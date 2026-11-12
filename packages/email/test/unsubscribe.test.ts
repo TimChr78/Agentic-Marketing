@@ -1,4 +1,5 @@
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
+import { Parser } from 'htmlparser2';
 import { describe, expect, it, vi } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
 import { emailPublishProblems } from '../src/checks';
@@ -69,6 +70,33 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
   {
     name: 'a hidden image inside the link',
     html: `<a href="${URL}"><img src="x.png" alt="Unsubscribe" style="display:none"></a>`,
+    reason: 'hidden',
+  },
+  // 0.14.9 review (P2): htmlparser2 12 parses these as raw text; browsers never render their content.
+  { name: 'link text inside noembed', html: `<a href="${URL}"><noembed><span hidden>Unsubscribe</span></noembed></a>`, reason: 'empty' },
+  { name: 'link text inside noframes', html: `<a href="${URL}"><noframes>Unsubscribe</noframes></a>`, reason: 'empty' },
+  { name: 'link text inside iframe', html: `<a href="${URL}"><iframe>Unsubscribe</iframe></a>`, reason: 'empty' },
+  // 0.14.9 review round 2 (P2): SVG title, desc and metadata are never rendered.
+  { name: 'a link inside an SVG title', html: `<svg><title><a href="${URL}">Unsubscribe</a></title></svg>`, reason: 'hidden' },
+  { name: 'a link inside an SVG desc', html: `<svg><desc><a href="${URL}">Unsubscribe</a></desc></svg>`, reason: 'hidden' },
+  { name: 'a link inside SVG metadata', html: `<svg><metadata><a href="${URL}">Unsubscribe</a></metadata></svg>`, reason: 'hidden' },
+  // 0.14.9 review round 3 (P2 and #707 P3s): nothing inside inline SVG or MathML counts.
+  { name: 'a link inside an SVG textarea', html: `<svg><textarea><a href="${URL}">Unsubscribe</a></textarea></svg>`, reason: 'hidden' },
+  { name: 'a link inside a MathML textarea', html: `<math><textarea><a href="${URL}">Unsubscribe</a></textarea></math>`, reason: 'hidden' },
+  { name: 'a link inside SVG defs', html: `<svg><defs><a href="${URL}">Unsubscribe</a></defs></svg>`, reason: 'hidden' },
+  {
+    name: 'a link inside an SVG clipPath',
+    html: `<svg><clipPath><a href="${URL}"><text>Unsubscribe</text></a></clipPath></svg>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a link inside a MathML annotation',
+    html: `<math><annotation-xml><a href="${URL}">Unsubscribe</a></annotation-xml></math>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a link inside SVG foreignObject',
+    html: `<svg><foreignObject><a href="${URL}">Unsubscribe</a></foreignObject></svg>`,
     reason: 'hidden',
   },
   // Review round 3 (P2): invisible colours, and the last declaration of a property winning.
@@ -271,6 +299,29 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
     expect(unsubscribeLinkProblem(fine, URL)).toBeNull();
   });
 
+  it('pause() stops the parser at the nesting limit (review round 6)', () => {
+    // The predicate rejects a document one level past the limit either way, so it cannot show
+    // whether the rest of the document was parsed. This mirrors the check's parser and options:
+    // once the 513th tag opens, no further open or text callback may run.
+    let opened = 0;
+    let text = 0;
+    const parser = new Parser(
+      {
+        onopentag() {
+          opened++;
+          if (opened > MAX_UNSUBSCRIBE_NESTING) parser.pause();
+        },
+        ontext() {
+          text++;
+        },
+      },
+      { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
+    );
+    parser.write(`${'<div>'.repeat(MAX_UNSUBSCRIBE_NESTING + 50)}${'<span>text</span>'.repeat(50)}`);
+    expect(opened).toBe(MAX_UNSUBSCRIBE_NESTING + 1);
+    expect(text).toBe(0);
+  });
+
   it('parses a long stylesheet background once, not per matching element (review round 7)', () => {
     expectLinear(
       (n) =>
@@ -390,6 +441,32 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
     );
     expect((await validateTemplate(t)).join(' ')).toContain('hidden');
     expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('rejects a link whose only text is inside noembed at save and at publish as empty (0.14.9 review)', async () => {
+    // Content inside noembed is never rendered, so the link has no text a reader can see.
+    const t = template('<mj-text><a href="{{ unsubscribe_url }}"><noembed><span hidden>Unsubscribe</span></noembed></a></mj-text>');
+    expect((await validateTemplate(t)).join(' ')).toContain('no text');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('no text');
+  });
+
+  it('rejects a link inside an SVG title at save and at publish (0.14.9 review round 2)', async () => {
+    const t = template('<mj-text><svg><title><a href="{{ unsubscribe_url }}">Unsubscribe</a></title></svg></mj-text>');
+    expect(await validateTemplate(t)).not.toEqual([]);
+    expect(await emailPublishProblems(t, { marketing: true })).not.toEqual([]);
+  });
+
+  it('rejects a link inside an SVG textarea at save and at publish (0.14.9 review round 3)', async () => {
+    const t = template('<mj-text><svg><textarea><a href="{{ unsubscribe_url }}">Unsubscribe</a></textarea></svg></mj-text>');
+    expect(await validateTemplate(t)).not.toEqual([]);
+    expect(await emailPublishProblems(t, { marketing: true })).not.toEqual([]);
+  });
+
+  it('still accepts a visible footer link next to an inline SVG icon', async () => {
+    const t = template(
+      '<mj-text><svg width="12" height="12"><circle r="6" /></svg> <a href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>',
+    );
+    expect(await validateTemplate(t)).toEqual([]);
   });
 
   it('rejects transparent text at save and at publish', async () => {

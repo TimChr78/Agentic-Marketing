@@ -9,6 +9,17 @@ updates:
       day: monday
     open-pull-requests-limit: 10
     groups:
+      # The Better Auth packages must move together: their peer ranges pin each other's exact
+      # minor (`better-call`, `@better-auth/utils`, `@better-fetch/fetch`) and `@better-auth/mcp`
+      # reaches `@better-auth/oauth-provider` by range, so a partial bump installs two versions of
+      # the same plugin against one core (#720, #727). Listed first so it wins over the group below;
+      # no `update-types`, so majors come in this PR too.
+      better-auth:
+        patterns:
+          - 'better-auth'
+          - '@better-auth/*'
+          - 'better-call'
+          - '@better-fetch/fetch'
       minor-and-patch:
         update-types: [minor, patch]
     # The spikes are throwaway benchmarks, not part of CI or the image.

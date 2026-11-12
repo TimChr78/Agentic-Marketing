@@ -29,8 +29,32 @@ export const MAX_UNSUBSCRIBE_NESTING = 512;
 /** The most classes one compound selector may name and still be modelled (review round 6). */
 const MAX_SELECTOR_CLASSES = 8;
 
-/** Elements whose content is not rendered as visible body content in an e-mail. */
-const NOT_BODY = new Set(['template', 'head', 'script', 'style', 'noscript']);
+/**
+ * Elements whose content is not rendered as visible body content in an e-mail. `noembed`,
+ * `noframes` and `iframe` hold fallback markup no client shows; htmlparser2 12 parses them as raw
+ * text, so without them here their text would count as visible link content (0.14.9 review).
+ */
+// SVG `title`, `desc` and `metadata` are never drawn either; parser 12 exposes anchors inside an
+// SVG `title` as elements (0.14.9 review round 2). An HTML `title` belongs in `head`, already listed.
+// Inline SVG and MathML are not a reliable way to show a link in e-mail (Gmail and others strip
+// inline SVG), and much of their content is never drawn (defs, symbol, clipPath, mask, title,
+// annotation, foreign textarea …). Nothing inside them counts as a visible unsubscribe link
+// (0.14.9 review round 3).
+const NOT_BODY = new Set([
+  'template',
+  'head',
+  'script',
+  'style',
+  'noscript',
+  'noembed',
+  'noframes',
+  'iframe',
+  'title',
+  'desc',
+  'metadata',
+  'svg',
+  'math',
+]);
 
 /** One declaration with the importance CSS needs for the cascade. */
 interface Declaration {
