@@ -1,7 +1,7 @@
 import { api } from '../../../app/api';
 import { TextLink } from '../../../app/links';
 import { useWorkspace } from '../../../app/session';
-import { useApi } from '../../../app/useApi';
+import { useKeyedApi } from '../../../app/useApi';
 import { Alert, BarChart, KpiTile, LineChart } from '../../../ui';
 import type { ChartDataState } from '../../../ui/charts';
 import { formatDateTime } from '../../../ui/time';
@@ -315,27 +315,26 @@ function LinkInspection({ canReadProfiles }: { canReadProfiles: boolean }) {
 
 export function ReportBody({ artifactId, period }: { artifactId: string; period: LocalDayPeriod }) {
   const { can } = useWorkspace();
-  const totalsQuery = useApi(
-    () =>
-      api.call('analytics.query', {
-        measures: [...TOTAL_MEASURES],
-        dimensions: [],
-        from: period.from,
-        to: period.to,
-        filters: { broadcast: artifactId },
-      }),
-    [artifactId, period.from, period.to],
+  // Artifact and period are the identity of the report; a new selection never shows the
+  // previous period's totals under its label.
+  const reportKey = `${artifactId}|${period.from}|${period.to}`;
+  const totalsQuery = useKeyedApi(reportKey, () =>
+    api.call('analytics.query', {
+      measures: [...TOTAL_MEASURES],
+      dimensions: [],
+      from: period.from,
+      to: period.to,
+      filters: { broadcast: artifactId },
+    }),
   );
-  const seriesQuery = useApi(
-    () =>
-      api.call('analytics.query', {
-        measures: [...SERIES_MEASURES],
-        dimensions: ['day'],
-        from: period.from,
-        to: period.to,
-        filters: { broadcast: artifactId },
-      }),
-    [artifactId, period.from, period.to],
+  const seriesQuery = useKeyedApi(reportKey, () =>
+    api.call('analytics.query', {
+      measures: [...SERIES_MEASURES],
+      dimensions: ['day'],
+      from: period.from,
+      to: period.to,
+      filters: { broadcast: artifactId },
+    }),
   );
   const totals = readTotals(totalsQuery.data);
   const series = readSeries(seriesQuery.data, period);

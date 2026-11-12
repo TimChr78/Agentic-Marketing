@@ -33,7 +33,7 @@ function DurationSelect({
   const v = typeof value === 'string' ? value : '';
   return (
     <Field label={label} hint={hint}>
-      <Select value={v} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+      <Select value={v} disabled={disabled} mutation onChange={(e) => onChange(e.target.value)}>
         {!DURATIONS.includes(v) && <option value={v}>{v ? durationText(v) : 'Choose…'}</option>}
         {DURATIONS.map((d) => (
           <option key={d} value={d}>
@@ -485,7 +485,7 @@ export function Inspector({
                 label={label ? `If ${label}` : 'Next step'}
                 hint={i > (node.next?.length ?? 0) ? `Connect “${edgeLabel(node, i - 1) ?? 'the previous outcome'}” first.` : undefined}
               >
-                <Select value={current} disabled={disabled} onChange={(e) => onConnect(i, e.target.value || null)}>
+                <Select value={current} disabled={disabled} mutation onChange={(e) => onConnect(i, e.target.value || null)}>
                   <option value="">{current ? 'Disconnect' : 'Not connected'}</option>
                   {targets.map((t) => (
                     <option key={t.id} value={t.id}>
@@ -503,7 +503,7 @@ export function Inspector({
           <Button size="sm" icon={<Copy size={13} />} onClick={onDuplicate} disabled={node.kind === 'trigger'}>
             Duplicate
           </Button>
-          <Button size="sm" variant="danger" icon={<Trash2 size={13} />} onClick={onDelete}>
+          <Button size="sm" variant="danger" icon={<Trash2 size={13} />} onClick={onDelete} mutation>
             Delete step
           </Button>
         </div>

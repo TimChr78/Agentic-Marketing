@@ -2,7 +2,7 @@ import { ShieldAlert } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useWorkspace } from '../../app/session';
-import { useApi } from '../../app/useApi';
+import { useKeyedApi } from '../../app/useApi';
 import {
   Alert,
   Button,
@@ -50,7 +50,9 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
   const { can, workspace, user } = useWorkspace();
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
-  const t = useApi(() => api.call('apiTokens.get', { id }), [id]);
+  // Closing and reopening the drawer, or moving to another token URL, must not keep the old token
+  // or let Revoke/edit act on it (#612).
+  const t = useKeyedApi(id, () => api.call('apiTokens.get', { id }));
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState<string[]>([]);
   const [expiryMode, setExpiryMode] = useState<'keep' | 'never' | 'date'>('keep');
@@ -59,17 +61,18 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const staleRead = !!t.data && t.data.id !== id;
+  const tok = t.data?.id === id ? t.data : undefined;
+
   useEffect(() => {
-    if (!t.data) return;
-    setName(t.data.name);
-    setScopes(t.data.scopes);
+    if (!tok) return;
+    setName(tok.name);
+    setScopes(tok.scopes);
     setExpiryMode('keep');
-    setExpiresAt(t.data.expiresAt);
+    setExpiresAt(tok.expiresAt);
     setPassword('');
     setError(null);
-  }, [t.data]);
-
-  const tok = t.data;
+  }, [tok]);
   const editable = !!tok && can('workspace:admin') && !tok.revoked;
   const added = tok ? scopes.filter((s) => !tok.scopes.includes(s)) : [];
   const removed = tok ? tok.scopes.filter((s) => !scopes.includes(s)) : [];
@@ -171,7 +174,7 @@ export function TokenDrawer({ id, onClose, onChanged }: { id: string; onClose: (
         )
       }
     >
-      {t.loading ? (
+      {t.loading || staleRead ? (
         <SettingsPanelSkeleton label="Loading the token" />
       ) : t.error ? (
         <div className="p-5">

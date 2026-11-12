@@ -88,9 +88,9 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
     const appRole = `am_supdel_app_${suffix}`;
     await d.db.admin.query(`CREATE ROLE ${role} LOGIN CREATEROLE PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
     await d.db.admin.query(`GRANT CREATE ON SCHEMA public TO ${role}`);
-    // The migration role owns the table it grants on; FORCE RLS applies to it as well, which is the
-    // small-install path this guards.
-    await d.db.admin.query(`ALTER TABLE suppressions OWNER TO ${role}`);
+    // The migration role owns the tables later migrations touch (suppressions for 0088, deliveries
+    // for 0089's index); FORCE RLS applies to it as well, which is the small-install path this guards.
+    for (const table of ['suppressions', 'deliveries']) await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
     await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
 
     const limitedUrl = new URL(d.url.toString());

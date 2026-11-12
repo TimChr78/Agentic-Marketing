@@ -34,6 +34,7 @@ export function demoSessionValue(): SessionValue {
     signOut: async () => {
       if (typeof window !== 'undefined') window.location.assign('/');
     },
+    signOutError: null,
     pending: DEMO_PENDING_APPROVALS.length,
     refreshPending: () => {},
   };

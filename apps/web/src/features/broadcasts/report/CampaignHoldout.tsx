@@ -1,6 +1,6 @@
 import { api, errText } from '../../../app/api';
 import { TextLink } from '../../../app/links';
-import { useApi } from '../../../app/useApi';
+import { useApi, useKeyedApi } from '../../../app/useApi';
 import { Alert, DetailSkeleton, ListSkeleton, StatusPill, Table, Td, THead, Th, Tr } from '../../../ui';
 import { formatDateTime } from '../../../ui/time';
 import type { LocalDayPeriod } from '../period';
@@ -170,9 +170,9 @@ function ControlledCampaignSection({
   period: LocalDayPeriod;
 }) {
   const hasGoal = !!campaign.goal.event;
-  const result = useApi(
+  const result = useKeyedApi(
+    `${campaign.id}|${period.from}|${period.to}`,
     () => api.call('campaigns.holdoutResult', { campaignId: campaign.id, from: period.from, to: period.to }),
-    [campaign.id, period.from, period.to, hasGoal],
     { skip: !hasGoal },
   );
 

@@ -2,7 +2,7 @@ import { Plus, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../app/api';
 import { TextLink } from '../../app/links';
-import { useApi } from '../../app/useApi';
+import { useApi, useKeyedApi } from '../../app/useApi';
 import { Alert, Button, Checkbox, Field, IconButton, Input, LoadingBlock, Switch, Textarea } from '../../ui';
 import { EditorSection } from '../phase27/audience/EditorSection';
 import type { EditorProps } from './ArtifactDetailPage';
@@ -621,7 +621,7 @@ function HostedPagesEditor({
 }
 
 function HostedPagePreview({ formId, savedVersion }: { formId: string; savedVersion: number }) {
-  const preview = useApi(() => api.call('hostedPages.preview', { page: 'confirm', formId }), [formId, savedVersion]);
+  const preview = useKeyedApi(`${formId}|${savedVersion}`, () => api.call('hostedPages.preview', { page: 'confirm', formId }));
   return (
     <div className="space-y-2">
       <p className="text-[12px] font-medium text-fg-2">Confirm page preview</p>

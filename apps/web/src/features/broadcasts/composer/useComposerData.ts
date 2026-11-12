@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../../app/api';
-import { useApi } from '../../../app/useApi';
+import { useApi, useKeyedApi } from '../../../app/useApi';
 import { getArtifact } from '../../artifactCache';
 import {
   type Channel,
@@ -22,33 +22,31 @@ export type ComposerEstimate = Out<'broadcasts.preview'>;
  * offer a local retry. It does not duplicate the cache read the page and preview already share.
  */
 export function useSharedArtifact(id: string | undefined | null) {
-  const [artifact, setArtifact] = useState<Got | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Each result is tagged with the id it belongs to, so a template switch never exposes the
+  // previous template while the new one loads (0.14.6 review).
+  const [loaded, setLoaded] = useState<{ id: string; artifact: Got | null; error: string | null } | null>(null);
   const [loading, setLoading] = useState(!!id);
   const [attempt, setAttempt] = useState(0);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` is the explicit retry trigger, not read by the effect body
   useEffect(() => {
     if (!id) {
-      setArtifact(null);
-      setError(null);
+      setLoaded(null);
       setLoading(false);
       return;
     }
     let live = true;
     setLoading(true);
-    setError(null);
     getArtifact(id)
       .then((a) => {
         if (live) {
-          setArtifact(a);
+          setLoaded({ id, artifact: a, error: null });
           setLoading(false);
         }
       })
       .catch((e) => {
         if (live) {
-          setArtifact(null);
-          setError(e?.message ?? 'Not found');
+          setLoaded({ id, artifact: null, error: e?.message ?? 'Not found' });
           setLoading(false);
         }
       });
@@ -57,17 +55,18 @@ export function useSharedArtifact(id: string | undefined | null) {
     };
   }, [id, attempt]);
 
+  const current = id && loaded?.id === id ? loaded : null;
   return {
-    artifact,
-    error,
-    loading,
+    artifact: current?.artifact ?? null,
+    error: current?.error ?? null,
+    loading: loading || (!!id && !current),
     reload: useCallback(() => setAttempt((n) => n + 1), []),
   };
 }
 
 export interface ComposerData {
   template: ReturnType<typeof useSharedArtifact>;
-  exact: ReturnType<typeof useApi<Got>>;
+  exact: ReturnType<typeof useKeyedApi<Got>>;
   purposes: ReturnType<typeof useApi<Out<'purposes.list'>>>;
   provider: ReturnType<typeof useApi<Out<'system.status'>>>;
   domains: ReturnType<typeof useApi<Out<'sendingDomains.list'>>>;
@@ -102,9 +101,10 @@ export function useComposerData({
 }): ComposerData {
   const template = useSharedArtifact(templateId);
   const publishedVersion = template.artifact?.publishedVersion ?? null;
-  const exact = useApi(
+  // Keyed by template and version: a switch withholds the previous template's content (0.14.6 review).
+  const exact = useKeyedApi(
+    `${templateId ?? ''}@${publishedVersion ?? ''}`,
     () => api.call('artifacts.get', { artifactId: templateId ?? '', version: publishedVersion ?? 1 }),
-    [templateId, publishedVersion],
     { skip: !canRead || !templateId || !publishedVersion },
   );
   const purposes = useApi(() => api.call('purposes.list', {}), [refreshKey], { skip: !canRead });

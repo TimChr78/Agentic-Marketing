@@ -6,6 +6,7 @@ import { useCrumbs } from '../../app/page';
 import { Link, navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { usePageTab } from '../../app/useTab';
+import { onPeopleChanged } from '../../features/audience/peopleEvents';
 import { CopyPersonId } from '../../features/audience/phase26/CopyControl';
 import { availabilityLabel, listIdentity, purposeRows, shownLabel } from '../../features/audience/phase26/model';
 import { PurposeConsentList } from '../../features/audience/phase26/PurposeConsent';
@@ -126,6 +127,10 @@ export function PeopleList() {
       generation.current += 1;
     };
   }, [loadFirst]);
+
+  // An erase elsewhere invalidates the cached pages (#595): refetch page one rather than presenting
+  // a person removed after the page was read.
+  useEffect(() => onPeopleChanged(() => void loadFirst()), [loadFirst]);
 
   const purposes = usePurposes({ enabled: canRead && canReadPurposes, always: true });
 

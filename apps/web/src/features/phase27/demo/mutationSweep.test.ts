@@ -133,24 +133,229 @@ const ALLOWED_CONTROLS: { file: string; control: RegExp; reason: string }[] = [
     control: /<Button icon=\{<Copy size=\{14\} \/>\} onClick=\{\(\) => void copy\(\)\}>/,
     reason: 'copies the invitation link to the clipboard',
   },
+  // #580 widened the sweep to camelCase word parts and to local `onChange` handlers. These are the
+  // controls it flagged that only touch local UI, filter or draft state; the write stays on a
+  // separate marked control (`Save`, `Publish`, the dialog's submit).
+  {
+    file: 'app/Shell.tsx',
+    control: /onClick=\{\(\) => toggleGroup\(group\)\}/,
+    reason: 'expands or collapses a navigation group; no write',
+  },
+  {
+    file: 'features/agents/HostedAgentDialog.tsx',
+    control: /onClick=\{\(\) => applyTemplate\(template\)\}/,
+    reason: 'fills the agent form; its submit control is the mutation',
+  },
+  {
+    file: 'features/agents/phase26/ComparisonSection.tsx',
+    control: /disabled=\{selected\.length === 0\} onClick=\{apply\}/,
+    reason: 'applies the chosen comparison filter; no write',
+  },
+  {
+    file: 'features/agents/phase26/OverviewTab.tsx',
+    control: /onChange=\{\(event\) => onChoiceChange/,
+    reason: 'changes the report period; a read',
+  },
+  {
+    file: 'features/approvals/ApprovalDrawer.tsx',
+    control: /setRejecting\(false\)/,
+    reason: 'closes the reject form; no write',
+  },
+  {
+    file: 'features/artifacts/ArtifactDetailPage.tsx',
+    control: /onClick=\{\(\) => setDiscardOpen\(false\)\}/,
+    reason: 'closes the discard dialog; no write',
+  },
+  {
+    file: 'features/artifacts/ArtifactSelect.tsx',
+    control: /onChange=\{\(e\) => onChange\(e\.target\.value\)\} disabled=\{disabled \|\| list\.loading\}/,
+    reason: 'selects an artifact in a form; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/BroadcastEditor.tsx',
+    control: /onClick=\{\(\) => removeSubject\(i\)\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/BroadcastEditor.tsx',
+    control: /onChange=\{\(e\) => setTest\(\{ metric: e\.target\.value as SubjectTest\['metric'\] \}\)\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/ExperienceEditor.tsx',
+    control: /onClick=\{\(\) => set\(\{ variants: removeVariant\(variants, i\) \}\)\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/ExperienceEditor.tsx',
+    control: /value=\{targeting\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/FormEditor.tsx',
+    control: /onClick=\{\(\) => onChange\(value\.filter\(\(t\) => t !== trait\)\)\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/PurposesEditor.tsx',
+    control: /onClick=\{\(\) => set\(\{ purposes: removePurpose\(purposes, i\) \}\)\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/PurposesEditor.tsx',
+    control: /set\(\{ purposes: updatePurpose\(purposes, i, removeTopic/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/PurposesEditor.tsx',
+    control: /changeBasis\(purpose, e\.target\.value as Basis\)/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/SegmentEditor.tsx',
+    control: /onClick=\{onRemove\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/SegmentEditor.tsx',
+    control: /value=\{mode\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/SegmentEditor.tsx',
+    control: /onChange=\{\(e\) => changeKind\(e\.target\.value as Kind\)\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/SegmentEditor.tsx',
+    control: /onChange=\{\(e\) => onChange\(\{ consent: e\.target\.value \}\)\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/artifacts/SegmentEditor.tsx',
+    control: /aria-label=\{`Segment, condition \$\{index\}`\}/,
+    reason: 'edits the unsaved draft; the save control is the mutation',
+  },
+  {
+    file: 'features/deliverability/TrendSection.tsx',
+    control: /onChange=\{\(event\) => onPeriodChange/,
+    reason: 'changes the chart period; a read',
+  },
+  {
+    file: 'features/deliverability/TrendSection.tsx',
+    control: /onChange=\{\(event\) => onStreamChange/,
+    reason: 'changes the chart stream; a read',
+  },
+  {
+    file: 'features/integrations/ConnectionsCard.tsx',
+    control: /onChange=\{\(e\) => changeConnector/,
+    reason: 'changes the connector in the add dialog; its submit is the mutation',
+  },
+  {
+    file: 'features/journey/report/JourneyReport.tsx',
+    control: /aria-expanded=\{open\} onClick=\{onToggle\}/,
+    reason: 'opens or closes the holdout section; no write',
+  },
+  {
+    file: 'features/providers/OtherProviders.tsx',
+    control: /onChange=\{\(e\) => changeKind\(e\.target\.value as AiKind\)\}/,
+    reason: 'changes the provider kind in the add dialog; its submit is the mutation',
+  },
+  {
+    file: 'features/templates/TemplateEditor.tsx',
+    control: /aria-pressed=\{outlines\}/,
+    reason: 'toggles the editor outline view; no write',
+  },
+  {
+    file: 'pages/build/BroadcastsPage.tsx',
+    control: /onChange=\{\(e\) => changeFilter/,
+    reason: 'changes the broadcast list filter; a read',
+  },
+  {
+    file: 'pages/build/SegmentsPage.tsx',
+    control: /onChange=\{\(e\) => onChange\(e\.target\.value\)\}/,
+    reason: 'selects the source segment in a form; the save control is the mutation',
+  },
+  {
+    file: 'ui/form.tsx',
+    control: /role="switch"/,
+    reason: 'the switch primitive; its caller passes mutation',
+  },
+  {
+    file: 'ui/tabs.tsx',
+    control: /role="tab"/,
+    reason: 'tab selection; no write',
+  },
+  {
+    file: 'ui/tabs.tsx',
+    control: /role="radio"/,
+    reason: 'view selection; no write',
+  },
 ];
 
-const MUTATING_HANDLER =
-  /\b(save|submit|create|remove|delete|archive|rename|approve|reject|invite|import|connect|revoke|erase|erasePerson|record|upload|install|rotate|discard|publish|openPublish|refreshSnapshot|toBrief|sendTest|setRole|setAutonomy|pause|resume|runNow|test)\b/;
+// Verbs that change data, matched word by word inside a name so `onDelete` and `doDelete` count
+// whatever their case (#580). A camelCase name is split into its parts before the lookup.
+const MUTATING_WORDS = new Set([
+  'save',
+  'submit',
+  'create',
+  'remove',
+  'delete',
+  'archive',
+  'rename',
+  'approve',
+  'reject',
+  'invite',
+  'import',
+  'connect',
+  'disconnect',
+  'revoke',
+  'erase',
+  'record',
+  'upload',
+  'install',
+  'rotate',
+  'discard',
+  'publish',
+  'test',
+  'pause',
+  'resume',
+  'mutate',
+  'apply',
+  'change',
+  'toggle',
+]);
 
-const MUTATING_SWITCH = /(\btoggle\b|onToggle|void\s+toggle\s*\()/;
+// Verbs that only mean something as a whole name: `set` or `role` alone is ordinary local state.
+const MUTATING_NAMES = new Set([
+  'eraseperson',
+  'refreshsnapshot',
+  'tobrief',
+  'sendtest',
+  'setrole',
+  'setautonomy',
+  'runnow',
+  'openpublish',
+]);
+
+/** Whether any identifier in a handler expression has a mutating word part. */
+function mutatingName(text: string): boolean {
+  for (const token of text.match(/[A-Za-z_$][\w$]*/g) ?? []) {
+    if (MUTATING_NAMES.has(token.toLowerCase())) return true;
+    for (const part of token.split(/(?=[A-Z])/)) if (MUTATING_WORDS.has(part.toLowerCase())) return true;
+  }
+  return false;
+}
 
 // A handler that fires an async command mutates even when its name is lexical rather than verbal:
-// `removeSelection`, `onPick`, `void save(…)` and `api.call(…)` all count. The verb list stays as
-// the second signal; either one is enough for a button, and it was already the rule for Select.
+// `removeSelection`, `onPick`, `void save(…)` and `api.call(…)` all count. The word parts stay as
+// the second signal; either one is enough.
 const ASYNC_COMMAND = /\bvoid\s+[\w.]+\s*\(|\bapi\.call\s*\(/;
 
 /** Whether one control's handler changes data, by name or by firing an async command. */
-export function handlerMutates(name: string, handler: string | null): boolean {
+export function handlerMutates(_name: string, handler: string | null): boolean {
   if (handler === null) return false;
-  if (name === 'Switch') return MUTATING_SWITCH.test(handler);
-  if (name === 'Select') return ASYNC_COMMAND.test(handler);
-  return MUTATING_HANDLER.test(handler) || ASYNC_COMMAND.test(handler);
+  return mutatingName(handler) || ASYNC_COMMAND.test(handler);
 }
 
 function walk(dir: string, out: string[] = []) {
@@ -213,8 +418,8 @@ function prop(tag: string, name: string): string | null {
 }
 
 /** Object literals that define a menu action (`onSelect`), expanded with balanced braces. */
-function menuActions(source: string): { text: string; line: number }[] {
-  const out: { text: string; line: number }[] = [];
+function menuActions(source: string): { text: string; handler: string; line: number }[] {
+  const out: { text: string; handler: string; line: number }[] = [];
   for (let at = source.indexOf('onSelect:'); at >= 0; at = source.indexOf('onSelect:', at + 1)) {
     let open = at;
     let depth = 0;
@@ -235,7 +440,10 @@ function menuActions(source: string): { text: string; line: number }[] {
         depth--;
       }
     }
-    out.push({ text: source.slice(open, close + 1), line: source.slice(0, at).split('\n').length });
+    const text = source.slice(open, close + 1);
+    // A menu item object has a label; a prop signature (`onSelect: (id: string) => void`) does not.
+    if (!/\blabel\s*:/.test(text)) continue;
+    out.push({ text, handler: source.slice(at + 'onSelect:'.length, close), line: source.slice(0, at).split('\n').length });
   }
   return out;
 }
@@ -269,14 +477,15 @@ function failures(): string[] {
     for (const tag of tags(source, 'button')) {
       if (/\bhidden\b/.test(tag.text) || /role="menuitem"/.test(tag.text)) continue;
       const handler = prop(tag.text, 'onClick');
-      const mutating = handler !== null && MUTATING_HANDLER.test(handler);
+      const mutating = handler !== null && mutatingName(handler);
       if (!/type="submit"/.test(tag.text) && !mutating) continue;
+      if (allowed(tag.text)) continue;
       problems.push(`${file}:${tag.line}: visible native button without mutation\n  ${tag.text.replace(/\s+/g, ' ').slice(0, 180)}`);
     }
 
     // Menu actions are data objects, so the flag lives on the item, not the rendered button.
     for (const action of menuActions(source)) {
-      if (!MUTATING_HANDLER.test(action.text)) continue;
+      if (!mutatingName(action.handler)) continue;
       if (/mutation\s*:\s*true/.test(action.text)) continue;
       problems.push(`${file}:${action.line}: mark this menu action with mutation\n  ${action.text.replace(/\s+/g, ' ').slice(0, 180)}`);
     }
@@ -308,5 +517,20 @@ describe('demo mutation sweep (#530)', () => {
 
   it('flags a clipboard copy by shape, so the sweep can allowlist that exact control (#552)', () => {
     expect(handlerMutates('Button', '() => void navigator.clipboard.writeText(text)')).toBe(true);
+  });
+
+  it('flags camelCase handler names by word part, whatever the case (#580)', () => {
+    expect(handlerMutates('Button', '() => onDelete(row.id)')).toBe(true);
+    expect(handlerMutates('Button', '() => doDelete(row)')).toBe(true);
+    expect(handlerMutates('Button', '() => mutateRoleNow(id)')).toBe(true);
+    expect(handlerMutates('Select', '(v) => applyTopic(v)')).toBe(true);
+    expect(handlerMutates('Switch', '() => changeTopic(topic)')).toBe(true);
+  });
+
+  it('still leaves local state and navigation alone after the word-part match (#580)', () => {
+    expect(handlerMutates('Button', '() => setOpen(true)')).toBe(false);
+    expect(handlerMutates('Select', '(v) => setTopic(v)')).toBe(false);
+    expect(handlerMutates('Switch', '() => setEnabled((v) => !v)')).toBe(false);
+    expect(handlerMutates('Button', '() => navigate("/settings")')).toBe(false);
   });
 });

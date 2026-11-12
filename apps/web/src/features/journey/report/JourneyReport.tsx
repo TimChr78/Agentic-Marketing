@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { api, type Out } from '../../../app/api';
 import { TextLink } from '../../../app/links';
 import { useWorkspace } from '../../../app/session';
-import { useApi } from '../../../app/useApi';
+import { useApi, useKeyedApi } from '../../../app/useApi';
 import { Alert, BarChart, Button, DetailSkeleton, Field, ListSkeleton, Select, Table, Tag, Td, Th, Tr } from '../../../ui';
 import { Identifier } from '../../../ui/Identifier';
 import { formatDateTime } from '../../../ui/time';
@@ -531,7 +531,7 @@ function HoldoutSection({
 
 /** Loaded on expand only; a report Refresh does not re-read it, while a period change does. */
 function HoldoutRead({ journeyId, from, to }: { journeyId: string; from: string; to: string }) {
-  const holdout = useApi(() => api.call('journeys.holdoutResult', { journeyId, from, to }), [journeyId, from, to]);
+  const holdout = useKeyedApi(`${journeyId}|${from}|${to}`, () => api.call('journeys.holdoutResult', { journeyId, from, to }));
   return <HoldoutCard result={holdout.data} loading={holdout.loading} error={holdout.error ?? undefined} />;
 }
 

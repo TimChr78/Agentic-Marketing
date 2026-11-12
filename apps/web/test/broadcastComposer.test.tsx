@@ -616,7 +616,9 @@ describe('composer component (#497)', () => {
     expect(await screen.findByText('Your role can read this broadcast but cannot edit it.')).toBeTruthy();
     expect((screen.getByLabelText(/Template/) as HTMLSelectElement).disabled).toBe(true);
     expect((screen.getByLabelText(/Segment/) as HTMLSelectElement).disabled).toBe(true);
-    expect((screen.getByRole('button', { name: 'Refresh checks' }) as HTMLButtonElement).disabled).toBe(false);
+    // Refresh stays available to a read-only role once the checks have loaded (it is busy while the
+    // template's exact version is read).
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh checks' }) as HTMLButtonElement).disabled).toBe(false));
     expect(await screen.findByText('1,842 eligible in current check')).toBeTruthy();
   });
 

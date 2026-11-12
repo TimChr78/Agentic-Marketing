@@ -346,6 +346,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
             icon: <Trash2 />,
             hint: 'Del',
             destructive: true,
+            mutation: true,
             onSelect: () => {
               commit(deleteNode(nodes, n.id));
               setSel(null);
@@ -390,6 +391,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               icon: <Trash2 />,
               hint: 'Del',
               destructive: true,
+              mutation: true,
               onSelect: () => {
                 commit(disconnect(nodes, source!, Number(index)));
                 setSel(null);
@@ -477,7 +479,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               </Button>
               <IconButton label="Undo (Ctrl Z)" icon={<Undo2 size={15} />} onClick={undo} disabled={!past.current.length} />
               <IconButton label="Redo (Ctrl Shift Z)" icon={<Redo2 size={15} />} onClick={redo} disabled={!future.current.length} />
-              <IconButton label="Delete selected (Del)" icon={<Trash2 size={15} />} onClick={removeSelection} disabled={!sel} />
+              <IconButton label="Delete selected (Del)" icon={<Trash2 size={15} />} onClick={removeSelection} disabled={!sel} mutation />
             </>
           )}
           <IconButton
@@ -663,6 +665,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
                         icon: <Trash2 />,
                         hint: 'Del',
                         destructive: true,
+                        mutation: true,
                         onSelect: () => {
                           commit(disconnect(nodes, source!, Number(index)));
                           setSel(null);
@@ -882,7 +885,7 @@ function JourneyMeta({
     <div className="space-y-4 p-4">
       <p className="text-[12px] text-muted">Select a step to edit it. These settings apply to the whole journey.</p>
       <Field label="Purpose" hint="Every message in the journey is sent under this purpose's consent rules.">
-        <Select value={content.purpose} disabled={readOnly} onChange={(e) => onChange({ ...content, purpose: e.target.value })}>
+        <Select value={content.purpose} disabled={readOnly} mutation onChange={(e) => onChange({ ...content, purpose: e.target.value })}>
           {!content.purpose && <option value="">Choose a purpose</option>}
           {content.purpose && !knownPurpose && (
             <option value={content.purpose}>{purposes.loading ? 'Loading purpose…' : 'Unavailable purpose'}</option>
