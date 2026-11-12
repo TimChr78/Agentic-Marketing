@@ -471,6 +471,46 @@ describe('campaign dimension and filter', () => {
     expect(revenue.meta.currency).toBeNull();
   });
 
+  it('keeps converters and the conversion rate independent of a revenue measure (#779)', async () => {
+    const withoutRevenue = await api().call('analytics.query', {
+      measures: ['campaign.recipients', 'campaign.converters', 'campaign.conversion_rate'],
+      dimensions: ['campaign'],
+      from: FROM,
+      to: TO,
+      order: { by: 'campaign', dir: 'asc' },
+    });
+    const withRevenue = await api().call('analytics.query', {
+      measures: ['campaign.recipients', 'campaign.converters', 'campaign.conversion_rate', 'campaign.revenue'],
+      dimensions: ['campaign'],
+      from: FROM,
+      to: TO,
+      order: { by: 'campaign', dir: 'asc' },
+    });
+
+    const convertersOf = (result: typeof withoutRevenue, campaign: string) => {
+      const campaignIndex = columnIndex(result, 'campaign');
+      const convertersIndex = columnIndex(result, 'campaign.converters');
+      const rateIndex = columnIndex(result, 'campaign.conversion_rate');
+      const row = result.rows.find((r) => r[campaignIndex] === campaign)!;
+      return { converters: row[convertersIndex], rate: row[rateIndex] };
+    };
+    const plain = convertersOf(withoutRevenue, campaignA);
+    // The defect split the same campaign into one row per conversion currency, counting only
+    // that currency's people as converters and dividing each by the all-channel recipients.
+    const byCurrency = new Map(
+      withRevenue.rows
+        .filter((r) => r[columnIndex(withRevenue, 'campaign')] === campaignA)
+        .map((r) => [r[columnIndex(withRevenue, 'currency')], r]),
+    );
+    expect(new Set(byCurrency.keys())).toEqual(new Set(['DKK', 'EUR']));
+    for (const row of byCurrency.values()) {
+      expect(row[columnIndex(withRevenue, 'campaign.converters')]).toBe(plain.converters);
+      expect(row[columnIndex(withRevenue, 'campaign.conversion_rate')]).toBeCloseTo(plain.rate as number, 5);
+    }
+    expect(plain).toMatchObject({ converters: 3 });
+    expect(plain.rate).toBeCloseTo(0.3, 5);
+  });
+
   it('never sees another workspace', async () => {
     const other = await api().call('analytics.query', { measures: ['email.sent'], dimensions: ['campaign'], from: WIDE_FROM, to: WIDE_TO });
     expect(other.rows.map((r) => r[0])).not.toContain(campaignOther);
@@ -732,6 +772,98 @@ describe('analytics.campaignSummary', () => {
       suppressed: false,
     });
     expect(summary.headline.emailSent).toBe(6);
+  });
+
+  it('scopes campaign freshness to sent and delivered for an SMS-only campaign (#760)', async () => {
+    const broadcast = await api().call('artifacts.create', {
+      type: 'broadcast',
+      name: 'SMS-only broadcast',
+      content: { template, segment },
+    });
+    const campaign = await createCampaign('SMS-only campaign', [broadcast.artifactId], {}, '2026-11-10T00:00:00.000Z');
+    await api().call('artifacts.requestPublishBundle', {
+      artifactIds: [broadcast.artifactId, campaign],
+      note: 'sms freshness',
+    });
+    const people = Array.from({ length: 6 }, person);
+    const sent = messageEvents(wsA, broadcast.artifactId, '2026-11-10T10:00:00.000Z', people, [5, 0, 0, 0], 'sms');
+    // A later failed send decision: the recipient CTE never counts it, so freshness must not name
+    // it either. Before #760 the campaign source took max(at) over every message event type.
+    const failed: MessageEvent = {
+      workspaceId: wsA,
+      messageId: `msg_${broadcast.artifactId}_sms_failed`,
+      eventId: `${broadcast.artifactId}:sms:failed:0`,
+      type: 'failed',
+      at: '2026-11-11T10:00:00.000Z',
+      profileId: people[0]!,
+      channel: 'sms',
+      purpose: 'marketing_sms',
+      provider: 'log',
+      templateId: '',
+      templateVersion: 1,
+      journeyId: broadcast.artifactId,
+      variant: '',
+      reason: 'provider rejected',
+      url: '',
+    };
+    await t.srv.events.insertMessageEvents([...sent, failed]);
+
+    const from = '2026-11-10T00:00:00.000Z';
+    const to = '2026-11-12T00:00:00.000Z';
+    const query = await api().call('analytics.query', {
+      measures: ['campaign.recipients'],
+      filters: { campaign: [campaign] },
+      from,
+      to,
+    });
+    expect(query.meta.freshness).toBe('2026-11-10T10:00:00.000Z');
+
+    // The summary falls back to the campaign-source freshness when it has no e-mail events.
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaign, from, to });
+    expect(summary.state).toBe('measured');
+    expect(summary.meta.freshness).toBe('2026-11-10T10:00:00.000Z');
+  });
+
+  it('measures an archived campaign by id with a headline that matches its member rows (#780)', async () => {
+    const broadcast = await api().call('artifacts.create', {
+      type: 'broadcast',
+      name: 'Archived broadcast',
+      content: { template, segment },
+    });
+    const campaign = await createCampaign('Archived campaign', [broadcast.artifactId], {}, '2026-11-08T00:00:00.000Z');
+    await api().call('artifacts.requestPublishBundle', {
+      artifactIds: [broadcast.artifactId, campaign],
+      note: 'archived campaign',
+    });
+    const people = Array.from({ length: 6 }, person);
+    await t.srv.events.insertMessageEvents(messageEvents(wsA, broadcast.artifactId, '2026-11-08T10:00:00.000Z', people, [5, 2, 0, 0]));
+    await t.srv.events.insert([
+      goal(wsA, people[0]!, 30, 'DKK', '2026-11-08T11:00:00.000Z'),
+      goal(wsA, people[1]!, 20, 'DKK', '2026-11-09T09:00:00.000Z'),
+    ]);
+    await api().call('campaigns.archive', { campaignId: campaign });
+
+    const summary = await api().call('analytics.campaignSummary', {
+      campaignId: campaign,
+      from: '2026-11-08T00:00:00.000Z',
+      to: '2026-11-10T00:00:00.000Z',
+    });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+
+    // The headline and the member rows must describe the same population. Before #780 the
+    // headline resolved through the non-archived query map (all zeros) while members did not.
+    expect(summary.headline.recipients).toBe(6);
+    expect(summary.headline.delivered).toBe(5);
+    expect(summary.headline.converters).toBe(2);
+    expect(summary.members).toHaveLength(1);
+    expect(summary.members[0]).toMatchObject({
+      artifactId: broadcast.artifactId,
+      sent: 6,
+      delivered: 5,
+      converters: 2,
+      suppressed: false,
+    });
   });
 
   it('returns readiness instead of zeros before the first send', async () => {

@@ -316,6 +316,9 @@ const measures: MeasureDef[] = [
     source: 'campaign',
     aggregation: 'distinct profiles',
     counting: 'campaign_recipients',
+    // The recipient CTE counts sent and delivered only, so campaign-source freshness must use the
+    // same scope: a later queued/failed/skipped send decision must not name the newest event (#760).
+    eventTypes: ['sent', 'delivered'],
     dimensions: CAMPAIGN_DIMENSIONS,
     defaultGrain: 'day',
   },
@@ -328,6 +331,8 @@ const measures: MeasureDef[] = [
     source: 'campaign',
     aggregation: 'distinct profiles',
     counting: 'campaign_converters',
+    // Converters are attributed through the recipient CTE, which reads sent and delivered only.
+    eventTypes: ['sent', 'delivered'],
     dimensions: CAMPAIGN_DIMENSIONS,
     defaultGrain: 'day',
   },
@@ -351,6 +356,8 @@ const measures: MeasureDef[] = [
     source: 'campaign',
     aggregation: 'sum',
     counting: 'campaign_revenue',
+    // Revenue is attributed through the same recipient CTE as converters.
+    eventTypes: ['sent', 'delivered'],
     dimensions: CAMPAIGN_DIMENSIONS,
     defaultGrain: 'day',
   },

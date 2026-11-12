@@ -157,13 +157,19 @@ describe('campaign query compiler', () => {
 
     expect(compiled.revenue).toBe(true);
     expect(compiled.sql).toContain('LEFT JOIN conv_roll');
+    expect(compiled.sql).toContain('LEFT JOIN rev_roll rv');
     expect(compiled.sql).toContain('currency AS dim_currency');
     expect(compiled.sql).toContain('sum(revenue_value) AS base_campaign_revenue');
-    expect(compiled.sql).toContain('c.dim_currency');
-    expect(compiled.sql).toContain('ifNull(c.base_campaign_revenue, 0) AS base_campaign_revenue');
+    expect(compiled.sql).toContain('rv.dim_currency');
+    expect(compiled.sql).toContain('ifNull(rv.base_campaign_revenue, 0) AS base_campaign_revenue');
     expect(compiled.sql).toContain(
-      'if(r.base_campaign_recipients = 0, NULL, ifNull(c.base_campaign_revenue, 0) / r.base_campaign_recipients) AS measure_campaign_revenue_per_recipient',
+      'if(r.base_campaign_recipients = 0, NULL, ifNull(rv.base_campaign_revenue, 0) / r.base_campaign_recipients) AS measure_campaign_revenue_per_recipient',
     );
+    // #779: currency partitions revenue only. The converter roll stays a single total per
+    // campaign group, so converters and the rate do not change when revenue is co-requested.
+    const converterRoll = compiled.sql.slice(compiled.sql.indexOf('conv_roll AS'), compiled.sql.indexOf('rev_roll AS'));
+    expect(converterRoll).toContain('uniqExact(profile_id) AS base_campaign_converters');
+    expect(converterRoll).not.toContain('currency');
     expect(compiled.columns).toEqual([
       { name: 'campaign', kind: 'dimension' },
       { name: 'currency', kind: 'dimension' },
@@ -274,10 +280,10 @@ describe('campaign query compiler', () => {
     // conv_roll only holds converting groups, so the join must keep every recipient group.
     expect(compiled.sql).toContain('LEFT JOIN conv_roll');
     expect(compiled.sql).not.toContain('INNER JOIN conv_roll');
-    expect(compiled.sql).toContain('ifNull(c.base_campaign_revenue, 0) AS base_campaign_revenue');
-    expect(compiled.sql).toContain('ifNull(c.base_campaign_revenue, 0) AS measure_campaign_revenue');
+    expect(compiled.sql).toContain('ifNull(rv.base_campaign_revenue, 0) AS base_campaign_revenue');
+    expect(compiled.sql).toContain('ifNull(rv.base_campaign_revenue, 0) AS measure_campaign_revenue');
     expect(compiled.sql).toContain(
-      'if(r.base_campaign_recipients = 0, NULL, ifNull(c.base_campaign_revenue, 0) / r.base_campaign_recipients)',
+      'if(r.base_campaign_recipients = 0, NULL, ifNull(rv.base_campaign_revenue, 0) / r.base_campaign_recipients)',
     );
   });
 

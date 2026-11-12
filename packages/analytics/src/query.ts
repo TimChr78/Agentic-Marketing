@@ -281,7 +281,9 @@ export async function freshness(deps: Deps, input: FreshnessInput): Promise<stri
     where.push('name IN {names:Array(String)}');
   }
   const result = await deps.events.client.query({
-    query: `SELECT toString(max(${column})) AS m FROM ${table} FINAL WHERE ${where.join(' AND ')}`,
+    // maxOrNull, not max: over an empty match ClickHouse's max returns 1970-01-01, which would
+    // report a fabricated epoch instead of "no events" (#760, the summary relies on null).
+    query: `SELECT toString(maxOrNull(${column})) AS m FROM ${table} FINAL WHERE ${where.join(' AND ')}`,
     query_params: params,
     format: 'JSONEachRow',
     clickhouse_settings: { ...(await deps.events.settingsFor(deps.workspaceId)), max_execution_time: 10, max_result_rows: 1 } as never,
