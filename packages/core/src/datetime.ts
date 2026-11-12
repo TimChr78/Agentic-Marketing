@@ -5,6 +5,23 @@ import { z } from 'zod';
 // both accepted forms. This widens the old `z.iso.datetime()`, which only accepted `Z`.
 
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
+const CALENDAR_FIELDS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/;
+
+/**
+ * The calendar fields name a real instant. `Date.parse` normalises the impossible ones instead
+ * (`2026-02-30T12:00:00Z` becomes 2 March), so a typo in a scheduled send would silently move it
+ * by a day. Checked before normalising: month 1–12, a day within that month (leap years
+ * included), hour 0–23 and minute/second 0–59 (#807).
+ */
+function validCalendarFields(value: string): boolean {
+  const m = CALENDAR_FIELDS.exec(value);
+  if (!m) return false;
+  const [y, mo, d, h, min, sec] = m.slice(1).map((v) => (v === undefined ? 0 : Number(v)));
+  if (mo < 1 || mo > 12 || d < 1 || h > 23 || min > 59 || sec > 59) return false;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+  return d <= days;
+}
 
 // Formatters are immutable and expensive to construct; bound the cache for caller-supplied zones.
 const zonedFormatters = new Map<string, Intl.DateTimeFormat>();
@@ -67,7 +84,10 @@ export function isoDateTime(field: string) {
   return z
     .string()
     .refine((value) => ISO_DATE_TIME.test(value), `${field} needs a time zone, e.g. ${exampleZ} or ${exampleOffset}.`)
-    .refine((value) => !Number.isNaN(Date.parse(value)), `${field} must be a valid date and time, e.g. ${exampleZ}.`)
+    .refine(
+      (value) => validCalendarFields(value) && !Number.isNaN(Date.parse(value)),
+      `${field} must be a valid date and time, e.g. ${exampleZ}.`,
+    )
     .transform((value) => new Date(value).toISOString())
     .describe(`ISO 8601 with a time zone, e.g. ${exampleZ} or ${exampleOffset}; stored in UTC`);
 }
