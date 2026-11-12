@@ -4,7 +4,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
-import { computeJourneyHoldout, type JourneyHoldoutResult } from '@agentic-marketing/journeys';
+import { computeJourneyHoldout } from '@agentic-marketing/journeys';
 import { eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { type CampaignMember, type CampaignRecord, goalEventsFor, loadCampaignRecord } from './campaign';
@@ -77,30 +77,29 @@ const memberRow = z.object({
   suppressed: z.boolean().describe('True when the member reached fewer than k people, so its counts are hidden'),
 });
 
+const holdoutArm = z.object({
+  entered: z.number().int().nullable().describe('People assigned to the arm; null when the holdout is suppressed'),
+  converted: z.number().int().nullable().describe('People in the arm who converted; null when the holdout is suppressed'),
+  unsubscribed: z.number().int().nullable().describe('People in the arm who unsubscribed; null when the holdout is suppressed'),
+  conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
+  unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
+});
+
 const holdoutSchema = z.object({
   journeyId: z.string(),
   name: z.string(),
   controlGroup: z.object({ percent: z.number(), minSampleSize: z.number(), hashVersion: z.string() }),
-  control: z.object({
-    entered: z.number(),
-    converted: z.number(),
-    unsubscribed: z.number(),
-    conversionRate: z.number(),
-    unsubscribeRate: z.number(),
-  }),
-  treatment: z.object({
-    entered: z.number(),
-    converted: z.number(),
-    unsubscribed: z.number(),
-    conversionRate: z.number(),
-    unsubscribeRate: z.number(),
-  }),
-  absoluteLift: z.number(),
+  control: holdoutArm,
+  treatment: holdoutArm,
+  absoluteLift: z.number().nullable().describe('Treatment minus control conversion rate; null when the holdout is suppressed'),
   relativeLift: z.number().nullable(),
   ci95: z.tuple([z.number(), z.number()]).nullable(),
   minSampleSizeMet: z.boolean(),
   verdict: z.enum(['not_enough_data', 'no_clear_difference', 'treatment_better', 'treatment_worse']),
   note: z.string(),
+  suppressed: z
+    .boolean()
+    .describe('True when fewer than k people were in an arm or in the journey member row, so its counts and rates are hidden'),
 });
 
 const campaignSummaryOutput = z.union([
@@ -303,13 +302,38 @@ async function memberBreakdown(
   );
 }
 
-async function holdoutResults(deps: Deps, record: CampaignRecord, from: string, to: string) {
-  const out: (JourneyHoldoutResult & { name: string })[] = [];
+async function holdoutResults(
+  deps: Deps,
+  record: CampaignRecord,
+  from: string,
+  to: string,
+  suppressedMembers: Set<string>,
+): Promise<z.infer<typeof holdoutSchema>[]> {
+  const out: z.infer<typeof holdoutSchema>[] = [];
   for (const member of sendingMembers(record)) {
     if (member.type !== 'journey' || !member.published) continue;
     try {
       const result = await computeJourneyHoldout(deps, member.artifactId, { from, to });
-      out.push({ ...result, name: member.name });
+      // The same k rule as the member row: a suppressed row, or an arm with fewer than k people,
+      // hides every count, rate and lift on the holdout card (#586).
+      if (suppressedMembers.has(member.artifactId) || result.control.entered < K || result.treatment.entered < K) {
+        out.push({
+          journeyId: result.journeyId,
+          name: member.name,
+          controlGroup: result.controlGroup,
+          control: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+          treatment: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+          absoluteLift: null,
+          relativeLift: null,
+          ci95: null,
+          minSampleSizeMet: false,
+          verdict: 'not_enough_data',
+          note: `Suppressed: fewer than k=${K} people in the control or treatment arm, or in the journey member row, so counts and rates are hidden.`,
+          suppressed: true,
+        });
+        continue;
+      }
+      out.push({ ...result, name: member.name, suppressed: false });
     } catch (error) {
       // A journey without a control group (or without a publish) has no uplift to report; the
       // summary still shows its message performance.
@@ -332,7 +356,11 @@ interface SummaryWindow {
  * to the metric layer's cap, because the query layer rejects a longer range before it measures
  * (#588); a campaign with no start date gets the last 400 days instead of the epoch.
  */
-export function summaryWindow(input: { from?: string; to?: string; startsAt: string | null }, now: string): SummaryWindow {
+export function summaryWindow(
+  input: { from?: string; to?: string; startsAt: string | null },
+  now: string,
+  options: { allowFutureStart?: boolean } = {},
+): SummaryWindow {
   const to = input.to ?? now;
   const reversed = () =>
     new AppError('invalid_input', 'from must be before to. Move from earlier than to, or omit from to use the campaign start and now.');
@@ -346,7 +374,12 @@ export function summaryWindow(input: { from?: string; to?: string; startsAt: str
   const earliest = new Date(Date.parse(to) - MAX_RANGE_DAYS * 86_400_000).toISOString();
   const clamped = Date.parse(start) < Date.parse(earliest);
   const from = clamped ? earliest : start;
-  if (Date.parse(from) > Date.parse(to)) throw reversed();
+  if (Date.parse(from) > Date.parse(to)) {
+    // A campaign that has not started yet may have a start after now; readiness is the answer,
+    // not a window error (#588). The explicit from > to rejection above still applies.
+    if (options.allowFutureStart) return { from: to, to, clamped: false };
+    throw reversed();
+  }
   return { from, to, clamped };
 }
 
@@ -371,12 +404,17 @@ export const analyticsCampaignSummary = defineCommand({
     const record = await loadCampaignRecord(ctx.tx, input.campaignId);
     const timeZone = await workspaceTimeZone(ctx.tx, deps.workspaceId);
     const now = new Date().toISOString();
-    const window = summaryWindow({ from: input.from, to: input.to, startsAt: record.startsAt }, now);
-    const { from, to } = window;
     const ready = await readiness(ctx.tx, record);
 
     const sending = sendingMembers(record);
     const memberIds = sending.map((m) => m.artifactId);
+    // Readiness decides the response before the default window is built: a campaign that starts
+    // after now must return not_started, not a reversed-window error (#588).
+    const notStarted = !record.published || !sending.length || !(await hasSent(deps, memberIds));
+    const window = summaryWindow({ from: input.from, to: input.to, startsAt: record.startsAt }, now, {
+      allowFutureStart: notStarted,
+    });
+    const { from, to } = window;
     // The same campaign-scoped identity map the measure queries and the holdout card use (#590).
     const identity = await loadIdentityMap(ctx.tx, deps.workspaceId, {
       profileIds: await campaignRecipientProfileIds(deps, memberIds, from, to),
@@ -398,7 +436,7 @@ export const analyticsCampaignSummary = defineCommand({
       ],
     };
 
-    if (!record.published || !sending.length || !(await hasSent(deps, memberIds))) {
+    if (notStarted) {
       return {
         campaignId: record.id,
         name: record.name,
@@ -541,9 +579,13 @@ export const analyticsCampaignSummary = defineCommand({
       },
     ];
 
-    const holdouts = await holdoutResults(deps, record, from, to);
+    const suppressedMembers = new Set(members.filter((m) => m.suppressed).map((m) => m.artifactId));
+    const holdouts = await holdoutResults(deps, record, from, to, suppressedMembers);
+    const suppressedHoldouts = holdouts.filter((h) => h.suppressed).length;
     const notes = [...new Set([...totals.meta.notes, ...email.meta.notes, ...revenue.meta.notes, ...baseMeta.notes])];
     if (memberSuppressed) notes.push(`Member rows with fewer than k=${K} people reached have their counts suppressed.`);
+    if (suppressedHoldouts)
+      notes.push(`Journey holdouts with fewer than k=${K} people in an arm or in a suppressed member row have their counts suppressed.`);
 
     return {
       campaignId: record.id,
@@ -573,7 +615,7 @@ export const analyticsCampaignSummary = defineCommand({
         from,
         to,
         freshness: email.meta.freshness ?? totals.meta.freshness,
-        suppressed: totals.meta.suppressed + email.meta.suppressed + revenue.meta.suppressed + memberSuppressed,
+        suppressed: totals.meta.suppressed + email.meta.suppressed + revenue.meta.suppressed + memberSuppressed + suppressedHoldouts,
         k: K,
         notes,
       },

@@ -202,7 +202,8 @@ function FunnelSection({ summary, bounds, zone }: { summary: MeasuredSummary; bo
         </TableFrame>
 
         <p className="text-[12px] leading-[18px] text-muted">
-          Step rate divides by the previous stage; conversion is attributed to recipients, not conditioned on a click. Converters can exceed
+          Step rate divides by the previous stage, except delivered ÷ e-mail sent because recipients covers every channel; clicked ÷
+          delivered and converted ÷ clicked. Conversion is attributed to recipients, not conditioned on a click. Converters can exceed
           clickers. Delivered and clicked counts are e-mail; recipients and conversions cover every channel.
         </p>
         <p className="text-[12px] leading-[18px] text-muted">
@@ -344,6 +345,7 @@ function JourneyHoldouts({
             minSampleSizeMet={holdout.minSampleSizeMet}
             verdict={holdout.verdict}
             note={holdout.note}
+            suppressed={holdout.suppressed}
             goalEvent={goalEvent}
             attributionDays={attributionDays}
             assignmentPeriod={assignmentPeriod}

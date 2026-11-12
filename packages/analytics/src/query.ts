@@ -59,7 +59,13 @@ export const queryInput = z.object({
     .optional(),
 });
 
-export type QueryInput = z.infer<typeof queryInput>;
+export type QueryInput = z.infer<typeof queryInput> & {
+  /**
+   * Internal: restrict journey_events to one published version. Named reports use it so a funnel
+   * describes one topology; analytics.query's own input does not accept it.
+   */
+  journeyVersion?: number;
+};
 
 export const analyticsColumn = z.object({
   name: z.string(),
@@ -102,6 +108,7 @@ export interface FreshnessInput {
   names?: string[];
   scope?: MeasureScope;
   campaignMap?: CampaignMap;
+  journeyVersion?: number;
 }
 
 interface CacheEntry {
@@ -206,6 +213,7 @@ function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFil
     from: input.from,
     to: input.to,
     filters: sortedFilters,
+    journeyVersion: input.journeyVersion ?? null,
     limit: input.limit,
     order: input.order ?? null,
   });
@@ -224,7 +232,7 @@ async function conversionInput(tx: Tx, filters: NormalizedFilters): Promise<{ ru
 }
 
 export async function freshness(deps: Deps, input: FreshnessInput): Promise<string | null> {
-  const { source, from, to, filters, names = [], scope, campaignMap } = input;
+  const { source, from, to, filters, names = [], scope, campaignMap, journeyVersion } = input;
   const table = source === 'events' ? 'events' : source;
   const column = source === 'events' ? 'received_at' : 'at';
   const params: Record<string, unknown> = { ws: deps.workspaceId, from: from.replace('Z', ''), to: to.replace('Z', '') };
@@ -239,6 +247,10 @@ export async function freshness(deps: Deps, input: FreshnessInput): Promise<stri
   if (source === 'message_events' && scope?.channels.length) {
     params.channels = scope.channels;
     where.push('channel IN {channels:Array(String)}');
+  }
+  if (source === 'journey_events' && journeyVersion !== undefined) {
+    params.journey_version = journeyVersion;
+    where.push('version = {journey_version:UInt32}');
   }
   const filterColumn: Partial<Record<keyof NormalizedFilters, string>> = {
     template: 'template_id',
@@ -411,6 +423,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
         conversionRules: conversion.rules,
         conversionNames: conversion.names,
         campaignMap: queryMap?.map,
+        journeyVersion: input.journeyVersion,
       });
 
   const started = Date.now();
@@ -512,6 +525,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
         names: conversion.names,
         scope: measureScope(measures),
         campaignMap: queryMap?.map,
+        journeyVersion: input.journeyVersion,
       }),
       suppressed,
       k: K,
