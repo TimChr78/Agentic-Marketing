@@ -72,6 +72,10 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
     html: `<a href="${URL}"><img src="x.png" alt="Unsubscribe" style="display:none"></a>`,
     reason: 'hidden',
   },
+  // 0.14.9 review (P2): htmlparser2 12 parses these as raw text; browsers never render their content.
+  { name: 'link text inside noembed', html: `<a href="${URL}"><noembed><span hidden>Unsubscribe</span></noembed></a>`, reason: 'empty' },
+  { name: 'link text inside noframes', html: `<a href="${URL}"><noframes>Unsubscribe</noframes></a>`, reason: 'empty' },
+  { name: 'link text inside iframe', html: `<a href="${URL}"><iframe>Unsubscribe</iframe></a>`, reason: 'empty' },
   // Review round 3 (P2): invisible colours, and the last declaration of a property winning.
   { name: 'transparent text', html: link(' style="color:transparent"'), reason: 'hidden' },
   { name: 'zero-alpha rgba text', html: link(' style="color:rgba(0,0,0,0)"'), reason: 'hidden' },
@@ -414,6 +418,13 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
     );
     expect((await validateTemplate(t)).join(' ')).toContain('hidden');
     expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('rejects a link whose only text is inside noembed at save and at publish as empty (0.14.9 review)', async () => {
+    // Content inside noembed is never rendered, so the link has no text a reader can see.
+    const t = template('<mj-text><a href="{{ unsubscribe_url }}"><noembed><span hidden>Unsubscribe</span></noembed></a></mj-text>');
+    expect((await validateTemplate(t)).join(' ')).toContain('no text');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('no text');
   });
 
   it('rejects transparent text at save and at publish', async () => {

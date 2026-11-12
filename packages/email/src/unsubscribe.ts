@@ -29,8 +29,12 @@ export const MAX_UNSUBSCRIBE_NESTING = 512;
 /** The most classes one compound selector may name and still be modelled (review round 6). */
 const MAX_SELECTOR_CLASSES = 8;
 
-/** Elements whose content is not rendered as visible body content in an e-mail. */
-const NOT_BODY = new Set(['template', 'head', 'script', 'style', 'noscript']);
+/**
+ * Elements whose content is not rendered as visible body content in an e-mail. `noembed`,
+ * `noframes` and `iframe` hold fallback markup no client shows; htmlparser2 12 parses them as raw
+ * text, so without them here their text would count as visible link content (0.14.9 review).
+ */
+const NOT_BODY = new Set(['template', 'head', 'script', 'style', 'noscript', 'noembed', 'noframes', 'iframe']);
 
 /** One declaration with the importance CSS needs for the cascade. */
 interface Declaration {

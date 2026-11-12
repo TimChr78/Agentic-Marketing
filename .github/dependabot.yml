@@ -19,6 +19,7 @@ updates:
           - 'better-auth'
           - '@better-auth/*'
           - 'better-call'
+          - '@better-fetch/fetch'
       minor-and-patch:
         update-types: [minor, patch]
     # The spikes are throwaway benchmarks, not part of CI or the image.
