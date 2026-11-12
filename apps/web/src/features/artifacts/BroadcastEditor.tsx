@@ -557,6 +557,7 @@ export function BroadcastEditor({ artifact, content, onChange, readOnly, errors 
             data={data}
             savedRevision={savedRevision}
             segmentName={segment.artifact?.name ?? null}
+            segmentLoading={segment.loading}
             topicName={topicName}
             onRefreshChecks={() => setRefreshKey((key) => key + 1)}
           />
