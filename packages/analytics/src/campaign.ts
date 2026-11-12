@@ -372,7 +372,8 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
     revenue
       ? `, rev_roll AS (
     SELECT ${dimSql.length ? `${dimSql.join(', ')}, ` : ''}currency AS ${currencyAlias},
-      sum(revenue_value) AS base_campaign_revenue
+      sum(revenue_value) AS base_campaign_revenue,
+      uniqExact(profile_id) AS base_currency_converters
     FROM conversion
     GROUP BY ${[...groupBy, 'currency'].join(', ')}
   )`
@@ -388,10 +389,11 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   outer.push('ifNull(c.base_campaign_converters, 0) AS base_campaign_converters');
   if (revenue) outer.push('ifNull(rv.base_campaign_revenue, 0) AS base_campaign_revenue');
   outer.push('r.base_campaign_recipients AS k_group');
-  // A currency row's subject is its converters, not the campaign's recipients: one EUR buyer on a
-  // fifty-recipient campaign is a group of one (#756). The query layer hides the revenue figures
-  // below k while the rest of the row stays.
-  if (revenue) outer.push('ifNull(c.base_campaign_converters, 0) AS k_revenue_group');
+  // A currency row's subject is its converters in that currency, not the campaign's recipients or
+  // its converters overall: one EUR buyer on a campaign with five converters is a group of one
+  // (#756). Since #779 conv_roll is no longer split by currency, so the count comes from rev_roll.
+  // The query layer hides the revenue figures below k while the rest of the row stays.
+  if (revenue) outer.push('ifNull(rv.base_currency_converters, 0) AS k_revenue_group');
 
   const measureSql: string[] = [];
   const outputs: Output[] = dimensions.map((d) => ({ kind: 'dimension', dimension: d, alias: alias('dim', d) }));

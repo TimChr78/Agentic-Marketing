@@ -159,7 +159,11 @@ describe('campaign query compiler', () => {
     expect(compiled.revenue).toBe(true);
     expect(compiled.kAlias).toBe('k_group');
     expect(compiled.revenueKAlias).toBe('k_revenue_group');
-    expect(compiled.sql).toContain('ifNull(c.base_campaign_converters, 0) AS k_revenue_group');
+    // The k-group is the converters in that currency (rev_roll), not the campaign's converters
+    // overall: after #779 conv_roll is no longer split by currency (#756 with #779).
+    expect(compiled.sql).toContain('uniqExact(profile_id) AS base_currency_converters');
+    expect(compiled.sql).toContain('ifNull(rv.base_currency_converters, 0) AS k_revenue_group');
+    expect(compiled.sql).not.toContain('ifNull(c.base_campaign_converters, 0) AS k_revenue_group');
     expect(compiled.sql).toContain('LEFT JOIN conv_roll');
     expect(compiled.sql).toContain('LEFT JOIN rev_roll rv');
     expect(compiled.sql).toContain('currency AS dim_currency');

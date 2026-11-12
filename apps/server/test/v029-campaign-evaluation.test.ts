@@ -371,6 +371,9 @@ beforeAll(async () => {
     goal(wsA, pChannelEmail[2]!, 25, 'DKK', '2026-11-01T12:00:00.000Z'),
     // One EUR converter in the six-recipient campaign, and five per currency in the other.
     goal(wsA, pRevBelow[0]!, 2499, 'EUR', '2026-05-02T11:00:00.000Z'),
+    // Five DKK converters among the same six people: the campaign clears k overall while EUR still
+    // has one buyer, so the EUR revenue must stay hidden (#756 with #779).
+    ...pRevBelow.slice(1, 6).map((p, i) => goal(wsA, p, 20, 'DKK', `2026-05-02T12:0${i}:00.000Z`)),
     ...pRevAboveEur.map((p, i) => goal(wsA, p, 10, 'EUR', `2026-05-02T11:0${i}:00.000Z`)),
     ...pRevAboveDkk.map((p, i) => goal(wsA, p, 20, 'DKK', `2026-05-02T11:1${i}:00.000Z`)),
   ]);
@@ -504,21 +507,22 @@ describe('campaign dimension and filter', () => {
       to: REV_TO,
       filters: { campaign: [campaignRevenueBelow] },
     });
-    // Six recipients and one EUR converter: the currency row's subject is one person, so the
-    // revenue is null while the campaign row's recipient and converter counts stay.
-    expect(revenue.rows).toHaveLength(1);
-    expect(cell(revenue, 0, 'campaign.recipients')).toBe(6);
-    expect(cell(revenue, 0, 'campaign.converters')).toBe(1);
-    expect(cell(revenue, 0, 'campaign.revenue')).toBeNull();
+    // Six recipients, one EUR converter and five DKK converters: the campaign has six converters, so
+    // the campaign row clears k, but the EUR row's subject is one person and its revenue stays null.
+    // The DKK row, with five buyers, shows its revenue.
+    const byCurrency = Object.fromEntries(revenue.rows.map((r) => [r[columnIndex(revenue, 'currency')], r]));
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.recipients')]).toBe(6);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.converters')]).toBe(6);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue')]).toBeNull();
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100);
     expect(revenue.meta.suppressed).toBe(1);
 
     const summary = await api().call('analytics.campaignSummary', { campaignId: campaignRevenueBelow, from: REV_FROM, to: REV_TO });
     expect(summary.state).toBe('measured');
     if (summary.state !== 'measured') return;
     expect(summary.headline.recipients).toBe(6);
-    expect(summary.headline.converters).toBe(1);
-    expect(summary.headline.revenue).toEqual([]);
-    expect(summary.headline.revenuePerRecipient).toEqual([]);
+    expect(summary.headline.converters).toBe(6);
+    expect(summary.headline.revenue).toEqual([{ currency: 'DKK', amount: 100 }]);
     expect(summary.meta.suppressed).toBe(1);
   });
 
@@ -533,9 +537,11 @@ describe('campaign dimension and filter', () => {
     });
     const byCurrency = Object.fromEntries(revenue.rows.map((r) => [r[columnIndex(revenue, 'currency')], r]));
     expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.recipients')]).toBe(10);
-    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.converters')]).toBe(5);
+    // Since #779 converters are the campaign's total on every currency row (5 EUR + 5 DKK
+    // buyers); the revenue k floor still counts the converters in each currency (#756).
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.converters')]).toBe(10);
     expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue')]).toBe(50);
-    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.converters')]).toBe(5);
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.converters')]).toBe(10);
     expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100);
     expect(revenue.meta.suppressed).toBe(0);
 
