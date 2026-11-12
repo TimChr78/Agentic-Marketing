@@ -341,36 +341,50 @@ export const adPerformance = defineCommand({
     const windowMs = input.windowDays * 86_400_000;
 
     // Our conversions: events of the conversion map in the period, with their values. The shared
-    // reader pages the whole window by (timestamp, event_id) instead of a raw `LIMIT 100000`, so
-    // no conversion silently falls outside an arbitrary row slice (#786, #366). Each page is
-    // attributed and folded into the totals at once, so a window of millions of conversions never
-    // has to fit in memory.
+    // reader pages the whole window by the table's full replacing key instead of a raw
+    // `LIMIT 100000`, so no conversion silently falls outside an arbitrary row slice (#786, #366).
+    // Each page is attributed and folded into the totals at once, so a window of millions of
+    // conversions never has to fit in memory.
     const map: ConversionMap | null = await publishedSingleton(ctx.tx, 'conversion_map');
     const rules = map?.rules ?? [];
     const names = [...new Set(rules.map((r) => r.event))];
     const windowFrom = new Date(`${since}T00:00:00.000Z`);
     const windowUntilEnd = new Date(Date.parse(until) + 86_400_000);
-    const touchesFrom = `${day(new Date(Date.parse(since) - windowMs))} 00:00:00`;
 
-    // ClickHouse caps one HTTP form field at 128 KiB, and the id array is JSON-escaped on the way
-    // in. Send the visitors of one page in 64 KiB chunks rather than one unbounded
-    // `visitors:Array(String)`: 100,001 distinct ids failed with "Field value too long" (#786).
-    // Chunking fits here where identityParams' three-array identity-map builder does not.
-    const visitorChunks = (ids: string[]) => {
-      const chunks: string[][] = [];
-      let chunk: string[] = [];
-      let bytes = 2;
+    // The last touch is selected in ClickHouse, not in Node: one visitor with millions of campaign
+    // touches made the old per-visitor `.json()` response unbounded even though conversions were
+    // paged (#786). Each page's conversions travel as parallel arrays (index, visitor, timestamp),
+    // chunked under the same 64 KiB form-field budget, and an ASOF LEFT JOIN returns at most one
+    // touch per conversion, bounded above by that conversion's timestamp and below by its window.
+    const stamp = (ms: number) => new Date(ms).toISOString().replace('T', ' ').replace('Z', '');
+    type Lookup = { idx: number; visitor: string; at: number };
+    const conversionChunks = (rows: Lookup[]) => {
+      const chunks: Lookup[][] = [];
+      let chunk: Lookup[] = [];
+      let visitorBytes = 2;
+      let timeBytes = 2;
+      let indexBytes = 2;
       const flush = () => {
         if (!chunk.length) return;
         chunks.push(chunk);
         chunk = [];
-        bytes = 2;
+        visitorBytes = 2;
+        timeBytes = 2;
+        indexBytes = 2;
       };
-      for (const id of ids) {
-        const size = Buffer.byteLength(JSON.stringify(id)) * 2 + 3;
-        if (chunk.length && bytes + size > 64 * 1024) flush();
-        chunk.push(id);
-        bytes += size;
+      for (const row of rows) {
+        const visitorSize = Buffer.byteLength(JSON.stringify(row.visitor)) * 2 + 3;
+        const timeSize = Buffer.byteLength(JSON.stringify(stamp(row.at))) * 2 + 3;
+        const indexSize = Buffer.byteLength(String(row.idx)) + 1;
+        if (
+          chunk.length &&
+          (visitorBytes + visitorSize > 64 * 1024 || timeBytes + timeSize > 64 * 1024 || indexBytes + indexSize > 64 * 1024)
+        )
+          flush();
+        chunk.push(row);
+        visitorBytes += visitorSize;
+        timeBytes += timeSize;
+        indexBytes += indexSize;
       }
       flush();
       return chunks;
@@ -379,41 +393,67 @@ export const adPerformance = defineCommand({
     const attribute = async (conversions: ConversionEvent[]) => {
       // Empty identifiers never have a touch to look up; a user-id-only conversion stays
       // unattributed.
-      const visitors = [...new Set(conversions.map((c) => c.anonymousId).filter((id) => id !== ''))];
-      const byVisitor = new Map<string, { anonymous_id: string; timestamp: string; campaign: string; source: string }[]>();
-      for (const chunk of visitorChunks(visitors)) {
+      const lookups: Lookup[] = conversions.flatMap((c, idx) =>
+        c.anonymousId === '' ? [] : [{ idx, visitor: c.anonymousId, at: c.timestamp }],
+      );
+      const byConversion = new Map<number, { campaign: string; source: string }>();
+      for (const chunk of conversionChunks(lookups)) {
+        const at = chunk.map((r) => r.at);
         const touches = await (
           await ch.query({
-            query: `SELECT anonymous_id, timestamp,
-                      coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS campaign,
-                      coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS source
-                    FROM events FINAL
-                    WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
-                      AND timestamp >= {from:DateTime64(3, 'UTC')} AND campaign != ''
-                    ORDER BY timestamp`,
-            query_params: { ws, visitors: chunk, from: touchesFrom },
+            // Touches with no campaign are dropped before the per-timestamp choice, so an
+            // identify at the same timestamp cannot mask a page touch. argMax on event_id then
+            // makes two campaign touches at the same timestamp deterministic (the greater event
+            // id wins) before the ASOF join picks the latest one. The right side is bounded above
+            // by the newest conversion in the chunk, and the outer predicate drops a latest touch
+            // that is older than its conversion's window, which is exactly when no touch in the
+            // window exists.
+            query: `SELECT idx, campaign, source
+                    FROM (
+                      SELECT tupleElement(z, 1) AS idx, tupleElement(z, 2) AS visitor,
+                             toDateTime64(tupleElement(z, 3), 3, 'UTC') AS at
+                      FROM (SELECT arrayJoin(arrayZip({idxs:Array(UInt32)}, {visitors:Array(String)}, {times:Array(String)})) AS z)
+                    ) AS c
+                    ASOF LEFT JOIN (
+                      SELECT anonymous_id, timestamp,
+                             argMax(touch_campaign, event_id) AS campaign,
+                             argMax(touch_source, event_id) AS source
+                      FROM (
+                        SELECT anonymous_id, timestamp, event_id,
+                               coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS touch_campaign,
+                               coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS touch_source
+                        FROM events FINAL
+                        WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
+                          AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
+                      )
+                      WHERE touch_campaign != ''
+                      GROUP BY anonymous_id, timestamp
+                      ORDER BY anonymous_id, timestamp
+                    ) AS t
+                    ON c.visitor = t.anonymous_id AND c.at >= t.timestamp
+                    WHERE t.timestamp >= c.at - toIntervalMillisecond({windowMs:UInt64})
+                    ORDER BY idx`,
+            query_params: {
+              ws,
+              idxs: chunk.map((r) => r.idx),
+              visitors: chunk.map((r) => r.visitor),
+              times: chunk.map((r) => stamp(r.at)),
+              from: stamp(Math.min(...at) - windowMs),
+              to: stamp(Math.max(...at)),
+              windowMs,
+            },
             format: 'JSONEachRow',
             clickhouse_settings,
           })
-        ).json<{ anonymous_id: string; timestamp: string; campaign: string; source: string }>();
-        for (const t of touches) {
-          const list = byVisitor.get(t.anonymous_id);
-          if (list) list.push(t);
-          else byVisitor.set(t.anonymous_id, [t]);
-        }
+        ).json<{ idx: number | string; campaign: string; source: string }>();
+        for (const t of touches) byConversion.set(Number(t.idx), { campaign: String(t.campaign), source: String(t.source) });
       }
-      // Last utm_campaign touch within the window, before the conversion: computed per page, which
-      // is identical to the whole-window loop because a conversion only reads its own visitor's
-      // touches. Pages are ordered by (timestamp, event_id) and no rule dedupes or depends on
-      // another conversion, so a batch boundary cannot change the result.
-      for (const c of conversions) {
-        const at = c.timestamp;
-        const touch = (byVisitor.get(c.anonymousId) ?? [])
-          .filter((t) => {
-            const tt = Date.parse(`${t.timestamp.replace(' ', 'T')}Z`);
-            return tt <= at && at - tt <= windowMs;
-          })
-          .at(-1);
+      // Attribution is computed per page, which is identical to the whole-window loop because a
+      // conversion only reads its own visitor's touches. Pages are ordered by (timestamp, event_id)
+      // and no rule dedupes or depends on another conversion, so a batch boundary cannot change the
+      // result.
+      for (const [idx, c] of conversions.entries()) {
+        const touch = byConversion.get(idx);
         const rule = rules.find((r) => r.event === c.name);
         const value = rule?.value ? Number(get(c.properties ?? {}, rule.value)) || 0 : 0;
         const platform = touch ? (PLATFORM_OF_SOURCE.find(([re]) => re.test(touch.source))?.[1] ?? '*') : '*';
