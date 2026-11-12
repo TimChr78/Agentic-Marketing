@@ -253,7 +253,7 @@ export function settleState() {
     const r = el.getBoundingClientRect();
     return r.bottom > 0 && r.top < window.innerHeight && r.right > 0 && r.left < window.innerWidth;
   };
-  const describe = (el) => {
+  const selectorOf = (el) => {
     const classes = el.classList.length ? `.${[...el.classList].join('.')}` : '';
     const shape = el.getAttribute('data-skeleton-shape');
     const geometry = el.getAttribute('data-geometry');
@@ -266,7 +266,7 @@ export function settleState() {
     skeletons: Array.from(document.querySelectorAll('.am-skeleton'))
       .slice(0, 20)
       .map((el) => ({
-        selector: describe(el),
+        selector: selectorOf(el),
         region: el.closest('[data-skeleton-region]')?.getAttribute('aria-label') ?? null,
       })),
     images: Array.from(document.images)
