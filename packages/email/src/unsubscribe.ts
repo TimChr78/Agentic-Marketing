@@ -60,6 +60,8 @@ interface RuleDecl {
   selector: HideSelector;
   value: string;
   important: boolean;
+  /** The one declaration every selector of a comma list shares, so parsing is cached per declaration. */
+  declaration: Declaration;
   /** Document order, so the later of two simple rules wins. */
   order: number;
 }
@@ -558,14 +560,18 @@ function colourValue(raw: string | undefined): string | null {
  * The colour of a `background` shorthand: the value itself when it is one colour, else the last
  * top-level token that is a colour. Tokens inside parentheses (url(), gradients) are ignored.
  */
-/** Each stylesheet rule's background colour, parsed on first use. */
-const ruleBackgrounds = new WeakMap<RuleDecl, string | null>();
+/**
+ * Each stylesheet declaration's background colour, parsed on first use. Keyed by the declaration,
+ * which every selector of a comma list shares, so `.a,.b,.c{background:…}` parses once (review
+ * rounds 7 and 8).
+ */
+const ruleBackgrounds = new WeakMap<Declaration, string | null>();
 
 function ruleBackgroundColour(rule: RuleDecl): string | null {
-  const cached = ruleBackgrounds.get(rule);
+  const cached = ruleBackgrounds.get(rule.declaration);
   if (cached !== undefined) return cached;
   const colour = backgroundColour(rule.value);
-  ruleBackgrounds.set(rule, colour);
+  ruleBackgrounds.set(rule.declaration, colour);
   return colour;
 }
 
@@ -751,7 +757,7 @@ function hiddenRules(css: string): HiddenRules {
         for (const part of prelude.split(',')) {
           const selector = parseSimpleSelector(part.trim());
           if (selector === null) continue;
-          addRule(rules[property], { selector, value: declaration.value, important: declaration.important, order });
+          addRule(rules[property], { selector, value: declaration.value, important: declaration.important, declaration, order });
         }
       }
     }
