@@ -25,14 +25,16 @@ const PHONE_CANDIDATE = /(?<![\p{L}\d])(?:\+|00)?(?:\(\d{1,5}\)[ .-]?|\d)[\d ().
  * Whether a phone-shaped run really is a phone number. A plain 9-digit count, an ISO date, a
  * date-time or an id with adjacent letters is not: the run must be international, contain a
  * separator, or be a contiguous national number with a trunk 0, and it must hold 9–15 digits.
- * An 8-digit run (DK/NO) counts unless it is date-shaped.
+ * In strict mode an 8-digit run (DK/NO) counts unless it is date-shaped.
  */
-function isPhone(match: string, text: string, index: number): boolean {
+function isPhone(match: string, text: string, index: number, strict = false): boolean {
   const digits = match.replace(/\D/g, '');
-  // Danish and Norwegian numbers have 8 digits (12 34 56 78, 12345678). A contiguous 8-digit run
-  // that reads as a date (YYYYMMDD) is not a phone; any other 8-digit run is, erring towards
-  // withholding (0.14.11 review).
+  // Danish and Norwegian numbers have 8 digits (12 34 56 78, 12345678). In strict mode (consent
+  // proof, where withholding is the safe answer) a contiguous 8-digit run that reads as a date
+  // (YYYYMMDD) is not a phone and any other 8-digit run is. Outside strict mode an 8-digit run is
+  // left alone: the AI context must keep order numbers such as order_id "12345678" (0.14.11 review).
   if (digits.length === 8) {
+    if (!strict) return false;
     if (/^\d{8}$/.test(match) && /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/.test(match)) return false;
     if (/^\d{4}[-./]\d{2}[-./]?\d{2}$/.test(match)) return false;
     if (/[\p{L}][-_/.#]$/u.test(text.slice(Math.max(0, index - 2), index))) return false;
@@ -68,7 +70,7 @@ const detectors: Detector[] = [
   { label: '[card]', re: /\b(?:\d[ -]?){13,19}\b/g },
   // Before the phone detector: a CPR-shaped number is a national id, not a phone.
   { label: '[national-id]', re: /\b\d{6}-?\d{4}\b/g },
-  { label: '[phone]', re: PHONE_CANDIDATE, accept: isPhone },
+  { label: '[phone]', re: PHONE_CANDIDATE, accept: (m, t, i) => isPhone(m, t, i) },
   { label: '[ip]', re: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g },
   // 123 Main Street / 10 Downing St.: a house number, a name and a street word.
   {
@@ -136,10 +138,23 @@ export function redactText(s: string): string {
   return out;
 }
 
-/** Which kinds of personal data the same detectors find in free text, e.g. ["[email]"] (hosted memory notes, #340). */
-export function personalDataInText(s: string): string[] {
+/**
+ * The same detectors in strict mode: an 8-digit run (a Danish or Norwegian phone number) also
+ * counts. For places where a false positive only withholds something, such as consent proof shown
+ * to a role without profiles:pii.
+ */
+const strictDetectors: Detector[] = detectors.map((d) =>
+  d.label === '[phone]' && d.re === PHONE_CANDIDATE ? { ...d, accept: (m, t, i) => isPhone(m, t, i, true) } : d,
+);
+
+/**
+ * Which kinds of personal data the same detectors find in free text, e.g. ["[email]"] (hosted memory
+ * notes, #340). `strict` also treats 8-digit runs as phone numbers; use it where withholding is the
+ * safe answer, not where a value must survive (the AI context).
+ */
+export function personalDataInText(s: string, options: { strict?: boolean } = {}): string[] {
   const found = new Set<string>();
-  for (const detector of detectors) if (scan(detector, s)) found.add(detector.label);
+  for (const detector of options.strict ? strictDetectors : detectors) if (scan(detector, s)) found.add(detector.label);
   return [...found];
 }
 
