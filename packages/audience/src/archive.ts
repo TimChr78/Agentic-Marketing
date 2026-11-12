@@ -560,6 +560,8 @@ export const MAX_EMAIL_DETACH_SCAN = 2_000_000;
 // stack, once per level. A deep stack and a long run of end tags therefore cost time without
 // touching any adapter insertion hook. Bound the total read, so the work is capped on a fast
 // machine too, not only by the clock. A real document reads about depth × tags, far below this.
+// parse5 8.1 keeps an index of the stack, so most end tags no longer read it at all; the cap stays as
+// a backstop for the paths that still scan (scope checks, foreign content).
 export const MAX_EMAIL_STACK_READS = 2_000_000;
 // A backstop for a whole sanitiser call: the scanner, the tree adapter, the stack reads and the
 // node sweep all check it, so a call cannot run much past it. Real newsletters take about 20 ms.
