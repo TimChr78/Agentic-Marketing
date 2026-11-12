@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
 import { emailPublishProblems } from '../src/checks';
 import { validateTemplate } from '../src/render';
-import { unsubscribeLinkProblem } from '../src/unsubscribe';
+import { MAX_UNSUBSCRIBE_NESTING, unsubscribeLinkProblem } from '../src/unsubscribe';
 
 // Review of #637 (P2): the gate only checked that an <a href> with the unsubscribe URL existed.
 // A link nobody can see or click — inline display:none, an ancestor style, a <template>, or an
@@ -248,6 +248,27 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
       (html) => unsubscribeLinkProblem(html, URL),
       2_000,
     );
+  });
+
+  it('stays linear for one selector naming many classes against many elements (review round 6)', () => {
+    expectLinear(
+      (n) =>
+        `<html><head><style>${'.x'.repeat(n)}{display:none}</style></head><body>${'<div class="x">x</div>'.repeat(n)}<a href="${URL}">Unsubscribe</a></body></html>`,
+      (html) => unsubscribeLinkProblem(html, URL),
+      2_000,
+    );
+  });
+
+  it('stays linear for deep nesting and rejects it past the limit (review round 6)', () => {
+    expectLinear(
+      (n) => `${'<div>'.repeat(n)}<a href="${URL}">Unsubscribe</a>${'</div>'.repeat(n)}`,
+      (html) => unsubscribeLinkProblem(html, URL),
+      8_000,
+    );
+    const deep = `${'<div>'.repeat(MAX_UNSUBSCRIBE_NESTING + 1)}<a href="${URL}">Unsubscribe</a>`;
+    expect(unsubscribeLinkProblem(deep, URL)).toBe('too_deep');
+    const fine = `${'<div>'.repeat(60)}<a href="${URL}">Unsubscribe</a>${'</div>'.repeat(60)}`;
+    expect(unsubscribeLinkProblem(fine, URL)).toBeNull();
   });
 
   it('still applies a compound hiding rule in a normal stylesheet', () => {
