@@ -16,7 +16,7 @@ import {
   resolvePreviousTag,
   selectReleasePullRequests,
 } from '../../../scripts/release/close-issues.mjs';
-import { imageTagSpec, isNewestInLine, parseTags } from '../../../scripts/release/image-tags.mjs';
+import { imageTagSpec, isNewestInLine, isNewestStable, parseTags } from '../../../scripts/release/image-tags.mjs';
 import { missingPlatforms, platforms } from '../../../scripts/release/manifest-platforms.mjs';
 import {
   architectureStatusVersions,
@@ -257,6 +257,8 @@ describe('the release handoff gate (#785)', () => {
     // 0.14.14 review: an unfinished state, a stale last release, or a mention outside "Now" fail.
     const now = (line: string, last = 'v0.14.8') => `## Now\n\n${line}\n\n## Last green\n\n- The last release is ${last}.\n`;
     expect(statusProblems(now('- **0.14.8** (alerts) is in progress.'), '0.14.8')[0]).toMatch(/does not say 0\.14\.8 is released/);
+    expect(statusProblems(now('- **0.14.8** (alerts) is not released.'), '0.14.8')[0]).toMatch(/does not say 0\.14\.8 is released/);
+    expect(statusProblems(now('- **0.14.8** (alerts) is unreleased.'), '0.14.8')[0]).toMatch(/does not say 0\.14\.8 is released/);
     expect(statusProblems(now('- **0.14.8** (alerts) is released.', 'v0.14.7'), '0.14.8')[0]).toMatch(/last release/);
     expect(
       statusProblems(
@@ -543,6 +545,15 @@ describe('the floating major.minor image tag (#773)', () => {
     expect(imageTagSpec('0.14.9', [], { exactOnly: true })).not.toContain('latest');
   });
 
+  it('ignores prereleases and non-SemVer tags when moving the floating tags (0.14.14 review round 2)', () => {
+    // A newer prerelease in the line does not hold :0.14 back; a prerelease never moves it.
+    expect(imageTagSpec('0.14.14', ['v0.14.13', 'v0.14.15-rc.1'])).toContain('{{major}}.{{minor}}');
+    expect(imageTagSpec('0.14.15-rc.1', ['v0.14.14'])).not.toContain('{{major}}.{{minor}}');
+    // An invalid tag (leading zeros) is not a release and blocks nothing.
+    expect(isNewestStable('0.14.14', ['v99.00.0'])).toBe(true);
+    expect(imageTagSpec('0.14.14', ['v99.00.0', 'vnext'])).toContain('type=raw,value=latest');
+  });
+
   it('publishes the exact tag alone when the line cannot be read', () => {
     expect(imageTagSpec('0.14.9', [], { exactOnly: true })).toBe('type=semver,pattern={{version}},value=0.14.9');
     expect(parseTags('# comment\nv0.14.1\n\nv0.14.2\n')).toEqual(['v0.14.1', 'v0.14.2']);
@@ -622,9 +633,10 @@ describe('the release workflow concurrency (#648)', () => {
     return next < 0 ? body : body.slice(0, next);
   };
 
-  it('keys one job-level group on the release line instead of the raw trigger input', () => {
-    // A line, not a version: every patch publishes the same floating :X.Y image tag (#773).
-    expect(job('release')).toMatch(/concurrency:\n\s+group: release-v\$\{\{ needs\.prepare\.outputs\.line \}\}/);
+  it('queues every release in one job-level group instead of the raw trigger input', () => {
+    // One group for all lines, not one per line: latest spans lines, so two lines publishing at
+    // once could both decide they are newest (#773, 0.14.14 review round 2).
+    expect(job('release')).toMatch(/concurrency:\n\s+group: release\n/);
     expect(job('release')).toMatch(/cancel-in-progress: false/);
     expect(workflow).not.toMatch(/group: release-\$\{\{ inputs\.version \|\| github\.ref_name \}\}/);
     expect(workflow).not.toMatch(/^concurrency:/m);

@@ -36,25 +36,35 @@ export function isNewestInLine(version, tags) {
   const line = releaseLine(version);
   const target = versionKey(version);
   if (!line || !target) throw new Error(`not a version: ${version}`);
+  // The metadata action turns {{major}}.{{minor}} into the exact version for a prerelease, so a
+  // prerelease never moves the line tag, and a prerelease tag never holds a stable release back.
+  if (target[3] === 0) return false;
   return tags.every((tag) => {
-    const other = String(tag).trim().replace(/^v/, '');
-    if (!isSemver(other) || releaseLine(other) !== line) return true;
-    const key = versionKey(other);
-    return key === null || compareKeys(key, target) <= 0;
+    const key = stableKey(tag);
+    if (!key) return true;
+    return releaseLine(String(tag).trim().replace(/^v/, '')) !== line || compareKeys(key, target) <= 0;
   });
+}
+
+/** The sort key of a listed tag that is a valid stable SemVer release, or null. */
+function stableKey(tag) {
+  const other = String(tag).trim().replace(/^v/, '');
+  if (!isSemver(other)) return null;
+  const key = versionKey(other);
+  return key && key[3] === 1 ? key : null;
 }
 
 /**
  * Whether `version` is a stable release newer than every other stable release among `tags`, in any
- * line. Prereleases never become `latest` and never block it.
+ * line. Prereleases and tags that are not valid SemVer never become `latest` and never block it.
  */
 export function isNewestStable(version, tags) {
   const target = versionKey(version);
   if (!target) throw new Error(`not a version: ${version}`);
   if (target[3] === 0) return false;
   return tags.every((tag) => {
-    const key = versionKey(String(tag).trim().replace(/^v/, ''));
-    return key === null || key[3] === 0 || compareKeys(key, target) <= 0;
+    const key = stableKey(tag);
+    return key === null || compareKeys(key, target) <= 0;
   });
 }
 

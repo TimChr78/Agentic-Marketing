@@ -73,11 +73,13 @@ jobs:
     timeout-minutes: 60
     # The group is acquired before the version and release-existence checks below run, so a second
     # run queued for the same version sees the first release when it starts.
-    # One group per release line (major.minor), not per version: every patch of a line pushes the
-    # same floating `:0.14` image tag, so overlapping patches must queue behind each other (#773).
-    # cancel-in-progress stays false so none of them is cancelled mid-publish.
+    # One group for every release, not one per version or per line: each patch of a line pushes the
+    # same floating `:0.14` tag, and `latest` spans lines, so two releases deciding their tags at
+    # once could both think they are newest (#773). A manual release creates its Git tag only after
+    # publishing, so the next queued run sees it. cancel-in-progress stays false so none is
+    # cancelled mid-publish (GitHub keeps one pending run per group: queue releases one at a time).
     concurrency:
-      group: release-v${{ needs.prepare.outputs.line }}
+      group: release
       cancel-in-progress: false
     # The release files and the image need the token of the event; the attestations need a signed
     # identity (`id-token`) and the permission to store an attestation (`attestations`).
