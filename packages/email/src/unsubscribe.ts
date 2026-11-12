@@ -34,7 +34,9 @@ const MAX_SELECTOR_CLASSES = 8;
  * `noframes` and `iframe` hold fallback markup no client shows; htmlparser2 12 parses them as raw
  * text, so without them here their text would count as visible link content (0.14.9 review).
  */
-const NOT_BODY = new Set(['template', 'head', 'script', 'style', 'noscript', 'noembed', 'noframes', 'iframe']);
+// SVG `title`, `desc` and `metadata` are never drawn either; parser 12 exposes anchors inside an
+// SVG `title` as elements (0.14.9 review round 2). An HTML `title` belongs in `head`, already listed.
+const NOT_BODY = new Set(['template', 'head', 'script', 'style', 'noscript', 'noembed', 'noframes', 'iframe', 'title', 'desc', 'metadata']);
 
 /** One declaration with the importance CSS needs for the cascade. */
 interface Declaration {
