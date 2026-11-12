@@ -63,5 +63,17 @@ describe('useComposerData keyed by template (0.14.6 review)', () => {
     await waitFor(() => expect(h.held.size).toBeGreaterThan(0));
     expect(consent(result.current.rows)).not.toBe('ready');
     expect(result.current.templateContent).toBeUndefined();
+
+    // Phase 2: B's metadata arrives while its exact version is still held. A's content must stay
+    // withheld, and the consent row must not be ready.
+    h.held.get(`artifacts.get:${B}:`)?.(artifact(B, 'missing'));
+    await waitFor(() => expect(h.held.has(`artifacts.get:${B}:1`)).toBe(true));
+    expect(result.current.templateContent).toBeUndefined();
+    expect(consent(result.current.rows)).not.toBe('ready');
+
+    // Phase 3: B's exact version arrives; B's own purpose (not configured) is what the row judges.
+    h.held.get(`artifacts.get:${B}:1`)?.(artifact(B, 'missing'));
+    await waitFor(() => expect(result.current.templateContent).toEqual({ purpose: 'missing' }));
+    expect(consent(result.current.rows)).toBe('attention');
   });
 });
