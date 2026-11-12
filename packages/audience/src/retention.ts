@@ -46,8 +46,12 @@ const PLATFORM_NAMES = new Set(PLATFORM_EVENTS);
 
 interface Cursor {
   createdAt: string;
+  workspaceId: string;
   id: string;
 }
+
+/** The form path's source id is the form artifact id (`frm_` + 32 hex), assigned server-side. */
+const FORM_SOURCE = /^frm_[0-9a-f]{32}$/;
 
 interface Candidate {
   workspace_id: string;
@@ -67,12 +71,17 @@ function onlyFormActivity(events: StoredEvent[]): boolean {
   if (!events.length || events.length >= EVENT_WINDOW) return false;
   if (events.some((e) => e.name === PLATFORM_EVENT.subscriptionConfirmed)) return false;
   // The form's own identify came from the form source at the submission timestamp. The source id
-  // is set by the ingest path (the form id `frm_…`), not by the request body, so a client identify
-  // that merely shares the timestamp does not count as the form's (P3).
-  const submissions = events.filter((e) => e.type === 'track' && e.name === PLATFORM_EVENT.formSubmitted);
+  // is set by the ingest path (the published form's `frm_…` id), not by the request body, so an
+  // event from a public `src_…` source cannot pose as the form (P2). A `Form Submitted` name from
+  // any other source is another event, and therefore activity that keeps the profile.
+  const submissions = events.filter((e) => e.type === 'track' && e.name === PLATFORM_EVENT.formSubmitted && FORM_SOURCE.test(e.sourceId));
   if (!submissions.length) return false;
   const submitted = new Set(submissions.map((e) => `${e.sourceId}:${e.timestamp}`));
-  return events.every((e) => PLATFORM_NAMES.has(e.name) || (e.type === 'identify' && submitted.has(`${e.sourceId}:${e.timestamp}`)));
+  return events.every(
+    (e) =>
+      (e.name === PLATFORM_EVENT.formSubmitted ? FORM_SOURCE.test(e.sourceId) : PLATFORM_NAMES.has(e.name)) ||
+      (e.type === 'identify' && FORM_SOURCE.test(e.sourceId) && submitted.has(`${e.sourceId}:${e.timestamp}`)),
+  );
 }
 
 async function readCursor(deps: RetentionDeps): Promise<Cursor | null> {
@@ -81,7 +90,9 @@ async function readCursor(deps: RetentionDeps): Promise<Cursor | null> {
     const raw = await deps.hot.cached(CURSOR_KEY);
     if (!raw) return null;
     const value = JSON.parse(raw) as Partial<Cursor>;
-    return typeof value.createdAt === 'string' && typeof value.id === 'string' ? { createdAt: value.createdAt, id: value.id } : null;
+    return typeof value.createdAt === 'string' && typeof value.workspaceId === 'string' && typeof value.id === 'string'
+      ? { createdAt: value.createdAt, workspaceId: value.workspaceId, id: value.id }
+      : null;
   } catch (err) {
     logger.warn({ err }, 'retention cursor not read');
     return null;
@@ -122,10 +133,10 @@ async function candidates(deps: RetentionDeps, cursor: Cursor | null): Promise<C
        AND (SELECT count(*) FROM identifiers a WHERE a.workspace_id = p.workspace_id AND a.profile_id = p.id
             AND a.type = 'anonymous_id') = 1
        AND NOT EXISTS (SELECT 1 FROM profile_merges m WHERE m.workspace_id = p.workspace_id AND m.into_id = p.id)
-       AND ($2::timestamptz IS NULL OR (p.created_at, p.id) > ($2::timestamptz, $3::text))
-     ORDER BY p.created_at, p.id
-     LIMIT $4`,
-    [deps.unconfirmedDays, cursor?.createdAt ?? null, cursor?.id ?? '', CANDIDATE_BATCH],
+       AND ($2::timestamptz IS NULL OR (p.created_at, p.workspace_id, p.id) > ($2::timestamptz, $3::uuid, $4::text))
+     ORDER BY p.created_at, p.workspace_id, p.id
+     LIMIT $5`,
+    [deps.unconfirmedDays, cursor?.createdAt ?? null, cursor?.workspaceId ?? null, cursor?.id ?? '', CANDIDATE_BATCH],
   );
   return rows;
 }
@@ -231,7 +242,8 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
     }
   }
   const last = rows.at(-1);
-  if (rows.length === CANDIDATE_BATCH && last) await writeCursor(deps, { createdAt: last.created_at, id: last.id });
+  if (rows.length === CANDIDATE_BATCH && last)
+    await writeCursor(deps, { createdAt: last.created_at, workspaceId: last.workspace_id, id: last.id });
   else await writeCursor(deps, null);
   const deliveries = await deps.db.admin.query(
     `DELETE FROM deliveries WHERE status IN ('done', 'failed', 'dead') AND created_at < now() - make_interval(days => $1)`,
