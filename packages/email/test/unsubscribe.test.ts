@@ -1,4 +1,5 @@
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
+import { Parser } from 'htmlparser2';
 import { describe, expect, it, vi } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
 import { emailPublishProblems } from '../src/checks';
@@ -269,6 +270,29 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
     expect(unsubscribeLinkProblem(deep, URL)).toBe('too_complex');
     const fine = `${'<div>'.repeat(60)}<a href="${URL}">Unsubscribe</a>${'</div>'.repeat(60)}`;
     expect(unsubscribeLinkProblem(fine, URL)).toBeNull();
+  });
+
+  it('pause() stops the parser at the nesting limit (review round 6)', () => {
+    // The predicate rejects a document one level past the limit either way, so it cannot show
+    // whether the rest of the document was parsed. This mirrors the check's parser and options:
+    // once the 513th tag opens, no further open or text callback may run.
+    let opened = 0;
+    let text = 0;
+    const parser = new Parser(
+      {
+        onopentag() {
+          opened++;
+          if (opened > MAX_UNSUBSCRIBE_NESTING) parser.pause();
+        },
+        ontext() {
+          text++;
+        },
+      },
+      { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
+    );
+    parser.write(`${'<div>'.repeat(MAX_UNSUBSCRIBE_NESTING + 50)}${'<span>text</span>'.repeat(50)}`);
+    expect(opened).toBe(MAX_UNSUBSCRIBE_NESTING + 1);
+    expect(text).toBe(0);
   });
 
   it('parses a long stylesheet background once, not per matching element (review round 7)', () => {
