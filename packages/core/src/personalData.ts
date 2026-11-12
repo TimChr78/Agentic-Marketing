@@ -25,9 +25,19 @@ const PHONE_CANDIDATE = /(?<![\p{L}\d])(?:\+|00)?(?:\(\d{1,5}\)[ .-]?|\d)[\d ().
  * Whether a phone-shaped run really is a phone number. A plain 9-digit count, an ISO date, a
  * date-time or an id with adjacent letters is not: the run must be international, contain a
  * separator, or be a contiguous national number with a trunk 0, and it must hold 9–15 digits.
+ * An 8-digit run (DK/NO) counts unless it is date-shaped.
  */
 function isPhone(match: string, text: string, index: number): boolean {
   const digits = match.replace(/\D/g, '');
+  // Danish and Norwegian numbers have 8 digits (12 34 56 78, 12345678). A contiguous 8-digit run
+  // that reads as a date (YYYYMMDD) is not a phone; any other 8-digit run is, erring towards
+  // withholding (0.14.11 review).
+  if (digits.length === 8) {
+    if (/^\d{8}$/.test(match) && /^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])$/.test(match)) return false;
+    if (/^\d{4}[-./]\d{2}[-./]?\d{2}$/.test(match)) return false;
+    if (/[\p{L}][-_/.#]$/u.test(text.slice(Math.max(0, index - 2), index))) return false;
+    return true;
+  }
   if (digits.length < 9 || digits.length > 15) return false;
   // At most one parenthesised group, and it must be closed.
   const opens = (match.match(/\(/g) ?? []).length;

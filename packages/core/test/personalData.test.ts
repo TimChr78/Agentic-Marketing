@@ -39,6 +39,18 @@ describe('phone numbers (#765)', () => {
   });
 });
 
+describe('Danish and Norwegian 8-digit numbers (0.14.11 review)', () => {
+  it('detects 8-digit numbers, spaced or contiguous', () => {
+    for (const phone of ['12345678', '12 34 56 78', '1234 5678', '+45 12345678', '0045 12 34 56 78'])
+      expect(personalDataInText(`call ${phone}`), phone).toContain('[phone]');
+  });
+
+  it('keeps date-shaped 8-digit runs and attached ids out', () => {
+    expect(personalDataInText('batch 20261112')).not.toContain('[phone]');
+    expect(personalDataInText('ref ORD-12345678')).not.toContain('[phone]');
+  });
+});
+
 describe('postal addresses (#765)', () => {
   it('detects a street address with the number first', () => {
     for (const address of ['123 Main Street', '221B Baker St.', '10 Downing Street', '27 Rue de la Paix']) {
