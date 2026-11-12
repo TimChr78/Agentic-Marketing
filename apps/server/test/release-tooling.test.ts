@@ -19,7 +19,6 @@ import {
 import { imageTagSpec, isNewestInLine, parseTags } from '../../../scripts/release/image-tags.mjs';
 import { missingPlatforms, platforms } from '../../../scripts/release/manifest-platforms.mjs';
 import {
-  architectureStatusProblems,
   architectureStatusVersions,
   assertCompleteHistory,
   bumpVersions,
@@ -135,7 +134,6 @@ describe('the version bump', () => {
     // The architecture status lines are version surfaces too, so they cannot pin an old release
     // between releases (#784).
     expect(architectureStatusVersions(root).map((status) => status.version)).toEqual(['0.13.0', '0.13.0', '0.13.0']);
-    expect(architectureStatusProblems(root, '0.13.0')).toEqual([]);
 
     // Running it again is harmless, so a retried release does not change a second time.
     expect(bumpVersions(root, '0.13.0').length).toBe(changes.length);
@@ -145,17 +143,19 @@ describe('the version bump', () => {
 describe('the architecture status lines (#784)', () => {
   it('fail a check when a page names an older release, and pass after the bump', () => {
     const root = versionFixture();
-    expect(architectureStatusProblems(root, '0.12.0')).toEqual([]);
-    const stale = architectureStatusProblems(root, '0.13.0');
-    expect(stale).toHaveLength(3);
-    expect(stale[0]).toMatch(/docs\/architecture\/README\.md says 0\.12\.0, expected 0\.13\.0/);
+    const versions = () => architectureStatusVersions(root).map((status) => status.version);
+    expect(versions()).toEqual(['0.12.0', '0.12.0', '0.12.0']);
+
+    // check-versions compares each line with the release, so these three would be listed as
+    // mismatches: the pages still pin the old release (#650's regression).
+    expect(versions().filter((version) => version !== '0.13.0')).toHaveLength(3);
 
     bumpVersions(root, '0.13.0');
-    expect(architectureStatusProblems(root, '0.13.0')).toEqual([]);
+    expect(versions()).toEqual(['0.13.0', '0.13.0', '0.13.0']);
 
-    // A reworded page loses its status line; that must fail rather than pass silently.
+    // A reworded page loses its status line; that must be reported rather than pass silently.
     put(root, 'docs/architecture/overview.md', '> Status: rewritten without a release number.\n');
-    expect(architectureStatusProblems(root, '0.13.0')[0]).toMatch(/overview\.md says no release/);
+    expect(architectureStatusVersions(root)[1]).toEqual({ file: 'docs/architecture/overview.md', version: null });
   });
 });
 

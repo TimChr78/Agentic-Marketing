@@ -135,16 +135,6 @@ export function architectureStatusVersions(root) {
   });
 }
 
-/** Architecture status lines that do not name `version`. */
-export function architectureStatusProblems(root, version) {
-  return architectureStatusVersions(root)
-    .filter((status) => status.version !== version)
-    .map(
-      (status) =>
-        `${status.file} says ${status.version ?? 'no release'}, expected ${version}; run node scripts/release/prepare.mjs or update the status line`,
-    );
-}
-
 /**
  * The durable handoff must name the release being cut in its "Now" state and must not describe it
  * as unfinished (#607, #785). Only those lines are checked: the rest of the file is prose.
