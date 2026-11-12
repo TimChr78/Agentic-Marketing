@@ -59,7 +59,7 @@ schema is validated on save. The source of truth is `artifactTypes` in
 | `segment` | `seg_` | Dynamic condition, static list or snapshot. |
 | `experience` | `exp_` | Web experience: placement, variants, targeting, holdout and goal. |
 | `prompt` | `prm_` | AI prompt for a journey step, with test cases. |
-| `form` | `frm_` | Public signup form: purposes, double opt-in, redirects, Turnstile. |
+| `form` | `frm_` | Public signup form: purposes, double opt-in, allowed sites, redirects, Turnstile, optional hosted-page brand override. |
 | `brand` | `brd_` | Brand for hosted pages and the newsletter archive; one per workspace. |
 | `broadcast` | `bct_` | One send: template, segment, schedule, subject test, staged send, archive. |
 | `campaign` | `cmp_` | Grouping of artifacts under one goal and UTM campaign, with a control group. |
