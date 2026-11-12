@@ -28,6 +28,9 @@ branch instead of a phase branch.
    the ownership map, create `feat/phase-<n>` from `main` and push it.
 2. **Dispatch.** Each delegate works in its own worktree, branched from the pushed phase branch, on
    the files its task owns. It commits; it does not push.
+   **Never `git stash`:** the stash list is shared by every worktree of the repository, so a
+   `stash pop` can apply another delegate's changes and lose your own. For failing-before evidence,
+   restore the base file with `git show <base>:<path> > <path>` and put yours back afterwards.
 3. **Open a draft PR per task.** When a delegate reports, the integrator runs
    `scripts/open-task-pr.sh <task-branch> <integration-branch> <issue> "<title>"`, where the
    integration branch is `feat/phase-<n>` or `patch/<x.y.z>`. The script refuses `main` and any
