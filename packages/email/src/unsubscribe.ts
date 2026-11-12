@@ -182,13 +182,15 @@ const isSpace = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch =
  * `!important` beats a later value without it. `background` and `background-color` are one
  * property for this purpose, so the later of the two wins. Inline wins over a simple rule unless
  * the rule is `!important` and the inline value is not; between simple rules an important rule
- * wins, then the later rule. Specificity beyond tag/class/id is not modelled.
+ * wins, then the rule with the higher specificity (id, then class, then tag), then the later rule.
+ * Specificity beyond simple tag/class/id compounds is not modelled.
  *
  * The `bgcolor` attribute sets an element's background when no CSS background applies, and a
  * `<font color>` attribute sets its text colour when no CSS colour does (CSS wins). A `background`
  * shorthand contributes the last top-level token that is a colour, so a gradient or url() before
  * it is ignored.
  *
+ * Rules are ordered as CSS does: importance, then specificity (id, class, tag), then document order.
  * Known limits: selectors with combinators, attributes or pseudo-classes, rules inside `@media` or
  * any other at-rule, compound (tag/class/id) rules past the first 64 per kind, selectors naming
  * more than 8 classes, and external
@@ -416,14 +418,35 @@ function cascade(inline: Declaration | undefined, rule: RuleDecl | null): string
 }
 
 /** The latest matching important rule, else the latest matching normal rule. */
+/**
+ * A simple selector's specificity as one comparable number: ids, then classes, then the tag. A
+ * compound selector has at most one id, MAX_SELECTOR_CLASSES classes and one tag, so the weights
+ * never overlap.
+ */
+function specificity(selector: HideSelector): number {
+  return (selector.id !== null ? 10_000 : 0) + selector.classes.length * 100 + (selector.tag !== null ? 1 : 0);
+}
+
+/**
+ * Whether `rule` wins over `current` in the CSS cascade at the same importance: higher specificity
+ * first, then the later rule (#775; the colour, opacity and font-size buckets made a later broad
+ * rule able to flip a visible footer to hidden, 0.14.10 review).
+ */
+function beats(rule: RuleDecl, current: RuleDecl | null): boolean {
+  if (!current) return true;
+  const a = specificity(rule.selector);
+  const b = specificity(current.selector);
+  return a !== b ? a > b : rule.order > current.order;
+}
+
 function matchRule(bucket: RuleBucket, el: ElementInfo): RuleDecl | null {
   let important: RuleDecl | null = null;
   let normal: RuleDecl | null = null;
   const consider = (rule: RuleDecl | null | undefined) => {
     if (!rule) return;
     if (rule.important) {
-      if (!important || rule.order > important.order) important = rule;
-    } else if (!normal || rule.order > normal.order) {
+      if (beats(rule, important)) important = rule;
+    } else if (beats(rule, normal)) {
       normal = rule;
     }
   };

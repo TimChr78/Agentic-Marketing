@@ -201,12 +201,18 @@ const PURPOSES_ID = /^pur_[0-9a-f]{32}$/;
  * nodes. This is the only way an artifact refers to the purposes singleton; it never carries its id
  * (#735).
  */
+/** The purposes artifact's key shape (`Key` in packages/artifacts/src/types.ts), e.g. "marketing_email". */
+const PURPOSE_KEY = /^[a-z][a-z0-9_]{0,63}$/;
+const isPurposeKey = (value: unknown): boolean => typeof value === 'string' && PURPOSE_KEY.test(value);
+
 function namesPurpose(node: unknown): boolean {
   if (!node || typeof node !== 'object') return false;
   if (Array.isArray(node)) return node.some(namesPurpose);
   for (const [key, value] of Object.entries(node)) {
-    if ((key === 'purpose' || key === 'consent') && asString(value)) return true;
-    if (key === 'purposes' && asArray(value).some((entry) => asString(entry))) return true;
+    // Only key-shaped strings name a purpose: a free-text field that happens to be called `purpose`
+    // (a mandate's mission statement) is not a reference (0.14.10 review).
+    if ((key === 'purpose' || key === 'consent') && isPurposeKey(value)) return true;
+    if (key === 'purposes' && asArray(value).some(isPurposeKey)) return true;
     if (namesPurpose(value)) return true;
   }
   return false;
