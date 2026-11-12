@@ -89,6 +89,33 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
     html: `<div style="background-color:#ffffff"><a href="${URL}" style="color:white;background:rgba(0,0,0,0)">Unsubscribe</a></div>`,
     reason: 'hidden',
   },
+  // Review round 5: backgrounds that need compositing, the shorthand colour, the later of
+  // background/background-color, and the bgcolor attribute.
+  {
+    name: 'white text on a semi-transparent white background over white',
+    html: `<div style="background:#fff"><a href="${URL}" style="color:white;background:rgba(255,255,255,0.5)">Unsubscribe</a></div>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'white text on a gradient shorthand ending in white over black',
+    html: `<div style="background:#000"><a href="${URL}" style="color:white;background:linear-gradient(transparent,transparent) #fff">Unsubscribe</a></div>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a later background shorthand overriding background-color',
+    html: link(' style="color:white;background-color:black;background:white"'),
+    reason: 'hidden',
+  },
+  {
+    name: 'white text in a white bgcolor table cell under a black parent',
+    html: `<div style="background:#000"><table><tr><td bgcolor="#ffffff"><a href="${URL}" style="color:white">Unsubscribe</a></td></tr></table></div>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'white text in a white font element under a white parent',
+    html: `<div style="background:#fff"><font color="white"><a href="${URL}">Unsubscribe</a></font></div>`,
+    reason: 'hidden',
+  },
   { name: 'an important hide then a later unhide', html: link(' style="display:none !important;display:block"'), reason: 'hidden' },
   {
     name: 'an important class rule over an inline unhide',
@@ -154,6 +181,37 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
 
   it('accepts a link whose colour differs from its background', () => {
     expect(unsubscribeLinkProblem(link(' style="color:#111827;background-color:#ffffff"'), URL)).toBeNull();
+  });
+
+  it('accepts dark text on a semi-transparent white background over white', () => {
+    expect(
+      unsubscribeLinkProblem(
+        `<div style="background:#fff"><a href="${URL}" style="color:#111827;background:rgba(255,255,255,0.5)">Unsubscribe</a></div>`,
+        URL,
+      ),
+    ).toBeNull();
+  });
+
+  it('accepts white text on a gradient shorthand ending in black', () => {
+    expect(
+      unsubscribeLinkProblem(
+        `<div style="background:#000"><a href="${URL}" style="color:white;background:linear-gradient(transparent,transparent) #000">Unsubscribe</a></div>`,
+        URL,
+      ),
+    ).toBeNull();
+  });
+
+  it('accepts white text when background-color comes after the shorthand', () => {
+    expect(unsubscribeLinkProblem(link(' style="color:white;background:white;background-color:black"'), URL)).toBeNull();
+  });
+
+  it('accepts white text in a black bgcolor table cell', () => {
+    expect(
+      unsubscribeLinkProblem(
+        `<table><tr><td bgcolor="#000000"><a href="${URL}" style="color:white">Unsubscribe</a></td></tr></table>`,
+        URL,
+      ),
+    ).toBeNull();
   });
 
   it('accepts a zero dimension without overflow:hidden (a collapsed box is not our concern)', () => {
@@ -248,6 +306,22 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
 
   it('rejects a display:inline followed by display:none at save and at publish', async () => {
     const t = template('<mj-text><a style="display:inline;display:none" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>');
+    expect((await validateTemplate(t)).join(' ')).toContain('hidden');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('rejects white text on a semi-transparent white background at save and at publish', async () => {
+    const t = template(
+      '<mj-text><div style="background:#fff"><a style="color:white;background:rgba(255,255,255,0.5)" href="{{ unsubscribe_url }}">Unsubscribe</a></div></mj-text>',
+    );
+    expect((await validateTemplate(t)).join(' ')).toContain('hidden');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('rejects white text in a white bgcolor table cell at save and at publish', async () => {
+    const t = template(
+      '<mj-table><tr><td bgcolor="#ffffff"><a style="color:white" href="{{ unsubscribe_url }}">Unsubscribe</a></td></tr></mj-table>',
+    );
     expect((await validateTemplate(t)).join(' ')).toContain('hidden');
     expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
   });

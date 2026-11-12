@@ -70,6 +70,7 @@ interface RuleBucket {
 interface HiddenRules {
   display: RuleBucket;
   visibility: RuleBucket;
+  background: RuleBucket;
 }
 
 /**
@@ -105,6 +106,11 @@ const ruleBucket = (): RuleBucket => ({ byTag: new Map(), byId: new Map(), byCla
 /** Named colours that matter for the comparisons below; other names compare only verbatim. */
 const NAMED_COLOURS: Record<string, string> = { white: '#ffffff', black: '#000000', transparent: '#00000000' };
 
+/** Words that are not colours, even though `isLetters` would accept them. */
+const NON_COLOURS = new Set(['none', 'inherit', 'initial', 'unset', 'revert', 'revert-layer', 'currentcolor']);
+
+const isSpace = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f';
+
 /**
  * True when the rendered HTML has a usable unsubscribe link. `url` is the rendered
  * `unsubscribe_url`, the same value the send gateway puts in the visible link and in
@@ -120,25 +126,32 @@ const NAMED_COLOURS: Record<string, string> = { white: '#ffffff', black: '#00000
  * - a zero max-height/height/width together with `overflow:hidden`;
  * - an effective `font-size:0` or `visibility:hidden`;
  * - an effective text colour that is transparent, has zero alpha, or equals the effective
- *   background colour;
+ *   background colour (a semi-transparent background is composited over a known ancestor one);
  * - an off-screen box: a `text-indent` of at most -1000px with hidden overflow, an absolutely
  *   positioned `left`/`top` of at most -1000px, `clip: rect(0,0,0,0)`, or a `clip-path` of
  *   `inset(50%)`/`inset(100%)`/`circle(0)`;
- * - a class or id matched by a simple `<style>` rule (outside an at-rule) that sets display or
- *   visibility, cascaded with the inline style.
+ * - a class or id matched by a simple `<style>` rule (outside an at-rule) that sets display,
+ *   visibility or a background, cascaded with the inline style.
  *
  * Cascade scope: declarations in one style attribute or one rule use the last value, except that
- * `!important` beats a later value without it. Inline wins over a simple rule unless the rule is
- * `!important` and the inline value is not; between simple rules an important rule wins, then the
- * later rule. Specificity beyond tag/class/id is not modelled.
+ * `!important` beats a later value without it. `background` and `background-color` are one
+ * property for this purpose, so the later of the two wins. Inline wins over a simple rule unless
+ * the rule is `!important` and the inline value is not; between simple rules an important rule
+ * wins, then the later rule. Specificity beyond tag/class/id is not modelled.
+ *
+ * The `bgcolor` attribute sets an element's background when no CSS background applies, and a
+ * `<font color>` attribute sets its text colour when no CSS colour does (CSS wins). A `background`
+ * shorthand contributes the last top-level token that is a colour, so a gradient or url() before
+ * it is ignored.
  *
  * Known limits: selectors with combinators, attributes or pseudo-classes, rules inside `@media` or
  * any other at-rule, and external stylesheets are not evaluated (a matching `display:none` rule
  * wins over any later non-important rule that would unhide it). Colour parsing is small: white,
  * black and transparent are normalised, hex and `rgb()`/`rgba()` are compared, but other named
- * colours and nonzero-alpha `hsl()` are not converted. Off-screen handling covers only the simple
- * forms above, not transforms, em/rem/percent offsets or other clip shapes. The `List-Unsubscribe`
- * header still applies in those cases; the visible link is the stricter check.
+ * colours and nonzero-alpha `hsl()` are not converted (and cannot be composited). Off-screen
+ * handling covers only the simple forms above, not transforms, em/rem/percent offsets or other
+ * clip shapes. The `List-Unsubscribe` header still applies in those cases; the visible link is the
+ * stricter check.
  */
 export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLinkProblem | null {
   const wanted = url.trim();
@@ -268,9 +281,10 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
     (declaredValue(d, 'mso-hide') ?? '') === 'all' ||
     isOffscreen(d);
 
-  const ownColour = d.has('color') ? colourValue(declaredValue(d, 'color')) : null;
-  const background = d.has('background-color') ? declaredValue(d, 'background-color') : declaredValue(d, 'background');
-  const ownBackground = colourValue(background);
+  const ownColour = d.has('color') ? colourValue(declaredValue(d, 'color')) : el.name === 'font' ? colourValue(el.attribs.color) : null;
+  const backgroundDecl = cascade(d.get('background'), matchRule(rules.background, el));
+  // The bgcolor attribute is a presentational hint: only when no CSS background applies.
+  const ownBackground = backgroundDecl === undefined ? colourValue(el.attribs.bgcolor) : backgroundColour(backgroundDecl);
 
   return {
     hidden,
@@ -278,8 +292,9 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
     visibility,
     fontSizeZero: d.has('font-size') ? isZero(declaredValue(d, 'font-size')) : parent.fontSizeZero,
     color: ownColour ?? parent.color,
-    // A transparent (zero-alpha) background shows the ancestor's background through it.
-    background: ownBackground !== null && !isInvisibleColour(ownBackground) ? ownBackground : parent.background,
+    // A transparent background shows the ancestor's, and a semi-transparent one is composited
+    // over a known ancestor background.
+    background: compositeBackground(ownBackground, parent.background),
   };
 }
 
@@ -356,8 +371,10 @@ function parseDeclarations(style: string): Map<string, Declaration> {
   for (const part of style.split(';')) {
     const colon = part.indexOf(':');
     if (colon < 0) continue;
-    const name = part.slice(0, colon).trim().toLowerCase();
-    if (!name) continue;
+    const rawName = part.slice(0, colon).trim().toLowerCase();
+    if (!rawName) continue;
+    // The shorthand and the longhand are one property for the cascade: the later one wins.
+    const name = rawName === 'background-color' ? 'background' : rawName;
     let value = part
       .slice(colon + 1)
       .trim()
@@ -488,7 +505,88 @@ function colourValue(raw: string | undefined): string | null {
     if (alpha === 0) return '#00000000';
     return value.replace(/\s+/g, '');
   }
+  if (NON_COLOURS.has(value)) return null;
   return NAMED_COLOURS[value] ?? (isLetters(value) ? value : null);
+}
+
+/**
+ * The colour of a `background` shorthand: the value itself when it is one colour, else the last
+ * top-level token that is a colour. Tokens inside parentheses (url(), gradients) are ignored.
+ */
+function backgroundColour(raw: string): string | null {
+  const direct = colourValue(raw);
+  if (direct !== null) return direct;
+  let depth = 0;
+  let start = -1;
+  let last: string | null = null;
+  for (let i = 0; i <= raw.length; i++) {
+    const ch = i < raw.length ? raw[i]! : ' ';
+    if (depth === 0 && isSpace(ch)) {
+      if (start >= 0) {
+        last = colourToken(raw.slice(start, i)) ?? last;
+        start = -1;
+      }
+      continue;
+    }
+    if (start < 0) start = i;
+    if (ch === '(') depth++;
+    else if (ch === ')' && depth > 0) depth--;
+  }
+  return last;
+}
+
+/** A shorthand token counts only if it is plainly a colour; background keywords are not. */
+function colourToken(token: string): string | null {
+  const value = token.trim().toLowerCase();
+  if (
+    value.startsWith('#') ||
+    value.startsWith('rgb(') ||
+    value.startsWith('rgba(') ||
+    value.startsWith('hsl(') ||
+    value.startsWith('hsla(')
+  )
+    return colourValue(value);
+  return NAMED_COLOURS[value] ?? null;
+}
+
+interface Rgba {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+/** A canonical hex colour as channels, or null for a named colour we cannot decompose. */
+function rgbaOf(colour: string): Rgba | null {
+  if (!colour.startsWith('#')) return null;
+  const hex = colour.slice(1);
+  if (!isHex(hex) || (hex.length !== 6 && hex.length !== 8)) return null;
+  return {
+    r: Number.parseInt(hex.slice(0, 2), 16),
+    g: Number.parseInt(hex.slice(2, 4), 16),
+    b: Number.parseInt(hex.slice(4, 6), 16),
+    a: hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) / 255 : 1,
+  };
+}
+
+/**
+ * The background a reader sees: an own transparent background keeps the parent's; a
+ * semi-transparent one is composited over a known parent background, and an unknown parent is
+ * kept as unknown (so a colour is never invented from no backdrop).
+ */
+function compositeBackground(own: string | null, parent: string | null): string | null {
+  if (own === null) return parent;
+  const o = rgbaOf(own);
+  if (o === null) return own;
+  if (o.a <= 0) return parent;
+  if (o.a >= 1) return own;
+  const p = parent === null ? null : rgbaOf(parent);
+  if (p === null) return parent;
+  const alpha = o.a + p.a * (1 - o.a);
+  if (alpha <= 0) return parent;
+  const mix = (os: number, ps: number) => Math.round((os * o.a + ps * p.a * (1 - o.a)) / alpha);
+  const hex = `#${byteHex(mix(o.r, p.r))}${byteHex(mix(o.g, p.g))}${byteHex(mix(o.b, p.b))}`;
+  return alpha >= 1 ? hex : `${hex}${byteHex(Math.round(alpha * 255))}`;
 }
 
 /** `rgb()`/`rgba()`, with comma or space syntax and an optional `/ alpha`. */
@@ -572,7 +670,7 @@ function isLetters(s: string): boolean {
  */
 function hiddenRules(css: string): HiddenRules {
   const text = stripCssComments(css);
-  const rules: HiddenRules = { display: ruleBucket(), visibility: ruleBucket() };
+  const rules: HiddenRules = { display: ruleBucket(), visibility: ruleBucket(), background: ruleBucket() };
   let i = 0;
   let order = 0;
   while (i < text.length) {
@@ -591,7 +689,7 @@ function hiddenRules(css: string): HiddenRules {
     if (!prelude.startsWith('@')) {
       order++;
       const declarations = parseDeclarations(body);
-      for (const property of ['display', 'visibility'] as const) {
+      for (const property of ['display', 'visibility', 'background'] as const) {
         const declaration = declarations.get(property);
         if (!declaration) continue;
         for (const part of prelude.split(',')) {
