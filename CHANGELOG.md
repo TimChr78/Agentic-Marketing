@@ -2,6 +2,33 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.6] - 2026-11-12
+
+### Fixed
+
+- Webhooks → Recent deliveries and each endpoint's "Last delivery" now read only webhook deliveries. Busy connector-action or ad-conversion traffic can no longer fill the delivery cap and make a working endpoint show "Never".
+- The read-only demo now also disables controls whose handler names are camelCase (`onDelete`, `doDelete`, `mutateRoleNow`, `applyTopic`, `changeTopic`) instead of letting them fail with the demo's refusal message.
+- Signing out now clears the local session only after the server confirms it; a refused or unreachable sign-out keeps you signed in and says so, instead of claiming you signed out while the session is still live.
+- Choosing a different starter recipe now shows that starter's form, even when an earlier read finishes last; a slow previous selection can no longer overwrite the parameters or preview.
+- The People list drops pages cached before a person was erased, so a removed person is no longer shown as a current row.
+- The copilot's token count starts at zero for a new chat and when an earlier conversation is opened, and is labelled as the current session's usage.
+- Switching the thing a screen is looking at no longer shows the previous one under the new title while the new read loads: consent lookups, approval and token drawers, alert rule history, the agent Activity tab, AI usage period and kind, and Messages filters and period now withhold the previous data, show the reserved loading state, and restart paging for the new selection.
+- Approval and token actions stay unavailable until the drawer's data belongs to the id in the address bar, so a decision or revoke can no longer target the previous entity.
+
+### Upgrading from 0.14.5
+
+- **Migrations:** `packages/db/migrations/0089_delivery_kind_index.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** one additive command input and changed sign-out behaviour; nothing is removed.
+  - **`deliveries.list`** takes an optional `kind` (`webhook`, `action` or `ad_conversion`). Existing calls without it are unchanged.
+  - **Sign-out** now fails visibly when the server refuses it or cannot be reached: the person stays signed in and sees an error instead of a signed-out screen over a still-valid session.
+  - **Read-only demo:** eight journey-builder controls that change data are now disabled in the demo.
+  - **Migration 0089** builds `deliveries_kind_recent` with `CREATE INDEX CONCURRENTLY`. On a large delivery log it takes a while but does not block delivery writes.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.6.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.6 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.6` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.6). Run `docker compose exec app am doctor`.
+
+<!-- issues: 580, 595, 596, 611, 612, 613, 614, 615, 616, 617, 618, 619 -->
+
 ## [0.14.5] - 2026-11-12
 
 ### Fixed
