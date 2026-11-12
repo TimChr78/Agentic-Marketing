@@ -307,6 +307,21 @@ describe('Helm role ports and probes (#645, #649)', () => {
   });
 });
 
+describe('Helm refuses a divergent config.PORT (#774)', () => {
+  it('fails the render instead of leaving the probes on another port', () => {
+    // The template reads like the ingress/hpa guards; CI renders the failing case because helm is
+    // only installed there.
+    expect(helmConfigMap).toContain('hasKey .Values.config "PORT"');
+    expect(helmConfigMap).toMatch(/\{\{- fail .*config\.PORT is %s but the chart's port is %s/);
+    expect(helmConfigMap).toContain('Remove config.PORT and set port');
+  });
+
+  it('renders the mismatch in CI and expects the failure', () => {
+    expect(ci).toContain('--set config.PORT=3001');
+    expect(ci).toContain("grep -q 'config.PORT is 3001'");
+  });
+});
+
 describe('smoke test', () => {
   it('always uses the source-build overlay, including logs and down', () => {
     expect(smoke).toContain('-f docker-compose.yml -f docker-compose.build.yml');
