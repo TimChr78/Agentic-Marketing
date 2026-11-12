@@ -45,6 +45,7 @@ interface FormContent {
   errorUrl?: string;
   allowedOrigins?: string[];
   turnstile?: boolean;
+  hostedPagesEnabled?: boolean;
   hostedPages?: FormBrand;
   [key: string]: unknown;
 }
@@ -53,6 +54,15 @@ const TRAIT_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(:\d+)?$/i;
 const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const URL_OR_PATH_RE = /^(https?:\/\/|\/)/;
+
+/**
+ * Mirrors `normalizeOrigin` in packages/artifacts: the scheme and host are lowercased and the port
+ * is kept (#597). The server stores that form, so the editor shows it once the field loses focus.
+ */
+const normalizeOrigin = (origin: string) => {
+  const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/:?#]+)(:\d+)?$/.exec(origin);
+  return match ? `${match[1]!.toLowerCase()}://${match[2]!.toLowerCase()}${match[3] ?? ''}` : origin.toLowerCase();
+};
 
 const COPY_DEFAULTS: { key: keyof BrandCopy; label: string; hint: string; rows: number }[] = [
   { key: 'confirmTitle', label: 'Confirm page title', hint: 'Default: Confirm your subscription', rows: 2 },
@@ -69,11 +79,6 @@ const COPY_DEFAULTS: { key: keyof BrandCopy; label: string; hint: string; rows: 
 
 export function FormEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<FormContent>) {
   const set = (patch: Partial<FormContent>) => onChange({ ...content, ...patch });
-  const remove = (key: keyof FormContent) => {
-    const next = { ...content };
-    delete next[key];
-    onChange(next);
-  };
 
   const purposes = useApi(() => api.call('purposes.list', {}), []);
   const doubleOptIn = content.doubleOptIn ?? true;
@@ -84,28 +89,13 @@ export function FormEditor({ artifact, content, onChange, readOnly, errors }: Ed
   // once asked, the frame stays mounted so collapsing the section keeps the same preview.
   const [previewOpen, setPreviewOpen] = useState(false);
 
-  // The override switch keeps the brand values while it is off, so turning it back on restores
-  // exactly what was there instead of starting from a blank override.
-  const [overrideOn, setOverrideOn] = useState(!!content.hostedPages);
-  const [rememberedBrand, setRememberedBrand] = useState<FormBrand | undefined>(content.hostedPages);
-  useEffect(() => {
-    if (content.hostedPages) {
-      setOverrideOn(true);
-      setRememberedBrand(content.hostedPages);
-    } else {
-      setOverrideOn(false);
-    }
-  }, [content.hostedPages]);
+  // The switch flag lives in the content (#598): switching the override off keeps the brand values
+  // in the draft, so saving does not throw them away and turning it back on restores them.
+  const overrideOn = !!content.hostedPages && content.hostedPagesEnabled !== false;
 
   const setOverride = (on: boolean) => {
-    if (on) {
-      setOverrideOn(true);
-      set({ hostedPages: rememberedBrand ?? {} });
-    } else {
-      setRememberedBrand(content.hostedPages);
-      setOverrideOn(false);
-      remove('hostedPages');
-    }
+    if (on) set({ hostedPages: content.hostedPages ?? {}, hostedPagesEnabled: true });
+    else set({ hostedPagesEnabled: false });
   };
 
   return (
@@ -281,7 +271,7 @@ export function FormEditor({ artifact, content, onChange, readOnly, errors }: Ed
           {errors.hostedPages && <p className="mt-1 text-[12px] text-bad">{errors.hostedPages}</p>}
         </div>
 
-        {content.hostedPages && (
+        {overrideOn && content.hostedPages && (
           <HostedPagesEditor
             brand={content.hostedPages}
             onChange={(hostedPages) => set({ hostedPages })}
@@ -423,7 +413,16 @@ function OriginsEditor({
       .filter(Boolean);
     if (origins.length > 20) return setLocal('At most 20 origins.');
     const invalid = origins.find((o) => !ORIGIN_RE.test(o));
-    setLocal(invalid ? `"${invalid}" is not an origin such as https://example.com or https://example.com:8080.` : null);
+    if (invalid) return setLocal(`"${invalid}" is not an origin such as https://example.com or https://example.com:8080.`);
+    setLocal(null);
+    // Show what is stored: the schema lowercases the scheme and host when the form is saved (#597).
+    const normalised = origins.map(normalizeOrigin);
+    const joined = normalised.join('\n');
+    if (joined !== text) {
+      setText(joined);
+      last.current = joined;
+      onChange(normalised);
+    }
   };
 
   return (

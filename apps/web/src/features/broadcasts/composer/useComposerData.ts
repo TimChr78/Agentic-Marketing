@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../../app/api';
 import { useApi, useKeyedApi } from '../../../app/useApi';
-import { getArtifact } from '../../artifactCache';
+import { forgetArtifact, getArtifact, onArtifactsChanged } from '../../artifactCache';
 import {
   type Channel,
   type CheckRow,
@@ -19,16 +19,23 @@ export type ComposerEstimate = Out<'broadcasts.preview'>;
 
 /**
  * The template artifact through the shared cache, with its own loading/error so the checklist can
- * offer a local retry. It does not duplicate the cache read the page and preview already share.
+ * offer a local retry.
+ *
+ * It re-reads whenever an artifact changes (#582): the cache's own invalidation signal is the
+ * trigger, as in `names.ts`, and `refreshKey` is the explicit "Refresh checks" read. A forced
+ * read drops this one entry first, so a refresh never answers from a cached pointer. Each result
+ * is tagged with the id it belongs to, so a template switch never exposes the previous template
+ * while the new one loads (0.14.6 review).
  */
-export function useSharedArtifact(id: string | undefined | null) {
-  // Each result is tagged with the id it belongs to, so a template switch never exposes the
-  // previous template while the new one loads (0.14.6 review).
+export function useSharedArtifact(id: string | undefined | null, refreshKey = 0) {
   const [loaded, setLoaded] = useState<{ id: string; artifact: Got | null; error: string | null } | null>(null);
   const [loading, setLoading] = useState(!!id);
   const [attempt, setAttempt] = useState(0);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` is the explicit retry trigger, not read by the effect body
+  // Every create, save, publish or delete tells the cache to drop what it knew.
+  useEffect(() => onArtifactsChanged(() => setAttempt((n) => n + 1)), []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` and `refreshKey` are explicit re-read triggers, not read by the effect body
   useEffect(() => {
     if (!id) {
       setLoaded(null);
@@ -37,6 +44,7 @@ export function useSharedArtifact(id: string | undefined | null) {
     }
     let live = true;
     setLoading(true);
+    forgetArtifact(id);
     getArtifact(id)
       .then((a) => {
         if (live) {
@@ -53,7 +61,7 @@ export function useSharedArtifact(id: string | undefined | null) {
     return () => {
       live = false;
     };
-  }, [id, attempt]);
+  }, [id, attempt, refreshKey]);
 
   const current = id && loaded?.id === id ? loaded : null;
   return {
@@ -99,7 +107,7 @@ export function useComposerData({
   canAdmin: boolean;
   refreshKey: number;
 }): ComposerData {
-  const template = useSharedArtifact(templateId);
+  const template = useSharedArtifact(templateId, refreshKey);
   const publishedVersion = template.artifact?.publishedVersion ?? null;
   // Keyed by template and version: a switch withholds the previous template's content (0.14.6 review).
   const exact = useKeyedApi(
@@ -107,6 +115,13 @@ export function useComposerData({
     () => api.call('artifacts.get', { artifactId: templateId ?? '', version: publishedVersion ?? 1 }),
     { skip: !canRead || !templateId || !publishedVersion },
   );
+  // "Refresh checks" re-reads the exact live version too, even when the pointer itself did not move.
+  const lastRefresh = useRef(refreshKey);
+  useEffect(() => {
+    if (refreshKey === lastRefresh.current) return;
+    lastRefresh.current = refreshKey;
+    exact.reload();
+  }, [refreshKey, exact.reload]);
   const purposes = useApi(() => api.call('purposes.list', {}), [refreshKey], { skip: !canRead });
   const channel = channelOfTemplate(templateId);
   const isEmail = channel === 'email';

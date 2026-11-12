@@ -1,4 +1,5 @@
 import { typeLabel } from '../../app/artifactRoutes';
+import { resolveConsentTopic } from '../../lib/consentTopic';
 import { referencedIds } from '../artifactCache';
 
 // Consequence derivation for the approval review (#498). Pure functions only: the drawer supplies
@@ -82,6 +83,8 @@ export interface ConsequenceRow {
   label: string;
   value?: string;
   notes?: string[];
+  /** A technical identifier rendered only by the copy affordance, never as the label. */
+  copyKey?: string;
   /** Sub-values such as dependencies or variants, one per line. */
   items?: ConsequenceRowItem[];
   /** A segment or targeting condition, rendered by ConditionView. */
@@ -101,6 +104,8 @@ export interface ConsequenceEvidence {
   status: EvidenceStatus;
   value: string;
   detail?: string;
+  /** A technical identifier rendered only by the copy affordance, never as the label. */
+  copyKey?: string;
 }
 
 export interface ConsequenceAudience {
@@ -325,6 +330,32 @@ const skipLabels: Record<string, string> = {
   holdout: 'Held out for measurement',
 };
 
+interface VersionLine {
+  text: string;
+  /** Set when approving the bundled version would move the live pointer backwards. */
+  warning?: string;
+}
+
+/**
+ * The version a bundled reference publishes, with the live pointer always beside it (#583). A
+ * bundle older than live is legitimate to publish, but the reviewer must see that it rolls back.
+ */
+function versionLine(role: string, bundleVersion: number | undefined, liveVersion: number | null | undefined): VersionLine {
+  if (bundleVersion == null) return { text: liveVersion != null ? `Published v${liveVersion}` : 'Not published' };
+  const live = liveVersion != null ? `Live v${liveVersion}` : 'Not live yet';
+  const warning =
+    liveVersion != null && bundleVersion < liveVersion
+      ? `Approval moves the live ${role.split(' · ')[0].toLowerCase()} back from v${liveVersion} to v${bundleVersion}.`
+      : undefined;
+  return { text: [`Saved v${bundleVersion}`, 'In this bundle', live].join(' · '), ...(warning ? { warning } : {}) };
+}
+
+function rollbackWarnings(input: ConsequenceInput): string[] {
+  return dependencyRefs(input.type, input.content, input.bundleVersions)
+    .map((ref) => versionLine(ref.role, ref.bundleVersion, input.dependencies?.[ref.id]?.publishedVersion).warning)
+    .filter((warning): warning is string => !!warning);
+}
+
 function dependencyRow(input: ConsequenceInput): ConsequenceRow {
   const refs = dependencyRefs(input.type, input.content, input.bundleVersions);
   if (!refs.length)
@@ -337,35 +368,30 @@ function dependencyRow(input: ConsequenceInput): ConsequenceRow {
     const dependency = input.dependencies?.[ref.id];
     if (input.dependenciesLoading) return { key: ref.id, value: dependency?.name ?? ref.id, note: `${ref.role} · Loading…` };
     if (!dependency || dependency.unavailable) return { key: ref.id, value: ref.id, note: `${ref.role} · Unavailable`, tone: 'bad' };
-    const required =
-      ref.bundleVersion != null
-        ? `Saved v${ref.bundleVersion}`
-        : dependency.publishedVersion != null
-          ? `Published v${dependency.publishedVersion}`
-          : 'Not published';
-    const live =
-      dependency.publishedVersion != null
-        ? `Live v${dependency.publishedVersion}`
-        : ref.bundleVersion != null
-          ? 'Not live yet'
-          : 'Not live';
-    const note = [ref.role, required, ref.bundleVersion != null ? 'In this bundle' : live, ref.id].filter(Boolean).join(' · ');
+    const version = versionLine(ref.role, ref.bundleVersion, dependency.publishedVersion);
+    const note = [ref.role, version.text, version.warning, ref.id].filter(Boolean).join(' · ');
     return {
       key: ref.id,
       value: dependency.name ? `${dependency.name}` : ref.id,
       note,
-      tone: ref.bundleVersion == null && dependency.publishedVersion == null ? 'warn' : undefined,
+      tone: version.warning ? 'warn' : ref.bundleVersion == null && dependency.publishedVersion == null ? 'warn' : undefined,
     };
   });
   return { key: 'dependencies', label: 'Dependencies', items };
 }
 
-function purposeLabel(purposeKey: string | undefined, purposes: PurposeInfo[] | null | undefined, topic?: string) {
-  if (!purposeKey) return 'Not set';
+function purposeLabel(
+  purposeKey: string | undefined,
+  purposes: PurposeInfo[] | null | undefined,
+  topic?: string,
+): { value: string; copyKey?: string } {
+  if (!purposeKey) return { value: 'Not set' };
   const purpose = purposes?.find((p) => p.key === purposeKey);
-  if (!purpose) return `${purposeKey} · Not configured`;
+  // The 0.14 rule: an unresolved saved purpose is named, never printed as its raw key; the key
+  // stays available behind the copy control (#600).
+  if (!purpose) return { value: 'Unavailable purpose', copyKey: purposeKey };
   const topicName = topic ? purpose.topics?.find((t) => t.key === topic)?.name : undefined;
-  return `${purpose.name} · ${purpose.basis}${topic ? ` · ${topicName ?? topic}` : ''}`;
+  return { value: `${purpose.name} · ${purpose.basis}${topic ? ` · ${topicName ?? topic}` : ''}` };
 }
 
 function audienceFromBroadcast(input: ConsequenceInput): ConsequenceAudience {
@@ -430,39 +456,38 @@ function typeRows(
     const segment = asString(c.segment);
     const templateDep = template ? input.dependencies?.[template] : undefined;
     const segmentDep = segment ? input.dependencies?.[segment] : undefined;
+    const templateVersion = versionLine('Template', template ? map[template] : undefined, templateDep?.publishedVersion);
     rows.push({
       key: 'template',
       label: 'Template',
       value: template ? (templateDep?.name ?? template) : 'Not set',
       notes: template
-        ? [
-            map[template] != null
-              ? `Saved v${map[template]} · In this bundle`
-              : templateDep?.publishedVersion != null
-                ? `Published v${templateDep.publishedVersion}`
-                : 'Not published',
-          ]
+        ? [templateVersion.text, ...(templateVersion.warning ? [templateVersion.warning] : [])]
         : ['Choose a template before submitting.'],
+      tone: template && templateVersion.warning ? 'warn' : undefined,
     });
+    const segmentVersion = versionLine('Segment', segment ? map[segment] : undefined, segmentDep?.publishedVersion);
     rows.push({
       key: 'segment',
       label: 'Segment',
       value: segment ? (segmentDep?.name ?? segment) : 'Not set',
       notes: [
-        segment
-          ? map[segment] != null
-            ? `Saved v${map[segment]} · In this bundle`
-            : segmentDep?.publishedVersion != null
-              ? `Published v${segmentDep.publishedVersion}`
-              : 'Not published'
-          : 'Choose a segment before submitting.',
+        segment ? segmentVersion.text : 'Choose a segment before submitting.',
+        ...(segment && segmentVersion.warning ? [segmentVersion.warning] : []),
         ...(segment && map[segment] != null ? ['Check uses current membership; this bundle may change it.'] : []),
       ],
+      tone: segment && segmentVersion.warning ? 'warn' : undefined,
     });
+    const purpose = purposeLabel(
+      input.templatePurpose?.purpose,
+      input.purposes,
+      resolveConsentTopic(asString(c.topic), input.templatePurpose?.topic),
+    );
     rows.push({
       key: 'purpose',
       label: 'Purpose',
-      value: purposeLabel(input.templatePurpose?.purpose, input.purposes, asString(c.topic) ?? input.templatePurpose?.topic),
+      value: purpose.value,
+      ...(purpose.copyKey ? { copyKey: purpose.copyKey } : {}),
       notes: ['Membership is not consent. Eligibility is checked again at send time.'],
     });
     const sendWindow = asObject(c.sendWindow);
@@ -513,7 +538,13 @@ function typeRows(
     if (asString(c.description)) rows.push({ key: 'description', label: 'Description', value: asString(c.description)! });
   } else if (type === 'email_template') {
     const utm = asObject(c.utm);
-    rows.push({ key: 'purpose', label: 'Purpose', value: purposeLabel(asString(c.purpose), input.purposes, asString(c.topic)) });
+    const purpose = purposeLabel(asString(c.purpose), input.purposes, asString(c.topic));
+    rows.push({
+      key: 'purpose',
+      label: 'Purpose',
+      value: purpose.value,
+      ...(purpose.copyKey ? { copyKey: purpose.copyKey } : {}),
+    });
     if (asString(c.topic)) rows.push({ key: 'topic', label: 'Topic', value: asString(c.topic)! });
     rows.push({ key: 'subject', label: 'Subject', value: asString(c.subject) ?? 'Not set' });
     if (asString(c.preheader)) rows.push({ key: 'preheader', label: 'Preheader', value: asString(c.preheader)! });
@@ -534,7 +565,13 @@ function typeRows(
       });
     rows.push({ key: 'sends', label: 'Sends', value: 'Nothing: publishing a template alone sends nothing.' });
   } else if (type === 'sms_template' || type === 'push_template') {
-    rows.push({ key: 'purpose', label: 'Purpose', value: purposeLabel(asString(c.purpose), input.purposes, asString(c.topic)) });
+    const purpose = purposeLabel(asString(c.purpose), input.purposes, asString(c.topic));
+    rows.push({
+      key: 'purpose',
+      label: 'Purpose',
+      value: purpose.value,
+      ...(purpose.copyKey ? { copyKey: purpose.copyKey } : {}),
+    });
     if (asString(c.topic)) rows.push({ key: 'topic', label: 'Topic', value: asString(c.topic)! });
     if (type === 'sms_template') {
       rows.push({ key: 'body', label: 'SMS body', value: asString(c.body) ?? 'Not set' });
@@ -554,7 +591,13 @@ function typeRows(
     const nodes = asArray(c.nodes).map(asObject);
     const trigger = nodes.find((n) => asString(n.kind) === 'trigger');
     const control = asObject(c.controlGroup);
-    rows.push({ key: 'purpose', label: 'Purpose', value: purposeLabel(asString(c.purpose), input.purposes) });
+    const purpose = purposeLabel(asString(c.purpose), input.purposes);
+    rows.push({
+      key: 'purpose',
+      label: 'Purpose',
+      value: purpose.value,
+      ...(purpose.copyKey ? { copyKey: purpose.copyKey } : {}),
+    });
     if (asString(c.goal)) rows.push({ key: 'goal', label: 'Goal', value: asString(c.goal)! });
     rows.push({
       key: 'control-group',
@@ -636,10 +679,14 @@ function typeRows(
       value: asArray(c.allowedOrigins).length ? asArray(c.allowedOrigins).join(', ') : 'Any site',
     });
     rows.push({ key: 'bot-check', label: 'Bot check', value: c.turnstile === true ? 'Cloudflare Turnstile required' : 'None' });
+    const hostedPages = asObject(c.hostedPages);
     rows.push({
       key: 'hosted-pages',
       label: 'Hosted pages',
-      value: Object.keys(asObject(c.hostedPages)).length ? 'Overrides the workspace brand on this form' : 'Workspace brand',
+      value:
+        c.hostedPagesEnabled !== false && Object.keys(hostedPages).length > 0
+          ? 'Overrides the workspace brand on this form'
+          : 'Workspace brand',
     });
     rows.push({
       key: 'sends',
@@ -834,10 +881,11 @@ function emailEvidence(input: ConsequenceInput, c: Record<string, unknown>, chan
       key: 'consent-purpose',
       label: 'Consent purpose',
       status: 'attention',
-      value: `Purpose ${purposeKey} is not configured`,
+      value: 'Unavailable purpose',
+      copyKey: purposeKey,
     });
   else {
-    const topic = input.templatePurpose?.topic ?? asString(c.topic);
+    const topic = resolveConsentTopic(asString(c.topic), input.templatePurpose?.topic);
     const channelOk = purpose.channels.includes(channel);
     const topicOk = !topic || !purpose.topics?.length || purpose.topics.some((t) => t.key === topic);
     evidence.push({
@@ -874,11 +922,18 @@ export function deriveConsequences(input: ConsequenceInput): ConsequenceModel {
 
   if (type === 'broadcast') {
     const sendAt = asString(c.sendAt);
+    const sendWindow = asObject(c.sendWindow);
+    const windowStart = asString(sendWindow.start);
+    const windowEnd = asString(sendWindow.end);
     rows.push({
       key: 'when',
       label: 'When',
       value: sendAt ? formatWhen(sendAt) : 'On publication',
-      notes: [asString(c.sendWindow) ? 'Inside each reader’s local send window.' : 'Arrival time varies by reader.'],
+      notes: [
+        windowStart && windowEnd
+          ? `Inside each reader’s local send window (${windowStart}–${windowEnd} in each reader’s time zone).`
+          : 'Arrival time varies by reader.',
+      ],
     });
   } else {
     rows.push({ key: 'when', label: 'When', value: 'On approval' });
@@ -886,6 +941,7 @@ export function deriveConsequences(input: ConsequenceInput): ConsequenceModel {
 
   rows.push(...typeRows(input, c, formatWhen));
   rows.push(dependencyRow(input));
+  notes.push(...rollbackWarnings(input));
 
   let audience: ConsequenceAudience | null = null;
   if (type === 'broadcast') audience = audienceFromBroadcast(input);
