@@ -21,7 +21,7 @@ function storedEvent(anon: string, name: string): BusEvent {
   const at = new Date().toISOString();
   return {
     workspaceId: ws,
-    sourceId: 'frm_test',
+    sourceId: `frm_${'a'.repeat(32)}`,
     messageId: `retention-cursor:${anon}:${name}:${++seq}`,
     type: 'track',
     name,

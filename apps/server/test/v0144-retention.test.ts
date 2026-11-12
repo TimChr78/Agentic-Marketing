@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { runRetentionOnce } from '@agentic-marketing/audience';
 import type { BusEvent } from '@agentic-marketing/events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startTestServer, testPort, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Sol's review of #627: retention must delete only on positive evidence, re-check consent and
 // identifiers atomically, and page through kept candidates so they cannot starve an eligible one.
@@ -40,7 +40,7 @@ function storedEvent(anon: string, name: string, opts: { type?: BusEvent['type']
   const at = opts.timestamp ?? new Date().toISOString();
   return {
     workspaceId: ws,
-    sourceId: opts.sourceId ?? 'frm_test',
+    sourceId: opts.sourceId ?? `frm_${'a'.repeat(32)}`,
     messageId: `retention:${anon}:${name}:${++seq}`,
     type: opts.type ?? 'track',
     name,
@@ -131,5 +131,39 @@ describe('retention positive evidence (#627 review)', () => {
 
     expect((await runRetentionOnce(retentionDeps())).profiles).toBe(0);
     expect(await profileExists(id)).toBe(true);
+  });
+
+  it('keeps a profile whose Form Submitted came through the public ingest API', async () => {
+    const email = 'public-form-event@example.com';
+    const anon = 'public-form-event';
+    const at = new Date().toISOString();
+    const { key } = await api().call('sources.create', { name: 'Public server', kind: 'server' });
+    // A legitimate public SDK source, not the platform's form path.
+    const res = await fetch(`${t.base}/v1/batch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Basic ${Buffer.from(`${key}:`).toString('base64')}` },
+      body: JSON.stringify({
+        batch: [
+          { type: 'identify', anonymousId: anon, timestamp: at, traits: { email } },
+          { type: 'track', event: 'Form Submitted', anonymousId: anon, timestamp: at, properties: { form_id: `frm_${'a'.repeat(32)}` } },
+        ],
+      }),
+    });
+    expect(res.status).toBe(200);
+    const { profileId } = await eventually(
+      () => api().call('profiles.find', { type: 'email', value: email }),
+      (r) => !!r.profileId,
+    );
+    await eventually(
+      async () => (await t.srv.events.eventsOf(ws, { anonymousIds: [anon], userIds: [] })).length,
+      (n) => n >= 2,
+    );
+    await t.srv.db.admin.query(
+      `UPDATE profiles SET first_seen = now() - interval '45 days', created_at = now() - interval '60 days' WHERE id = $1`,
+      [profileId],
+    );
+
+    expect((await runRetentionOnce(retentionDeps())).profiles).toBe(0);
+    expect(await profileExists(profileId!)).toBe(true);
   });
 });
