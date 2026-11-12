@@ -8,7 +8,7 @@ import {
 } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, isoDateTime, newId, newUuid } from '@agentic-marketing/core';
+import { AppError, isoDateTime, newId, newUuid, personalDataInText } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
@@ -635,7 +635,7 @@ export const simulateJourney = defineCommand({
   name: 'journeys.simulate',
   title: 'Simulate a journey',
   description:
-    'Walk through a journey version (default: latest) on a virtual clock, without sending anything. With a profile, e-mail steps say whether the gateway would send or why not, and branches use the person’s data. `events` lets you script what the person does (e.g. clicks after 1 day). `sampleEvent` resolves the trigger entry key and says whether that entry would be suppressed as a duplicate.',
+    'Walk through a journey version (default: latest) on a virtual clock, without sending anything. With a profile, e-mail steps say whether the gateway would send or why not, and branches use the person’s data. `events` lets you script what the person does (e.g. clicks after 1 day). `sampleEvent` resolves the trigger entry key and says whether that entry would be suppressed as a duplicate. Simulating a named person needs `profiles:read`, and any step whose detail would show personal data (e.g. an updateProfile value that is a phone number) needs `profiles:pii`, otherwise that step is withheld. Without a `profileId` the dry run stays with `artifacts:read`.',
   input: z.object({
     artifactId: JourneyId,
     version: z.number().int().min(1).optional(),
@@ -694,6 +694,15 @@ export const simulateJourney = defineCommand({
   auditReads: true,
   target: (i) => i.profileId ?? i.artifactId,
   handler: async (input, ctx) => {
+    // #762: a walk for a named person discloses their consent, topic and suppression state — the
+    // same facts consent.history gates behind profiles:read. A dry run without a profile stays a
+    // journey-builder scope. The extra permission is checked here because the registry has no
+    // conditional permission: `selfService` is an alternative permission, not an input-dependent one.
+    if (input.profileId && !ctx.principal.permissions.has('profiles:read'))
+      throw new AppError(
+        'forbidden',
+        'Walking a journey for a named person shows their consent, topic and suppression state, which needs the "profiles:read" permission. Simulate without a profileId, or ask the workspace owner for the permission.',
+      );
     const { version, def } = await loadDefinition(ctx.tx, input.artifactId, input.version);
     let graph: ReturnType<typeof compile>;
     try {
@@ -918,6 +927,13 @@ export const simulateJourney = defineCommand({
     }
     const outcome: 'completed' | 'exited' | 'waiting' =
       state.status === 'completed' || state.status === 'exited' ? state.status : 'waiting';
+    // #762: a step can carry personal data from the journey content (e.g. an updateProfile value
+    // that is a phone number or an address). Showing it needs profiles:pii; without it the step is
+    // withheld rather than reworded, so nothing about the person leaks through the walk.
+    if (input.profileId && !ctx.principal.permissions.has('profiles:pii'))
+      for (const step of steps)
+        if (personalDataInText(step.detail).length)
+          step.detail = 'withheld: this step would show personal data, which needs the profiles:pii permission';
     return { version, outcome, converted: state.converted, steps, entry };
   },
 });

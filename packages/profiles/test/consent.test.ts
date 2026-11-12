@@ -69,6 +69,29 @@ describe('consentProofFor (Sol 0.14.2 review)', () => {
   });
 });
 
+describe('consentProofFor hides national phones and addresses (#765)', () => {
+  it('withholds a national-format phone number in an allowlisted proof key', () => {
+    for (const value of ['called back on 555 123 4567', 'called back on (555) 123-4567', 'called back on 020 7946 0958']) {
+      expect(consentProofFor({ via: value, system: 'Kit' }, false), value).toEqual({
+        proof: { system: 'Kit' },
+        proofWithheld: true,
+      });
+    }
+  });
+
+  it('withholds a postal address in an allowlisted proof key', () => {
+    expect(consentProofFor({ method: 'signed at 123 Main Street', issue: 'Hauptstraße 12' }, false)).toEqual({
+      proof: {},
+      proofWithheld: true,
+    });
+  });
+
+  it('keeps a harmless free-text proof and an ISO date', () => {
+    const proof = { via: 'phone call', issue: 'asked for a call back', submitted_at: '2026-11-12', consent_text: 'Newsletter' };
+    expect(consentProofFor(proof, false)).toEqual({ proof, proofWithheld: false });
+  });
+});
+
 describe('refusedPurposes (journeys exit on these, #108)', () => {
   const purpose = (key: string, basis: Purposes[number]['basis']) =>
     ({ key, name: key, description: '', basis, channels: ['email'], requiresDoubleOptIn: false }) as Purposes[number];
