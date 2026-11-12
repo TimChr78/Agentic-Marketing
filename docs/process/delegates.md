@@ -66,8 +66,16 @@ branch instead of a phase branch.
   the specs you added. A green new spec beside a broken existing one is not a green task.
 - Run `corepack pnpm lint`, not Biome alone: the root lint also runs the e2e selector check and the
   changelog fragment check. Run the typecheck too.
+- **Server tests: only the files for the code the task touches. Never the full server suite.** CI
+  runs every server test file on its own ClickHouse for each PR; a full local run on the shared
+  stack duplicates that, takes the better part of an hour under load, and pushes the shared
+  ClickHouse into `memory limit exceeded` for every other run. A file that fails with that error is
+  rerun alone before it counts as a failure.
 - All of it against the one shared test stack: `eval "$(scripts/test-services.sh env)"`. A delegate
   never starts its own containers.
+- **Never use `TEST_PORT_OFFSET=300`.** Server test port 3473 plus 300 is 3773, the port T3 Code's
+  own server listens on in this container, so one test file fails with `EADDRINUSE` on every run.
+  Use 400 to 900.
 
 Phase 28 hit both failures directly: **#564** was a broadcast primary action that only looked right
 on a fresh seed, and **#566** was an empty block list that another spec had already filled with a
