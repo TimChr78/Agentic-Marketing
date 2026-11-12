@@ -2,26 +2,32 @@ import { Parser } from 'htmlparser2';
 
 // #637 (review, P2): the gate must find an unsubscribe link a reader can actually see and click.
 // A link that exists only in the source — inline display:none, an ancestor style, a <template>, an
-// empty anchor, or text hidden inside the link — is not an unsubscribe link. This predicate is
-// shared by the save validator and the publish gate, so both give the same answer.
+// empty anchor, text hidden inside the link, transparent text — is not an unsubscribe link. This
+// predicate is shared by the save validator and the publish gate, so both give the same answer.
 //
-// Visibility is evaluated where the content is, not just at the anchor: a single top-down pass
-// carries the inherited state (visibility, font-size, colour, background, whether a subtree is
-// hidden outright) through every element, and a text node or <img alt> counts only when that
-// state at the node is visible. The CSS rules from <style> are collected in a small first pass,
-// so the evaluation pass knows them before it reaches the body.
+// Visibility is evaluated where the content is, not just at the anchor: one top-down pass carries
+// the inherited state (visibility, font-size, colour, background, whether a subtree is hidden
+// outright) through every element, and a text node or <img alt> counts only when that state at the
+// node is visible. Style rules from <style> are collected in a small first pass and cascaded
+// against the inline declarations the way CSS does within the scope described below.
 
 export type UnsubscribeLinkProblem = 'missing' | 'hidden' | 'empty';
 
 /** Elements whose content is not rendered as visible body content in an e-mail. */
 const NOT_BODY = new Set(['template', 'head', 'script', 'style', 'noscript']);
 
+/** One declaration with the importance CSS needs for the cascade. */
+interface Declaration {
+  value: string;
+  important: boolean;
+}
+
 interface ElementInfo {
   name: string;
   attribs: Record<string, string>;
   classes: Set<string>;
   id: string | null;
-  declarations: Map<string, string>;
+  declarations: Map<string, Declaration>;
 }
 
 interface Candidate {
@@ -33,32 +39,43 @@ interface Candidate {
   visible: boolean;
 }
 
-/** A simple class/id selector whose rule hides its target. Complex selectors are not modelled. */
+/** A simple class/id/tag selector whose rule sets display or visibility. */
 interface HideSelector {
   tag: string | null;
   id: string | null;
   classes: string[];
 }
 
+interface RuleDecl {
+  selector: HideSelector;
+  value: string;
+  important: boolean;
+  /** Document order, so the later of two simple rules wins. */
+  order: number;
+}
+
+/** The latest important and normal rule for one selector key; importance beats document order. */
+interface RuleSlot {
+  important: RuleDecl | null;
+  normal: RuleDecl | null;
+}
+
+interface RuleBucket {
+  byTag: Map<string, RuleSlot>;
+  byId: Map<string, RuleSlot>;
+  byClass: Map<string, RuleSlot>;
+  compound: RuleDecl[];
+}
+
 interface HiddenRules {
-  display: RuleIndex;
-  visibility: RuleIndex;
+  display: RuleBucket;
+  visibility: RuleBucket;
 }
-
-/** Style rules indexed for a constant-time match in the evaluation pass. */
-interface RuleIndex {
-  byTag: Set<string>;
-  byId: Set<string>;
-  byClass: Set<string>;
-  compound: HideSelector[];
-}
-
-const ruleIndex = (): RuleIndex => ({ byTag: new Set(), byId: new Set(), byClass: new Set(), compound: [] });
 
 /**
  * Carried down the tree. `hidden` is latched for the subtree (display:none, hidden, aria-hidden,
- * opacity:0, a clipped zero box, mso-hide:all); the rest are inherited properties whose nearest
- * explicit value wins.
+ * opacity:0, a clipped zero box, mso-hide:all, an off-screen position); the rest are inherited
+ * properties whose nearest explicit value wins.
  */
 interface VisibilityState {
   hidden: boolean;
@@ -83,6 +100,11 @@ const INITIAL: VisibilityState = {
   background: null,
 };
 
+const ruleBucket = (): RuleBucket => ({ byTag: new Map(), byId: new Map(), byClass: new Map(), compound: [] });
+
+/** Named colours that matter for the comparisons below; other names compare only verbatim. */
+const NAMED_COLOURS: Record<string, string> = { white: '#ffffff', black: '#000000', transparent: '#00000000' };
+
 /**
  * True when the rendered HTML has a usable unsubscribe link. `url` is the rendered
  * `unsubscribe_url`, the same value the send gateway puts in the visible link and in
@@ -94,17 +116,29 @@ const INITIAL: VisibilityState = {
  *
  * A content node is hidden when it, or any element on the path up to the body, has:
  * - `hidden` or `aria-hidden="true"`;
- * - inline `display:none`, `opacity:0`, or `mso-hide:all`;
+ * - `display:none`, `opacity:0`, or `mso-hide:all`;
  * - a zero max-height/height/width together with `overflow:hidden`;
- * - an effective `font-size:0`, `visibility:hidden`, or text colour equal to the effective
- *   background colour, with the nearest explicit value on the path winning for the inherited ones;
- * - a class or id matched by a simple `<style>` rule (outside an at-rule) that sets
- *   `display:none` or `visibility:hidden`.
+ * - an effective `font-size:0` or `visibility:hidden`;
+ * - an effective text colour that is transparent, has zero alpha, or equals the effective
+ *   background colour;
+ * - an off-screen box: a `text-indent` of at most -1000px with hidden overflow, an absolutely
+ *   positioned `left`/`top` of at most -1000px, `clip: rect(0,0,0,0)`, or a `clip-path` of
+ *   `inset(50%)`/`inset(100%)`/`circle(0)`;
+ * - a class or id matched by a simple `<style>` rule (outside an at-rule) that sets display or
+ *   visibility, cascaded with the inline style.
  *
- * Known limits: a hide rule with a descendant/child/attribute/pseudo selector, inside `@media` or
- * any other at-rule, or coming from an external stylesheet is not evaluated. A later rule that
- * unhides the element is not considered either: a matching display:none rule wins. The
- * `List-Unsubscribe` header still applies in those cases; the visible link is the stricter check.
+ * Cascade scope: declarations in one style attribute or one rule use the last value, except that
+ * `!important` beats a later value without it. Inline wins over a simple rule unless the rule is
+ * `!important` and the inline value is not; between simple rules an important rule wins, then the
+ * later rule. Specificity beyond tag/class/id is not modelled.
+ *
+ * Known limits: selectors with combinators, attributes or pseudo-classes, rules inside `@media` or
+ * any other at-rule, and external stylesheets are not evaluated (a matching `display:none` rule
+ * wins over any later non-important rule that would unhide it). Colour parsing is small: white,
+ * black and transparent are normalised, hex and `rgb()`/`rgba()` are compared, but other named
+ * colours and nonzero-alpha `hsl()` are not converted. Off-screen handling covers only the simple
+ * forms above, not transforms, em/rem/percent offsets or other clip shapes. The `List-Unsubscribe`
+ * header still applies in those cases; the visible link is the stricter check.
  */
 export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLinkProblem | null {
   const wanted = url.trim();
@@ -215,35 +249,34 @@ function element(name: string, attribs: Record<string, string>): ElementInfo {
 /** The state for one element, from its parent's inherited state and its own attributes/rules. */
 function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules): VisibilityState {
   const d = el.declarations;
+  const display = cascade(d.get('display'), matchRule(rules.display, el));
+  const visibilityDecl = cascade(d.get('visibility'), matchRule(rules.visibility, el));
+  const visibility =
+    visibilityDecl === 'hidden' || visibilityDecl === 'collapse' ? 'hidden' : visibilityDecl === 'visible' ? 'visible' : parent.visibility;
+
+  const overflow = declaredValue(d, 'overflow') ?? '';
   const clipped =
-    (isZero(d.get('max-height')) || isZero(d.get('height')) || isZero(d.get('width'))) && (d.get('overflow') ?? '').includes('hidden');
+    (isZero(declaredValue(d, 'max-height')) || isZero(declaredValue(d, 'height')) || isZero(declaredValue(d, 'width'))) &&
+    overflow.includes('hidden');
   const hidden =
     parent.hidden ||
     'hidden' in el.attribs ||
     (el.attribs['aria-hidden'] ?? '').trim().toLowerCase() === 'true' ||
-    d.get('display') === 'none' ||
-    ruleMatches(rules.display, el) ||
-    isZero(d.get('opacity')) ||
+    display === 'none' ||
+    isZero(declaredValue(d, 'opacity')) ||
     clipped ||
-    (d.get('mso-hide') ?? '') === 'all';
+    (declaredValue(d, 'mso-hide') ?? '') === 'all' ||
+    isOffscreen(d);
 
-  const declaredVisibility = d.get('visibility');
-  const visibility =
-    declaredVisibility === 'hidden' || declaredVisibility === 'visible'
-      ? declaredVisibility
-      : ruleMatches(rules.visibility, el)
-        ? 'hidden'
-        : parent.visibility;
-
-  const ownColour = d.has('color') ? colourValue(d.get('color')) : null;
-  const backgroundDeclaration = d.has('background-color') ? d.get('background-color') : d.get('background');
-  const ownBackground = backgroundDeclaration === undefined ? null : colourValue(backgroundDeclaration);
+  const ownColour = d.has('color') ? colourValue(declaredValue(d, 'color')) : null;
+  const background = d.has('background-color') ? declaredValue(d, 'background-color') : declaredValue(d, 'background');
+  const ownBackground = colourValue(background);
 
   return {
     hidden,
     forbidden: parent.forbidden + (NOT_BODY.has(el.name) ? 1 : 0),
     visibility,
-    fontSizeZero: d.has('font-size') ? isZero(d.get('font-size')) : parent.fontSizeZero,
+    fontSizeZero: d.has('font-size') ? isZero(declaredValue(d, 'font-size')) : parent.fontSizeZero,
     color: ownColour ?? parent.color,
     background: ownBackground ?? parent.background,
   };
@@ -252,7 +285,42 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
 /** The inherited state decides whether text (or an image's alt) is visible where it sits. */
 function contentVisible(state: VisibilityState): boolean {
   if (state.hidden || state.visibility === 'hidden' || state.fontSizeZero === true) return false;
+  if (state.color !== null && isInvisibleColour(state.color)) return false;
   return !(state.color !== null && state.background !== null && state.color === state.background);
+}
+
+/**
+ * The winning value of an inline declaration against the winning simple rule. Inline wins unless
+ * the rule is `!important` and the inline value is not; an inline `!important` also wins.
+ */
+function cascade(inline: Declaration | undefined, rule: RuleDecl | null): string | undefined {
+  if (rule && (!inline || (rule.important && !inline.important))) return rule.value;
+  return inline?.value;
+}
+
+/** The latest matching important rule, else the latest matching normal rule. */
+function matchRule(bucket: RuleBucket, el: ElementInfo): RuleDecl | null {
+  let important: RuleDecl | null = null;
+  let normal: RuleDecl | null = null;
+  const consider = (rule: RuleDecl | null | undefined) => {
+    if (!rule) return;
+    if (rule.important) {
+      if (!important || rule.order > important.order) important = rule;
+    } else if (!normal || rule.order > normal.order) {
+      normal = rule;
+    }
+  };
+  if (el.id !== null) considerSlot(bucket.byId.get(el.id), consider);
+  for (const c of el.classes) considerSlot(bucket.byClass.get(c), consider);
+  considerSlot(bucket.byTag.get(el.name), consider);
+  for (const rule of bucket.compound) if (selectorMatches(rule.selector, el)) consider(rule);
+  return important ?? normal;
+}
+
+function considerSlot(slot: RuleSlot | undefined, consider: (rule: RuleDecl | null | undefined) => void): void {
+  if (!slot) return;
+  consider(slot.important);
+  consider(slot.normal);
 }
 
 function selectorMatches(selector: HideSelector, el: ElementInfo): boolean {
@@ -261,42 +329,52 @@ function selectorMatches(selector: HideSelector, el: ElementInfo): boolean {
   return selector.classes.every((c) => el.classes.has(c));
 }
 
-/** A constant-time check for the common selectors, with a small fallback for compounds. */
-function ruleMatches(index: RuleIndex, el: ElementInfo): boolean {
-  if (el.id !== null && index.byId.has(el.id)) return true;
-  for (const c of el.classes) if (index.byClass.has(c)) return true;
-  if (index.byTag.has(el.name)) return true;
-  return index.compound.some((s) => selectorMatches(s, el));
-}
-
-function addRule(index: RuleIndex, selector: HideSelector): void {
-  if (selector.tag === null && selector.id === null && selector.classes.length === 1) {
-    index.byClass.add(selector.classes[0]!);
-  } else if (selector.tag === null && selector.id !== null && selector.classes.length === 0) {
-    index.byId.add(selector.id);
-  } else if (selector.tag !== null && selector.id === null && selector.classes.length === 0) {
-    index.byTag.add(selector.tag);
+function addRule(bucket: RuleBucket, rule: RuleDecl): void {
+  const { tag, id, classes } = rule.selector;
+  if (tag === null && id === null && classes.length === 1) {
+    addToSlot(bucket.byClass, classes[0]!, rule);
+  } else if (tag === null && id !== null && classes.length === 0) {
+    addToSlot(bucket.byId, id, rule);
+  } else if (tag !== null && id === null && classes.length === 0) {
+    addToSlot(bucket.byTag, tag, rule);
   } else {
-    index.compound.push(selector);
+    bucket.compound.push(rule);
   }
 }
 
-/** Declarations of one inline style, or of one simple CSS rule body. */
-function parseDeclarations(style: string): Map<string, string> {
-  const out = new Map<string, string>();
+function addToSlot(map: Map<string, RuleSlot>, key: string, rule: RuleDecl): void {
+  const slot = map.get(key) ?? { important: null, normal: null };
+  if (rule.important) slot.important = rule;
+  else slot.normal = rule;
+  map.set(key, slot);
+}
+
+/** Declarations of one style attribute or rule body: last wins, but `!important` beats later. */
+function parseDeclarations(style: string): Map<string, Declaration> {
+  const out = new Map<string, Declaration>();
   for (const part of style.split(';')) {
     const colon = part.indexOf(':');
     if (colon < 0) continue;
     const name = part.slice(0, colon).trim().toLowerCase();
+    if (!name) continue;
     let value = part
       .slice(colon + 1)
       .trim()
       .toLowerCase();
+    let important = false;
     const bang = value.lastIndexOf('!');
-    if (bang >= 0 && value.slice(bang + 1).trim() === 'important') value = value.slice(0, bang).trim();
-    if (name && !out.has(name)) out.set(name, value);
+    if (bang >= 0 && value.slice(bang + 1).trim() === 'important') {
+      important = true;
+      value = value.slice(0, bang).trim();
+    }
+    const previous = out.get(name);
+    if (!previous?.important || important) out.set(name, { value, important });
   }
   return out;
+}
+
+function declaredValue(d: Map<string, Declaration>, name: string): string | undefined {
+  return d.get(name)?.value;
 }
 
 /** A zero length in any unit (`0`, `0px`, `0.0em`), but not `0.5em`. */
@@ -313,19 +391,163 @@ function isZero(value: string | undefined): boolean {
   return Number.isFinite(n) && n === 0;
 }
 
-/** A comparable colour value, or null when the declaration is not a plain colour. */
+/**
+ * Pixels in a simple length (`-9999px`, `0`, `12.5px`), or null for another unit. Percentages,
+ * em/rem and calc() are stated limits.
+ */
+function lengthPx(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const s = raw.trim().toLowerCase();
+  let i = 0;
+  let sign = 1;
+  if (s[i] === '-') {
+    sign = -1;
+    i++;
+  } else if (s[i] === '+') i++;
+  const start = i;
+  let digits = 0;
+  let dot = false;
+  while (i < s.length) {
+    const ch = s[i]!;
+    if (ch >= '0' && ch <= '9') {
+      digits++;
+      i++;
+    } else if (ch === '.' && !dot) {
+      dot = true;
+      i++;
+    } else break;
+  }
+  if (digits === 0) return null;
+  const unit = s.slice(i).trim();
+  if (unit !== '' && unit !== 'px') return null;
+  const n = Number(s.slice(start, i)) * sign;
+  return Number.isFinite(n) ? n : null;
+}
+
+/** The simple off-screen forms: an indented first line, a far absolute offset, a zero clip box. */
+function isOffscreen(d: Map<string, Declaration>): boolean {
+  const overflow = declaredValue(d, 'overflow') ?? '';
+  const indent = lengthPx(declaredValue(d, 'text-indent'));
+  if (indent !== null && indent <= -1000 && (overflow.includes('hidden') || overflow.includes('clip'))) return true;
+
+  const position = declaredValue(d, 'position');
+  if (position === 'absolute' || position === 'fixed') {
+    const left = lengthPx(declaredValue(d, 'left'));
+    const top = lengthPx(declaredValue(d, 'top'));
+    if ((left !== null && left <= -1000) || (top !== null && top <= -1000)) return true;
+  }
+
+  const clip = declaredValue(d, 'clip');
+  if (clip !== undefined && zeroRect(clip)) return true;
+  const clipPath = declaredValue(d, 'clip-path');
+  if (clipPath !== undefined && zeroClipPath(clipPath)) return true;
+  return false;
+}
+
+function zeroRect(raw: string): boolean {
+  const value = raw.trim().toLowerCase();
+  if (!value.startsWith('rect(') || !value.endsWith(')')) return false;
+  const parts = value.slice(5, -1).split(',');
+  if (parts.length !== 4) return false;
+  return parts.every((part) => {
+    const n = lengthPx(part.trim());
+    return n !== null && n === 0;
+  });
+}
+
+function zeroClipPath(raw: string): boolean {
+  const value = raw.replace(/\s+/g, '').toLowerCase();
+  return value === 'inset(50%)' || value === 'inset(100%)' || value === 'circle(0)' || value === 'circle(0px)';
+}
+
+/**
+ * A comparable colour. Hex, `rgb()`/`rgba()` and the named colours that matter are normalised;
+ * transparent and zero-alpha colours become `#rrggbb00`. Other names compare verbatim, and a
+ * nonzero-alpha `hsl()` is not converted.
+ */
 function colourValue(raw: string | undefined): string | null {
   if (!raw) return null;
-  const value = raw.replace(/\s+/g, '').toLowerCase();
+  const value = raw.trim().toLowerCase();
+  if (!value) return null;
   if (value.startsWith('#')) {
     const hex = value.slice(1);
-    if (hex.length === 3 && isHex(hex)) return `#${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`;
-    if (hex.length === 6 && isHex(hex)) return value;
+    if (!isHex(hex)) return null;
+    if (hex.length === 3) return `#${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`;
+    if (hex.length === 4) {
+      const expanded = `#${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`;
+      return expanded.endsWith('ff') ? expanded.slice(0, 7) : expanded;
+    }
+    if (hex.length === 6) return `#${hex}`;
+    if (hex.length === 8) return hex.endsWith('ff') ? `#${hex.slice(0, 6)}` : `#${hex}`;
     return null;
   }
-  if (value.startsWith('rgb(') || value.startsWith('rgba(') || value.startsWith('hsl(') || value.startsWith('hsla(')) return value;
-  if (isLetters(value)) return value;
-  return null;
+  if (value.startsWith('rgb(') || value.startsWith('rgba(')) return rgbValue(value);
+  if (value.startsWith('hsl(') || value.startsWith('hsla(')) {
+    const alpha = alphaOf(value);
+    if (alpha === 0) return '#00000000';
+    return value.replace(/\s+/g, '');
+  }
+  return NAMED_COLOURS[value] ?? (isLetters(value) ? value : null);
+}
+
+/** `rgb()`/`rgba()`, with comma or space syntax and an optional `/ alpha`. */
+function rgbValue(raw: string): string {
+  const open = raw.indexOf('(');
+  const close = raw.lastIndexOf(')');
+  if (open < 0 || close <= open) return raw.replace(/\s+/g, '');
+  let body = raw.slice(open + 1, close);
+  let alphaPart: string | undefined;
+  const slash = body.indexOf('/');
+  if (slash >= 0) {
+    alphaPart = body.slice(slash + 1).trim();
+    body = body.slice(0, slash);
+  }
+  const parts = body.split(/[,\s]+/).filter(Boolean);
+  if (parts.length < 3) return raw.replace(/\s+/g, '');
+  const channels = parts.slice(0, 3).map(channelValue);
+  if (channels.some((c) => c === null)) return raw.replace(/\s+/g, '');
+  if (alphaPart === undefined && parts.length >= 4) alphaPart = parts[3];
+  const alpha = alphaPart === undefined ? 1 : alphaNumber(alphaPart);
+  if (alpha === null) return raw.replace(/\s+/g, '');
+  const hex = `#${channels.map((c) => byteHex(c!)).join('')}`;
+  if (alpha <= 0) return `${hex}00`;
+  if (alpha >= 1) return hex;
+  return `${hex}${byteHex(Math.round(alpha * 255))}`;
+}
+
+function channelValue(raw: string): number | null {
+  const value = raw.trim();
+  const n = value.endsWith('%') ? (Number(value.slice(0, -1)) * 255) / 100 : Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.min(255, Math.max(0, Math.round(n)));
+}
+
+/** The alpha of an `hsl()`/`hsla()` or the `/ alpha` of an `rgb()`, 0–1; null when unreadable. */
+function alphaOf(raw: string): number | null {
+  const open = raw.indexOf('(');
+  const close = raw.lastIndexOf(')');
+  if (open < 0 || close <= open) return null;
+  const body = raw.slice(open + 1, close);
+  const slash = body.indexOf('/');
+  if (slash >= 0) return alphaNumber(body.slice(slash + 1).trim());
+  const parts = body.split(/[,\s]+/).filter(Boolean);
+  return parts.length >= 4 ? alphaNumber(parts[3]!) : 1;
+}
+
+function alphaNumber(raw: string): number | null {
+  const value = raw.trim();
+  const n = value.endsWith('%') ? Number(value.slice(0, -1)) / 100 : Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function byteHex(n: number): string {
+  const clamped = Math.min(255, Math.max(0, Math.round(n)));
+  return clamped.toString(16).padStart(2, '0');
+}
+
+function isInvisibleColour(colour: string): boolean {
+  if (colour === '#00000000') return true;
+  return colour.length === 9 && colour.startsWith('#') && colour.endsWith('00');
 }
 
 function isHex(s: string): boolean {
@@ -344,14 +566,14 @@ function isLetters(s: string): boolean {
 }
 
 /**
- * Simple `display:none` / `visibility:hidden` rules, skipping comments and every at-rule block.
- * The two declarations are kept apart because one hides a subtree outright and the other is
- * inherited and can be reversed by a nearer `visibility:visible`.
+ * Simple display/visibility rules in document order, skipping comments and every at-rule block.
+ * A rule that sets `display:block` is kept too, so it can override an earlier hide.
  */
 function hiddenRules(css: string): HiddenRules {
   const text = stripCssComments(css);
-  const rules: HiddenRules = { display: ruleIndex(), visibility: ruleIndex() };
+  const rules: HiddenRules = { display: ruleBucket(), visibility: ruleBucket() };
   let i = 0;
+  let order = 0;
   while (i < text.length) {
     const brace = text.indexOf('{', i);
     if (brace < 0) break;
@@ -366,14 +588,16 @@ function hiddenRules(css: string): HiddenRules {
     const body = text.slice(brace + 1, depth === 0 ? j - 1 : j);
     // An at-rule (notably @media) may hold rules this predicate does not resolve; skip it whole.
     if (!prelude.startsWith('@')) {
+      order++;
       const declarations = parseDeclarations(body);
-      const hides: (keyof HiddenRules)[] = [];
-      if (declarations.get('display') === 'none') hides.push('display');
-      if (declarations.get('visibility') === 'hidden') hides.push('visibility');
-      for (const part of prelude.split(',')) {
-        const selector = parseSimpleSelector(part.trim());
-        if (selector === null) continue;
-        for (const kind of hides) addRule(rules[kind], selector);
+      for (const property of ['display', 'visibility'] as const) {
+        const declaration = declarations.get(property);
+        if (!declaration) continue;
+        for (const part of prelude.split(',')) {
+          const selector = parseSimpleSelector(part.trim());
+          if (selector === null) continue;
+          addRule(rules[property], { selector, value: declaration.value, important: declaration.important, order });
+        }
       }
     }
     i = j;

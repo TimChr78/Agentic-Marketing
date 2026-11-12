@@ -71,6 +71,24 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
     html: `<a href="${URL}"><img src="x.png" alt="Unsubscribe" style="display:none"></a>`,
     reason: 'hidden',
   },
+  // Review round 3 (P2): invisible colours, and the last declaration of a property winning.
+  { name: 'transparent text', html: link(' style="color:transparent"'), reason: 'hidden' },
+  { name: 'zero-alpha rgba text', html: link(' style="color:rgba(0,0,0,0)"'), reason: 'hidden' },
+  { name: 'zero-alpha shorthand hex text', html: link(' style="color:#0000"'), reason: 'hidden' },
+  { name: 'white on white', html: link(' style="color:#fff;background:#FFFFFF"'), reason: 'hidden' },
+  { name: 'display:inline then display:none', html: link(' style="display:inline;display:none"'), reason: 'hidden' },
+  { name: 'display:block then display:none', html: link(' style="display:block;display:none"'), reason: 'hidden' },
+  { name: 'an important hide then a later unhide', html: link(' style="display:none !important;display:block"'), reason: 'hidden' },
+  {
+    name: 'an important class rule over an inline unhide',
+    html: `<html><head><style>.footer { display: none !important; }</style></head><body>${link(' class="footer" style="display:block"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a later rule that hides',
+    html: `<html><head><style>.a { display: block; } .b { display: none; }</style></head><body>${link(' class="a b"')}</body></html>`,
+    reason: 'hidden',
+  },
 ];
 
 describe('the unsubscribe link must be visible and clickable (#637 review)', () => {
@@ -93,6 +111,21 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
     expect(
       unsubscribeLinkProblem(`<a href="${URL}" style="font-size:0"><span style="font-size:13px">Unsubscribe</span></a>`, URL),
     ).toBeNull();
+  });
+
+  it('accepts display:none followed by display:block', () => {
+    expect(unsubscribeLinkProblem(link(' style="display:none;display:block"'), URL)).toBeNull();
+  });
+
+  // Review round 3 (P3): the inline declaration wins over a non-important class rule.
+  it('accepts an inline display:block over a hiding class rule', () => {
+    const html = `<html><head><style>.footer { display: none; }</style></head><body>${link(' class="footer" style="display:block"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  it('accepts the later of two simple rules', () => {
+    const html = `<html><head><style>.a { display: none; } .b { display: block; }</style></head><body>${link(' class="a b"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
   });
 
   it('accepts a link whose text recolours itself under a hidden-colour anchor', () => {
@@ -186,6 +219,27 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
     );
     expect((await validateTemplate(t)).join(' ')).toContain('hidden');
     expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('rejects transparent text at save and at publish', async () => {
+    const t = template('<mj-text><a style="color:transparent" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>');
+    expect((await validateTemplate(t)).join(' ')).toContain('hidden');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('rejects a display:inline followed by display:none at save and at publish', async () => {
+    const t = template('<mj-text><a style="display:inline;display:none" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>');
+    expect((await validateTemplate(t)).join(' ')).toContain('hidden');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  it('accepts an inline display:block over a hiding mj-style class rule', async () => {
+    const t = template(
+      '<mj-text><a class="footer" style="display:block" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>',
+      '<mj-style>.footer { display: none; }</mj-style>',
+    );
+    await expect(validateTemplate(t)).resolves.toEqual([]);
+    await expect(emailPublishProblems(t, { marketing: true })).resolves.toEqual([]);
   });
 
   it('still accepts a visible link, including one from a block footer', async () => {
