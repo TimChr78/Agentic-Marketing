@@ -660,6 +660,27 @@ describe('the release workflow concurrency (#648)', () => {
     expect(job('release')).toMatch(/matching-refs\/tags\/v"/);
   });
 
+  it('queues every pending release instead of replacing the waiting one (0.14.14 review round 3)', () => {
+    expect(job('release')).toMatch(/concurrency:\n\s+group: release\n\s+cancel-in-progress: false\n\s+queue: max/);
+    // The CI a release calls gets its own group, so two manual releases from main never share one.
+    const ci = readFileSync(join(root, '.github/workflows/ci.yml'), 'utf8');
+    expect(ci).toMatch(
+      /group: ci-\$\{\{ github\.workflow \}\}-\$\{\{ github\.workflow == 'Release' && github\.run_id \|\| github\.ref \}\}/,
+    );
+  });
+
+  it('reserves the version tag before any image is pushed (0.14.14 review round 3)', () => {
+    const release = job('release');
+    const reserve = release.indexOf('name: Reserve the version tag');
+    expect(reserve).toBeGreaterThan(0);
+    // Before the tag decision and the first push, so an older retry always sees this version.
+    expect(reserve).toBeLessThan(release.indexOf('name: Decide the image tags'));
+    expect(release.slice(reserve)).toMatch(/git\/refs/);
+    // A manual retry is allowed only when the existing tag points at the same commit.
+    expect(release).toMatch(/points at \$existing, not \$sha/);
+    expect(release).not.toMatch(/Tag v\$v exists already: push it again/);
+  });
+
   it('normalises a leading v for both a tag push and a manual run in one place', () => {
     const prepare = job('prepare');
     // Both triggers hand the raw ref or input to the script; it strips one leading v and validates
