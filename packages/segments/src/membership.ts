@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { artifactTypes, type SegmentDefinition } from '@agentic-marketing/artifacts';
 
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -202,21 +203,33 @@ export async function refreshSegment(tx: Tx, workspaceId: string, seg: Published
   ).rows;
   const entered = rows.filter((r) => r.entered);
   const exited = rows.filter((r) => !r.entered);
-  const runId = new Date().toISOString().slice(0, 16);
+  const announcingExits = exited.filter((r) => !r.merged);
+  // The cause is deterministic for what this transaction is about to commit (#628): the last
+  // committed refresh token plus the sorted change set. A publish that fails rolls the transaction
+  // back, so the retry sees the same token and the same changes and reuses the messageIds (which
+  // JetStream then deduplicates); a refresh that commits moves the token, so a later run with the
+  // same change set gets new ids. `at` is read as text at full microsecond precision (never a JS
+  // Date, which would truncate it) and the upsert advances it with GREATEST(), so it strictly
+  // increases even when the wall clock repeats within a millisecond.
+  const prior = (
+    await tx.execute<{ token: string }>(sql`
+      SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS token
+      FROM segment_runs
+      WHERE workspace_id = ${workspaceId} AND segment_id = ${seg.id}`)
+  ).rows[0]?.token;
+  const changesKey = [...entered.map((r) => `${r.profile_id}:in`), ...announcingExits.map((r) => `${r.profile_id}:out`)].sort();
+  const cause = `run:${createHash('sha256')
+    .update(`${seg.id}\n${prior ?? 'first'}\n${changesKey.join('\n')}`)
+    .digest('hex')
+    .slice(0, 32)}`;
   const changes: BusEvent[] = [];
   const add = (r: Row, name: string) => {
-    const e = changeEvent(
-      workspaceId,
-      seg,
-      { profileId: r.profile_id, userId: r.user_id, anonymousId: r.anonymous_id },
-      name,
-      `run:${runId}`,
-    );
+    const e = changeEvent(workspaceId, seg, { profileId: r.profile_id, userId: r.user_id, anonymousId: r.anonymous_id }, name, cause);
     if (e) changes.push(e);
   };
   for (const r of entered) add(r, ENTERED);
   // People merged into others leave quietly: they still exist, as part of someone else.
-  for (const r of exited) if (!r.merged) add(r, EXITED);
+  for (const r of announcingExits) add(r, EXITED);
   const run = {
     workspaceId,
     segmentId: seg.id,
@@ -225,12 +238,14 @@ export async function refreshSegment(tx: Tx, workspaceId: string, seg: Published
     entered: entered.length,
     exited: exited.length,
     tookMs: Date.now() - started,
-    at: new Date(),
   };
   await tx
     .insert(schema.segmentRuns)
-    .values(run)
-    .onConflictDoUpdate({ target: [schema.segmentRuns.workspaceId, schema.segmentRuns.segmentId], set: run });
+    .values({ ...run, at: sql`clock_timestamp()` })
+    .onConflictDoUpdate({
+      target: [schema.segmentRuns.workspaceId, schema.segmentRuns.segmentId],
+      set: { ...run, at: sql`GREATEST(clock_timestamp(), ${schema.segmentRuns.at} + interval '1 microsecond')` },
+    });
   return {
     members: members.size,
     entered: entered.length,

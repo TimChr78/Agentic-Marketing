@@ -2,7 +2,7 @@ import { createServer, type IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { evaluateAlerts, resetAlertEvaluationState } from '@agentic-marketing/alerts';
 import { clearAnalyticsCache } from '@agentic-marketing/analytics';
-import type { BusEvent, JourneyEvent, MessageEvent } from '@agentic-marketing/events';
+import type { BusEvent, EventStore, JourneyEvent, MessageEvent } from '@agentic-marketing/events';
 import { verifyWebhook } from '@agentic-marketing/integrations';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
@@ -48,6 +48,22 @@ const receiver = createServer((req, res) => {
 });
 
 const api = (workspaceId = wsA) => t.api(owner, workspaceId);
+
+/** An event store whose ClickHouse query fails a number of times, then works (or always fails). */
+function failingEvents(times: number) {
+  const events = t.srv.events;
+  const always = times === Number.POSITIVE_INFINITY;
+  let remaining = times;
+  let attempts = 0;
+  const query = (async (...args: Parameters<typeof events.client.query>) => {
+    attempts++;
+    if (always || remaining-- > 0) throw new Error('ClickHouse query timeout');
+    return events.client.query(...args);
+  }) as typeof events.client.query;
+  const flaky = { ...events, client: { ...events.client, query } } as EventStore;
+  return { events: flaky, attempts: () => attempts };
+}
+
 const deps = () => ({
   db: t.srv.db,
   events: t.srv.events,
@@ -492,4 +508,104 @@ describe('alert commands', () => {
     expect((await rejects(api(wsB).call('alerts.get', { id: rule.rule.id }))).message).toContain('No alert rule');
     expect((await rejects(api(wsB).call('alerts.delete', { id: rule.rule.id }))).message).toContain('No alert rule');
   });
+});
+
+describe('alert evaluation resilience and deleted history', () => {
+  it('retries a failed measurement on the next tick instead of skipping the whole interval (#633)', async () => {
+    const base = T0 + 40 * HOUR;
+    await t.srv.events.insertMessageEvents([...messageEvents(wsA, T(40 * HOUR - 10 * 60_000), { sent: 200, bounced: 20 })]);
+    const created = await api().call('alerts.create', {
+      name: 'Transient analytics failure',
+      kind: 'deliverability',
+      config: { metric: 'bounce', window: 'PT1H', threshold: 0.05, minSent: 100 },
+      channels: [{ type: 'webhook', webhookId: endpoint.id }],
+    });
+
+    // One transient ClickHouse timeout, not an evaluation: no episode and no interval booked.
+    const flaky = failingEvents(1);
+    await evaluateAlerts({ ...deps(), events: flaky.events }, { now: new Date(base) });
+    expect(flaky.attempts()).toBe(1);
+    expect(await eventRows()).toHaveLength(0);
+    expect((await rulesIn()).find((r) => r.id === created.rule.id)).toMatchObject({ state: 'ok' });
+
+    // The next scheduler tick (five minutes later) measures again and sees the breach. (One
+    // measurement is two ClickHouse reads: the query and its freshness probe.)
+    await evaluateAlerts({ ...deps(), events: flaky.events }, { now: new Date(base + 5 * 60_000) });
+    expect(flaky.attempts()).toBeGreaterThan(1);
+    expect((await rulesIn()).find((r) => r.id === created.rule.id)).toMatchObject({ state: 'firing' });
+    expect(await eventRows()).toHaveLength(1);
+  }, 30_000);
+
+  it('backs a persistently failing rule off instead of querying ClickHouse every tick (#633)', async () => {
+    const base = T0 + 50 * HOUR;
+    await api().call('alerts.create', {
+      name: 'Broken analytics',
+      kind: 'journey_errors',
+      config: { window: 'PT1H', threshold: 5 },
+      channels: [{ type: 'webhook', webhookId: endpoint.id }],
+    });
+
+    const broken = failingEvents(Number.POSITIVE_INFINITY);
+    const depsWith = { ...deps(), events: broken.events };
+
+    // The first failures are retried on each tick, so a single blip is not mistaken for a streak.
+    for (let tick = 0; tick < 3; tick++) await evaluateAlerts(depsWith, { now: new Date(base + tick * 5 * 60_000) });
+    expect(broken.attempts()).toBe(3);
+
+    // After that the rule keeps the per-rule minimum interval (PT1H → 15 minutes): ticks at +15
+    // and +20 minutes skip it, and +25 minutes tries again.
+    await evaluateAlerts(depsWith, { now: new Date(base + 15 * 60_000) });
+    await evaluateAlerts(depsWith, { now: new Date(base + 20 * 60_000) });
+    expect(broken.attempts()).toBe(3);
+    await evaluateAlerts(depsWith, { now: new Date(base + 25 * 60_000) });
+    expect(broken.attempts()).toBe(4);
+  }, 30_000);
+
+  it('deletes a rule’s episodes with it and never shows history for a missing rule (#620)', async () => {
+    const base = T0 + 60 * HOUR;
+    await t.srv.events.insertMessageEvents([...messageEvents(wsA, T(60 * HOUR - 10 * 60_000), { sent: 200, bounced: 20 })]);
+    const created = await api().call('alerts.create', {
+      name: 'Delete me',
+      kind: 'deliverability',
+      config: { metric: 'bounce', window: 'PT1H', threshold: 0.05, minSent: 100 },
+      channels: [{ type: 'webhook', webhookId: endpoint.id }],
+    });
+    await evaluate(base);
+    expect(await eventRows()).toHaveLength(1);
+
+    await api().call('alerts.delete', { id: created.rule.id });
+
+    // The delete handler removes the episodes in the same transaction as the rule.
+    const gone = await t.srv.db.admin.query<{ id: string }>('SELECT id FROM alert_events WHERE rule_id = $1', [created.rule.id]);
+    expect(gone.rows).toHaveLength(0);
+    expect((await api().call('alerts.history', { ruleId: created.rule.id })).events).toEqual([]);
+
+    // An episode left behind by an older version (no rule row) is not history either: no name and
+    // no kind means it would render under a raw id with the wrong unit. Insert it with the foreign
+    // key checks off, the shape an older database could hold.
+    const orphanId = 'ale_orphan_620';
+    const orphanRuleId = `alr_${'f'.repeat(32)}`;
+    const orphanClient = await t.srv.db.admin.connect();
+    try {
+      await orphanClient.query('SET session_replication_role = replica');
+      await orphanClient.query(
+        `INSERT INTO alert_events (workspace_id, id, rule_id, state, value, threshold, "window", fired_at)
+         VALUES ($1, $2, $3, 'resolved', 0.06, 0.05, 'PT1H', now())`,
+        [wsA, orphanId, orphanRuleId],
+      );
+    } finally {
+      await orphanClient.query('SET session_replication_role = origin').catch(() => {});
+      orphanClient.release();
+    }
+    try {
+      expect((await api().call('alerts.history', { limit: 500 })).events.map((e) => e.id)).not.toContain(orphanId);
+      expect((await api().call('alerts.history', { ruleId: orphanRuleId })).events).toEqual([]);
+    } finally {
+      await t.srv.db.admin.query('DELETE FROM alert_events WHERE id = $1', [orphanId]);
+    }
+
+    // The delete is still in the audit chain, naming the rule it removed.
+    const audit = await api().call('audit.list', { target: created.rule.id, limit: 20 });
+    expect(audit.entries.find((e) => e.command === 'alerts.delete')).toMatchObject({ target: created.rule.id, ok: true });
+  }, 30_000);
 });

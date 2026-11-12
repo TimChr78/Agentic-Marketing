@@ -2,6 +2,31 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.8] - 2026-11-12
+
+### Fixed
+
+- A single failed alert measurement (for example a ClickHouse timeout) is retried on the next scheduler tick instead of silencing the rule for up to an hour; a rule that keeps failing backs off after three attempts and logs the failure streak once.
+- Deleting an alert rule also removes its firing history, and the history list never shows episodes whose rule no longer exists (nor a raw rule id with the wrong value unit).
+- Editing an alert rule keeps each e-mail channel as it was saved; renaming a rule no longer flattens several e-mail channels into one and rewrites the notification targets.
+- An hourly hosted agent now runs at minute 0 of every hour in the workspace's time zone instead of only at midnight, and its next run is computed by jumping to the boundary rather than scanning minutes, so creating or running a weekly agent no longer stalls the server for about a second.
+- Two segment refreshes in the same minute now both publish their Segment Entered and Segment Exited events, so a journey triggered by a quick re-entry is no longer lost to the event bus's duplicate window.
+- An independent model check that cannot record its usage now keeps its AI budget reservation through the billing month, so the tokens the provider billed are no longer counted nowhere.
+
+### Upgrading from 0.14.7
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** behaviour changes only; no command, artifact field, URL or setting changes.
+  - **Hourly hosted agents** now run every hour instead of once a day at midnight, so they use more runs and AI budget. Review hourly agents' budgets after upgrading.
+  - **Next-run times** of daily and weekly hosted agents can move by an hour around DST transitions, to the time the schedule actually names.
+  - **An independent model check** whose usage cannot be recorded now fails, and the publish it guards waits for review, instead of passing with uncounted tokens.
+  - **A persistently failing alert rule** is retried every tick for three attempts, then backs off to its normal interval.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.8.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.8 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.8` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.8). Run `docker compose exec app am doctor`.
+
+<!-- issues: 601, 620, 621, 622, 628, 633, 642 -->
+
 ## [0.14.7] - 2026-11-12
 
 ### Fixed

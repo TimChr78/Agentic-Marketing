@@ -8,8 +8,14 @@
 // Days are three letters: mon, tue, wed, thu, fri, sat, sun. Times are 24-hour HH:MM with two
 // digits. Anything else is refused when the hosted agent is created or changed.
 
+import { zonedParts } from '@agentic-marketing/core';
+
 const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'] as const;
 export type HostedWeekday = (typeof DAYS)[number];
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY_MS = 24 * HOUR;
 
 const TIME = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const DAY = /^(mon|tue|wed|thu|fri|sat|sun)$/;
@@ -52,45 +58,96 @@ export function isValidHostedSchedule(value: string): boolean {
   }
 }
 
-/** The day, hour and minute of `date` in `timeZone`. */
-function localParts(date: Date, timeZone: string): { weekday: string; hour: number; minute: number } {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone,
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(date);
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
-  return {
-    weekday: get('weekday').toLowerCase().slice(0, 3),
-    hour: Number(get('hour')),
-    minute: Number(get('minute')),
-  };
+/**
+ * A zone's offset from UTC at `at`, in milliseconds. `zonedParts` caches its formatter, so this
+ * stays cheap even when called a handful of times per scheduled day.
+ */
+function offsetMs(at: Date, timeZone: string): number {
+  const p = zonedParts(at, timeZone);
+  return Date.UTC(p.y, p.m - 1, p.d, p.h, p.min) - Math.floor(at.getTime() / MINUTE) * MINUTE;
 }
 
-function matches(schedule: HostedSchedule, local: { weekday: string; hour: number; minute: number }): boolean {
-  if (local.hour !== schedule.hour || local.minute !== schedule.minute) return false;
-  return schedule.kind !== 'weekly' || local.weekday === schedule.weekday;
+/**
+ * The earliest instant at or after `from` whose wall clock in `timeZone` is the named minute, or
+ * null when that wall-clock time does not exist (a daylight-saving spring-forward).
+ *
+ * Resolving a wall time needs the zone offset, and the offset is exactly what changes at a
+ * transition. The standard two-pass method reads the offset at the target interpreted as UTC,
+ * subtracts it, then re-reads the offset at that candidate. Probing 24 hours before and after as
+ * well brackets both sides of any transition (30 minutes, 1 hour, 2 hours), so the candidates
+ * include every instant that really maps back to the wall time. A repeated time keeps the earliest
+ * that is not before `from`; a skipped one has no candidate, so the caller moves to the next day.
+ */
+function localMinute(y: number, m: number, d: number, hour: number, minute: number, timeZone: string, from: Date): Date | null {
+  const wanted = Date.UTC(y, m - 1, d, hour, minute);
+  const offsets = new Set<number>();
+  for (const shift of [-DAY_MS, 0, DAY_MS]) {
+    const first = offsetMs(new Date(wanted + shift), timeZone);
+    offsets.add(first);
+    offsets.add(offsetMs(new Date(wanted - first), timeZone));
+  }
+  let best: Date | null = null;
+  for (const offset of offsets) {
+    const candidate = new Date(wanted - offset);
+    if (candidate.getTime() < from.getTime()) continue;
+    const p = zonedParts(candidate, timeZone);
+    if (p.y !== y || p.m !== m || p.d !== d || p.h !== hour || p.min !== minute) continue;
+    if (!best || candidate.getTime() < best.getTime()) best = candidate;
+  }
+  return best;
 }
-
-/** How far ahead to look: a weekly schedule can be nearly eight days away. */
-const LIMIT_MINUTES = { hourly: 61, daily: 26 * 60 + 1, weekly: 8 * 24 * 60 + 1 } as const;
 
 /**
  * The first minute after `now` that matches the schedule in `timeZone`. When a local time is
  * skipped by a daylight-saving jump the next matching day is used; when it repeats, the first
  * occurrence wins.
+ *
+ * The next run is found by jumping: an hourly schedule jumps to the next local minute 0, and a
+ * daily or weekly one tries at most the next three days or three weeks. A skipped weekly occurrence
+ * therefore falls through to the following week instead of returning a time on another day, and a
+ * schedule that somehow has no run inside the window throws instead of guessing.
  */
 export function nextHostedRunAt(schedule: string | HostedSchedule, timeZone: string, now = new Date()): Date {
   const parsed = typeof schedule === 'string' ? parseHostedSchedule(schedule) : schedule;
-  let candidate = new Date(Math.floor(now.getTime() / 60_000) * 60_000 + 60_000);
-  for (let i = 0; i < LIMIT_MINUTES[parsed.kind]; i++) {
-    if (matches(parsed, localParts(candidate, timeZone))) return candidate;
-    candidate = new Date(candidate.getTime() + 60_000);
+  const from = new Date(Math.floor(now.getTime() / MINUTE) * MINUTE + MINUTE);
+  if (parsed.kind === 'hourly') {
+    let candidate = from;
+    // Wall-clock minutes normally advance with UTC. A daylight-saving change can move the boundary
+    // by up to an hour, so re-check after the jump rather than trusting a single subtraction.
+    for (let i = 0; i < 4; i++) {
+      const jump = (60 - zonedParts(candidate, timeZone).min) % 60;
+      if (jump === 0) return candidate;
+      candidate = new Date(candidate.getTime() + jump * MINUTE);
+    }
+    return candidate;
   }
-  // Unreachable for a valid schedule; a safe retry rather than a crash.
-  return new Date(now.getTime() + 60 * 60_000);
+  const p = zonedParts(from, timeZone);
+  // Three weeks covers a weekly time skipped by a transition (the next week is seven days out) and
+  // any pathological skipped calendar date; three days does the same for a daily time.
+  const reach = parsed.kind === 'weekly' ? 21 : 3;
+  for (let d = 0; d <= reach; d++) {
+    const day = new Date(Date.UTC(p.y, p.m - 1, p.d + d));
+    if (parsed.kind === 'weekly' && DAYS[day.getUTCDay()] !== parsed.weekday) continue;
+    const candidate = localMinute(
+      day.getUTCFullYear(),
+      day.getUTCMonth() + 1,
+      day.getUTCDate(),
+      parsed.hour,
+      parsed.minute,
+      timeZone,
+      from,
+    );
+    if (!candidate) continue;
+    // Verify the candidate's wall clock rather than trusting the date arithmetic: a transition can
+    // move a local date, and a weekly run must stay on its weekday.
+    const at = zonedParts(candidate, timeZone);
+    if (at.h !== parsed.hour || at.min !== parsed.minute) continue;
+    if (parsed.kind === 'weekly' && DAYS[new Date(Date.UTC(at.y, at.m - 1, at.d)).getUTCDay()] !== parsed.weekday) continue;
+    return candidate;
+  }
+  throw new Error(
+    `A ${parsed.kind} schedule has no matching run in ${timeZone} within ${parsed.kind === 'weekly' ? 'three weeks' : 'three days'}.`,
+  );
 }
 
 const DAY_LABEL: Record<HostedWeekday, string> = {
