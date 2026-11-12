@@ -257,6 +257,7 @@ function PeriodReads({
   const gate = useMemo<FunnelGateResult | null>(() => {
     if (!result) return null;
     return funnelGate({
+      basis: result.basis,
       latestVersion: artifact.latestVersion,
       publishedVersion: artifact.publishedVersion,
       nodes,
