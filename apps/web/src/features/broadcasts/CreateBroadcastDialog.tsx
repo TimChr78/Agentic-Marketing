@@ -40,7 +40,7 @@ export function CreateBroadcastDialog({ onClose }: { onClose: () => void }) {
         name: name.trim(),
         content: { template: state.template, segment: state.segment },
       });
-      notifyArtifactsChanged();
+      notifyArtifactsChanged(r.artifactId);
       toast.success(`Created “${name.trim()}” as a draft.`);
       onClose();
       navigate(artifactPath('broadcast', r.artifactId));

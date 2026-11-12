@@ -31,6 +31,7 @@ const h = vi.hoisted(() => ({
   templateVersion: 5,
   templatePurpose: 'marketing_email',
   templateSubject: 'Weekly Signal #43',
+  segmentVersion: 1,
   holdSegment: false,
   releaseSegment: null as null | (() => void),
 }));
@@ -96,14 +97,14 @@ const draftTemplateArtifact = {
   version: { ...templateArtifact.version, number: 2, state: 'draft' },
 };
 
-const segmentArtifact = (artifactId: string, name: string) => ({
+const segmentArtifact = (artifactId: string, name: string, publishedVersion = 1) => ({
   id: artifactId,
   type: 'segment',
   name,
-  latestVersion: 1,
-  publishedVersion: 1,
+  latestVersion: publishedVersion,
+  publishedVersion,
   version: {
-    number: 1,
+    number: publishedVersion,
     state: 'published',
     author: { type: 'user', id: 'person_1', client: null },
     content: {},
@@ -160,7 +161,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
           case 'artifacts.get': {
             if (input.artifactId === seg) {
               if (h.holdSegment) await new Promise<void>((resolve) => (h.releaseSegment = resolve));
-              return segmentArtifact(seg, 'Engaged readers');
+              return segmentArtifact(seg, 'Engaged readers', h.segmentVersion);
             }
             if (input.artifactId === seg2) return segmentArtifact(seg2, 'All readers');
             if (input.artifactId === tplDraft) return draftTemplateArtifact;
@@ -318,6 +319,7 @@ beforeEach(() => {
   h.templateVersion = 5;
   h.templatePurpose = 'marketing_email';
   h.templateSubject = 'Weekly Signal #43';
+  h.segmentVersion = 1;
   h.holdSegment = false;
   h.releaseSegment = null;
   invalidateArtifact(tpl);
@@ -657,6 +659,51 @@ describe('composer component (#497)', () => {
     await waitFor(() =>
       expect(calls('artifacts.get').filter((call) => (call.input as { artifactId?: string }).artifactId === tpl).length).toBe(4),
     );
+  });
+
+  it('ignores a write to an unrelated artifact: no forced read and the rows stay ready (#768)', async () => {
+    render(<Harness />);
+    expect(await screen.findByText('1,842 eligible in current check')).toBeTruthy();
+    await waitFor(() => expect(calls('artifacts.get')).toHaveLength(3));
+    const templateRow = screen.getByText('Template live').closest('[data-check]') as HTMLElement;
+    expect(within(templateRow).getByText(/Live v5/)).toBeTruthy();
+
+    // Any mutation anywhere in the tab used to notify with no id; this one names a block.
+    act(() => invalidateArtifact(`blk_${'f'.repeat(32)}`));
+    await act(async () => {});
+
+    expect(calls('artifacts.get')).toHaveLength(3);
+    expect(within(templateRow).getByText(/Live v5/)).toBeTruthy();
+    expect(within(templateRow).queryByText(/Checking/)).toBeNull();
+  });
+
+  it('re-reads a template republished in another tab when the window regains focus (#767)', async () => {
+    render(<Harness />);
+    expect(await screen.findByText('Published v5')).toBeTruthy();
+    const consentRow = (await screen.findByText('Consent purpose')).closest('[data-check]') as HTMLElement;
+    await waitFor(() => expect(within(consentRow).getByText(/Marketing e-mail/)).toBeTruthy());
+
+    // Another tab republishes the template; this tab hears nothing until it is focused again.
+    h.templateVersion = 6;
+    h.templatePurpose = 'onboarding';
+    h.templateSubject = 'Service notice';
+    act(() => window.dispatchEvent(new Event('focus')));
+
+    await waitFor(() => expect(calls('artifacts.get').some((call) => (call.input as { version?: number }).version === 6)).toBe(true));
+    expect((await screen.findByText('Published v6')).closest('[data-preview-source]')?.textContent).toContain('template');
+    await waitFor(() => expect(within(consentRow).getByText(/Service messages/)).toBeTruthy());
+    const templateRow = screen.getByText('Template live').closest('[data-check]') as HTMLElement;
+    expect(within(templateRow).getByText(/Live v6/)).toBeTruthy();
+  });
+
+  it('re-runs the audience estimate when the selected segment is republished in another tab (#767)', async () => {
+    render(<Harness />);
+    await waitFor(() => expect(calls('broadcasts.preview')).toHaveLength(1));
+
+    h.segmentVersion = 2;
+    act(() => window.dispatchEvent(new Event('focus')));
+
+    await waitFor(() => expect(calls('broadcasts.preview')).toHaveLength(2));
   });
 
   it('shows a neutral placeholder while the segment is loading and Unavailable only after it fails (#585)', async () => {

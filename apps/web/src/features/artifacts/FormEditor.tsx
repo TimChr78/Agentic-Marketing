@@ -56,12 +56,17 @@ const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const URL_OR_PATH_RE = /^(https?:\/\/|\/)/;
 
 /**
- * Mirrors `normalizeOrigin` in packages/artifacts: the scheme and host are lowercased and the port
- * is kept (#597). The server stores that form, so the editor shows it once the field loses focus.
+ * Mirrors `normalizeOrigin` in packages/artifacts: the scheme and host are lowercased, and the
+ * scheme's default port is dropped (#597, #769). The server stores that form, so the editor shows
+ * it once the field loses focus.
  */
 const normalizeOrigin = (origin: string) => {
   const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/:?#]+)(:\d+)?$/.exec(origin);
-  return match ? `${match[1]!.toLowerCase()}://${match[2]!.toLowerCase()}${match[3] ?? ''}` : origin.toLowerCase();
+  if (!match) return origin.toLowerCase();
+  const scheme = match[1]!.toLowerCase();
+  const port = match[3] ?? '';
+  const defaultPort = (scheme === 'https' && port === ':443') || (scheme === 'http' && port === ':80');
+  return `${scheme}://${match[2]!.toLowerCase()}${defaultPort ? '' : port}`;
 };
 
 const COPY_DEFAULTS: { key: keyof BrandCopy; label: string; hint: string; rows: number }[] = [

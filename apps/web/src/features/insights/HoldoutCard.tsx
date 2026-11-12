@@ -1,4 +1,5 @@
 import { Alert, ListSkeleton, StatusPill, Table, TableFrame, Td, THead, Th, Tr } from '../../ui';
+import { pointsText } from '../campaigns/phase26/model';
 
 // Treatment against control, with the interval and the guardrail (#67). Shared by the journey
 // stats page and the campaign evaluation card so both say the same thing about a holdout.
@@ -129,13 +130,13 @@ export function HoldoutCard({
         </p>
       ) : (
         <p className="mt-3 text-[12px] text-fg-2">
-          Lift: <strong>{result.absoluteLift === null ? 'Unavailable' : pct(result.absoluteLift)}</strong> absolute
+          Lift: <strong>{result.absoluteLift === null ? 'Unavailable' : pointsText(result.absoluteLift)}</strong> absolute
           {result.relativeLift !== null
             ? ` (${pct(result.relativeLift)} relative)`
             : result.absoluteLift === null
               ? ''
               : ' (relative lift unavailable)'}
-          {result.ci95 ? ` · 95% CI ${pct(result.ci95[0])} to ${pct(result.ci95[1])}` : ''}
+          {result.ci95 ? ` · 95% CI ${pointsText(result.ci95[0])} to ${pointsText(result.ci95[1])}` : ''}
         </p>
       )}
       <p className="mt-1 text-[12px] text-muted">

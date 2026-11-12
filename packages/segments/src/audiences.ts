@@ -225,12 +225,16 @@ async function recordRun(tx: Tx, workspaceId: string, seg: PublishedSegment, ent
     entered,
     exited,
     tookMs: 0,
-    at: new Date(),
   };
   await tx
     .insert(schema.segmentRuns)
-    .values(run)
-    .onConflictDoUpdate({ target: [schema.segmentRuns.workspaceId, schema.segmentRuns.segmentId], set: run });
+    .values({ ...run, at: sql`clock_timestamp()` })
+    .onConflictDoUpdate({
+      target: [schema.segmentRuns.workspaceId, schema.segmentRuns.segmentId],
+      // Strictly increasing, at full microsecond precision: `segments.preview` reports this stamp
+      // and a client compares it, so two mutations must never share one (#771).
+      set: { ...run, at: sql`GREATEST(clock_timestamp(), ${schema.segmentRuns.at} + interval '1 microsecond')` },
+    });
 }
 
 /** Publishes list change events before the command commits; stable ids make a retried batch harmless. */

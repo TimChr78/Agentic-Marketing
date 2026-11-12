@@ -318,11 +318,20 @@ describe('platform-owned events', () => {
     }
   });
 
+  it('exempts a connector source’s own event names from the plan (#764)', () => {
+    const order = { type: 'track', event: 'Order Completed', anonymousId: 'a' };
+    const connector: SourceInfo = { ...server, platform: true };
+    expect(acceptItems([order], connector, strict).rejected).toHaveLength(1);
+    expect(acceptInternalItems([order], connector, strict).accepted).toHaveLength(1);
+  });
+
   it('exempts only the internal entry point, not the public one', () => {
     const item = { type: 'track', event: 'Form Submitted', anonymousId: 'a' };
     expect(acceptItems([item], server, strict).rejected).toHaveLength(1);
     expect(acceptInternalItems([item], server, strict).accepted).toHaveLength(1);
-    // The public gateway and inbound webhooks keep using acceptItems, wherever the source came from.
+    // A public client keeps no bypass even on a server source; a connector marks its source
+    // `platform`, which only the internal entry point honours (#764).
     expect(acceptItems([item], { ...server, kind: 'browser' }, strict).rejected).toHaveLength(1);
+    expect(acceptItems([item], { ...server, platform: true }, strict).rejected).toHaveLength(1);
   });
 });

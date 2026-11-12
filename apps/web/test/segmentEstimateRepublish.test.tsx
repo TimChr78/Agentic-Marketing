@@ -17,10 +17,11 @@ type Call = { name: string; input: Record<string, unknown> };
 const h = vi.hoisted(() => ({
   calls: [] as Call[],
   artifacts: {} as Record<string, unknown>,
-  resolved: [] as { id: string; version: number }[],
+  resolved: [] as { id: string; version: number; stamp?: string | null }[],
+  listStamp: null as string | null,
 }));
 
-const artifact = (id: string, name: string, publishedVersion: number | null) => ({
+const artifact = (id: string, name: string, publishedVersion: number | null, mode: 'dynamic' | 'static' = 'dynamic') => ({
   id,
   type: 'segment',
   name,
@@ -31,7 +32,8 @@ const artifact = (id: string, name: string, publishedVersion: number | null) => 
   version: {
     number: publishedVersion ?? 1,
     state: publishedVersion === null ? 'draft' : 'published',
-    content: { description: '', mode: 'dynamic', condition: { trait: 'city', op: 'eq', value: 'Aarhus' } },
+    content:
+      mode === 'dynamic' ? { description: '', mode, condition: { trait: 'city', op: 'eq', value: 'Aarhus' } } : { description: '', mode },
     contentHash: 'hash',
     author: { type: 'user', id: 'u1' },
     by: { kind: 'person', displayName: 'Sam Rivera', personName: 'Sam Rivera', tokenName: null, tokenId: null, clientName: null },
@@ -55,7 +57,11 @@ vi.mock('../src/app/api', async (importOriginal) => {
           if (!found) throw new Error('This item does not exist.');
           return found;
         }
-        if (name === 'segments.preview') return { count: 42, segments: h.resolved };
+        if (name === 'segments.preview') {
+          // Previewing a static list itself reports the membership stamp that moves on an import.
+          if (input.artifactId === B) return { count: 42, sample: [], segments: [{ id: B, version: 3, stamp: h.listStamp }] };
+          return { count: 42, segments: h.resolved };
+        }
         throw new Error(`unexpected command ${name}`);
       }),
     },
@@ -95,6 +101,7 @@ beforeEach(() => {
     [B]: artifact(B, 'Engaged readers', 3),
   };
   h.resolved = [{ id: B, version: 3 }];
+  h.listStamp = null;
   resetPickerIndexes();
   invalidateArtifact(A);
   invalidateArtifact(B);
@@ -144,5 +151,24 @@ describe('segment estimate follows referenced publications (#599)', () => {
     act(() => invalidateArtifact(B));
 
     await waitFor(() => expect(estimateText()).toContain('previous estimate'));
+  });
+
+  it('turns the estimate into a previous estimate when a referenced list gains members (#771)', async () => {
+    // B is a static list: an import changes who it holds without any published version moving.
+    h.artifacts[B] = artifact(B, 'Partner list', 3, 'static');
+    h.listStamp = '2026-11-12T09:00:00.000000Z';
+    h.resolved = [{ id: B, version: 3, stamp: h.listStamp }];
+
+    render(editor);
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+    expect(h.calls.some((c) => c.name === 'segments.preview' && c.input.artifactId === B)).toBe(true);
+
+    // A CSV import adds 400 people to B; no publish, no new version, only a newer run stamp.
+    h.listStamp = '2026-11-12T09:05:00.000000Z';
+    act(() => window.dispatchEvent(new Event('focus')));
+
+    await waitFor(() => expect(estimateText()).toContain('previous estimate'));
+    expect(estimateText()).toContain('42 people');
   });
 });

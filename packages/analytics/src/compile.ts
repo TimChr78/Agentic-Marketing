@@ -74,6 +74,12 @@ export interface CompiledQuery {
   columns: Column[];
   outputs: Output[];
   kAlias: string;
+  /**
+   * The k key for a per-currency revenue row when it differs from the row's own group: a campaign
+   * currency row's people are its converters, so a single buyer cannot ride the recipient count
+   * past the floor (#756).
+   */
+  revenueKAlias?: string;
   hasNonTimeDimension: boolean;
   revenue: boolean;
 }
