@@ -2,6 +2,33 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.7] - 2026-11-12
+
+### Fixed
+
+- The approval drawer now resolves the consent topic the way the composer and send time do: a broadcast's topic override wins over the template's own topic, so the evidence describes the actual send.
+- Bundled dependencies always show the live version beside the bundled one, and an approval that would move a live version backwards says so on the row and in the summary.
+- A broadcast with a send window no longer claims that arrival time varies by reader in the When row; it describes the reader's local window.
+- An unresolved saved purpose is named "Unavailable purpose" in the approval consequences and the imports list, with the technical key only behind its copy control.
+- The broadcast composer now follows a template that was republished elsewhere: its checklist, consent evidence and preview re-read the new live version, and Refresh checks re-reads the template even when the publication pointer has not moved.
+- The composer preview distinguishes a segment that is still loading (“Segment…”) from one that could not be read (“Unavailable reference”), instead of calling a fresh selection dead while its name resolves.
+- A segment estimate now records the published versions of the referenced segments it was counted from and turns into a previous estimate when one of them is republished, including when the change happened in another tab.
+- An allowed site on a signup form is now compared case-insensitively, so typing `https://MySite.com` no longer publishes a form that refuses every real submission; the origin is saved with the scheme and host lowercased, and the editor shows the stored value when the field loses focus.
+- Switching a form's hosted-page override off no longer deletes its colours and wording when the draft is saved; the values stay in the form and come back when the override is switched on, while the hosted pages use the workspace brand until then.
+
+### Upgrading from 0.14.6
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** additive interface changes only; nothing is removed.
+  - **`segments.preview`** returns `segments: [{ id, version }]`, the referenced segment versions the count used.
+  - **Forms:** content gains an optional `hostedPagesEnabled` (absent means enabled, as before), and `allowedOrigins` are stored in lowercase on the next save. Agents that compare stored origins byte for byte should compare case-insensitively.
+  - **Approvals:** an approval that moves a live version backwards now shows a warning. Approving is still allowed.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.7.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.7 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.7` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.7). Run `docker compose exec app am doctor`.
+
+<!-- issues: 581, 582, 583, 584, 585, 597, 598, 599, 600 -->
+
 ## [0.14.6] - 2026-11-12
 
 ### Fixed

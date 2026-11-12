@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { invalidateArtifact } from '../src/features/artifactCache';
@@ -28,6 +28,11 @@ const h = vi.hoisted(() => ({
   calls: [] as { name: string; input: unknown }[],
   can: (_permission: string): boolean => true,
   failProvider: false,
+  templateVersion: 5,
+  templatePurpose: 'marketing_email',
+  templateSubject: 'Weekly Signal #43',
+  holdSegment: false,
+  releaseSegment: null as null | (() => void),
 }));
 
 const id = `bct_${'a'.repeat(32)}`;
@@ -153,12 +158,26 @@ vi.mock('../src/app/api', async (importOriginal) => {
         h.calls.push({ name, input });
         switch (name) {
           case 'artifacts.get': {
-            if (input.artifactId === seg) return segmentArtifact(seg, 'Engaged readers');
+            if (input.artifactId === seg) {
+              if (h.holdSegment) await new Promise<void>((resolve) => (h.releaseSegment = resolve));
+              return segmentArtifact(seg, 'Engaged readers');
+            }
             if (input.artifactId === seg2) return segmentArtifact(seg2, 'All readers');
-            const artifact = input.artifactId === tplDraft ? draftTemplateArtifact : templateArtifact;
+            if (input.artifactId === tplDraft) return draftTemplateArtifact;
+            if (input.artifactId !== tpl) throw new Error('This item does not exist.');
+            const republished = {
+              ...templateArtifact,
+              latestVersion: h.templateVersion,
+              publishedVersion: h.templateVersion,
+              version: {
+                ...templateArtifact.version,
+                number: h.templateVersion,
+                content: { purpose: h.templatePurpose, topic: 'newsletter' },
+              },
+            };
             return {
-              ...artifact,
-              version: { ...artifact.version, number: (input.version as number | undefined) ?? artifact.latestVersion },
+              ...republished,
+              version: { ...republished.version, number: (input.version as number | undefined) ?? republished.latestVersion },
             };
           }
           case 'artifacts.list':
@@ -215,8 +234,8 @@ vi.mock('../src/app/api', async (importOriginal) => {
             return estimate;
           case 'templates.preview':
             return {
-              version: (input.version as number | undefined) ?? 5,
-              subject: 'Weekly Signal #43',
+              version: (input.version as number | undefined) ?? h.templateVersion,
+              subject: h.templateSubject,
               preheader: 'This week',
               html: '<html><body><p>Hi Ada</p></body></html>',
               text: 'Hi Ada',
@@ -296,6 +315,11 @@ beforeEach(() => {
   h.calls.length = 0;
   h.can = (permission) => permission === 'artifacts:read' || permission === 'artifacts:write';
   h.failProvider = false;
+  h.templateVersion = 5;
+  h.templatePurpose = 'marketing_email';
+  h.templateSubject = 'Weekly Signal #43';
+  h.holdSegment = false;
+  h.releaseSegment = null;
   invalidateArtifact(tpl);
   invalidateArtifact(tplDraft);
   invalidateArtifact(seg);
@@ -598,8 +622,58 @@ describe('composer component (#497)', () => {
     await waitFor(() => expect(calls('system.status')).toHaveLength(2));
     expect(calls('sendingDomains.list')).toHaveLength(2);
     expect(calls('purposes.list')).toHaveLength(2);
-    // Refreshing checks does not re-read the selected template, its live version or the segment.
-    expect(calls('artifacts.get')).toHaveLength(3);
+    // Refreshing checks re-reads the template and its exact live version, never the segment (#582).
+    await waitFor(() => expect(calls('artifacts.get')).toHaveLength(5));
+    expect(gets.filter((call) => (call.input as { artifactId?: string }).artifactId === seg)).toHaveLength(1);
+  });
+
+  it('picks up a republished template and follows it in the preview (#582)', async () => {
+    render(<Harness />);
+    expect((await screen.findByText('Published v5')).closest('[data-preview-source]')?.textContent).toContain('template');
+    const consentRow = (await screen.findByText('Consent purpose')).closest('[data-check]') as HTMLElement;
+    await waitFor(() => expect(within(consentRow).getByText(/Marketing e-mail/)).toBeTruthy());
+
+    // Another tab republishes the template as v6 with another purpose and subject.
+    h.templateVersion = 6;
+    h.templatePurpose = 'onboarding';
+    h.templateSubject = 'Service notice';
+    act(() => invalidateArtifact(tpl));
+
+    await waitFor(() => expect(calls('artifacts.get').some((call) => (call.input as { version?: number }).version === 6)).toBe(true));
+    expect((await screen.findByText('Published v6')).closest('[data-preview-source]')?.textContent).toContain('template');
+    await waitFor(() => expect(within(consentRow).getByText(/Service messages/)).toBeTruthy());
+    expect(await screen.findByText('Service notice')).toBeTruthy();
+    const templateRow = screen.getByText('Template live').closest('[data-check]') as HTMLElement;
+    expect(within(templateRow).getByText(/Live v6/)).toBeTruthy();
+  });
+
+  it('re-reads the template on Refresh checks even when the publication pointer has not moved (#582)', async () => {
+    render(<Harness />);
+    await waitFor(() => expect(calls('artifacts.get')).toHaveLength(3));
+    const before = calls('artifacts.get').filter((call) => (call.input as { artifactId?: string }).artifactId === tpl).length;
+    expect(before).toBe(2);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh checks' }));
+    await waitFor(() =>
+      expect(calls('artifacts.get').filter((call) => (call.input as { artifactId?: string }).artifactId === tpl).length).toBe(4),
+    );
+  });
+
+  it('shows a neutral placeholder while the segment is loading and Unavailable only after it fails (#585)', async () => {
+    h.holdSegment = true;
+    const { unmount } = render(<Harness />);
+    expect((await screen.findByText('Template live')).closest('[data-check]')).toBeTruthy();
+    expect(screen.queryByText('Unavailable reference')).toBeNull();
+    expect(screen.getByText('Segment…')).toBeTruthy();
+
+    h.holdSegment = false;
+    await waitFor(() => expect(h.releaseSegment).toBeTruthy());
+    act(() => h.releaseSegment?.());
+    expect(await screen.findByText('Engaged readers')).toBeTruthy();
+
+    unmount();
+    render(<Harness initial={content({ segment: `seg_${'f'.repeat(32)}` })} />);
+    expect(await screen.findByText('Unavailable reference')).toBeTruthy();
   });
 
   it('shows the save-required and empty states without inventing a number', async () => {

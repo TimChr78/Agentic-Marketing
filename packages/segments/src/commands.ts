@@ -6,7 +6,7 @@ import { personCrypto } from '@agentic-marketing/profiles';
 import { and, desc, eq, gt, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { audienceListCommands } from './audiences';
-import { contextFor, publishedSegments, publishInSlices, refreshSegment } from './membership';
+import { contextFor, type PublishedSegment, publishedSegments, publishInSlices, refreshSegment } from './membership';
 import { materialize } from './sql';
 
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
@@ -23,6 +23,38 @@ async function segmentContent(ctx: { tx: Tx }, artifactId: string, version?: num
   return artifactTypes.segment.content.parse(v.content);
 }
 
+/**
+ * The published versions a condition is resolved against, setting aside references that have no
+ * published version (they resolve to nobody). Walks through published definitions too: B may
+ * itself be built on C, and a change to either makes an old count stale (#599).
+ */
+export function resolvedSegmentVersions(condition: unknown, published: PublishedSegment[]) {
+  const byId = new Map(published.map((s) => [s.id, s]));
+  const seen = new Set<string>();
+  const found: { id: string; version: number }[] = [];
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      if (key !== 'segment' || typeof value !== 'string') {
+        visit(value);
+        continue;
+      }
+      if (seen.has(value)) continue;
+      seen.add(value);
+      const segment = byId.get(value);
+      if (!segment) continue;
+      found.push({ id: segment.id, version: segment.version });
+      if (segment.definition.condition) visit(segment.definition.condition);
+    }
+  };
+  visit(condition);
+  return found.sort((a, b) => a.id.localeCompare(b.id));
+}
+
 export const previewSegment = defineCommand({
   name: 'segments.preview',
   title: 'Preview a segment',
@@ -33,7 +65,14 @@ export const previewSegment = defineCommand({
     version: z.number().int().min(1).optional(),
     condition: segmentCondition.optional().describe('A condition to evaluate instead of a saved segment'),
   }),
-  output: z.object({ count: z.number().int(), sample: z.array(z.string()), tookMs: z.number().int() }),
+  output: z.object({
+    count: z.number().int(),
+    sample: z.array(z.string()),
+    tookMs: z.number().int(),
+    segments: z
+      .array(z.object({ id: SegmentId, version: z.number().int() }))
+      .describe('The published versions of the referenced segments this count was resolved against'),
+  }),
   permission: 'profiles:read',
   effect: 'read',
   // The sample is profile ids: pseudonymous, but they identify people in the workspace.
@@ -60,11 +99,13 @@ export const previewSegment = defineCommand({
         .where(eq(schema.segmentMemberships.segmentId, listSegment))
         .orderBy(schema.segmentMemberships.profileId)
         .limit(20);
-      return { count: row?.n ?? 0, sample: sample.map((r) => r.profileId), tookMs: Date.now() - started };
+      return { count: row?.n ?? 0, sample: sample.map((r) => r.profileId), tookMs: Date.now() - started, segments: [] };
     }
     if (!condition) throw new AppError('invalid_input', 'The segment has no condition.');
     // The previewed version stands in for its segment, so references back to it are checked too.
-    let segments = await publishedSegments(ctx.tx);
+    const published = await publishedSegments(ctx.tx);
+    const resolved = resolvedSegmentVersions(condition, published);
+    let segments = published;
     if (input.artifactId)
       segments = [
         ...segments.filter((s) => s.id !== input.artifactId),
@@ -79,7 +120,7 @@ export const previewSegment = defineCommand({
     );
     const members = await materialize(condition, evalCtx);
     const sample = await ctx.tx.execute<{ profile_id: string }>(sql.raw(`SELECT profile_id FROM ${members.table} LIMIT 20`));
-    return { count: members.size, sample: sample.rows.map((r) => r.profile_id), tookMs: Date.now() - started };
+    return { count: members.size, sample: sample.rows.map((r) => r.profile_id), tookMs: Date.now() - started, segments: resolved };
   },
 });
 
