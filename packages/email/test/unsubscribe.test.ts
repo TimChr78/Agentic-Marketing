@@ -17,6 +17,16 @@ const link = (attrs = '', text = 'Unsubscribe') => `<a href="${URL}"${attrs}>${t
 const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'missing' }[] = [
   // #775 and the 0.14.10 review: specificity decides before document order.
   {
+    name: 'a repeated id outweighs a tag-and-id rule (0.14.10 review round 2)',
+    html: `<html><head><style>a#footer{display:block} #footer#footer{display:none}</style></head><body><a id="footer" href="${URL}">Unsubscribe</a></body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a repeated id rule placed before a single-id rule still wins',
+    html: `<html><head><style>#footer#footer{display:none} #footer{display:block}</style></head><body><a id="footer" href="${URL}">Unsubscribe</a></body></html>`,
+    reason: 'hidden',
+  },
+  {
     name: 'an id rule hides the link despite a later class rule that shows it',
     html: `<html><head><style>#x{display:none} .u{display:block}</style></head><body><a id="x" class="u" href="${URL}">Unsubscribe</a></body></html>`,
     reason: 'hidden',
@@ -628,6 +638,11 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
       '<mj-text><svg width="12" height="12"><circle r="6" /></svg> <a href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>',
     );
     expect(await validateTemplate(t)).toEqual([]);
+  });
+
+  it('ignores a selector that names two different ids, which matches nothing', () => {
+    const html = `<html><head><style>#a#footer{display:none}</style></head><body><a id="footer" href="${URL}">Unsubscribe</a></body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
   });
 
   it('keeps a footer visible when a more specific rule gives it a dark colour (0.14.10 review)', () => {

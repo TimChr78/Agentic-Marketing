@@ -83,6 +83,8 @@ interface Candidate {
 interface HideSelector {
   tag: string | null;
   id: string | null;
+  /** How many times the id is named: `#a#a` counts twice toward specificity, as in CSS. */
+  idCount: number;
   classes: string[];
 }
 
@@ -424,7 +426,7 @@ function cascade(inline: Declaration | undefined, rule: RuleDecl | null): string
  * never overlap.
  */
 function specificity(selector: HideSelector): number {
-  return (selector.id !== null ? 10_000 : 0) + selector.classes.length * 100 + (selector.tag !== null ? 1 : 0);
+  return selector.idCount * 10_000 + selector.classes.length * 100 + (selector.tag !== null ? 1 : 0);
 }
 
 /**
@@ -473,7 +475,7 @@ function addRule(bucket: RuleBucket, rule: RuleDecl): void {
   const { tag, id, classes } = rule.selector;
   if (tag === null && id === null && classes.length === 1) {
     addToSlot(bucket.byClass, classes[0]!, rule);
-  } else if (tag === null && id !== null && classes.length === 0) {
+  } else if (tag === null && id !== null && rule.selector.idCount === 1 && classes.length === 0) {
     addToSlot(bucket.byId, id, rule);
   } else if (tag !== null && id === null && classes.length === 0) {
     addToSlot(bucket.byTag, tag, rule);
@@ -917,6 +919,7 @@ function parseSimpleSelector(raw: string): HideSelector | null {
   while (i < raw.length && raw[i] !== '.' && raw[i] !== '#') i++;
   const tag = i > 0 ? raw.slice(0, i).toLowerCase() : null;
   let id: string | null = null;
+  let idCount = 0;
   const classes: string[] = [];
   while (i < raw.length) {
     const kind = raw[i];
@@ -929,10 +932,18 @@ function parseSimpleSelector(raw: string): HideSelector | null {
       // past a few it is a stated limit, which keeps matching linear (review round 6).
       if (classes.length >= MAX_SELECTOR_CLASSES) return null;
       classes.push(name);
-    } else id = name;
+    } else {
+      // Two different ids can never match one element; skip the rule. A repeated id counts once
+      // per occurrence toward specificity (0.14.10 review round 2). Like many classes, more than
+      // MAX_SELECTOR_CLASSES repeats is a stated limit, so the weights in specificity() never overlap.
+      if (id !== null && id !== name) return null;
+      if (idCount >= MAX_SELECTOR_CLASSES) return null;
+      id = name;
+      idCount++;
+    }
     i = j;
   }
-  return { tag, id, classes };
+  return { tag, id, idCount, classes };
 }
 
 function stripCssComments(css: string): string {
