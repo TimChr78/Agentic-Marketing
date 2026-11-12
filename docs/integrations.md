@@ -59,7 +59,9 @@ const ok = sig.split(' ').includes(expected) && Math.abs(Date.now() / 1000 - ts)
 
 ## Inbound webhooks (connections)
 
-`connections.create` with a connector that receives webhooks returns a secret URL `/hooks/in/<connection>/<token>`, once. Its events go through the same tracking plan, personal-data rules and identity resolution as the Segment API.
+`connections.create` with a connector that receives webhooks returns a secret URL `/hooks/in/<connection>/<token>`, once. Its events are platform-produced, like a form submission or an import, so a workspace tracking plan does not reject them: a strict plan must not drop a Shopify order while the sender is told the delivery succeeded. Personal-data rules and identity resolution are the same as for the Segment API.
+
+**Replays.** A delivery is claimed while it is processed and remembered for ten minutes after it publishes. A Standard Webhooks delivery uses its signed `webhook-id`; every other inbound configuration (Shopify, Salesforce, `hmac-sha256` and an unsigned secret URL) derives the key from the connection and the raw body, because those schemes carry no replay-safe id header. Shopify and Salesforce also stamp stable per-record ids, so JetStream still drops a duplicate after a lost store key. A byte-identical replay is answered 200 as already received and publishes nothing, and a different body publishes again. For those schemes the dedupe window is that ten minutes, not a provider timestamp.
 
 | Connector | Receives | Actions |
 |---|---|---|

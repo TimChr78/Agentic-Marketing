@@ -104,6 +104,9 @@ export function smsRoutes(deps: Deps) {
                 proof: { via: `SMS ${match.keyword}`, provider: provider.id },
               })),
             );
+          // A STOP is the weakest suppression reason: DO NOTHING leaves a hard_bounce or complaint
+          // row in place, so a later START (which deletes only 'stop') cannot unsuppress it (#664,
+          // #750).
           await tx
             .insert(schema.suppressions)
             .values({ workspaceId: target.ws, channel: 'sms', valueHash: hash, reason: 'stop' })
