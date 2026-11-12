@@ -9,7 +9,7 @@
 // The generated block leaves one TODO for a person: breaking changes cannot be inferred from a
 // diff. --check fails while that TODO is still there, so it cannot reach a release by accident.
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build as buildChangelog, check as checkChangelog, splitSections } from '../changelog.mjs';
@@ -37,6 +37,25 @@ function git(cwd, args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
+/**
+ * Refuse a shallow clone before a release reads a tag range (#772). `git rev-list prev..vX` in a
+ * `--depth=1` clone stops at the graft boundary silently, so close-issues would skip issues and
+ * the migrations block would claim there are none. A non-git directory (a packaged tree) has no
+ * range to truncate and is left alone.
+ */
+export function assertCompleteHistory(root) {
+  let shallow;
+  try {
+    shallow = git(root, ['rev-parse', '--is-shallow-repository']);
+  } catch {
+    return;
+  }
+  if (shallow === 'true')
+    throw new Error(
+      'this is a shallow clone, so the commit range between tags is truncated (release commit lists, issues and migrations would be wrong); run `git fetch --unshallow --tags` and retry',
+    );
+}
+
 /** The environment keys in an env file, including commented examples. */
 export function envKeys(text) {
   const keys = new Set();
@@ -56,6 +75,7 @@ export function findPreviousVersion(changelog, exclude) {
 
 /** The migration files added since `previous`, from the tag to HEAD. */
 export function migrationsSince(root, previous) {
+  assertCompleteHistory(root);
   let files;
   try {
     files = git(root, ['diff', '--name-only', '--diff-filter=A', `v${previous}..HEAD`, '--', 'packages/db/migrations']);
@@ -93,6 +113,52 @@ export function renderUpgradeBlock({ previous, version, migrations = [], envVars
     '- **Manual steps:** none.',
     `- **Upgrade:** download \`agentic-marketing-compose-${version}.tar.gz\`, replace \`docker-compose.yml\` with its copy, check configuration with \`AM_VERSION=${version} docker compose run --rm --no-deps -T app am doctor --env-file - < .env\`, set \`AM_VERSION=${version}\` in \`.env\`, then \`docker compose pull && docker compose up -d\` (Helm: chart ${version}). Run \`docker compose exec app am doctor\`.`,
   ].join('\n');
+}
+
+/**
+ * The prose status line on each architecture page that names the release the pages describe
+ * (#650, #784). They are version surfaces like the chart: prepare.mjs rewrites the captured
+ * number, check-versions.mjs compares it, so a page cannot pin an old release again.
+ */
+export const ARCHITECTURE_STATUS = [
+  ['docs/architecture/README.md', /^(> Status: \*\*0\.x — release )(\d+\.\d+\.\d+)(\.\*\*)/m],
+  ['docs/architecture/overview.md', /^(> Status: describes \*\*)(\d+\.\d+\.\d+)(\*\*\.)/m],
+  ['docs/architecture/roadmap.md', /(\bThe current release is )(\d+\.\d+\.\d+)(\.)/],
+];
+
+/** The release version each architecture status line names, or null when the line is missing. */
+export function architectureStatusVersions(root) {
+  return ARCHITECTURE_STATUS.map(([file, pattern]) => {
+    const path = join(root, file);
+    const match = existsSync(path) ? pattern.exec(read(path)) : null;
+    return { file, version: match?.[2] ?? null };
+  });
+}
+
+/** Architecture status lines that do not name `version`. */
+export function architectureStatusProblems(root, version) {
+  return architectureStatusVersions(root)
+    .filter((status) => status.version !== version)
+    .map(
+      (status) =>
+        `${status.file} says ${status.version ?? 'no release'}, expected ${version}; run node scripts/release/prepare.mjs or update the status line`,
+    );
+}
+
+/**
+ * The durable handoff must name the release being cut in its "Now" state and must not describe it
+ * as unfinished (#607, #785). Only those lines are checked: the rest of the file is prose.
+ */
+export const STATUS_FILE = 'docs/status/current.md';
+
+export function statusProblems(status, version) {
+  if (typeof status !== 'string') return [`${STATUS_FILE} is missing`];
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!new RegExp(`\\*\\*${escaped}\\*\\*`).test(status))
+    return [`${STATUS_FILE} does not name **${version}** in its "Now" state; update it before the release`];
+  if (new RegExp(`\\*\\*${escaped}\\*\\*[^\\n]*\\bis being\\b`, 'i').test(status))
+    return [`${STATUS_FILE} still says ${version} is being released; mark it released before the release`];
+  return [];
 }
 
 /** Bump every surface check-versions.mjs knows, plus the README's version default and release line. */
@@ -133,6 +199,19 @@ export function bumpVersions(root, version) {
     .replace(/current release is the \*\*[^*]+\*\* line/, `current release is the **${line}** line`);
   write(readmePath, next);
   changes.push('README.md');
+
+  // The architecture pages say which release they describe. Bumping them here is what keeps them
+  // from pinning an old release between releases (#784); check-versions.mjs checks the result.
+  for (const [file, pattern] of ARCHITECTURE_STATUS) {
+    const path = join(root, file);
+    const source = read(path);
+    if (!pattern.test(source)) throw new Error(`${file} has no architecture status line to bump`);
+    write(
+      path,
+      source.replace(pattern, (_match, before, _old, after) => `${before}${version}${after}`),
+    );
+    changes.push(file);
+  }
   return changes;
 }
 
@@ -214,6 +293,8 @@ export function checkRelease({ root, version }) {
   }
   const missing = missingEnvHistory(root);
   if (missing.length) errors.push(`ENV_SINCE is missing ${missing.join(', ')}; run prepare.mjs again or add them by hand`);
+  const statusPath = join(root, STATUS_FILE);
+  errors.push(...statusProblems(existsSync(statusPath) ? read(statusPath) : null, version));
   const fragments = checkChangelog(join(root, 'changelog.d'));
   errors.push(...fragments.errors);
   return errors;
@@ -247,6 +328,8 @@ function parseArgs(argv) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     const options = parseArgs(process.argv.slice(2));
+    // A shallow clone truncates every tag range silently; refuse before a release reads one (#772).
+    assertCompleteHistory(root);
     if (options.check) {
       runCheckVersions(root, options.version);
       const errors = checkRelease({ root, version: options.version });

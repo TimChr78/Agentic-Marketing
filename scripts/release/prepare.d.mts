@@ -1,9 +1,15 @@
 /** Types for prepare.mjs, so the release-tooling tests can import it. */
 export function envKeys(text: string): Set<string>;
+export function assertCompleteHistory(root: string): void;
 export function findPreviousVersion(changelog: string, exclude?: string): string | null;
 export function migrationsSince(root: string, previous: string): string[];
 export function envVarsSince(root: string, previous: string): string[];
 export function renderUpgradeBlock(options: { previous: string; version: string; migrations?: string[]; envVars?: string[] }): string;
+export const ARCHITECTURE_STATUS: [string, RegExp][];
+export function architectureStatusVersions(root: string): { file: string; version: string | null }[];
+export function architectureStatusProblems(root: string, version: string): string[];
+export const STATUS_FILE: string;
+export function statusProblems(status: string | null | undefined, version: string): string[];
 export function bumpVersions(root: string, version: string): string[];
 export function missingEnvHistory(root: string): string[];
 export function updateEnvHistory(root: string, version: string): string[];

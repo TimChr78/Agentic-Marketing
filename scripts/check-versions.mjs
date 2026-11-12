@@ -8,6 +8,7 @@
 // A version bump edits exactly the files listed in SURFACES; CHANGELOG.md needs a section too.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { architectureStatusVersions } from './release/prepare.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const read = (path) => readFileSync(root + path, 'utf8');
@@ -29,6 +30,12 @@ export const SURFACES = [
     'README.md release line',
     (v) => (read('README.md').includes(`current release is the **${v.split('.').slice(0, 2).join('.')}** line`) ? v : 'wrong release line'),
   ],
+  // The architecture pages state which release they describe; a stale pin is a false claim about
+  // what the pages cover (#650, #784). prepare.mjs rewrites these lines with the version bump.
+  ...['docs/architecture/README.md', 'docs/architecture/overview.md', 'docs/architecture/roadmap.md'].map((file) => [
+    `${file} status`,
+    () => architectureStatusVersions(root).find((status) => status.file === file)?.version ?? 'not found',
+  ]),
   [
     'CHANGELOG.md section',
     (v) =>

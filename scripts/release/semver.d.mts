@@ -2,3 +2,4 @@
 export const SEMVER: RegExp;
 export function isSemver(value: unknown): boolean;
 export function normalizeVersion(value: unknown): string | null;
+export function releaseLine(version: string | null | undefined): string | null;

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { releaseNotesErrors, topReleaseVersion } from '../../../scripts/release/check-notes.mjs';
 import {
+  commitsInRange,
   issuesForRelease,
   parseCloses,
   parseIssuesComment,
@@ -15,8 +16,12 @@ import {
   resolvePreviousTag,
   selectReleasePullRequests,
 } from '../../../scripts/release/close-issues.mjs';
+import { imageTagSpec, isNewestInLine, parseTags } from '../../../scripts/release/image-tags.mjs';
 import { missingPlatforms, platforms } from '../../../scripts/release/manifest-platforms.mjs';
 import {
+  architectureStatusProblems,
+  architectureStatusVersions,
+  assertCompleteHistory,
   bumpVersions,
   checkRelease,
   envKeys,
@@ -24,12 +29,13 @@ import {
   migrationsSince,
   missingEnvHistory,
   renderUpgradeBlock,
+  statusProblems,
   updateEnvHistory,
   upgradeBlockOf,
   validateUpgradeBlock,
 } from '../../../scripts/release/prepare.mjs';
 import { assetProblems, expectedAssets } from '../../../scripts/release/release-assets.mjs';
-import { isSemver, normalizeVersion } from '../../../scripts/release/semver.mjs';
+import { isSemver, normalizeVersion, releaseLine } from '../../../scripts/release/semver.mjs';
 
 // The release helpers (#521): the generated upgrade block, the version bump and the env-history
 // source the test reads. Pure filesystem tests in the docs project.
@@ -67,6 +73,9 @@ function versionFixture() {
   put(root, '.env.example', 'AM_VERSION=0.12.0\n');
   put(root, 'docker-compose.yml', `image: ghcr.io/timchr78/agentic-marketing:\${AM_VERSION:-0.12.0}\n`);
   put(root, 'README.md', '`AM_VERSION` (default `0.12.0`) selects the image. The current release is the **0.12** line.\n');
+  put(root, 'docs/architecture/README.md', '> Status: **0.x — release 0.12.0.** Waves 1–3 are built.\n');
+  put(root, 'docs/architecture/overview.md', '> Status: describes **0.12.0**. Waves 1–3 are built.\n');
+  put(root, 'docs/architecture/roadmap.md', 'Phases shipped. The current release is 0.12.0. The table is history.\n');
   return root;
 }
 
@@ -123,9 +132,30 @@ describe('the version bump', () => {
     expect(readFileSync(join(root, 'docker-compose.yml'), 'utf8')).toContain(`\${AM_VERSION:-0.13.0}`);
     expect(readFileSync(join(root, 'README.md'), 'utf8')).toContain('`AM_VERSION` (default `0.13.0`)');
     expect(readFileSync(join(root, 'README.md'), 'utf8')).toContain('current release is the **0.13** line');
+    // The architecture status lines are version surfaces too, so they cannot pin an old release
+    // between releases (#784).
+    expect(architectureStatusVersions(root).map((status) => status.version)).toEqual(['0.13.0', '0.13.0', '0.13.0']);
+    expect(architectureStatusProblems(root, '0.13.0')).toEqual([]);
 
     // Running it again is harmless, so a retried release does not change a second time.
     expect(bumpVersions(root, '0.13.0').length).toBe(changes.length);
+  });
+});
+
+describe('the architecture status lines (#784)', () => {
+  it('fail a check when a page names an older release, and pass after the bump', () => {
+    const root = versionFixture();
+    expect(architectureStatusProblems(root, '0.12.0')).toEqual([]);
+    const stale = architectureStatusProblems(root, '0.13.0');
+    expect(stale).toHaveLength(3);
+    expect(stale[0]).toMatch(/docs\/architecture\/README\.md says 0\.12\.0, expected 0\.13\.0/);
+
+    bumpVersions(root, '0.13.0');
+    expect(architectureStatusProblems(root, '0.13.0')).toEqual([]);
+
+    // A reworded page loses its status line; that must fail rather than pass silently.
+    put(root, 'docs/architecture/overview.md', '> Status: rewritten without a release number.\n');
+    expect(architectureStatusProblems(root, '0.13.0')[0]).toMatch(/overview\.md says no release/);
   });
 });
 
@@ -163,12 +193,57 @@ describe('the release check', () => {
       "export const ENV_SINCE: Record<string, string> = {\n  AUTH_SECRET: '0.1.0',\n  AM_VERSION: '0.1.1',\n};\n",
     );
     put(root, '.env.example', 'AUTH_SECRET=\nAM_VERSION=0.13.0\n');
+    put(root, 'docs/status/current.md', '- **0.13.0** (release tooling) is released and verified.\n');
     const changelog = (breaking: string) =>
       `## [0.13.0] - 2026-11-08\n\n### Added\n\n- New.\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Configuration:** no new environment variables.\n- **Breaking changes:** ${breaking}\n- **Manual steps:** none.\n- **Upgrade:** pull.\n`;
     put(root, 'CHANGELOG.md', changelog('TODO: fill this in.'));
     expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/still contains TODO/);
     put(root, 'CHANGELOG.md', changelog('none.'));
     expect(checkRelease({ root, version: '0.13.0' })).toEqual([]);
+  });
+
+  it('requires the handoff to name the release being cut (#785)', () => {
+    const root = temp();
+    put(
+      root,
+      'apps/server/src/ops/env-history.ts',
+      "export const ENV_SINCE: Record<string, string> = {\n  AUTH_SECRET: '0.1.0',\n  AM_VERSION: '0.1.1',\n};\n",
+    );
+    put(root, '.env.example', 'AUTH_SECRET=\nAM_VERSION=0.13.0\n');
+    put(
+      root,
+      'CHANGELOG.md',
+      '## [0.13.0] - 2026-11-08\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Configuration:** no new environment variables.\n- **Breaking changes:** none.\n- **Manual steps:** none.\n- **Upgrade:** pull.\n',
+    );
+
+    expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/docs\/status\/current\.md is missing/);
+    put(root, 'docs/status/current.md', '- **0.12.0** (previous) is released and verified.\n');
+    expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/does not name \*\*0\.13\.0\*\*/);
+    put(root, 'docs/status/current.md', '- **0.13.0** (release tooling) is being released.\n');
+    expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/still says 0\.13\.0 is being released/);
+    put(root, 'docs/status/current.md', '- **0.13.0** (release tooling) is released and verified.\n');
+    expect(checkRelease({ root, version: '0.13.0' })).toEqual([]);
+  });
+});
+
+describe('the release handoff gate (#785)', () => {
+  it('reads the status file, not just the changelog', () => {
+    const status = '- **0.14.8** (alerts) is released and verified.\n- The last release is v0.14.8.\n';
+    expect(statusProblems(status, '0.14.8')).toEqual([]);
+    expect(statusProblems(status, '0.14.9')[0]).toMatch(/does not name \*\*0\.14\.9\*\*/);
+    expect(statusProblems('- **0.14.8** (alerts) is being released.\n', '0.14.8')[0]).toMatch(/still says 0\.14\.8 is being released/);
+    expect(statusProblems(null, '0.14.8')[0]).toMatch(/is missing/);
+  });
+
+  it('fails the release-notes gate the workflow runs, before publishing', () => {
+    const changelog =
+      '## [0.13.0] - 2026-11-08\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Configuration:** no new environment variables.\n- **Breaking changes:** none.\n- **Manual steps:** none.\n- **Upgrade:** pull.\n';
+    expect(releaseNotesErrors({ changelog, version: '0.13.0', status: '**0.13.0** is released.\n' })).toEqual([]);
+    expect(releaseNotesErrors({ changelog, version: '0.13.0', status: '**0.13.0** is being released.\n' })).toEqual([
+      'docs/status/current.md still says 0.13.0 is being released; mark it released before the release',
+    ]);
+    // Without a status argument the changelog-only tests keep working.
+    expect(releaseNotesErrors({ changelog, version: '0.13.0' })).toEqual([]);
   });
 });
 
@@ -353,6 +428,76 @@ describe('migrationsSince (#604)', () => {
   });
 });
 
+describe('shallow clones (#772)', () => {
+  /** A repository with two tags and commits between them. */
+  function historyRepo(): string {
+    const dir = temp();
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'release@example.com');
+    git('config', 'user.name', 'Release Test');
+    git('config', 'commit.gpgsign', 'false');
+    put(dir, 'packages/db/migrations/0001_base.sql', 'select 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    git('tag', 'v0.12.0');
+    put(dir, 'packages/db/migrations/0002_new.sql', 'select 2;\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'one');
+    put(dir, 'README.md', 'release\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'two');
+    git('tag', 'v0.12.1');
+    return dir;
+  }
+
+  it('refuses a shallow clone instead of silently truncating the tag range', () => {
+    const origin = historyRepo();
+    const clone = temp();
+    // file:// forces the smart protocol, which honours --depth (a plain path does not).
+    execFileSync('git', ['clone', '--quiet', '--depth=1', `file://${origin}`, clone]);
+    execFileSync('git', ['fetch', '--quiet', '--tags', '--force'], { cwd: clone });
+
+    // Both release scripts read a tag range: prepare for migrations, close-issues for the
+    // release's commit list. Both must refuse before the truncated answer reaches the changelog.
+    expect(() => assertCompleteHistory(clone)).toThrow(/shallow clone[\s\S]*--unshallow/);
+    expect(() => migrationsSince(clone, '0.12.0')).toThrow(/shallow clone/);
+    expect(() => commitsInRange(clone, 'v0.12.0', '0.12.1')).toThrow(/shallow clone/);
+
+    // A complete clone has the history, so the same calls work there.
+    expect(assertCompleteHistory(origin)).toBeUndefined();
+    expect(commitsInRange(origin, 'v0.12.0', '0.12.1')).toHaveLength(2);
+    expect(migrationsSince(origin, '0.12.0')).toEqual(['packages/db/migrations/0002_new.sql']);
+  });
+});
+
+describe('the floating major.minor image tag (#773)', () => {
+  it('moves only for the newest release in its line', () => {
+    const spec = (version: string, tags: string[]) => imageTagSpec(version, tags);
+    expect(spec('0.14.8', ['v0.14.5', 'v0.14.8'])).toContain('type=semver,pattern={{major}}.{{minor}}');
+    // An older patch finishing later must not move :0.14 backwards.
+    expect(spec('0.14.5', ['v0.14.5', 'v0.14.8'])).toBe('type=semver,pattern={{version}},value=0.14.5');
+    // Another line never blocks, and this version's own tag (a tag push) is not "newer".
+    expect(spec('0.14.9', ['v0.14.9', 'v0.15.0'])).toContain('{{major}}.{{minor}}');
+    expect(spec('0.14.9', ['v0.14.9', 'v0.14.10'])).not.toContain('{{major}}.{{minor}}');
+    // A prerelease is older than its release in semver order.
+    expect(spec('0.14.9-rc.1', ['v0.14.9'])).not.toContain('{{major}}.{{minor}}');
+    expect(isNewestInLine('0.14.10', ['v0.14.9', 'v0.14.2'])).toBe(true);
+    expect(isNewestInLine('0.14.2', ['v0.14.10'])).toBe(false);
+  });
+
+  it('publishes the exact tag alone when the line cannot be read', () => {
+    expect(imageTagSpec('0.14.9', [], { exactOnly: true })).toBe('type=semver,pattern={{version}},value=0.14.9');
+    expect(parseTags('# comment\nv0.14.1\n\nv0.14.2\n')).toEqual(['v0.14.1', 'v0.14.2']);
+  });
+
+  it('derives the line from the version for the concurrency group', () => {
+    expect(releaseLine('0.14.8')).toBe('0.14');
+    expect(releaseLine('0.15.0-rc.1')).toBe('0.15');
+    expect(releaseLine('10.20.30')).toBe('10.20');
+  });
+});
+
 describe('the release version check (#671)', () => {
   it('accepts every SemVer 2.0.0 form the release uses', () => {
     for (const version of ['0.14.10', '1.0.0-rc.1', '1.0.0+build.5', '1.0.0-rc.1+build.5', '0.0.0', '10.20.30']) {
@@ -420,10 +565,25 @@ describe('the release workflow concurrency (#648)', () => {
     return next < 0 ? body : body.slice(0, next);
   };
 
-  it('keys one job-level group on the normalised version instead of the raw trigger input', () => {
-    expect(job('release')).toMatch(/concurrency:\n\s+group: release-v\$\{\{ needs\.prepare\.outputs\.version \}\}/);
+  it('keys one job-level group on the release line instead of the raw trigger input', () => {
+    // A line, not a version: every patch publishes the same floating :X.Y image tag (#773).
+    expect(job('release')).toMatch(/concurrency:\n\s+group: release-v\$\{\{ needs\.prepare\.outputs\.line \}\}/);
+    expect(job('release')).toMatch(/cancel-in-progress: false/);
     expect(workflow).not.toMatch(/group: release-\$\{\{ inputs\.version \|\| github\.ref_name \}\}/);
     expect(workflow).not.toMatch(/^concurrency:/m);
+    // The prepare job derives that line with the tested semver helper, not a bash expression.
+    expect(job('prepare')).toMatch(/semver\.mjs "\$raw" --line/);
+    expect(job('prepare')).toMatch(
+      /outputs:\n\s+version: \$\{\{ steps\.version\.outputs\.version \}\}\n\s+line: \$\{\{ steps\.version\.outputs\.line \}\}/,
+    );
+  });
+
+  it('guards the floating tag with the tested image-tags script', () => {
+    expect(job('release')).toContain('scripts/release/image-tags.mjs');
+    expect(job('release')).toMatch(/matching-refs\/tags\/v\$\{LINE\}\./);
+    expect(job('release')).toMatch(/tags: \$\{\{ steps\.tags\.outputs\.spec \}\}/);
+    // The old static tag list let every patch move the line tag.
+    expect(job('release')).not.toMatch(/tags: \|\n\s+type=semver,pattern=\{\{version\}\}/);
   });
 
   it('normalises a leading v for both a tag push and a manual run in one place', () => {
