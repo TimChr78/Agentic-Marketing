@@ -352,12 +352,16 @@ interface SummaryWindow {
 /**
  * The explicit window is used as given. The documented default (campaign start → now) is clamped
  * to the metric layer's cap, because the query layer rejects a longer range before it measures
- * (#588); a campaign with no start date gets the last 400 days instead of the epoch.
+ * (#588); a campaign with no start date gets the last 400 days instead of the epoch. When that
+ * default `from` falls after `to`, the period holds no sends: return an empty window so the caller
+ * answers with readiness or zeros instead of a reversed-window error (#747).
  */
 export function summaryWindow(
   input: { from?: string; to?: string; startsAt: string | null },
   now: string,
-  options: { allowFutureStart?: boolean } = {},
+  // Kept for callers that still pass it; a start after `to` now always yields an empty window
+  // (#747). Readiness is decided from the campaign, not from this hint.
+  _options: { allowFutureStart?: boolean } = {},
 ): SummaryWindow {
   const to = input.to ?? now;
   const reversed = () =>
@@ -373,10 +377,11 @@ export function summaryWindow(
   const clamped = Date.parse(start) < Date.parse(earliest);
   const from = clamped ? earliest : start;
   if (Date.parse(from) > Date.parse(to)) {
-    // A campaign that has not started yet may have a start after now; readiness is the answer,
-    // not a window error (#588). The explicit from > to rejection above still applies.
-    if (options.allowFutureStart) return { from: to, to, clamped: false };
-    throw reversed();
+    // The campaign's start (or its clamped default) is after the requested `to`, so the period
+    // holds no sends even when the campaign has sent later. Return an empty window so the summary
+    // answers with readiness or zeros rather than a reversed-window error (#588, #747). This does
+    // not depend on hasSent, and the explicit from > to rejection above still applies.
+    return { from: to, to, clamped: false };
   }
   return { from, to, clamped };
 }
@@ -406,9 +411,15 @@ export const analyticsCampaignSummary = defineCommand({
 
     const sending = sendingMembers(record);
     const memberIds = sending.map((m) => m.artifactId);
+    const windowTo = input.to ?? now;
     // Readiness decides the response before the default window is built: a campaign that starts
-    // after now must return not_started, not a reversed-window error (#588).
-    const notStarted = !record.published || !sending.length || !(await hasSent(deps, memberIds));
+    // after the requested `to` (or after now) has no sends in that period, even when it has sent
+    // later. Readiness answers instead of a reversed-window error (#588, #747).
+    const notStarted =
+      !record.published ||
+      !sending.length ||
+      (record.startsAt !== null && Date.parse(record.startsAt) >= Date.parse(windowTo)) ||
+      !(await hasSent(deps, memberIds));
     const window = summaryWindow({ from: input.from, to: input.to, startsAt: record.startsAt }, now, {
       allowFutureStart: notStarted,
     });

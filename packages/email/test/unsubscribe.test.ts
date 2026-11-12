@@ -155,6 +155,88 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
     html: `<html><head><style>.a { display: block; } .b { display: none; }</style></head><body>${link(' class="a b"')}</body></html>`,
     reason: 'hidden',
   },
+  // #746: opacity, font-size and colour rules are applied through the same cascade as display and
+  // background, with the same tag/class/id selector support.
+  {
+    name: 'a class rule with opacity:0',
+    html: `<html><head><style>.h { opacity: 0; }</style></head><body>${link(' class="h"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'an id rule with opacity:0',
+    html: `<html><head><style>#h { opacity: 0; }</style></head><body>${link(' id="h"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a tag rule with opacity:0',
+    html: `<html><head><style>a { opacity: 0; }</style></head><body>${link()}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a class rule with font-size:0',
+    html: `<html><head><style>.h { font-size: 0; }</style></head><body>${link(' class="h"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'an id rule with font-size:0',
+    html: `<html><head><style>#h { font-size: 0; }</style></head><body>${link(' id="h"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a tag rule with font-size:0',
+    html: `<html><head><style>a { font-size: 0; }</style></head><body>${link()}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a class rule with colour:transparent',
+    html: `<html><head><style>.h { color: transparent; }</style></head><body>${link(' class="h"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'an id rule with colour:transparent',
+    html: `<html><head><style>#h { color: transparent; }</style></head><body>${link(' id="h"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a tag rule with colour:transparent',
+    html: `<html><head><style>a { color: transparent; }</style></head><body>${link()}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a class rule with white text and a white background',
+    html: `<html><head><style>.h { color: white; background: white; }</style></head><body>${link(' class="h"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'an important opacity rule over an inline opacity:1',
+    html: `<html><head><style>.h { opacity: 0 !important; }</style></head><body>${link(' class="h" style="opacity:1"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'an important font-size rule over an inline font size',
+    html: `<html><head><style>.h { font-size: 0 !important; }</style></head><body>${link(' class="h" style="font-size:13px"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'an important colour rule over an inline colour',
+    html: `<html><head><style>.h { color: transparent !important; }</style></head><body>${link(' class="h" style="color:#111827"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'an important opacity hide over a later normal unhide',
+    html: `<html><head><style>.a { opacity: 0 !important; } .b { opacity: 1; }</style></head><body>${link(' class="a b"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'an important font-size hide then a later normal declaration in the same rule',
+    html: `<html><head><style>.h { font-size: 0 !important; font-size: 13px; }</style></head><body>${link(' class="h"')}</body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a later normal colour rule that hides',
+    html: `<html><head><style>.a { color: #111827; } .b { color: transparent; }</style></head><body>${link(' class="a b"')}</body></html>`,
+    reason: 'hidden',
+  },
 ];
 
 describe('the unsubscribe link must be visible and clickable (#637 review)', () => {
@@ -191,6 +273,49 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
 
   it('accepts the later of two simple rules', () => {
     const html = `<html><head><style>.a { display: none; } .b { display: block; }</style></head><body>${link(' class="a b"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  // #746: the same cascade applies to opacity, font-size and colour rules. An inline declaration
+  // beats a normal rule, an inline !important beats an important rule, and a later normal
+  // declaration wins inside a rule.
+  it('accepts an inline opacity:1 over a normal opacity rule', () => {
+    const html = `<html><head><style>.h { opacity: 0; }</style></head><body>${link(' class="h" style="opacity:1"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  it('accepts an inline font size over a normal font-size:0 rule', () => {
+    const html = `<html><head><style>.h { font-size: 0; }</style></head><body>${link(' class="h" style="font-size:13px"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  it('accepts an inline colour over a normal transparent colour rule', () => {
+    const html = `<html><head><style>.h { color: transparent; }</style></head><body>${link(' class="h" style="color:#111827"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  it('accepts an inline !important over an important hiding rule', () => {
+    const html = `<html><head><style>.h { opacity: 0 !important; }</style></head><body>${link(' class="h" style="opacity:1 !important"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  it('accepts an opacity rule that a later normal rule overrides', () => {
+    const html = `<html><head><style>.a { opacity: 0; } .b { opacity: 1; }</style></head><body>${link(' class="a b"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  it('accepts the later normal declaration inside one opacity rule', () => {
+    const html = `<html><head><style>.h { opacity: 0; opacity: 1; }</style></head><body>${link(' class="h"')}</body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  it('accepts a zero font-size rule on the anchor when the text resets it', () => {
+    const html = `<html><head><style>.h { font-size: 0; }</style></head><body><a class="h" href="${URL}"><span style="font-size:13px">Unsubscribe</span></a></body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+  });
+
+  it('accepts a white colour rule on a black background', () => {
+    const html = `<html><head><style>.h { color: white; }</style></head><body><div style="background:#000">${link(' class="h"')}</div></body></html>`;
     expect(unsubscribeLinkProblem(html, URL)).toBeNull();
   });
 
@@ -337,6 +462,31 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
         const selectors = Array.from({ length: n }, (_, i) => `.x${i}`).join(',');
         const divs = Array.from({ length: n }, (_, i) => `<div class="x${i}">x</div>`).join('');
         return `<html><head><style>${selectors}{background:linear-gradient(${'red,'.repeat(n)}blue) #fff}</style></head><body>${divs}<a href="${URL}">Unsubscribe</a></body></html>`;
+      },
+      (html) => unsubscribeLinkProblem(html, URL),
+      2_000,
+    );
+  });
+
+  it('stays linear for many opacity, font-size and colour rules and many elements (#746)', () => {
+    // Each rule's value is long and matches many elements: parsing it per element would be
+    // quadratic. The value is parsed once per declaration, like backgrounds since review round 7.
+    expectLinear(
+      (n) => {
+        const value = `0.${'0'.repeat(n)}`;
+        const style = `.o{opacity:${value}}.f{font-size:${value}em}.c{color:rgb(${value},0,0)}`;
+        return `<html><head><style>${style}</style></head><body>${'<div class="o f c">x</div>'.repeat(n)}<a href="${URL}">Unsubscribe</a></body></html>`;
+      },
+      (html) => unsubscribeLinkProblem(html, URL),
+      2_000,
+    );
+    // Many distinct rules and many elements: matching each new bucket stays a map lookup per
+    // class, and the three declarations are parsed once per rule.
+    expectLinear(
+      (n) => {
+        const style = Array.from({ length: n }, (_, i) => `.x${i}{opacity:1;font-size:13px;color:#111827}`).join('');
+        const divs = Array.from({ length: n }, (_, i) => `<div class="x${i}">x</div>`).join('');
+        return `<html><head><style>${style}</style></head><body>${divs}<a href="${URL}">Unsubscribe</a></body></html>`;
       },
       (html) => unsubscribeLinkProblem(html, URL),
       2_000,
@@ -509,6 +659,72 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
     const t = template(
       '<mj-text><a class="footer" style="display:block" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>',
       '<mj-style>.footer { display: none; }</mj-style>',
+    );
+    await expect(validateTemplate(t)).resolves.toEqual([]);
+    await expect(emailPublishProblems(t, { marketing: true })).resolves.toEqual([]);
+  });
+
+  // #746: a simple <style> rule that hides by opacity, font-size or colour is refused at save and
+  // at publish, for tag, class and id selectors.
+  const ruleHides: { name: string; css: string; attrs: string }[] = [
+    { name: 'a class opacity rule', css: '.h { opacity: 0; }', attrs: ' class="h"' },
+    { name: 'an id opacity rule', css: '#h { opacity: 0; }', attrs: ' id="h"' },
+    { name: 'a tag opacity rule', css: 'a { opacity: 0; }', attrs: '' },
+    { name: 'a class font-size rule', css: '.h { font-size: 0; }', attrs: ' class="h"' },
+    { name: 'an id font-size rule', css: '#h { font-size: 0; }', attrs: ' id="h"' },
+    { name: 'a tag font-size rule', css: 'a { font-size: 0; }', attrs: '' },
+    { name: 'a class colour rule', css: '.h { color: transparent; }', attrs: ' class="h"' },
+    { name: 'an id colour rule', css: '#h { color: transparent; }', attrs: ' id="h"' },
+    { name: 'a tag colour rule', css: 'a { color: transparent; }', attrs: '' },
+  ];
+
+  it.each(ruleHides)('rejects $name at save and at publish (#746)', async ({ css, attrs }) => {
+    const t = template(`<mj-text><a${attrs} href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>`, `<mj-style>${css}</mj-style>`);
+    expect((await validateTemplate(t)).join(' ')).toContain('hidden');
+    expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+  });
+
+  const importantHides: { name: string; rule: string; inline: string }[] = [
+    { name: 'opacity', rule: 'opacity: 0 !important', inline: 'opacity: 1' },
+    { name: 'font-size', rule: 'font-size: 0 !important', inline: 'font-size: 13px' },
+    { name: 'colour', rule: 'color: transparent !important', inline: 'color: #111827' },
+  ];
+
+  it.each(importantHides)(
+    'rejects an important $name rule over an inline value at save and at publish (#746)',
+    async ({ rule, inline }) => {
+      const t = template(
+        `<mj-text><a class="h" style="${inline}" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>`,
+        `<mj-style>.h { ${rule}; }</mj-style>`,
+      );
+      expect((await validateTemplate(t)).join(' ')).toContain('hidden');
+      expect((await emailPublishProblems(t, { marketing: true })).join(' ')).toContain('hidden');
+    },
+  );
+
+  it.each(importantHides)('accepts an inline $name over a normal rule at save and at publish (#746)', async ({ rule, inline }) => {
+    const normal = rule.replace(' !important', '');
+    const t = template(
+      `<mj-text><a class="h" style="${inline}" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>`,
+      `<mj-style>.h { ${normal}; }</mj-style>`,
+    );
+    await expect(validateTemplate(t)).resolves.toEqual([]);
+    await expect(emailPublishProblems(t, { marketing: true })).resolves.toEqual([]);
+  });
+
+  it('accepts a zero font-size rule when the text resets it at save and at publish (#746)', async () => {
+    const t = template(
+      '<mj-text><a class="h" href="{{ unsubscribe_url }}"><span style="font-size:13px">Unsubscribe</span></a></mj-text>',
+      '<mj-style>.h { font-size: 0; }</mj-style>',
+    );
+    await expect(validateTemplate(t)).resolves.toEqual([]);
+    await expect(emailPublishProblems(t, { marketing: true })).resolves.toEqual([]);
+  });
+
+  it('accepts a footer whose rules set visible opacity, font size and colour (#746)', async () => {
+    const t = template(
+      '<mj-text><a class="footer" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>',
+      '<mj-style>.footer { opacity: 1; font-size: 13px; color: #111827; }</mj-style>',
     );
     await expect(validateTemplate(t)).resolves.toEqual([]);
     await expect(emailPublishProblems(t, { marketing: true })).resolves.toEqual([]);
