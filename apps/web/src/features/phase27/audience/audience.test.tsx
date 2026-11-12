@@ -254,6 +254,8 @@ beforeEach(() => {
   };
   h.results = {
     method: 'sequential',
+    version: 2,
+    analysis: { method: 'sequential', alpha: 0.05, threshold: 0.95 },
     goal: 'Purchase',
     control: 'a',
     recommendation: 'Variant B is ahead.',
