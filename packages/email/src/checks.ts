@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
 import { Parser } from 'htmlparser2';
-import { type Rendered, type RenderOptions, type RenderVars, renderTemplate } from './render';
+import { type Rendered, type RenderOptions, type RenderVars, renderTemplate, unsubscribeUrlFor } from './render';
+import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
 
 // Pre-send checks (#90): a template can be valid MJML/Liquid and still fail in an inbox, so this
 // inspects the rendered e-mail (the same output the preview shows, with the sample data) for the
@@ -255,11 +256,15 @@ async function personalisedHrefs(t: EmailTemplate, vars: RenderVars, hrefs: stri
   return new Set(hrefs.filter((h, i) => h !== probe[i]));
 }
 
-function checkCompliance(t: EmailTemplate, opts: EmailCheckOptions, c: Collector) {
-  if (opts.marketing && !/unsubscribe_url/.test(t.mjml))
-    c.add('compliance', 'unsubscribe', 'blocking', 'A marketing e-mail must contain an unsubscribe link, and this one does not.', {
+function checkCompliance(t: EmailTemplate, opts: EmailCheckOptions, c: Collector, renderedHtml: string, unsubscribeUrl: string) {
+  // The gate promises a real unsubscribe link in the e-mail, not the variable name in the source
+  // (#637), and it must be a link a reader can see and click (review P2). `unsubscribeUrl` is the
+  // URL the send gateway puts in the visible link and in List-Unsubscribe / List-Unsubscribe-Post.
+  const problem = opts.marketing ? unsubscribeLinkProblem(renderedHtml, unsubscribeUrl) : null;
+  if (problem)
+    c.add('compliance', 'unsubscribe', 'blocking', unsubscribeProblemMessage(problem), {
       location: 'mjml',
-      fix: 'Add {{ unsubscribe_url }} to the footer, usually as an “Unsubscribe” link.',
+      fix: 'Make the footer link to {{ unsubscribe_url }} visible and give it text, e.g. an “Unsubscribe” link.',
     });
   // A physical address in the footer is a warning, but there is no workspace or brand field to
   // compare against, so there is nothing concrete to report; skip it rather than guess.
@@ -476,7 +481,7 @@ export async function checkEmailTemplate(t: EmailTemplate, opts: EmailCheckOptio
   const vars = { ...(t.sampleData ?? {}) } as RenderVars;
   const rendered = await renderTemplate(t, vars, opts.render);
   const c = new Collector();
-  checkCompliance(t, opts, c);
+  checkCompliance(t, opts, c, rendered.html, unsubscribeUrlFor(vars));
   const { links, images } = scanHtml(rendered.html);
   checkLinks(links, c);
   await checkImages(images, opts, c);

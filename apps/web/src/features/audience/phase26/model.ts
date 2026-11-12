@@ -105,6 +105,14 @@ export function purposeName(purposeKey: string, purposes: readonly Purpose[] | u
   return purposes?.find((p) => p.key === purposeKey)?.name ?? null;
 }
 
+export type EffectiveChannel = {
+  channel: string;
+  status: string | null;
+  allowed: boolean;
+};
+
+export type EffectiveConsent = PersonProfile['consentEffective'][number];
+
 export type PurposeRow = {
   key: string;
   name: string | null;
@@ -114,6 +122,8 @@ export type PurposeRow = {
   source: string | null;
   updatedAt: string | null;
   eligible: boolean | null;
+  /** The effective status per channel as the server computed it; empty for a list row. */
+  channels: EffectiveChannel[];
 };
 
 type ConsentEntry = {
@@ -128,19 +138,40 @@ type ConsentEntry = {
 /**
  * One row per purpose in force. The list read already returns every purpose with a null status
  * when the person recorded nothing; the detail read may only return recorded purposes, so the
- * purpose metadata fills the gap.
+ * purpose metadata fills the gap. The person detail passes the server's `consentEffective` so the
+ * page shows exactly what delivery decides — the per-channel rule included — instead of
+ * re-deriving precedence from unordered raw rows (#593).
  */
 export function purposeRows(
   consent: readonly ConsentEntry[],
   purposes: readonly Purpose[] | undefined,
-  _options: { includeUnrecorded?: boolean } = {},
+  options: { includeUnrecorded?: boolean; effective?: readonly EffectiveConsent[] } = {},
 ): PurposeRow[] {
-  const byKey = new Map(consent.map((c) => [c.purpose, c]));
-  const keys = purposes?.length ? purposes.map((p) => p.key) : consent.map((c) => c.purpose);
+  const byKey = new Map((options.effective ?? []).map((c) => [c.purpose, c]));
+  const byConsent = new Map(consent.map((c) => [c.purpose, c]));
+  const keys = purposes?.length
+    ? purposes.map((p) => p.key)
+    : (options.effective ?? []).length
+      ? (options.effective ?? []).map((c) => c.purpose)
+      : consent.map((c) => c.purpose);
+  for (const c of options.effective ?? []) if (!keys.includes(c.purpose)) keys.push(c.purpose);
   for (const c of consent) if (!keys.includes(c.purpose)) keys.push(c.purpose);
   return keys.map((key) => {
-    const entry = byKey.get(key);
     const meta = purposes?.find((p) => p.key === key);
+    const effective = byKey.get(key);
+    if (effective)
+      return {
+        key,
+        name: meta?.name ?? null,
+        basis: effective.basis,
+        channel: null,
+        status: effective.status,
+        source: null,
+        updatedAt: null,
+        eligible: effective.allowed,
+        channels: effective.channels,
+      };
+    const entry = byConsent.get(key);
     const basis = entry?.basis ?? meta?.basis ?? null;
     const status = entry?.status ?? null;
     return {
@@ -152,6 +183,7 @@ export function purposeRows(
       source: entry?.source ?? null,
       updatedAt: entry?.updatedAt ?? null,
       eligible: purposeAllowed(basis, status),
+      channels: [],
     };
   });
 }

@@ -40,6 +40,8 @@ export interface WebhookRequest {
 
 export interface AdapterDeps {
   fetch: typeof fetch;
+  /** Monotonic-ish clock in ms, for tests that must not sleep; defaults to `Date.now`. */
+  now?: () => number;
   /** HTTP/2 requests (Apple's push service only speaks HTTP/2), under the same egress guard. */
   http2?: (
     url: string,

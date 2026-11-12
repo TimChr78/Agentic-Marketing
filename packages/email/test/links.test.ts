@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { tagLinks, tagTextLinks, type Utm } from '../src/links';
+import { tagLinks, tagTextLinks, trackLinks, type Utm } from '../src/links';
 import { renderTemplate } from '../src/render';
 
 const utm: Utm = { source: 'newsletter', medium: 'email', campaign: 'welcome', domains: ['shop.example.com'] };
@@ -29,6 +29,45 @@ describe('UTM tags in the HTML and text parts', () => {
     expect(html).not.toContain('other.example.com/x?utm_');
     expect(text).not.toContain('other.example.com/x?utm_');
     expect(text).not.toContain(`${own}?utm_`);
+  });
+
+  // #638: MJML passes raw HTML inside mj-text through as written, so `<a href='…'>` and
+  // `<a href=…>` reached the sent e-mail untagged and untracked. Only the double-quoted form
+  // worked, because both rewriters matched the literal `href="`.
+  it('tags and tracks single-quoted and unquoted hrefs, and leaves double-quoted output unchanged', () => {
+    const wrap = (url: string) => `https://m.example.com/c/tok?u=${encodeURIComponent(url)}`;
+    const double = '<a href="https://shop.example.com/double">Double</a>';
+    const single = "<a href='https://shop.example.com/single'>Single</a>";
+    const bare = '<a href=https://shop.example.com/bare>Bare</a>';
+    const html = `${double}${single}${bare}`;
+
+    // Exactly what the previous double-quoted regex produced: byte for byte.
+    expect(tagLinks(double, utm, skip)).toBe(
+      '<a href="https://shop.example.com/double?utm_source=newsletter&amp;utm_medium=email&amp;utm_campaign=welcome">Double</a>',
+    );
+    expect(trackLinks(double, wrap, skip)).toBe(`<a href="${wrap('https://shop.example.com/double')}">Double</a>`);
+
+    const tagged = tagLinks(html, utm, skip);
+    expect(tagged).toContain("href='https://shop.example.com/single?utm_source=newsletter&amp;utm_medium=email&amp;utm_campaign=welcome'");
+    // An unquoted value cannot hold "=", so a tagged link is emitted double-quoted.
+    expect(tagged).toContain('href="https://shop.example.com/bare?utm_source=newsletter&amp;utm_medium=email&amp;utm_campaign=welcome"');
+
+    const tracked = trackLinks(html, wrap, skip);
+    expect(tracked).toContain(`href='${wrap('https://shop.example.com/single')}'`);
+    expect(tracked).toContain(`href="${wrap('https://shop.example.com/bare')}"`);
+  });
+
+  it('leaves skipped schemes, platform links and non-http hrefs alone in every quoting style', () => {
+    const wrap = (url: string) => `https://m.example.com/c/tok?u=${encodeURIComponent(url)}`;
+    const html =
+      "<a href='mailto:hi@example.com'>Mail</a>" +
+      '<a href=tel:+4512345678>Call</a>' +
+      '<a href="{{ unsubscribe_url }}">Liquid</a>' +
+      "<a href='https://m.example.com/u/token'>Own</a>" +
+      '<a href="/relative">Relative</a>';
+
+    expect(tagLinks(html, utm, skip)).toBe(html);
+    expect(trackLinks(html, wrap, skip)).toBe(html);
   });
 
   it('tags a hand-written text part, keeping brackets and trailing punctuation outside the URL', async () => {

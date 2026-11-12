@@ -12,7 +12,7 @@ import { AppError, isoDateTime, newId, newUuid } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
-import { consentStateOf, purposeAllowed } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -688,7 +688,9 @@ export const simulateJourney = defineCommand({
   }),
   permission: 'artifacts:read',
   effect: 'read',
-  target: (i) => i.artifactId,
+  // With a profile, the walk shows that person's consent verdicts and branch data.
+  auditReads: true,
+  target: (i) => i.profileId ?? i.artifactId,
   handler: async (input, ctx) => {
     const { version, def } = await loadDefinition(ctx.tx, input.artifactId, input.version);
     let graph: ReturnType<typeof compile>;
@@ -871,9 +873,7 @@ export const simulateJourney = defineCommand({
             (await (async () => {
               const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
               const basis = purposes.find((x) => x.key === graph.purpose)?.basis ?? 'consent';
-              const state = (await consentStateOf(ctx.tx, ws, input.profileId!)).find(
-                (x) => x.purpose === graph.purpose && (x.channel === '' || x.channel === 'webhook'),
-              );
+              const state = currentConsent(await consentStateOf(ctx.tx, ws, input.profileId!), graph.purpose, 'webhook');
               return purposeAllowed(basis, state?.status);
             })());
           detail = allowed ? `would send a webhook to ${eff.endpoint}` : `would not send: no lawful basis for purpose "${graph.purpose}"`;
