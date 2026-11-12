@@ -542,6 +542,48 @@ describe('campaign roll-up holdouts (#511)', () => {
     ).toBeTruthy();
   });
 
+  it('suppresses a journey holdout when its member row is below k (#586)', async () => {
+    const base = summaryMeasured();
+    h.summary = summaryMeasured({
+      members: [
+        {
+          ...base.members[1],
+          sent: null,
+          delivered: null,
+          clickRate: null,
+          unsubscribeRate: null,
+          converters: null,
+          suppressed: true,
+        },
+      ],
+      holdouts: [
+        journeyHoldout({
+          suppressed: true,
+          control: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+          treatment: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+          absoluteLift: null,
+          relativeLift: null,
+          ci95: null,
+          minSampleSizeMet: false,
+          verdict: 'not_enough_data',
+          note: 'Suppressed: fewer than k=5 people in an arm or in the journey member row, so no uplift is shown.',
+        }),
+      ],
+      meta: {
+        ...meta,
+        suppressed: 2,
+        notes: ['Member rows and journey holdouts with fewer than k=5 people reached have their counts suppressed.'],
+      },
+    });
+
+    renderTab();
+    const journey = await screen.findByRole('region', { name: 'Welcome series · Journey holdout' });
+    expect(within(journey).getAllByText('Suppressed').length).toBeGreaterThan(0);
+    expect(within(journey).queryByText('0')).toBeNull();
+    expect(within(journey).queryByText('400')).toBeNull();
+    expect(screen.getByText(/k = 5/)).toBeTruthy();
+  });
+
   it('shows no assignments as unavailable, not a healthy zero result', async () => {
     h.holdout = campaignHoldout({
       verdict: 'not_enough_data',
@@ -798,6 +840,15 @@ describe('campaign roll-up chart and table parity (#511)', () => {
     const table = screen.getByRole('table', { name: 'Campaign funnel' });
     expect(within(table).getByText('144% of Clicked')).toBeTruthy();
     expect(screen.getByText(/Step rate divides by the previous stage/)).toBeTruthy();
+  });
+
+  it('labels the delivered step rate against e-mail sent (#586)', async () => {
+    renderTab();
+    await screen.findByRole('table', { name: 'Campaign funnel' });
+
+    expect(screen.getByText('100% of E-mail sent')).toBeTruthy();
+    expect(screen.getByText(/delivered ÷ e-mail sent/)).toBeTruthy();
+    expect(screen.queryByText('100% of Recipients')).toBeNull();
   });
 
   it('keeps member counts separate from the distinct recipients total', async () => {
