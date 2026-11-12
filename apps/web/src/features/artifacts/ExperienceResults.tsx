@@ -9,12 +9,6 @@ import type { Artifact } from './ArtifactDetailPage';
 // experience's analysis method calls for. Exposures and conversions are counted by the events
 // service; previews are not counted.
 
-interface Analysis {
-  method?: 'sequential' | 'bayesian' | 'fixed';
-  alpha?: number;
-  threshold?: number;
-}
-
 const pct = (n: number | null) => (n === null ? '—' : `${(n * 100).toFixed(1)}%`);
 const points = (n: number) => `${(n * 100).toFixed(1)} points`;
 
@@ -45,11 +39,12 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
     );
 
   const r = results.data;
-  const viewingLatest = artifact.version.number === artifact.latestVersion;
-  const analysis = viewingLatest ? (artifact.version.content as { analysis?: Analysis } | null)?.analysis : undefined;
-  const alpha = viewingLatest ? (analysis?.alpha ?? 0.05).toString() : null;
-  const threshold = viewingLatest ? `${((analysis?.threshold ?? 0.95) * 100).toFixed(0)}%` : null;
+  // The server says which version it measured and the analysis that version configured (#759);
+  // the artifact row may be a newer draft with different variants, alpha and threshold.
+  const alpha = r.analysis.alpha.toString();
+  const threshold = `${(r.analysis.threshold * 100).toFixed(0)}%`;
   const method = r.method;
+  const viewingOther = artifact.version.number !== r.version;
   const significance = method === 'bayesian' ? 'P(beats control)' : method === 'sequential' ? 'Always-valid p' : 'p-value';
   const exposures = r.variants.reduce((sum, variant) => sum + variant.exposed, 0);
 
@@ -58,8 +53,8 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
       <div className="flex flex-wrap items-center gap-2">
         <Tag>{method === 'bayesian' ? 'Bayesian' : method === 'sequential' ? 'Sequential' : 'Fixed horizon'}</Tag>
         <span className="text-[12px] text-muted">
-          Goal: {r.goal ?? 'none'} · Control: {r.control ?? 'none'}
-          {!viewingLatest && ` · results use v${artifact.latestVersion}`}
+          Goal: {r.goal ?? 'none'} · Control: {r.control ?? 'none'} · results use v{r.version}
+          {viewingOther && ` · you are viewing v${artifact.version.number}`}
         </span>
         <Button size="sm" variant="ghost" icon={<RefreshCw size={14} />} onClick={results.reload} className="ml-auto">
           Refresh
@@ -71,8 +66,8 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
       {!r.goal && <Alert tone="info">Set a goal to measure conversions.</Alert>}
       {!r.control && <Alert tone="info">No control group is configured. Comparison is unavailable.</Alert>}
       {exposures === 0 && (
-        <Alert tone="info" title="No exposures yet">
-          No exposures yet. A result cannot be calculated.
+        <Alert tone="info" title="No exposures for this version yet">
+          No visitor has been exposed to v{r.version} in this view. Events arrive within a minute or two after a visitor sees it.
         </Alert>
       )}
 

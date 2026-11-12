@@ -144,6 +144,13 @@ export const experienceResults = defineCommand({
       }),
     ),
     method: z.enum(['sequential', 'bayesian', 'fixed']),
+    analysis: z
+      .object({
+        method: z.enum(['sequential', 'bayesian', 'fixed']),
+        alpha: z.number(),
+        threshold: z.number(),
+      })
+      .describe('The analysis settings of the version these results describe; an open draft may configure different ones'),
     recommendation: z.string(),
     note: z.string(),
   }),
@@ -173,6 +180,9 @@ export const experienceResults = defineCommand({
     const def = artifactTypes.experience.content.parse(row.content);
     const counts = await ctx.services.events.experimentCounts(ctx.principal.workspaceId, {
       experienceId: input.artifactId,
+      // Variant ids are editable per version, so counting every exposure of the experience would
+      // mix ids the published version no longer has into its results (#758).
+      version,
       goal: def.goal?.event,
       since: input.days ? new Date(Date.now() - input.days * 86_400_000) : undefined,
     });
@@ -214,10 +224,13 @@ export const experienceResults = defineCommand({
       control: controlRow?.variant ?? null,
       variants,
       method,
+      analysis: { method, alpha, threshold },
       recommendation,
-      note: def.goal
-        ? 'Sequential p-values may be checked at any time; the fixed-horizon p-value only at the planned sample size; Bayesian figures assume a uniform prior.'
-        : 'Set a goal event on the experience to measure conversions.',
+      note: counts.length
+        ? def.goal
+          ? 'Sequential p-values may be checked at any time; the fixed-horizon p-value only at the planned sample size; Bayesian figures assume a uniform prior.'
+          : 'Set a goal event on the experience to measure conversions.'
+        : `No data for version ${version} yet: counts include only exposures of version ${version}${input.days ? ` in the last ${input.days} days` : ''}, and no visitor has been exposed to it. Exposures of other versions, and exposures recorded without a version, do not count toward this version.`,
     };
   },
 });

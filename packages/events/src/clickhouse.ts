@@ -42,7 +42,7 @@ export interface EventStore {
   /** Per variant: visitors exposed to an experience, and how many did the goal event after their first exposure. */
   experimentCounts(
     workspaceId: string,
-    q: { experienceId: string; goal?: string; since?: Date },
+    q: { experienceId: string; version: number; goal?: string; since?: Date },
   ): Promise<{ variant: string; exposed: number; converted: number }[]>;
   insertMessageEvents(events: MessageEvent[]): Promise<void>;
   insertJourneyEvents(events: JourneyEvent[]): Promise<void>;
@@ -430,6 +430,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
               SELECT anonymous_id AS visitor, argMin(toString(properties.variant_id), timestamp) AS variant, min(timestamp) AS first
               FROM events FINAL
               WHERE workspace_id = {ws:UUID} AND name = 'Experience Viewed' AND toString(properties.experience_id) = {exp:String}
+                AND toString(properties.version) = {version:String}
                 AND anonymous_id != '' AND timestamp >= {since:DateTime64(3, 'UTC')}
               GROUP BY anonymous_id),
             goals AS (
@@ -443,6 +444,12 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
         query_params: {
           ws: workspaceId,
           exp: q.experienceId,
+          // Variant ids are author-chosen and may be renamed between versions, so the exposure must
+          // match the version the results describe (#758). The SDK records the number; ClickHouse's
+          // JSON path reads back as a string here. An exposure with no version (a hand-rolled client,
+          // or one from before the SDK sent it) matches no version and is deliberately left out
+          // rather than guessed into v1.
+          version: String(q.version),
           goal: q.goal ?? '',
           since: (q.since ?? new Date(0)).toISOString().replace('Z', ''),
         },
