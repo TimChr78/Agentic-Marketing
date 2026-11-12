@@ -145,7 +145,8 @@ const isSpace = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch =
  * it is ignored.
  *
  * Known limits: selectors with combinators, attributes or pseudo-classes, rules inside `@media` or
- * any other at-rule, and external stylesheets are not evaluated (a matching `display:none` rule
+ * any other at-rule, compound (tag/class/id) rules past the first 64 per kind, and external
+ * stylesheets are not evaluated (a matching `display:none` rule
  * wins over any later non-important rule that would unhide it). Colour parsing is small: white,
  * black and transparent are normalised, hex and `rgb()`/`rgba()` are compared, but other named
  * colours and nonzero-alpha `hsl()` are not converted (and cannot be composited). Off-screen
@@ -353,10 +354,16 @@ function addRule(bucket: RuleBucket, rule: RuleDecl): void {
     addToSlot(bucket.byId, id, rule);
   } else if (tag !== null && id === null && classes.length === 0) {
     addToSlot(bucket.byTag, tag, rule);
-  } else {
+  } else if (bucket.compound.length < MAX_COMPOUND_RULES) {
+    // Compound selectors are matched against every element, so their number is capped to keep the
+    // check linear in the document (review round 5). Normal templates have a handful; rules past
+    // the cap are a stated limit, like complex selectors.
     bucket.compound.push(rule);
   }
 }
+
+/** The most compound (tag/class/id) rules modelled per bucket; see addRule. */
+const MAX_COMPOUND_RULES = 64;
 
 function addToSlot(map: Map<string, RuleSlot>, key: string, rule: RuleDecl): void {
   const slot = map.get(key) ?? { important: null, normal: null };

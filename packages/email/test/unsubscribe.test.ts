@@ -240,6 +240,20 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
       5_000,
     );
   });
+
+  it('stays linear with many compound style rules and many elements (review round 5)', () => {
+    expectLinear(
+      (n) =>
+        `<html><head><style>${'.x.y{background:#fff}'.repeat(n)}</style></head><body>${'<div>x</div>'.repeat(n)}<a href="${URL}">Unsubscribe</a></body></html>`,
+      (html) => unsubscribeLinkProblem(html, URL),
+      2_000,
+    );
+  });
+
+  it('still applies a compound hiding rule in a normal stylesheet', () => {
+    const html = `<html><head><style>.foot.gone{display:none}</style></head><body><a class="foot gone" href="${URL}">Unsubscribe</a></body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBe('hidden');
+  });
 });
 
 const mjml = (body: string, head = '') =>
