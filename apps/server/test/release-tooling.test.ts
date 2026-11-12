@@ -29,6 +29,7 @@ import {
   validateUpgradeBlock,
 } from '../../../scripts/release/prepare.mjs';
 import { assetProblems, expectedAssets } from '../../../scripts/release/release-assets.mjs';
+import { isSemver, normalizeVersion } from '../../../scripts/release/semver.mjs';
 
 // The release helpers (#521): the generated upgrade block, the version bump and the env-history
 // source the test reads. Pure filesystem tests in the docs project.
@@ -352,6 +353,61 @@ describe('migrationsSince (#604)', () => {
   });
 });
 
+describe('the release version check (#671)', () => {
+  it('accepts every SemVer 2.0.0 form the release uses', () => {
+    for (const version of ['0.14.10', '1.0.0-rc.1', '1.0.0+build.5', '1.0.0-rc.1+build.5', '0.0.0', '10.20.30']) {
+      expect(isSemver(version), version).toBe(true);
+    }
+  });
+
+  it('rejects a version that is not full SemVer 2.0.0', () => {
+    for (const version of ['0.14.3-..', '01.2.3', '1.2', 'v1.2.3', '1.2.3-', '1.2.3+', '1.2.3.4', '1.2.3-01', '']) {
+      expect(isSemver(version), version).toBe(false);
+    }
+  });
+
+  it('normalises one leading v for both triggers, and refuses the rest', () => {
+    expect(normalizeVersion('v0.14.10')).toBe('0.14.10');
+    expect(normalizeVersion(' 0.14.10 ')).toBe('0.14.10');
+    expect(normalizeVersion('0.14.3-..')).toBeNull();
+    expect(normalizeVersion('')).toBeNull();
+    expect(normalizeVersion(undefined)).toBeNull();
+  });
+
+  it('is the entry point the workflow calls: it prints the version or exits 1', () => {
+    const script = join(fileURLToPath(new URL('../../../', import.meta.url)), 'scripts/release/semver.mjs');
+    const stdio: ['ignore', 'pipe', 'pipe'] = ['ignore', 'pipe', 'pipe'];
+    const run = (version: string) => {
+      try {
+        return { status: 0, stdout: execFileSync(process.execPath, [script, version], { encoding: 'utf8', stdio }) };
+      } catch (error) {
+        const failure = error as { status?: number; stderr?: string };
+        return { status: failure.status, stdout: String(failure.stderr) };
+      }
+    };
+
+    expect(run('v0.14.10')).toEqual({ status: 0, stdout: '0.14.10\n' });
+    expect(run('0.14.3-..')).toMatchObject({ status: 1 });
+    expect(run('0.14.3-..').stdout).toContain('::error::');
+  });
+
+  it('refuses a malformed version in a hand-run prepare (#671)', () => {
+    const script = join(fileURLToPath(new URL('../../../', import.meta.url)), 'scripts/release/prepare.mjs');
+    let output = '';
+    try {
+      execFileSync(process.execPath, [script, '0.14.3-..', '--check'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      const failure = error as { stdout?: string; stderr?: string };
+      output = `${failure.stdout ?? ''}${failure.stderr ?? ''}`;
+    }
+    // The old parseArgs passed the version straight through; the shared check must refuse it first.
+    expect(output).toMatch(/not a version: 0\.14\.3-\.\./);
+  });
+});
+
 describe('the release workflow concurrency (#648)', () => {
   const root = fileURLToPath(new URL('../../../', import.meta.url));
   const workflow = readFileSync(join(root, '.github/workflows/release.yml'), 'utf8');
@@ -372,8 +428,12 @@ describe('the release workflow concurrency (#648)', () => {
 
   it('normalises a leading v for both a tag push and a manual run in one place', () => {
     const prepare = job('prepare');
-    expect(prepare).toMatch(/\$\{INPUT_VERSION#v\}/);
-    expect(prepare).toMatch(/\$\{GITHUB_REF_NAME#v\}/);
+    // Both triggers hand the raw ref or input to the script; it strips one leading v and validates
+    // the full SemVer grammar, so `0.14.3-..` fails here, before anything is built (#671).
+    expect(prepare).toMatch(/\$INPUT_VERSION/);
+    expect(prepare).toMatch(/\$GITHUB_REF_NAME/);
+    expect(prepare).toMatch(/node scripts\/release\/semver\.mjs/);
+    expect(prepare).not.toMatch(/grep -Eq/);
     expect(prepare).toMatch(/outputs:\n\s+version: \$\{\{ steps\.version\.outputs\.version \}\}/);
   });
 });

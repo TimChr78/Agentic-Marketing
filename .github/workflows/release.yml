@@ -36,17 +36,23 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Normalise the version
+      # The version check is a script, so the release fails on the full SemVer grammar before
+      # anything is built, and the same check is unit-tested (#671).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Normalise and validate the version
         id: version
         env:
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            v="${INPUT_VERSION#v}"
+            raw="$INPUT_VERSION"
           else
-            v="${GITHUB_REF_NAME#v}"
+            raw="$GITHUB_REF_NAME"
           fi
-          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' || { echo "::error::$v is not a version (x.y.z)"; exit 1; }
+          # Prints the version without one leading v, or fails the job with a ::error:: line.
+          v="$(node scripts/release/semver.mjs "$raw")"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
   # The same checks as a pull request, on the commit being released.
