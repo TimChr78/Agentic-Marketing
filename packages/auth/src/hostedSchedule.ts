@@ -103,8 +103,9 @@ function localMinute(y: number, m: number, d: number, hour: number, minute: numb
  * occurrence wins.
  *
  * The next run is found by jumping: an hourly schedule jumps to the next local minute 0, and a
- * daily or weekly one tries at most the next eight local dates. No minute-by-minute scan, and no
- * formatter constructed per candidate (#622).
+ * daily or weekly one tries at most the next three days or three weeks. A skipped weekly occurrence
+ * therefore falls through to the following week instead of returning a time on another day, and a
+ * schedule that somehow has no run inside the window throws instead of guessing.
  */
 export function nextHostedRunAt(schedule: string | HostedSchedule, timeZone: string, now = new Date()): Date {
   const parsed = typeof schedule === 'string' ? parseHostedSchedule(schedule) : schedule;
@@ -121,7 +122,10 @@ export function nextHostedRunAt(schedule: string | HostedSchedule, timeZone: str
     return candidate;
   }
   const p = zonedParts(from, timeZone);
-  for (let d = 0; d <= 8; d++) {
+  // Three weeks covers a weekly time skipped by a transition (the next week is seven days out) and
+  // any pathological skipped calendar date; three days does the same for a daily time.
+  const reach = parsed.kind === 'weekly' ? 21 : 3;
+  for (let d = 0; d <= reach; d++) {
     const day = new Date(Date.UTC(p.y, p.m - 1, p.d + d));
     if (parsed.kind === 'weekly' && DAYS[day.getUTCDay()] !== parsed.weekday) continue;
     const candidate = localMinute(
@@ -133,10 +137,17 @@ export function nextHostedRunAt(schedule: string | HostedSchedule, timeZone: str
       timeZone,
       from,
     );
-    if (candidate) return candidate;
+    if (!candidate) continue;
+    // Verify the candidate's wall clock rather than trusting the date arithmetic: a transition can
+    // move a local date, and a weekly run must stay on its weekday.
+    const at = zonedParts(candidate, timeZone);
+    if (at.h !== parsed.hour || at.min !== parsed.minute) continue;
+    if (parsed.kind === 'weekly' && DAYS[new Date(Date.UTC(at.y, at.m - 1, at.d)).getUTCDay()] !== parsed.weekday) continue;
+    return candidate;
   }
-  // Unreachable for a valid schedule; a safe retry rather than a crash.
-  return new Date(now.getTime() + HOUR);
+  throw new Error(
+    `A ${parsed.kind} schedule has no matching run in ${timeZone} within ${parsed.kind === 'weekly' ? 'three weeks' : 'three days'}.`,
+  );
 }
 
 const DAY_LABEL: Record<HostedWeekday, string> = {
