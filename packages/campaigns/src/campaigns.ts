@@ -18,7 +18,8 @@ import { and, eq, gte, inArray, isNotNull, lte, max } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
 import { goalEventsFor } from './goal';
-import { identityScopeProfileLimit, identityUnresolvedNote, loadIdentityMap, overLimitIdentityMap } from './identity';
+import { identityUnresolvedNote } from './identity';
+import { campaignIdentityMap } from './identityScope';
 
 // Campaigns (#65) stay thin: a published campaign version groups existing artifacts under one goal
 // and one UTM campaign. Membership is read from those published versions rather than from a join
@@ -482,15 +483,19 @@ export const campaignHoldoutResult = defineCommand({
       const first = new Date(Math.min(...assignedTimes));
       const last = new Date(Math.max(...assignedTimes) + c.goal.attributionDays * 86_400_000);
       const windowTo = to && to < last ? to : last;
-      // One identity resolution, shared with the campaign summary and the measure queries (#590):
-      // an event stored under an identifier or a merged-away profile counts for the survivor. Above
-      // the bound the headline ships no map, so the holdout omits it too and both surfaces report
-      // the same note rather than disagreeing.
-      // The same scope bound as the campaign measures (#590): over it, resolve nothing and report
-      // the shared note rather than attempting a map the transport cannot carry.
-      const scope = [...people.keys()];
-      const identity =
-        scope.length > identityScopeProfileLimit() ? overLimitIdentityMap() : await loadIdentityMap(ctx.tx, ws, { profileIds: scope });
+      // One identity map, shared with the campaign summary and the measure queries (#590): sent
+      // recipients union this campaign's holdout assignments, both arms. The union is what keeps
+      // the headline and the holdout on the same side of the bound; above it both omit the map and
+      // report the same note rather than one resolving a conversion the other misses.
+      const identity = await campaignIdentityMap(
+        { tx: ctx.tx, events: ctx.services.events, workspaceId: ws },
+        {
+          campaignIds: [input.campaignId],
+          memberIds: sendingIds,
+          ...(input.from ? { from: input.from } : {}),
+          ...(input.to ? { to: input.to } : {}),
+        },
+      );
       if (identity.overLimit) identityLimit = identity.limit;
       const pairs = identity.overLimit ? [] : identity.pairs;
       const userProfiles = new Map(pairs.filter((p) => p.kind === 'user_id').map((p) => [p.key, p.profileId]));

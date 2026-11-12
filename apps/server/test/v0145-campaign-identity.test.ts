@@ -436,3 +436,100 @@ describe('the campaign recipient scope (#590)', () => {
     }
   }, 60_000);
 });
+
+// Sol's round-3 re-check: the headline scoped the map to sent recipients while the campaign-wide
+// holdout scoped it to its assignments, so near the bound only one side dropped resolution.
+describe('one identity map for the headline, the member rows and the holdout (#590)', () => {
+  it('drops resolution everywhere when the sent recipients and the assignments are jointly over the bound', async () => {
+    // Sent recipients alone are under the test bound; the union with both holdout arms is over it.
+    process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT = '10';
+    try {
+      const broadcast = (
+        await api().call('artifacts.create', {
+          type: 'broadcast',
+          name: 'Union scope broadcast',
+          content: { template, segment },
+        })
+      ).artifactId;
+      await api().call('artifacts.requestPublish', { artifactId: broadcast, note: 'union scope' });
+      const campaign = await createCampaign('Union scope campaign', broadcast);
+      await api().call('artifacts.requestPublish', { artifactId: campaign, note: 'union scope' });
+
+      // Six recipients keep the member row above k=5, while sent alone (6) stays under the bound.
+      const recipients = Array.from({ length: 6 }, profileId);
+      const controls = Array.from({ length: 5 }, profileId);
+      const treatmentFillers = Array.from({ length: 4 }, profileId);
+      await t.srv.db.admin.query(`INSERT INTO profiles (workspace_id, id) SELECT $1, x FROM unnest($2::text[]) AS x`, [
+        ws,
+        [...recipients, ...controls, ...treatmentFillers],
+      ]);
+      await t.srv.events.insertMessageEvents(
+        recipients.map(
+          (profileId, i): MessageEvent => ({
+            workspaceId: ws,
+            messageId: `msg_union_${i}`,
+            eventId: `union:${i}:sent`,
+            type: 'sent',
+            at: SEND_AT,
+            profileId,
+            channel: 'email',
+            purpose: 'marketing_email',
+            provider: 'log',
+            templateId: template,
+            templateVersion: 1,
+            journeyId: broadcast,
+            variant: '',
+            reason: '',
+            url: '',
+          }),
+        ),
+      );
+      // Five people in each arm keeps the holdout above k, so the note it carries is the map's,
+      // not a suppression note. The treatment conversion is stored under the treatment profile, so
+      // it is visible to every output even when resolution is dropped.
+      await assign(controls, campaign, 'control');
+      await assign([recipients[0]!, ...treatmentFillers], campaign, 'treatment');
+      await t.srv.events.insert([conversion(recipients[0]!)]);
+      clearAnalyticsCache();
+
+      const summary = await api().call('analytics.campaignSummary', { campaignId: campaign, from: FROM, to: TO });
+      expect(summary.state).toBe('measured');
+      if (summary.state !== 'measured') return;
+      expect(summary.meta.notes.some((note) => note.includes('not identity-resolved'))).toBe(true);
+      expect(summary.headline.converters).toBe(1);
+      expect(summary.members[0]).toMatchObject({ converters: 1, suppressed: false });
+
+      const holdout = await api().call('campaigns.holdoutResult', { campaignId: campaign, from: FROM, to: TO });
+      expect(holdout.suppressed).toBe(false);
+      expect(holdout.note).toContain('not identity-resolved');
+      expect(holdout.control.converted).toBe(0);
+      expect(holdout.treatment.converted).toBe(1);
+      expect(summary.headline.converters).toBe(holdout.control.converted! + holdout.treatment.converted!);
+    } finally {
+      delete process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT;
+    }
+  }, 60_000);
+
+  it('resolves a merged-away treatment conversion everywhere when the union is under the bound', async () => {
+    // The inverse case: both parts are well under the bound, so every output uses the same map and
+    // the treatment conversion stored under the merged-away profile resolves in all of them.
+    process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT = '100';
+    try {
+      clearAnalyticsCache();
+      const summary = await api().call('analytics.campaignSummary', { campaignId: campaignA, from: FROM, to: TO });
+      expect(summary.state).toBe('measured');
+      if (summary.state !== 'measured') return;
+      expect(summary.meta.notes.some((note) => note.includes('not identity-resolved'))).toBe(false);
+      expect(summary.headline.converters).toBe(1);
+      expect(summary.members[0]).toMatchObject({ converters: 1, suppressed: false });
+
+      const holdout = await api().call('campaigns.holdoutResult', { campaignId: campaignA, from: FROM, to: TO });
+      expect(holdout.suppressed).toBe(false);
+      expect(holdout.note).not.toContain('not identity-resolved');
+      expect(holdout.treatment.converted).toBe(1);
+      expect(summary.headline.converters).toBe(holdout.control.converted! + holdout.treatment.converted!);
+    } finally {
+      delete process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT;
+    }
+  }, 60_000);
+});
