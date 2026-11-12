@@ -395,6 +395,40 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
   });
 });
 
+// The href is compared after HTML entity decoding, because that is the URL a reader clicks. A
+// template that encodes the ampersand twice produces a different (literal) URL, so it must not be
+// treated as the rendered unsubscribe URL, and a malformed entity must never make the check throw.
+describe('the unsubscribe link is compared after one round of entity decoding', () => {
+  const withQuery = (html: string) => `<p><a href="${html}">Unsubscribe</a></p>`;
+
+  it('decodes a single-encoded ampersand', () => {
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&amp;b=2`), `${URL}?a=1&b=2`)).toBeNull();
+  });
+
+  it('decodes numeric and hexadecimal character references', () => {
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&#38;b=2`), `${URL}?a=1&b=2`)).toBeNull();
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&#x26;b=2`), `${URL}?a=1&b=2`)).toBeNull();
+  });
+
+  // Double encoding is not decoded twice: `&amp;amp;` is the literal text `&amp;` in the href.
+  it('does not decode a double-encoded ampersand a second time', () => {
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&amp;amp;b=2`), `${URL}?a=1&b=2`)).toBe('missing');
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&amp;amp;b=2`), `${URL}?a=1&amp;b=2`)).toBeNull();
+  });
+
+  it('treats a malformed entity literally instead of failing the check', () => {
+    // `&#;` and an unknown named reference are not character references; both stay as written.
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&#;b=2`), `${URL}?a=1&#;b=2`)).toBeNull();
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&#;b=2`), `${URL}?a=1&b=2`)).toBe('missing');
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&notanentity;b=2`), `${URL}?a=1&notanentity;b=2`)).toBeNull();
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&notanentity;b=2`), `${URL}?a=1&b=2`)).toBe('missing');
+  });
+
+  it('decodes the legacy semicolon-less ampersand the way a browser does', () => {
+    expect(unsubscribeLinkProblem(withQuery(`${URL}?a=1&amp b=2`), `${URL}?a=1& b=2`)).toBeNull();
+  });
+});
+
 const mjml = (body: string, head = '') =>
   `<mjml><mj-head>${head}</mj-head><mj-body><mj-section><mj-column>${body}</mj-column></mj-section></mj-body></mjml>`;
 
