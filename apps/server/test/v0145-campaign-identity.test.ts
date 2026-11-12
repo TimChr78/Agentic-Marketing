@@ -533,6 +533,32 @@ describe('one identity map for the headline, the member rows and the holdout (#5
     }
   }, 60_000);
 
+  it('ignores assignments under an old hash version when deciding the bound (0.14.5 round 5)', async () => {
+    // A percentage reset keeps the old scope's assignments; the holdout no longer counts them, so
+    // they must not push the identity scope over the bound either.
+    process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT = '20';
+    try {
+      const stale = Array.from({ length: 12 }, profileId);
+      await t.srv.db.admin.query(`INSERT INTO profiles (workspace_id, id) SELECT $1, x FROM unnest($2::text[]) AS x`, [ws, stale]);
+      await t.srv.db.admin.query(
+        `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm, assigned_at)
+         SELECT $1, 'campaign', $2, $3, x, 'control', $4 FROM unnest($5::text[]) AS x`,
+        [ws, campaignA, holdoutHashVersion(30), ASSIGNED_AT, stale],
+      );
+      clearAnalyticsCache();
+      const summary = await api().call('analytics.campaignSummary', { campaignId: campaignA, from: FROM, to: TO });
+      expect(summary.state).toBe('measured');
+      if (summary.state !== 'measured') return;
+      expect(summary.meta.notes.some((note) => note.includes('not identity-resolved'))).toBe(false);
+      expect(summary.headline.converters).toBe(1);
+      const holdout = await api().call('campaigns.holdoutResult', { campaignId: campaignA, from: FROM, to: TO });
+      expect(holdout.note).not.toContain('not identity-resolved');
+      expect(holdout.treatment.converted).toBe(1);
+    } finally {
+      delete process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT;
+    }
+  }, 60_000);
+
   it('ignores holdout assignments outside the report window when deciding the bound (0.14.5 round 4)', async () => {
     // Assignments made before the window are not part of this report's holdout, so they must not
     // push the identity scope over the bound and change the window's numbers.
