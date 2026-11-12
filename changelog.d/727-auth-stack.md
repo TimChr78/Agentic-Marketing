@@ -1,5 +1,5 @@
 ---
-section: Changed
+section: Security
 issues: [727]
 ---
 - The auth stack moves to Better Auth 1.7.22 together: `better-auth`, `@better-auth/{core,oauth-provider,sso,mcp,cimd}`, `@better-auth/utils` 0.5.1, `@better-fetch/fetch` 1.3.3, `better-call` 1.4.5 and `jose` 6.2.16. The `pnpm` overrides that held three of those packages at 1.7.7 are gone; the new Dependabot group moves the whole stack in one PR.
