@@ -1,5 +1,5 @@
 import { publishedSingleton } from '@agentic-marketing/artifacts';
-import { type IdentityMap, loadIdentityMap } from '@agentic-marketing/campaigns';
+import { type IdentityMap, identityUnresolvedNote, loadIdentityMap } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -8,7 +8,7 @@ import { computeJourneyHoldout, type JourneyHoldoutResult } from '@agentic-marke
 import { eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { type CampaignMember, type CampaignRecord, goalEventsFor, loadCampaignRecord } from './campaign';
-import { type AnalyticsResult, analyticsMeta, K, MAX_RANGE_DAYS, runAnalyticsQuery } from './query';
+import { type AnalyticsResult, analyticsMeta, campaignRecipientProfileIds, K, MAX_RANGE_DAYS, runAnalyticsQuery } from './query';
 
 // The campaign summary (#66) is a named report over the campaign measures and the existing
 // e-mail measures. It keeps the raw runs out of the UI: the funnel, per-member rows and journey
@@ -208,11 +208,18 @@ async function memberBreakdown(
         FROM numbers({identity_count:UInt32})
       ),
       first AS (
-        SELECT journey_id AS member_id, profile_id, min(at) AS first_at
-        FROM message_events FINAL
-        WHERE workspace_id = {ws:UUID} AND journey_id IN {members:Array(String)}
-          AND at >= {from:DateTime64(3, 'UTC')} AND at <= {to:DateTime64(3, 'UTC')}
-          AND type IN ('sent', 'delivered') AND profile_id != ''
+        SELECT member_id, profile_id, min(first_at) AS first_at
+        FROM (
+          SELECT
+            m.journey_id AS member_id,
+            coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id,
+            m.at AS first_at
+          FROM message_events m FINAL
+          LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
+          WHERE m.workspace_id = {ws:UUID} AND m.journey_id IN {members:Array(String)}
+            AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}
+            AND m.type IN ('sent', 'delivered') AND m.profile_id != ''
+        )
         GROUP BY member_id, profile_id
       ),
       events_resolved AS (
@@ -233,17 +240,25 @@ async function memberBreakdown(
           AND e.name IN {goal_events:Array(String)}
       ),
       sent AS (
-        SELECT journey_id AS member_id,
+        SELECT member_id,
           -- The k group is people reached on any channel; the figures are e-mail only (#682).
           uniqExactIf(profile_id, profile_id != '') AS reached,
-          uniqExactIf(profile_id, profile_id != '' AND channel = 'email' AND type = 'sent') AS sent,
-          uniqExactIf(profile_id, profile_id != '' AND channel = 'email' AND type = 'delivered') AS delivered,
-          uniqExactIf(profile_id, profile_id != '' AND channel = 'email' AND type = 'clicked') AS clicked,
-          uniqExactIf(profile_id, profile_id != '' AND channel = 'email' AND type = 'unsubscribed') AS unsubscribed
-        FROM message_events FINAL
-        WHERE workspace_id = {ws:UUID} AND journey_id IN {members:Array(String)}
-          AND at >= {from:DateTime64(3, 'UTC')} AND at <= {to:DateTime64(3, 'UTC')}
-          AND profile_id != ''
+          uniqExactIf(profile_id, profile_id != '' AND event_type = 'sent' AND channel = 'email') AS sent,
+          uniqExactIf(profile_id, profile_id != '' AND event_type = 'delivered' AND channel = 'email') AS delivered,
+          uniqExactIf(profile_id, profile_id != '' AND event_type = 'clicked' AND channel = 'email') AS clicked,
+          uniqExactIf(profile_id, profile_id != '' AND event_type = 'unsubscribed' AND channel = 'email') AS unsubscribed
+        FROM (
+          SELECT
+            m.journey_id AS member_id,
+            m.type AS event_type,
+            m.channel AS channel,
+            coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id
+          FROM message_events m FINAL
+          LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
+          WHERE m.workspace_id = {ws:UUID} AND m.journey_id IN {members:Array(String)}
+            AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}
+            AND m.profile_id != ''
+        )
         GROUP BY member_id
       ),
       conv AS (
@@ -362,8 +377,10 @@ export const analyticsCampaignSummary = defineCommand({
 
     const sending = sendingMembers(record);
     const memberIds = sending.map((m) => m.artifactId);
-    // The same identity map the measure queries and the holdout card use (#590).
-    const identity = await loadIdentityMap(ctx.tx, deps.workspaceId);
+    // The same campaign-scoped identity map the measure queries and the holdout card use (#590).
+    const identity = await loadIdentityMap(ctx.tx, deps.workspaceId, {
+      profileIds: await campaignRecipientProfileIds(deps, memberIds, from, to),
+    });
     const baseMeta = {
       timeZone,
       currency: null as string | null,
@@ -377,11 +394,7 @@ export const analyticsCampaignSummary = defineCommand({
         ...(window.clamped
           ? [`The default window was shortened to the last ${MAX_RANGE_DAYS} days; pass from to measure an earlier period.`]
           : []),
-        ...(identity.overLimit
-          ? [
-              `Identity resolution was skipped: the workspace has more than ${identity.limit} merged identity mappings, so conversions are matched on the profile id stored with the event.`,
-            ]
-          : []),
+        ...(identity.overLimit ? [identityUnresolvedNote(identity.limit)] : []),
       ],
     };
 

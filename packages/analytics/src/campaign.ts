@@ -1,5 +1,5 @@
 import { artifactTypes, type CampaignDefinition } from '@agentic-marketing/artifacts';
-import { goalEventsFor, type IdentityMap, publishedCampaigns } from '@agentic-marketing/campaigns';
+import { goalEventsFor, IDENTITY_FIELD_BYTES, type IdentityMap, type IdentityPair, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -217,15 +217,73 @@ export interface CampaignBuildInput {
 
 const alias = (prefix: string, id: string) => `${prefix}_${id.replace(/[^A-Za-z0-9_]/g, '_')}`;
 
+interface IdentityChunk {
+  keys: string[];
+  profiles: string[];
+  kinds: string[];
+}
+
+/**
+ * Splits the three identity arrays into chunks whose serialised fields stay under ClickHouse's
+ * per-field limit. Chunking keeps the three arrays index-aligned, which `arrayConcat` restores.
+ */
+function identityChunks(pairs: readonly IdentityPair[]): IdentityChunk[] {
+  const chunks: IdentityChunk[] = [];
+  let chunk: IdentityChunk = { keys: [], profiles: [], kinds: [] };
+  let keyBytes = 2;
+  let profileBytes = 2;
+  let kindBytes = 2;
+  const flush = () => {
+    if (!chunk.keys.length) return;
+    chunks.push(chunk);
+    chunk = { keys: [], profiles: [], kinds: [] };
+    keyBytes = 2;
+    profileBytes = 2;
+    kindBytes = 2;
+  };
+  for (const pair of pairs) {
+    const key = Buffer.byteLength(JSON.stringify(pair.key)) + 1;
+    const profile = Buffer.byteLength(JSON.stringify(pair.profileId)) + 1;
+    const kind = Buffer.byteLength(JSON.stringify(pair.kind)) + 1;
+    if (
+      chunk.keys.length &&
+      (keyBytes + key > IDENTITY_FIELD_BYTES || profileBytes + profile > IDENTITY_FIELD_BYTES || kindBytes + kind > IDENTITY_FIELD_BYTES)
+    )
+      flush();
+    chunk.keys.push(pair.key);
+    chunk.profiles.push(pair.profileId);
+    chunk.kinds.push(pair.kind);
+    keyBytes += key;
+    profileBytes += profile;
+    kindBytes += kind;
+  }
+  flush();
+  if (!chunks.length) chunks.push({ keys: [], profiles: [], kinds: [] });
+  return chunks;
+}
+
 /** Compiles the campaign measures into the same shape analytics.query already consumes. */
 export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   // One entry per campaign, paired by campaign id: the member map is member-aligned, so a campaign
   // with two sending members must never shift its neighbours' attribution window (#629).
   const windows = new Map<string, number>();
   for (const scope of input.queryMap.scopes) if (!windows.has(scope.id)) windows.set(scope.id, scope.goal.attributionDays);
-  // The identity map is all or nothing: above its transport bound it is omitted, and the caller
-  // reports that the result is not identity-resolved (#590).
+  // The identity map is all or nothing: above its bound it is omitted, and the caller reports that
+  // the result is not identity-resolved (#590). The caller scopes it to the campaign's recipients,
+  // so unrelated merges elsewhere in the workspace cannot push it over the bound.
   const identity = input.identity?.overLimit ? [] : (input.identity?.pairs ?? []);
+  // Each array is split below ClickHouse's per-field limit; the CTE concatenates the parts back.
+  const identityChunked = identityChunks(identity);
+  const identityArray = (field: 'keys' | 'profiles' | 'kinds') =>
+    identityChunked.length === 1
+      ? `{identity_${field}_0:Array(String)}`
+      : `arrayConcat(${identityChunked.map((_, i) => `{identity_${field}_${i}:Array(String)}`).join(', ')})`;
+  const identityParams: Record<string, unknown> = {};
+  identityChunked.forEach((chunk, i) => {
+    identityParams[`identity_keys_${i}`] = chunk.keys;
+    identityParams[`identity_profiles_${i}`] = chunk.profiles;
+    identityParams[`identity_kinds_${i}`] = chunk.kinds;
+  });
   const params: Record<string, unknown> = {
     ws: input.workspaceId,
     tz: input.timeZone,
@@ -236,9 +294,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
     campaign_map_ids: input.queryMap.map.memberCampaignIds,
     campaign_window_ids: [...windows.keys()],
     campaign_attr_days: [...windows.values()],
-    identity_keys: identity.map((p) => p.key),
-    identity_profiles: identity.map((p) => p.profileId),
-    identity_kinds: identity.map((p) => p.kind),
+    ...identityParams,
     identity_count: identity.length,
   };
   const conversion = revenueExpressions(input.conversionRules, params);
@@ -260,20 +316,30 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
 
   const revenue = input.measures.some((m) => m.id === 'campaign.revenue' || (m.kind === 'ratio' && m.numerator === 'campaign.revenue'));
 
+  // Recipients resolve through the same map as conversions. A send stored under a profile that
+  // later merged away must match an event stored under the survivor, and a person reached as both
+  // the historical and the surviving profile must count once (#590).
   const recipient = `recipient AS (
     SELECT
-      arrayElement({campaign_map_ids:Array(String)}, indexOf({campaign_map_members:Array(String)}, journey_id)) AS campaign_id,
+      campaign_id,
       profile_id,
-      min(at) AS first_at,
-      formatDateTime(toStartOfDay(min(at), {tz:String}), '%Y-%m-%d') AS send_day,
-      formatDateTime(toStartOfWeek(min(at), 1, {tz:String}), '%Y-%m-%d') AS send_week,
-      formatDateTime(toStartOfMonth(min(at), {tz:String}), '%Y-%m-%d') AS send_month
-    FROM message_events FINAL
-    WHERE workspace_id = {ws:UUID}
-      AND at >= {from:DateTime64(3, 'UTC')} AND at <= {to:DateTime64(3, 'UTC')}
-      AND journey_id IN {campaign_map_members:Array(String)}
-      AND type IN ('sent', 'delivered')
-      AND profile_id != ''
+      min(send_at) AS first_at,
+      formatDateTime(toStartOfDay(min(send_at), {tz:String}), '%Y-%m-%d') AS send_day,
+      formatDateTime(toStartOfWeek(min(send_at), 1, {tz:String}), '%Y-%m-%d') AS send_week,
+      formatDateTime(toStartOfMonth(min(send_at), {tz:String}), '%Y-%m-%d') AS send_month
+    FROM (
+      SELECT
+        arrayElement({campaign_map_ids:Array(String)}, indexOf({campaign_map_members:Array(String)}, m.journey_id)) AS campaign_id,
+        coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id,
+        m.at AS send_at
+      FROM message_events m FINAL
+      LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
+      WHERE m.workspace_id = {ws:UUID}
+        AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}
+        AND m.journey_id IN {campaign_map_members:Array(String)}
+        AND m.type IN ('sent', 'delivered')
+        AND m.profile_id != ''
+    )
     GROUP BY campaign_id, profile_id
   )`;
 
@@ -288,9 +354,9 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   // survivor. With an empty map it contributes no rows and the joins fall back to the stored ids.
   const identityMap = `identity AS (
     SELECT
-      arrayElement({identity_keys:Array(String)}, number + 1) AS identity_key,
-      arrayElement({identity_profiles:Array(String)}, number + 1) AS profile_id,
-      arrayElement({identity_kinds:Array(String)}, number + 1) AS kind
+      arrayElement(${identityArray('keys')}, number + 1) AS identity_key,
+      arrayElement(${identityArray('profiles')}, number + 1) AS profile_id,
+      arrayElement(${identityArray('kinds')}, number + 1) AS kind
     FROM numbers({identity_count:UInt32})
   )`;
 
@@ -413,7 +479,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   const dir = input.order?.dir ?? (dimensions.length ? 'asc' : 'desc');
   const orderSql = dimensions.includes(primary as DimensionId) ? `r.${alias('dim', primary)}` : alias('measure', primary);
 
-  const sql = `WITH ${recipient}, ${goalMap}, ${identityMap}, ${eventIdentity}, ${conversionSql}, ${recRoll}, ${convSql}
+  const sql = `WITH ${identityMap}, ${recipient}, ${goalMap}, ${eventIdentity}, ${conversionSql}, ${recRoll}, ${convSql}
     SELECT ${[...outer, ...measureSql].join(', ')}
     ${joined}
     ORDER BY ${orderSql} ${dir.toUpperCase()} LIMIT {limit:UInt32}`;
