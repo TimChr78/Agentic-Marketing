@@ -332,6 +332,12 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
     }
   });
 
+  it('still recognises a long but valid colour (review round 10)', () => {
+    expect(unsubscribeLinkProblem(link(` style="color:rgba(0,0,0,${' '.repeat(60)}0)"`), URL)).toBe('hidden');
+    expect(unsubscribeLinkProblem(link(` style="color:rgba(0,0,0,0.${'0'.repeat(80)})"`), URL)).toBe('hidden');
+    expect(unsubscribeLinkProblem(link(` style="color:rgb(${' '.repeat(80)}0,0,0)"`), URL)).toBeNull();
+  });
+
   it('still applies a compound hiding rule in a normal stylesheet', () => {
     const html = `<html><head><style>.foot.gone{display:none}</style></head><body><a class="foot gone" href="${URL}">Unsubscribe</a></body></html>`;
     expect(unsubscribeLinkProblem(html, URL)).toBe('hidden');
