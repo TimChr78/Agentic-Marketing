@@ -433,6 +433,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
               }
               if (opts.idempotencyKey) {
+                // Serialise the key before the lookup (#812): two concurrent requests used to both
+                // miss it and both run the handler (a send could go out twice), and the loser then
+                // failed on the unique constraint instead of returning the winner's response. The
+                // transaction-scoped lock makes the second wait for the first to commit and then
+                // read its stored response.
+                await tx.execute(
+                  sql`SELECT pg_advisory_xact_lock(hashtextextended(${`idempotency:${principal.workspaceId}:${opts.idempotencyKey}`}, 0))`,
+                );
                 const [hit] = await tx
                   .select()
                   .from(schema.idempotencyKeys)
