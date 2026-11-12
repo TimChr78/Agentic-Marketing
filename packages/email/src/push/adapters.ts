@@ -151,7 +151,12 @@ export const fcmAdapter = definePushAdapter({
               token: to.token,
               notification: { title: msg.title, body: msg.body, ...(msg.image ? { image: msg.image } : {}) },
               data,
-              android: { priority: msg.urgency === 'high' ? 'high' : 'normal', ttl: `${msg.ttlSeconds}s` },
+              android: {
+                priority: msg.urgency === 'high' ? 'high' : 'normal',
+                ttl: `${msg.ttlSeconds}s`,
+                // Same key on a retry, so FCM collapses a duplicate instead of showing it twice (#753).
+                collapse_key: msg.messageId,
+              },
             },
           }),
         });
@@ -209,6 +214,9 @@ export const apnsAdapter = definePushAdapter({
             'apns-push-type': 'alert',
             'apns-priority': msg.urgency === 'high' ? '10' : '5',
             'apns-expiration': String(Math.floor(Date.now() / 1000) + msg.ttlSeconds),
+            // A retry of the same message carries the same id, so Apple collapses it instead of
+            // showing the notification twice (#753).
+            'apns-collapse-id': msg.messageId,
             'content-type': 'application/json',
           },
           body: JSON.stringify({
