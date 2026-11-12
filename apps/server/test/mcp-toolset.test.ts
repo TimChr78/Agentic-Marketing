@@ -30,7 +30,10 @@ const humansOnly = new Set<string>(commands.filter((c) => c.humansOnly).map((c) 
 const granted = (p: Principal) => p.permissions as ReadonlySet<string>;
 
 describe('hosted MCP toolset (#364)', () => {
-  const viewer = agentPrincipal('usr_viewer', 'client_viewer', 'ws_1', 'viewer', ['artifacts:read']);
+  // The tools a principal sees do not consult the agent row; the executor does. A placeholder
+  // record keeps these unit tests to the catalogue.
+  const record = (id: string) => ({ id: `agt_${id}`.padEnd(36, '0'), name: id, status: 'active' as const, statusReason: null });
+  const viewer = agentPrincipal('usr_viewer', 'client_viewer', 'ws_1', 'viewer', ['artifacts:read'], record('viewer'));
 
   it('offers a viewer-sponsored run only tools its scopes grant', async () => {
     const tools = await toolsOf(viewer, false);
@@ -50,7 +53,7 @@ describe('hosted MCP toolset (#364)', () => {
 
   it('offers a marketer-scoped run exactly the commands those scopes grant', async () => {
     const scopes = ['artifacts:read', 'artifacts:write', 'messages:send'];
-    const marketer = agentPrincipal('usr_marketer', 'client_marketer', 'ws_1', 'marketer', scopes);
+    const marketer = agentPrincipal('usr_marketer', 'client_marketer', 'ws_1', 'marketer', scopes, record('marketer'));
     const names = (await toolsOf(marketer, false)).map((t) => t.name);
     expect(names).toContain('artifacts.create');
     expect(names).toContain('messages.sendEmail');
@@ -60,7 +63,7 @@ describe('hosted MCP toolset (#364)', () => {
   });
 
   it('never offers people-only commands even to a role that could run them', async () => {
-    const owner = agentPrincipal('usr_owner', 'client_owner', 'ws_1', 'owner', ['artifacts:read', 'workspace:admin']);
+    const owner = agentPrincipal('usr_owner', 'client_owner', 'ws_1', 'owner', ['artifacts:read', 'workspace:admin'], record('owner'));
     const names = (await toolsOf(owner, true)).map((t) => t.name);
     expect(humansOnly.has('agents.createHosted')).toBe(true);
     expect(names).not.toContain('agents.createHosted');
@@ -87,7 +90,7 @@ describe('hosted MCP toolset (#364)', () => {
   it('keeps the OAuth step-up listing, which a hosted run deliberately does not use', async () => {
     // A marketer's role allows writes; this connection was only granted reads. A hosted run with
     // the same mandate must not see the write, while an OAuth client may ask the person for it.
-    const partial = agentPrincipal('usr_partial', 'client_partial', 'ws_1', 'marketer', ['artifacts:read']);
+    const partial = agentPrincipal('usr_partial', 'client_partial', 'ws_1', 'marketer', ['artifacts:read'], record('partial'));
     const plain = (await toolsOf(partial, false)).map((t) => t.name);
     const stepped = await toolsOf(partial, true);
     const steppedNames = stepped.map((t) => t.name);

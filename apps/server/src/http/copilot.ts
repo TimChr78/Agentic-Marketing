@@ -13,7 +13,7 @@ import {
 import { activeMandate } from '@agentic-marketing/artifacts';
 import { type Auth, principalFromSession } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
+import { AppError, newId, sha256 } from '@agentic-marketing/core';
 import { type Db, type Role, schema, type Tx } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -21,7 +21,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { dynamicTool, isStepCount, jsonSchema, type ModelMessage, streamText, type Tool } from 'ai';
-import { and, desc, eq } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { z } from 'zod';
 import { VERSION } from '../version';
@@ -163,6 +163,61 @@ async function agentForConversation(
   return { agent, sponsorRole: member.role as Role, context };
 }
 
+/**
+ * The built-in Copilot agent's id for one workspace (#811). It is derived from the workspace, not
+ * random, so every plain Copilot turn finds the same row without a lookup by name.
+ */
+export function copilotAgentId(workspaceId: string): string {
+  return `agt_${sha256(`copilot-agent:${workspaceId}`).slice(0, 32)}`;
+}
+
+/**
+ * The workspace's built-in Copilot agent (#811): the identity a plain Copilot conversation acts
+ * as. One agent row per workspace, created on the first plain turn and reused after that, so the
+ * policy engine (autonomy switch, limits, guard, ownership), the status check and the action
+ * ledger apply to the assistant exactly as to any other agent. Its autonomy and limits are the
+ * workspace's (`autonomySettings`), not per-agent: switching agents off makes the Copilot read-only.
+ *
+ * The sponsor is the workspace's first owner, so the accountability line names a person; each turn
+ * still acts with the role of the person using it. Pausing or revoking this agent stops the plain
+ * Copilot's writes for the workspace until it is resumed.
+ */
+async function builtinCopilotAgent(tx: Tx, workspaceId: string, user: { userId: string; role: Role }) {
+  const id = copilotAgentId(workspaceId);
+  const find = async () => {
+    const [row] = await tx
+      .select()
+      .from(schema.agents)
+      .where(and(eq(schema.agents.workspaceId, workspaceId), eq(schema.agents.id, id)));
+    return row;
+  };
+  const existing = await find();
+  if (existing) return existing;
+  // Two first turns at once: one inserts, the other waits on the lock and then finds the row.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`copilot-agent:${workspaceId}`}, 0))`);
+  const again = await find();
+  if (again) return again;
+  const [owner] = await tx
+    .select({ userId: schema.workspaceMembers.userId })
+    .from(schema.workspaceMembers)
+    .where(and(eq(schema.workspaceMembers.workspaceId, workspaceId), eq(schema.workspaceMembers.role, 'owner')))
+    .orderBy(asc(schema.workspaceMembers.createdAt))
+    .limit(1);
+  const [created] = await tx
+    .insert(schema.agents)
+    .values({
+      workspaceId,
+      id,
+      name: 'Copilot',
+      description:
+        'The workspace’s built-in Copilot: it acts for the person using the assistant, with that person’s role and the Copilot’s scopes, and its changes follow the agent policy.',
+      sponsorUserId: owner?.userId ?? user.userId,
+    })
+    .returning();
+  await tx.insert(schema.agentCredentials).values({ workspaceId, kind: 'copilot', credentialId: id, agentId: id }).onConflictDoNothing();
+  return created;
+}
+
 export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: KeyProvider }) {
   const app = new Hono();
   app.post('/api/copilot', bodyLimit(COPILOT_MAX_BODY, COPILOT_TOO_LARGE), async (c) => {
@@ -204,9 +259,13 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
     });
     // A conversation attached to an agent acts as that agent (#339): its sponsor's role ∩ the
     // copilot's scopes, its mandate and limits, and a `copilot` credential that pausing stops.
+    // Every other conversation acts as the workspace's built-in Copilot agent (#811), so the same
+    // policy engine, status check, limits and ledger apply instead of being skipped.
     const acting = conversation.agentId
       ? await deps.db.withWorkspace(ws, (tx) => agentForConversation(tx, conversation.agentId!, user))
       : null;
+    const copilotAgent = acting ? acting.agent : await deps.db.withWorkspace(ws, (tx) => builtinCopilotAgent(tx, ws, user));
+    const role = acting ? acting.sponsorRole : user.role;
     const model = await deps.db
       .withWorkspace(ws, (tx) => modelFor(tx, deps.kp, 'copilot'))
       .catch((err) => {
@@ -214,24 +273,14 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
           throw new AppError('conflict', `The copilot cannot answer: ${err.message}. An admin can set one up under AI providers.`);
         throw err;
       });
-    const principal = acting
-      ? {
-          ...agentPrincipal(
-            acting.agent.sponsorUserId,
-            `copilot:${acting.agent.id}`,
-            ws,
-            acting.sponsorRole,
-            COPILOT_SCOPES.filter((p) => ROLE_PERMISSIONS[acting.sponsorRole].includes(p)),
-          ),
-          agent: { id: acting.agent.id, name: acting.agent.name, status: acting.agent.status, statusReason: acting.agent.statusReason },
-        }
-      : agentPrincipal(
-          user.userId,
-          'copilot',
-          ws,
-          user.role,
-          COPILOT_SCOPES.filter((p) => ROLE_PERMISSIONS[user.role].includes(p)),
-        );
+    const principal = agentPrincipal(
+      acting ? acting.agent.sponsorUserId : user.userId,
+      `copilot:${copilotAgent.id}`,
+      ws,
+      role,
+      COPILOT_SCOPES.filter((p) => ROLE_PERMISSIONS[role].includes(p)),
+      { id: copilotAgent.id, name: copilotAgent.name, status: copilotAgent.status, statusReason: copilotAgent.statusReason },
+    );
 
     // The turn may use at most what is actually left of the month's budget, up to the fixed turn
     // cap. The reserved amount is the hard allowance the loop is held to (#356): reserving the
@@ -248,7 +297,9 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
       throw err;
     });
     const allowance = reservation.tokens;
-    const system = acting ? `${SYSTEM}\n\n${acting.context}` : SYSTEM;
+    const system = acting
+      ? `${SYSTEM}\n\n${acting.context}`
+      : `${SYSTEM}\n\nYou act as the workspace’s built-in Copilot agent, so your changes are recorded in its activity, count against its limits and follow the agent policy.`;
     const abort = new AbortController();
     let cancelled = false;
 
