@@ -87,7 +87,7 @@ describe('approval consequence rows (#498)', () => {
       }),
     );
     expect(row(model.rows, 'template')?.value).toBe('Weekly Signal #43');
-    expect(row(model.rows, 'template')?.notes).toEqual(['Saved v3 · In this bundle']);
+    expect(row(model.rows, 'template')?.notes).toEqual(['Saved v3 · In this bundle · Live v2']);
     expect(row(model.rows, 'segment')?.notes).toContain('Check uses current membership; this bundle may change it.');
     expect(row(model.rows, 'purpose')?.value).toBe('Marketing e-mail · consent · weekly');
     expect(row(model.rows, 'send-window')?.value).toContain('09:00–17:00');
@@ -346,6 +346,116 @@ describe('approval consequence rows (#498)', () => {
     );
     expect(row(model.rows, 'dependencies')?.items?.[0]?.note).toContain('Loading…');
     expect(row(model.rows, 'dependencies')?.items?.[0]?.tone).toBeUndefined();
+  });
+});
+
+describe('approval consequence corrections (0.14.7)', () => {
+  it('lets the broadcast topic override the template topic in the consent evidence (#581)', () => {
+    const model = deriveConsequences(
+      base({
+        type: 'broadcast',
+        content: { template: eml, segment: seg, topic: 'annual_recap' },
+        dependencies: { [eml]: { id: eml, publishedVersion: 1 }, [seg]: { id: seg, publishedVersion: 1 } },
+        purposes: [
+          {
+            key: 'marketing_email',
+            name: 'Marketing e-mail',
+            basis: 'consent',
+            channels: ['email'],
+            topics: [{ key: 'product_updates', name: 'Product updates' }],
+          },
+        ],
+        templatePurpose: { purpose: 'marketing_email', topic: 'product_updates' },
+      }),
+    );
+    const consent = model.evidence.find((e) => e.key === 'consent-purpose');
+    expect(consent?.status).toBe('attention');
+    expect(consent?.value).toContain('annual_recap');
+    expect(consent?.value).not.toContain('product_updates');
+    // The Purpose row already preferred the broadcast topic and must agree with the evidence.
+    expect(row(model.rows, 'purpose')?.value).toContain('annual_recap');
+  });
+
+  it('shows the live version beside a bundled one and warns when approval moves it backwards (#583)', () => {
+    const model = deriveConsequences(
+      base({
+        type: 'broadcast',
+        content: { template: eml, segment: seg },
+        bundleVersions: { [eml]: 2 },
+        dependencies: { [eml]: { id: eml, name: 'Weekly Signal', publishedVersion: 3 }, [seg]: { id: seg, publishedVersion: 3 } },
+      }),
+    );
+    const template = row(model.rows, 'template');
+    expect(template?.notes?.join(' ')).toContain('Live v3');
+    expect(template?.notes?.join(' ')).toContain('back from v3 to v2');
+    expect(template?.tone).toBe('warn');
+
+    const dependency = row(model.rows, 'dependencies')?.items?.find((item) => item.key === eml);
+    expect(dependency?.note).toContain('Live v3');
+    expect(dependency?.note).toContain('back from v3 to v2');
+    expect(dependency?.tone).toBe('warn');
+
+    // The drawer's summary repeats the warning, not only the row.
+    expect(model.notes.join(' ')).toContain('back from v3 to v2');
+  });
+
+  it('shows the live version beside a newer bundled one without a rollback warning (#583)', () => {
+    const model = deriveConsequences(
+      base({
+        type: 'broadcast',
+        content: { template: eml, segment: seg },
+        bundleVersions: { [eml]: 4 },
+        dependencies: { [eml]: { id: eml, name: 'Weekly Signal', publishedVersion: 3 }, [seg]: { id: seg, publishedVersion: 3 } },
+      }),
+    );
+    const template = row(model.rows, 'template');
+    expect(template?.notes?.join(' ')).toContain('Live v3');
+    expect(template?.notes?.join(' ')).not.toContain('back from');
+    expect(template?.tone).toBeUndefined();
+    const dependency = row(model.rows, 'dependencies')?.items?.find((item) => item.key === eml);
+    expect(dependency?.note).toContain('Live v3');
+    expect(dependency?.note).not.toContain('back from');
+    expect(dependency?.tone).toBeUndefined();
+    expect(model.notes.join(' ')).not.toContain('back from');
+  });
+
+  it('describes the send window in the When row instead of “arrival varies” (#584)', () => {
+    const model = deriveConsequences(
+      base({
+        type: 'broadcast',
+        content: { template: eml, segment: seg, sendWindow: { start: '09:00', end: '17:00', maxDelay: 'P1D' } },
+      }),
+    );
+    expect(row(model.rows, 'when')?.notes?.[0]).toContain('Inside each reader’s local send window');
+    const without = deriveConsequences(base({ type: 'broadcast', content: { template: eml, segment: seg } }));
+    expect(row(without.rows, 'when')?.notes?.[0]).toBe('Arrival time varies by reader.');
+  });
+
+  it('does not claim a hosted-page override when the form turned it off (#598)', () => {
+    const content = { purposes: ['marketing_email'], hostedPages: { headline: 'Custom' } };
+    const off = deriveConsequences(base({ type: 'form', content: { ...content, hostedPagesEnabled: false }, purposes: [] }));
+    expect(row(off.rows, 'hosted-pages')?.value).toBe('Workspace brand');
+    const on = deriveConsequences(base({ type: 'form', content: { ...content, hostedPagesEnabled: true }, purposes: [] }));
+    expect(row(on.rows, 'hosted-pages')?.value).toBe('Overrides the workspace brand on this form');
+  });
+
+  it('names an unresolved saved purpose “Unavailable purpose” in every consequence row (#600)', () => {
+    const cases: ConsequenceInput[] = [
+      base({
+        type: 'broadcast',
+        content: { template: eml, segment: seg, topic: 'weekly' },
+        templatePurpose: { purpose: 'legacy_purpose', topic: 'weekly' },
+        purposes: [],
+      }),
+      base({ type: 'email_template', content: { purpose: 'legacy_purpose', subject: 'S' }, purposes: [] }),
+      base({ type: 'sms_template', content: { purpose: 'legacy_purpose', body: 'B' }, purposes: [] }),
+      base({ type: 'journey', content: { purpose: 'legacy_purpose', nodes: [] }, purposes: [] }),
+    ];
+    for (const input of cases) {
+      const purpose = row(deriveConsequences(input).rows, 'purpose');
+      expect(purpose?.value).toBe('Unavailable purpose');
+      expect(purpose?.value).not.toContain('legacy_purpose');
+    }
   });
 });
 

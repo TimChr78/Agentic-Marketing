@@ -116,10 +116,13 @@ describe('segments', () => {
     );
     expect(after.members.map((m) => m.profileId)).toEqual([ids.bo]);
 
-    // Segments can build on each other; loops are refused.
-    expect(
-      await api.call('segments.preview', { condition: { all: [{ segment: artifactId }, { trait: 'city', op: 'eq', value: 'Aarhus' }] } }),
-    ).toMatchObject({ count: 1 });
+    // Segments can build on each other; loops are refused. The preview reports the published
+    // versions it resolved, so a client can tell when a referenced segment was republished (#599).
+    const nested = await api.call('segments.preview', {
+      condition: { all: [{ segment: artifactId }, { trait: 'city', op: 'eq', value: 'Aarhus' }] },
+    });
+    expect(nested).toMatchObject({ count: 1 });
+    expect(nested.segments).toEqual([{ id: artifactId, version: 1 }]);
     const loop = await api.call('artifacts.updateDraft', { artifactId, content: { condition: { segment: artifactId } } });
     expect((await rejects(api.call('segments.preview', { artifactId, version: loop.version }))).message).toContain('loop');
   });

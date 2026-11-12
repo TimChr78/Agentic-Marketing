@@ -27,9 +27,10 @@ _Last updated: 2026-11-12_
   - **0.14.3** (install, deploy and release tooling) is released.
   - **0.14.4** (consent, privacy records and delivery reliability, plus #664) is released and verified. Sol approved after 11 rounds; most were on the unsubscribe-link check (hiding forms, then super-linear inputs). The check now has a 1 s budget and a 512-level nesting cap, and its remaining limits are tracked in #707. `fast-xml-parser` is pinned to 5.12.0 (Dependabot 21).
   - **0.14.5** (analytics correctness) is released and verified. Sol approved after six rounds; one shared `campaignIdentityMap` (window and current hash version) now feeds the headline, member rows and holdouts. The suppression gap is filed as #692.
-  - **0.14.6** (admin UI stale data, migration 0089) is being released.
-  - **0.14.7** (authoring, approvals and forms) is in progress on `patch/0.14.7`, branched from `patch/0.14.6`.
-  - **0.14.8** (alerts, schedules and jobs) is in progress on `patch/0.14.8`, branched from `patch/0.14.6`. Up to four delegates run at once (raised 2026-11-12).
+  - **0.14.6** (admin UI stale data, migration 0089) is released and verified (the first release run hit an `expectLinear` flake; `expectLinear` now re-measures, #730).
+  - **0.14.7** (authoring, approvals and forms) is being released; Sol approved on the first round. P3 follow-ups: #735.
+  - **0.14.8** (alerts, schedules and jobs) is in review (#733): Sol blocked on DST offset probing and refresh-retry run ids; fixes in progress. Up to four delegates run at once (raised 2026-11-12).
+  - **0.14.9** (dependency updates, #727) is in progress: the auth stack, `htmlparser2` 12 and `jsdom` 31 now; Biome 2.6 and the remaining group after 0.14.8. Flaky axe test: #732.
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
@@ -75,4 +76,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.5 (verified); v0.14.6 is being released from `main` at `0c490ab`.
+- The last release is v0.14.6 (verified); v0.14.7 is being released from `main` at `d6cd608`.

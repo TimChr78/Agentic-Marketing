@@ -124,6 +124,6 @@ describe('label registry coverage (#437)', () => {
     }
     expect(purposeLabel('marketing_email')).toBe('Marketing e-mail');
     expect(purposeLabel('marketing_email', [{ key: 'marketing_email', name: 'Weekly signal' }])).toBe('Weekly signal');
-    expect(purposeLabel('custom_purpose')).toBe('Custom Purpose');
+    expect(purposeLabel('custom_purpose')).toBe('Unavailable purpose');
   });
 });
