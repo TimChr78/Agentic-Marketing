@@ -81,16 +81,68 @@ const ConsentEntry = z.object({
   source: z.string(),
   updatedAt: z.string(),
 });
+const EffectiveConsentEntry = z.object({
+  purpose: z.string(),
+  basis: z.string(),
+  status: z
+    .string()
+    .nullable()
+    .describe(
+      'The status delivery applies across channels (newest of the all-channels row and every channel row, a refusal winning a tie); null when nothing is recorded',
+    ),
+  allowed: z.boolean().describe('Whether processing for this purpose is allowed on its lawful basis'),
+  channels: z
+    .array(
+      z.object({
+        channel: z.string(),
+        status: z
+          .string()
+          .nullable()
+          .describe(
+            'The status delivery applies for this channel (newest of the all-channels row and this channel row, a refusal winning a tie)',
+          ),
+        allowed: z.boolean(),
+      }),
+    )
+    .describe('The effective status per channel: the purpose’s configured channels and every channel with a recorded row'),
+});
 const ProfileOut = z.object({
   id: z.string(),
   traits: z.record(z.string(), z.unknown()).describe('Traits that are not personal data'),
   personal: z.record(z.string(), z.unknown()).describe(`Personal traits; values are "${HIDDEN}" without profiles:pii`),
   identifiers: z.array(Identifier),
-  consent: z.array(ConsentEntry),
+  consent: z.array(ConsentEntry).describe('The raw current row per purpose and channel, for the consent ledger'),
+  consentEffective: z
+    .array(EffectiveConsentEntry)
+    .describe('The effective consent per purpose and channel, computed with the same rule delivery and segments enforce'),
   mergedFrom: z.array(z.string()),
   firstSeen: z.string(),
   lastSeen: z.string(),
 });
+
+async function effectiveConsent(ctx: CommandContext, rows: Awaited<ReturnType<typeof consentStateOf>>) {
+  const purposes = await purposesOf(ctx);
+  const keys = purposes.map((p) => p.key);
+  for (const row of rows) if (!keys.includes(row.purpose)) keys.push(row.purpose);
+  return keys.map((purpose) => {
+    const meta = purposes.find((p) => p.key === purpose);
+    const basis = meta?.basis ?? rows.find((r) => r.purpose === purpose)?.basis ?? 'consent';
+    const status = currentConsent(rows, purpose)?.status;
+    const channels = [
+      ...new Set([...(meta?.channels ?? []), ...rows.filter((r) => r.purpose === purpose && r.channel).map((r) => r.channel)]),
+    ];
+    return {
+      purpose,
+      basis,
+      status: status ?? null,
+      allowed: purposeAllowed(basis, status),
+      channels: channels.map((channel) => {
+        const channelStatus = currentConsent(rows, purpose, channel)?.status;
+        return { channel, status: channelStatus ?? null, allowed: purposeAllowed(basis, channelStatus) };
+      }),
+    };
+  });
+}
 
 async function profileOut(ctx: CommandContext, p: typeof schema.profiles.$inferSelect) {
   const ws = ctx.principal.workspaceId;
@@ -111,12 +163,14 @@ async function profileOut(ctx: CommandContext, p: typeof schema.profiles.$inferS
   }
   for (const [k, v] of Object.entries(pii)) personal[k] = show(k) ? v : HIDDEN;
   const family = await mergedFamily(ctx.tx, ws, p.id);
+  const consentRows = await consentStateOf(ctx.tx, ws, p.id);
   return {
     id: p.id,
     traits: p.traits,
     personal,
     identifiers,
-    consent: (await consentStateOf(ctx.tx, ws, p.id)).map((c) => ({ ...c, updatedAt: c.updatedAt.toISOString() })),
+    consent: consentRows.map((c) => ({ ...c, updatedAt: c.updatedAt.toISOString() })),
+    consentEffective: await effectiveConsent(ctx, consentRows),
     mergedFrom: family.filter((id) => id !== p.id),
     firstSeen: p.firstSeen.toISOString(),
     lastSeen: p.lastSeen.toISOString(),
@@ -242,6 +296,7 @@ export const findProfile = defineCommand({
   output: z.object({ profileId: z.string().nullable() }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
   sensitive: ['value'],
   handler: async (input, ctx) => {
     const crypto = personCrypto(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider);
@@ -297,6 +352,7 @@ export const profileEvents = defineCommand({
   }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     const p = await canonical(ctx, input.profileId);
@@ -490,6 +546,7 @@ export const consentHistory = defineCommand({
   }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     const canSeePii = ctx.principal.permissions.has('profiles:pii');
@@ -538,6 +595,7 @@ export const topicPreferencesCommand = defineCommand({
   }),
   permission: 'profiles:read',
   effect: 'read',
+  auditReads: true,
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     const p = await canonical(ctx, input.profileId);

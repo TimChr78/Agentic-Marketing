@@ -69,7 +69,12 @@ export function captureClickIds(search: string, cookies: string, now = Date.now(
   const fbclid = q.get('fbclid');
   if (fbclid && CLICK_VALUE.test(fbclid)) out.fbc = `fb.1.${now}.${fbclid}`;
   for (const part of cookies.split(';')) {
-    const [k, v] = part.trim().split('=');
+    // Split on the first "=" only: a cookie value may contain "=" (base64 padding, "==").
+    const trimmed = part.trim();
+    const eq = trimmed.indexOf('=');
+    if (eq < 0) continue;
+    const k = trimmed.slice(0, eq);
+    const v = trimmed.slice(eq + 1);
     if (!v || !CLICK_VALUE.test(v)) continue;
     if ((k === '_fbc' && !out.fbc) || k === '_fbp' || k === '_ttp') out[k.slice(1) as 'fbc' | 'fbp' | 'ttp'] = v;
     else if (k === '_epik' && !out.epik) out.epik = v;

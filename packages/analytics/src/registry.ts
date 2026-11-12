@@ -133,6 +133,11 @@ export interface BaseMeasureDef {
   counting: Counting;
   /** Message or journey event types this measure counts, for the compiler. */
   eventTypes?: readonly string[];
+  /**
+   * The message channel this measure counts. Omitted means every channel. SMS and push write the
+   * same sent/delivered types as e-mail, so a measure named e-mail must say which channel it means.
+   */
+  channel?: string;
   dimensions: readonly DimensionId[];
   defaultGrain: DimensionId | null;
 }
@@ -185,6 +190,7 @@ const emailBase = (
   aggregation: 'distinct profiles',
   counting: 'profiles',
   eventTypes: [type],
+  channel: 'email',
   dimensions,
   defaultGrain: 'day',
 });
@@ -304,7 +310,8 @@ const measures: MeasureDef[] = [
   {
     kind: 'base',
     id: 'campaign.recipients',
-    description: 'Distinct people who got a sent or delivered message from a campaign member in the range.',
+    description:
+      'Distinct people reached by a campaign member, on any channel (e-mail, SMS or push), in the range. Conversions belong to the campaign, so this is not an e-mail-only count.',
     unit: 'count',
     source: 'campaign',
     aggregation: 'distinct profiles',
@@ -327,7 +334,7 @@ const measures: MeasureDef[] = [
   {
     kind: 'ratio',
     id: 'campaign.conversion_rate',
-    description: 'Campaign converters divided by campaign recipients.',
+    description: 'Campaign converters divided by campaign recipients (people reached on any channel).',
     unit: 'ratio',
     source: 'campaign',
     aggregation: 'ratio',
@@ -350,7 +357,7 @@ const measures: MeasureDef[] = [
   {
     kind: 'ratio',
     id: 'campaign.revenue_per_recipient',
-    description: 'Attributed revenue divided by campaign recipients, in the conversion currency.',
+    description: 'Attributed revenue divided by campaign recipients (reached on any channel), in the conversion currency.',
     unit: 'currency',
     source: 'campaign',
     aggregation: 'ratio',

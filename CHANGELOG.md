@@ -2,6 +2,81 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.5] - 2026-11-12
+
+### Fixed
+
+- The campaign evaluation's per-member rows now apply the same k-anonymity rule as the measure layer: a member that reached fewer than k=5 people has its counts and rates suppressed, `meta.suppressed` counts the hidden rows, and the page no longer claims k-protection when nothing was suppressed.
+- A journey holdout now follows the same k rule as its member row: when the row is suppressed, or either arm has fewer than k=5 people, its counts, rates and lift are null, `suppressed` is true, and `meta.suppressed` counts it; the page shows "Suppressed" instead of numbers.
+- The k rule now applies to every holdout read, not only the campaign summary's journey rows: `journeys.holdoutResult` and `campaigns.holdoutResult` hide both arms, the lift and campaign revenue when either arm has fewer than k=5 people, return `suppressed: true` with `k`, and say why. The journey report and the campaign cards show "Suppressed" and the k line, never a zero count.
+- Per-member counts ignore message events without a profile id, so an unprofiled send no longer adds a phantom person to the row or deflates its click and unsubscribe rates.
+- `analytics.campaignSummary` clamps its documented default window to the 400-day cap (`max(campaign start, to − 400 days)`), notes when it shortened the window, returns readiness instead of rejecting a default window whose campaign starts after now, and rejects a reversed explicit window with a message that names the fix.
+- The summary keeps `campaign.recipients` as people reached on any channel, but labels the e-mail figures as e-mail and computes e-mail rates and funnel shares on the e-mail base (`email.sent`/`email.delivered`), so a campaign that also sends SMS or push no longer shows recipients above e-mails delivered or divides e-mail counts by all-channel recipients.
+- Ad performance now counts conversions that carry only a user id (server-side orders, CRM and offline imports) as unattributed instead of dropping them, so their revenue appears in the report.
+- Experiment results describe the published version of a live experience, so editing a draft no longer changes its goal, analysis method, threshold or control; the response names the version it describes.
+- The journey funnel API computes its drop-off chain in the published journey's node order and leaves out steps from older versions, so republishing a journey no longer mixes topologies. When no published topology exists it reports per-step reach without a claim of a chain.
+- The "latest event in period" line now applies the same event types and conversion names as the result, and is unavailable when the filters can match nothing.
+- The e-mail measures count only `channel = 'email'`. Workspaces that also send SMS or push will see their e-mail numbers drop where those channels wrote sent, delivered or other shared message events; the measures are named and described as e-mail, so the old figures included other channels.
+- Campaign analytics gives every campaign its own attribution window, even when an earlier campaign has several sending members, and keeps campaigns with recipients but no conversions in a revenue query with revenue 0 instead of dropping them (including the total row).
+- A revenue campaign's holdout result counts the campaign's own goal event, so it measures conversions on an install with no conversion map published, and an event without a revenue rule counts as a conversion worth 0.
+- The campaign headline, the per-member rows and the holdout card resolve conversion identity the same way, so a profile merge no longer makes one surface count a conversion the other misses: a recipient reached before a merge and a conversion stored under either profile still count, and a person reached as both profiles counts once. Identity resolution is scoped to the campaign's recipients, so unrelated merges elsewhere in the workspace no longer change the headline; above the bound for the largest supported campaign, the headline and the holdout report the same not-resolved note.
+- Every query that ships the identity map now uses one builder that splits the three arrays into index-aligned chunks below ClickHouse's 128 KiB per-field limit and joins them with `arrayConcat`. The per-member breakdown previously sent one unchunked array, so a campaign with 4,000 recipients and a mapped identifier each failed with HTTP 500 while the headline succeeded.
+- The recipient scope read is capped at the map's pair bound plus one id. Above it the campaign skips resolution instead of building a partial map, and the headline, the per-member rows and the holdout all report the same not-resolved note. The map's documented bound is now stated in pairs and bytes, not recipients, because one recipient can contribute several anonymous ids, user ids and merge ancestors.
+- The headline, the per-member rows, the campaign-wide holdout and the summary's holdout rows now share one campaign identity map. Its scope is the union of the campaign's sent recipients in the window and its holdout assignments (both arms), and the bound is decided once on that union. Near the bound, one side used to drop resolution while the other kept it, so a treatment conversion stored under a merged-away profile could count in the headline but not in the holdout; now either every output resolves with the same map or every output reports the same not-resolved note.
+- The journey funnel reports drop-off only for a straight-line published journey, where every node has one outgoing step and no node repeats. A branch, split, alternative wait/action exit, loop or reconvergence now returns reach per node in breadth-first order with null drop-off, so a 70/30 split that reconverges no longer reports a negative drop-off. Counts use only the published version when journey events record one.
+- A linear published journey also needs non-increasing counts along the walk. Migration moves a participant to the new version without a new entry, so a later step can outnumber the entry step; when that happens the report returns `basis: "reach"` with null drop-off and a note that people joined mid-journey, instead of clamping the excess to a fabricated zero drop-off. A negative drop-off is never silently turned into zero.
+
+### Upgrading from 0.14.4
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** several reported numbers change after upgrading; no command, URL or configuration is removed.
+  - **E-mail figures drop** in workspaces that also send SMS or push: the `email.*` measures and the campaign summary's e-mail rates and member rows now count e-mail only. Dashboards, alert rules and reports built on `email.*` measures keep working but show the e-mail-only values.
+  - **Campaign conversions and revenue can rise** where a campaign used the wrong attribution window, had no conversions in the revenue roll-up, or converted under a merged profile; ads totals rise by user-id-only conversions.
+  - **Small groups are hidden:** member rows, journey holdouts and campaign holdouts with fewer than 5 people now return `null` with `suppressed: true` instead of counts. API and MCP consumers must handle the `null` values.
+  - **Journey funnels:** journeys with branches, splits, loops or mid-journey migrations report `basis: "reach"` with null drop-off instead of a drop-off chain.
+  - **Campaign summary output:** gains `headline.emailSent` and per-row `suppressed`; a reversed explicit window is now rejected.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.5.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.5 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.5` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.5). Run `docker compose exec app am doctor`.
+
+<!-- issues: 586, 587, 588, 589, 590, 591, 629, 630, 631, 632, 640, 682 -->
+
+## [0.14.4] - 2026-11-12
+
+### Fixed
+
+- Personal-data reads now write an audit record: `profiles.find`, `profiles.events`, `consent.history`, `topics.preferences`, `messages.list`, `segments.ofProfile`, `profiles.scores`, `deliveries.list`, `segments.preview` (its sample is profile ids) and `journeys.simulate` (with the person as the target when a profile is given).
+- The person page shows the consent delivery actually enforces, per purpose and per channel, so a newer withdrawal on one channel is visible beside the channels it did not touch and an equal-timestamp refusal wins.
+- `journeys.simulate` asks the same channel-precedence rule as the runtime, so a webhook withdrawal behind an older all-channel grant previews as “would not send” instead of “would send a webhook”.
+- A strict tracking plan no longer rejects the platform's own signup, confirmation, import and e-mail carrier events, so newsletter signups keep working and imported consent is recorded.
+- Tracking plans gain a `declaredProperties` setting for a declared property that is missing although required, or has the wrong type. When it is absent, plans that block unknown properties keep blocking and other plans warn; the unknown-event setting no longer affects this.
+- Retention removes unconfirmed form signups that supplied a client anonymous id only when the stored event history proves an unconfirmed signup with no other activity; confirmed subscribers and people with other activity stay, and kept candidates can no longer hide an older signup.
+- Delivery events from Amazon SES keep arriving after a transient failure: the SNS signing certificate is cached only after a successful fetch, a stale certificate is fetched again at most once a minute, and one timeout or 5xx no longer rejects every bounce and complaint webhook for the life of the process.
+- The unsubscribe check now reads the rendered e-mail, not the template source: a footer supplied by a reusable block passes, while prose that only mentions `unsubscribe_url` is refused, with the same answer at save and at publish. The link must also be usable: a hidden link (`display:none`, `visibility:hidden`, `hidden`, a covering style or a simple `<style>` rule), one outside the body, or one with no text or image alt text is refused with the reason. Visibility is judged at the link's own text, following the CSS cascade (the last declaration wins unless an earlier one is `!important`; inline beats a simple rule), and transparent, zero-alpha or background-coloured text counts as hidden, including semi-transparent backgrounds, the `background` shorthand and table `bgcolor`. An e-mail nested more than 512 levels deep, or one that takes more than a second to check, is refused as too complex to check. Known limits (complex selectors, `@media` rules, external stylesheets, transforms and some colour forms) are listed in #707.
+- UTM tagging and click tracking now cover single-quoted and unquoted `href` links that authors write inside `mj-text`; the existing double-quoted output is unchanged.
+- A push message that reached some devices while others hit a transient error now retries only the failed devices with the normal back-off, instead of marking the message `sent` and losing those notifications.
+- Replying START to an SMS now works: the app role may delete its workspace’s `stop` suppression, so opting back in returns 200 and never removes a bounce or complaint suppression.
+- Signed inbound webhooks remember their `webhook-id` in the shared hot state: a replayed request is answered as already received and publishes nothing, while a delivery still being processed gets a retryable 503 instead of a false acknowledgement, so a crash mid-publish cannot lose the event.
+- The browser SDK reads ad click-id cookies without truncating values at `=`: a value that fails the click-id pattern is dropped whole instead of a shortened, wrong id being stored.
+
+### Security
+
+- `fast-xml-parser` is pinned to 5.12.0 for `@better-auth/sso`, which parses SAML responses with it; 5.11.2 and earlier spend quadratic CPU on unterminated stop-node tags (Dependabot alert 21).
+
+### Upgrading from 0.14.3
+
+- **Migrations:** `packages/db/migrations/0088_suppressions_delete_grant.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** stricter unsubscribe-link checks, a new tracking-plan setting, more audit records and changed webhook replay answers.
+  - **Marketing e-mail templates are checked more strictly.** A template whose unsubscribe link is hidden, outside the body, empty, or only mentioned in prose is now refused at save and at publish, and so is one too complex to check. Templates that passed before can now be refused; open them and fix the footer link (the message names the reason). Transactional e-mail is not affected.
+  - **Tracking plans:** the new `declaredProperties` setting decides what happens to a declared property that is missing or has the wrong type. Plans without it keep blocking when they block unknown properties and otherwise warn; the unknown-event setting no longer affects this.
+  - **More audit records:** the personal-data reads listed under Fixed now each write an audit record, so the audit log grows faster on workspaces that read profiles often.
+  - **Inbound webhook replays:** a repeated `webhook-id` is acknowledged without publishing, and a delivery still in progress gets a retryable 503. Senders that retry on 503 need no change.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.4.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.4 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.4` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.4). Run `docker compose exec app am doctor`.
+
+<!-- issues: 592, 593, 623, 624, 625, 626, 627, 634, 637, 638, 639, 643, 644, 664 -->
+
 ## [0.14.3] - 2026-11-10
 
 ### Changed

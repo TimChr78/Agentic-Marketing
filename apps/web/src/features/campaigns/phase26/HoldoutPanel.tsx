@@ -5,11 +5,11 @@ import { holdoutVerdict, int, money, pointsText, rateText, signedPercentText } f
 // closing note say which cohort this is, and every returned currency keeps its own amount.
 
 export type HoldoutArm = {
-  entered: number;
-  converted: number;
-  unsubscribed: number;
-  conversionRate: number;
-  unsubscribeRate: number;
+  entered: number | null;
+  converted: number | null;
+  unsubscribed: number | null;
+  conversionRate: number | null;
+  unsubscribeRate: number | null;
   revenue?: Record<string, number>;
 };
 
@@ -19,34 +19,37 @@ export interface HoldoutPanelProps {
   controlGroup: { percent: number; minSampleSize: number };
   control: HoldoutArm;
   treatment: HoldoutArm;
-  absoluteLift: number;
+  absoluteLift: number | null;
   relativeLift: number | null;
   ci95: [number, number] | null;
   minSampleSizeMet: boolean;
   verdict: 'not_enough_data' | 'no_clear_difference' | 'treatment_better' | 'treatment_worse';
   note: string;
+  suppressed?: boolean;
   goalEvent: string | null;
   attributionDays: number | null;
   assignmentPeriod: string;
 }
 
-function armRate(converted: number, entered: number, rate: number): string {
+function armRate(converted: number | null, entered: number | null, rate: number | null): string {
+  if (entered === null) return 'Suppressed';
   if (!entered) return 'Unavailable';
   return `${int(converted)} / ${int(entered)} = ${rateText(rate, entered)}`;
 }
 
-function ArmCard({ label, arm }: { label: string; arm: HoldoutArm }) {
+function ArmCard({ label, arm, suppressed }: { label: string; arm: HoldoutArm; suppressed: boolean }) {
+  const count = (value: number | null) => (suppressed ? 'Suppressed' : int(value));
   return (
     <div className="rounded-md border border-line p-3">
       <p className="text-[13px] leading-5 font-semibold">{label}</p>
       <Meta
         className="mt-2"
         items={[
-          ['Entered', int(arm.entered)],
-          ['Converted', int(arm.converted)],
-          ['Conversion rate', armRate(arm.converted, arm.entered, arm.conversionRate)],
-          ['Unsubscribed', int(arm.unsubscribed)],
-          ['Unsubscribe rate', armRate(arm.unsubscribed, arm.entered, arm.unsubscribeRate)],
+          ['Entered', count(arm.entered)],
+          ['Converted', count(arm.converted)],
+          ['Conversion rate', suppressed ? 'Suppressed' : armRate(arm.converted, arm.entered, arm.conversionRate)],
+          ['Unsubscribed', count(arm.unsubscribed)],
+          ['Unsubscribe rate', suppressed ? 'Suppressed' : armRate(arm.unsubscribed, arm.entered, arm.unsubscribeRate)],
         ]}
       />
     </div>
@@ -54,11 +57,12 @@ function ArmCard({ label, arm }: { label: string; arm: HoldoutArm }) {
 }
 
 export function HoldoutPanel(props: HoldoutPanelProps) {
-  const verdict = holdoutVerdict(props);
-  const insufficient = !props.minSampleSizeMet || props.verdict === 'not_enough_data';
+  const suppressed = props.suppressed === true;
+  const verdict = suppressed ? { label: 'Suppressed', tone: 'warn' as const } : holdoutVerdict(props);
+  const insufficient = !suppressed && (!props.minSampleSizeMet || props.verdict === 'not_enough_data');
   const includesZero = !!props.ci95 && props.ci95[0] <= 0 && props.ci95[1] >= 0;
-  const inconclusive = !insufficient && (props.verdict === 'no_clear_difference' || includesZero);
-  const noAssignments = props.control.entered + props.treatment.entered === 0;
+  const inconclusive = !suppressed && !insufficient && (props.verdict === 'no_clear_difference' || includesZero);
+  const noAssignments = !suppressed && props.control.entered === 0 && props.treatment.entered === 0;
   const currencies =
     props.kind === 'campaign'
       ? [...new Set([...Object.keys(props.control.revenue ?? {}), ...Object.keys(props.treatment.revenue ?? {})])]
@@ -78,6 +82,11 @@ export function HoldoutPanel(props: HoldoutPanelProps) {
         <StatusPill tone={verdict.tone}>{verdict.label}</StatusPill>
       </div>
 
+      {suppressed && (
+        <Alert tone="warn" className="mt-3" title="Suppressed">
+          Fewer than k people in the control or treatment arm, or in this journey's member row. Counts, rates and lift are hidden.
+        </Alert>
+      )}
       {insufficient && (
         <Alert tone="warn" className="mt-3" title="Insufficient sample">
           Control {int(props.control.entered)} / minimum {int(props.controlGroup.minSampleSize)}. No significance claim.
@@ -97,8 +106,8 @@ export function HoldoutPanel(props: HoldoutPanelProps) {
       )}
 
       <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <ArmCard label="Control" arm={props.control} />
-        <ArmCard label="Treatment" arm={props.treatment} />
+        <ArmCard label="Control" arm={props.control} suppressed={suppressed} />
+        <ArmCard label="Treatment" arm={props.treatment} suppressed={suppressed} />
       </div>
 
       {props.kind === 'campaign' && (
@@ -129,13 +138,21 @@ export function HoldoutPanel(props: HoldoutPanelProps) {
         </div>
       )}
 
-      <p className="mt-3 text-[12px] leading-[18px] text-fg-2">
-        <strong>{pointsText(props.absoluteLift)}</strong> absolute lift ·{' '}
-        {props.relativeLift === null ? 'Relative lift unavailable' : `${signedPercentText(props.relativeLift)} relative lift`} · 95%
-        interval {props.ci95 ? `${pointsText(props.ci95[0])} to ${pointsText(props.ci95[1])}` : 'Unavailable'}
-      </p>
-      {props.control.converted === 0 && props.relativeLift === null && (
-        <p className="mt-1 text-[12px] leading-[18px] text-muted">Zero control conversion makes relative lift unavailable.</p>
+      {suppressed ? (
+        <p className="mt-3 text-[12px] leading-[18px] text-fg-2">
+          <strong>Suppressed</strong> · the k-anonymity rule hides the counts, rates and lift.
+        </p>
+      ) : (
+        <>
+          <p className="mt-3 text-[12px] leading-[18px] text-fg-2">
+            <strong>{pointsText(props.absoluteLift)}</strong> absolute lift ·{' '}
+            {props.relativeLift === null ? 'Relative lift unavailable' : `${signedPercentText(props.relativeLift)} relative lift`} · 95%
+            interval {props.ci95 ? `${pointsText(props.ci95[0])} to ${pointsText(props.ci95[1])}` : 'Unavailable'}
+          </p>
+          {props.control.converted === 0 && props.relativeLift === null && (
+            <p className="mt-1 text-[12px] leading-[18px] text-muted">Zero control conversion makes relative lift unavailable.</p>
+          )}
+        </>
       )}
       <p className="mt-1 text-[12px] leading-[18px] text-muted">{props.note}</p>
       <p className="mt-1 text-[12px] leading-[18px] text-muted">

@@ -1,4 +1,14 @@
-import { type ArmResult, analyseHoldout, artifactTypes, type HoldoutVerdict, holdoutHashVersion } from '@agentic-marketing/artifacts';
+import {
+  type ArmResult,
+  analyseHoldout,
+  artifactTypes,
+  type HoldoutVerdict,
+  holdoutBelowK,
+  holdoutHashVersion,
+  K,
+  type SuppressedArmResult,
+  suppressHoldout,
+} from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -33,14 +43,18 @@ export interface JourneyHoldoutResult {
   controlGroup: { percent: number; minSampleSize: number; hashVersion: string };
   from: string | null;
   to: string | null;
-  control: ArmResult;
-  treatment: ArmResult;
-  absoluteLift: number;
+  /** The k-anonymity floor the result was measured against. */
+  k: number;
+  control: ArmResult | SuppressedArmResult;
+  treatment: ArmResult | SuppressedArmResult;
+  absoluteLift: number | null;
   relativeLift: number | null;
   ci95: [number, number] | null;
   minSampleSizeMet: boolean;
   verdict: HoldoutVerdict;
   note: string;
+  /** True when an arm held fewer than k people, so no count, rate or lift is reported. */
+  suppressed: boolean;
 }
 
 /**
@@ -94,6 +108,18 @@ export async function computeJourneyHoldout(
     counts[row.arm].entered++;
     people[row.arm].add(row.profileId);
   }
+  // The same k rule as the campaign summary (#590): an arm below k is never reported, so the
+  // journey's own report and MCP cannot expose a handful of people the summary already hides.
+  if (holdoutBelowK(counts)) {
+    return {
+      journeyId,
+      controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },
+      from: range.from ?? null,
+      to: range.to ?? null,
+      k: K,
+      ...suppressHoldout(`Suppressed: fewer than k=${K} people in the control or treatment arm, so counts, rates and lift are hidden.`),
+    };
+  }
   // Outcomes come from ClickHouse (the journey's goal events and the e-mail unsubscribe
   // guardrail), joined in code to the Postgres assignments. The event store applies the row
   // policies through settingsFor, so a query never crosses workspaces.
@@ -124,7 +150,9 @@ export async function computeJourneyHoldout(
     controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },
     from: range.from ?? null,
     to: range.to ?? null,
+    k: K,
     ...analysis,
     note,
+    suppressed: false,
   };
 }
