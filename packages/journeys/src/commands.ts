@@ -1,8 +1,10 @@
 import {
   analyseHoldout,
+  anyArmBelowK,
   artifactTypes,
   DEFAULT_PURPOSES,
   type JourneyDefinition,
+  K,
   publishedSingleton,
   publishValidators,
 } from '@agentic-marketing/artifacts';
@@ -236,18 +238,19 @@ export const journeyHoldoutResult = defineCommand({
 const ArmOut = z.object({
   arm: z.number().int().describe('0-based: arm 0 is the split’s first edge (variant 1)'),
   weight: z.number(),
-  entered: z.number().int().describe('Participants who took this arm'),
-  converted: z.number().int(),
-  unsubscribed: z.number().int(),
-  conversionRate: z.number(),
-  unsubscribeRate: z.number(),
+  entered: z.number().int().nullable().describe('Participants who took this arm; null when the arm is below k'),
+  converted: z.number().int().nullable().describe('People in the arm who converted; null when the arm is below k'),
+  unsubscribed: z.number().int().nullable().describe('E-mail unsubscribes, the guardrail; null when the arm is below k'),
+  conversionRate: z.number().nullable().describe('Converted divided by entered; null when the arm is below k'),
+  unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the arm is below k'),
+  suppressed: z.boolean().describe('True when this arm held fewer than k people, so its counts and rates are hidden'),
 });
 
 export const journeySplitResult = defineCommand({
   name: 'journeys.splitResult',
   title: 'Results per arm of a journey split',
   description:
-    "For a split node in a published journey: how many people took each arm, their goal conversions and e-mail unsubscribes, and each arm compared with the first (variant 1) — absolute and relative lift, Newcombe's 95% interval and a verdict that needs the minimum sample in both arms and an interval excluding zero. Each outcome is attributed once, to the split entry active at the outcome (a recorded participant wins; otherwise the latest entry at or before it), so a re-entrant cannot count for every arm. The lifecycle optimiser uses it to promote or retire a variant (#313).",
+    "For a split node in a published journey: how many people took each arm, their goal conversions and e-mail unsubscribes, and each arm compared with the first (variant 1) — absolute and relative lift, Newcombe's 95% interval and a verdict that needs the minimum sample in both arms and an interval excluding zero. Each outcome is attributed once, to the split entry active at the outcome (a recorded participant wins; otherwise the latest entry at or before it), so a re-entrant cannot count for every arm. The lifecycle optimiser uses it to promote or retire a variant (#313). When any arm holds fewer than k=5 people, that arm's counts and rates are null, suppressed is true and k is reported, and every comparison and its verdict is withheld.",
   input: z.object({
     journeyId: JourneyId,
     node: z.string().min(1).describe('The split node id'),
@@ -258,6 +261,10 @@ export const journeySplitResult = defineCommand({
   output: z.object({
     journeyId: z.string(),
     node: z.string(),
+    k: z.number().int().describe('The k-anonymity floor; an arm below it is suppressed'),
+    suppressed: z
+      .boolean()
+      .describe('True when an arm held fewer than k people, so small-arm counts, rates and every comparison are hidden'),
     arms: z.array(ArmOut),
     comparisons: z.array(
       z.object({
@@ -303,34 +310,55 @@ export const journeySplitResult = defineCommand({
       weights.length,
     );
     const rate = (n: number, of: number) => (of ? n / of : 0);
-    const arms = counts.map((c, i) => ({
-      arm: i,
-      weight: weights[i],
-      ...c,
-      conversionRate: rate(c.converted, c.entered),
-      unsubscribeRate: rate(c.unsubscribed, c.entered),
-    }));
-    const comparisons = counts.slice(1).map((c, i) => {
-      const r = analyseHoldout(counts[0], c, input.minSampleSize);
-      return {
-        arm: i + 1,
-        versus: 0 as const,
-        absoluteLift: r.absoluteLift,
-        relativeLift: r.relativeLift,
-        ci95: r.ci95,
-        minSampleSizeMet: r.minSampleSizeMet,
-        verdict: r.verdict,
-      };
-    });
+    // The same k floor the holdout read applies, per arm (#757): an arm below k never reports a
+    // count or rate, and no comparison or verdict is computed from a hidden baseline.
+    const belowK = anyArmBelowK(counts);
+    const arms = counts.map((c, i) =>
+      belowK && c.entered < K
+        ? {
+            arm: i,
+            weight: weights[i],
+            entered: null,
+            converted: null,
+            unsubscribed: null,
+            conversionRate: null,
+            unsubscribeRate: null,
+            suppressed: true,
+          }
+        : {
+            arm: i,
+            weight: weights[i],
+            ...c,
+            conversionRate: rate(c.converted, c.entered),
+            unsubscribeRate: rate(c.unsubscribed, c.entered),
+            suppressed: false,
+          },
+    );
+    const comparisons = belowK
+      ? []
+      : counts.slice(1).map((c, i) => {
+          const r = analyseHoldout(counts[0], c, input.minSampleSize);
+          return {
+            arm: i + 1,
+            versus: 0 as const,
+            absoluteLift: r.absoluteLift,
+            relativeLift: r.relativeLift,
+            ci95: r.ci95,
+            minSampleSizeMet: r.minSampleSizeMet,
+            verdict: r.verdict,
+          };
+        });
     const better = comparisons.filter((c) => c.verdict === 'treatment_better').map((c) => `arm ${c.arm}`);
     const note = !taken.length
       ? 'Nobody has reached this split yet.'
-      : better.length
-        ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
-        : comparisons.every((c) => c.verdict === 'not_enough_data')
-          ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
-          : 'No arm is clearly better than arm 0 yet.';
-    return { journeyId: input.journeyId, node: input.node, arms, comparisons, note };
+      : belowK
+        ? `An arm has fewer than k=${K} people, so its counts and rates and every comparison are withheld.`
+        : better.length
+          ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
+          : comparisons.every((c) => c.verdict === 'not_enough_data')
+            ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
+            : 'No arm is clearly better than arm 0 yet.';
+    return { journeyId: input.journeyId, node: input.node, k: K, suppressed: belowK, arms, comparisons, note };
   },
 });
 
