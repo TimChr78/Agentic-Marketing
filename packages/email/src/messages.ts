@@ -103,6 +103,8 @@ export const listMessages = defineCommand({
   effect: 'read',
   auditReads: true,
   target: (i) => i.profileId,
+  // Without a profileId filter the page spans several people: name each of them (#763).
+  auditTargets: (out) => out.messages.map((m) => m.profileId).filter((profileId): profileId is string => profileId !== null),
   handler: async (input, ctx) => {
     const c = schema.messages;
     const cursor = input.cursor ? decodeCursor(input.cursor) : null;
