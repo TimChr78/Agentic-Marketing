@@ -9,6 +9,12 @@ const h = vi.hoisted(() => ({
   ready: true,
   empty: false,
   two: false,
+  // The selection race tests resolve the detail reads immediately and hold the action they test.
+  fastGet: false,
+  holdPreview: false,
+  previewHeld: [] as { recipeId: string; resolve: (value: unknown) => void }[],
+  holdInstall: false,
+  installHeld: [] as { recipeId: string; resolve: (value: unknown) => void }[],
   held: [] as { which: 'A' | 'B'; resolve: (value: unknown) => void }[],
   checkError: null as Error | null,
   installError: null as Error | null,
@@ -60,9 +66,32 @@ vi.mock('../../../app/api', async (importOriginal) => {
           };
         if (name === 'recipes.get') {
           // With two starters the reads are held, so the test decides the order they resolve in.
-          if (h.two) {
+          if (h.two && !h.fastGet) {
             const which = input.recipeId === `rcp_${'b'.repeat(32)}` ? ('B' as const) : ('A' as const);
             return new Promise((resolve) => h.held.push({ which, resolve }));
+          }
+          if (h.two) {
+            const isB = input.recipeId === `rcp_${'b'.repeat(32)}`;
+            return {
+              recipe: {
+                id: input.recipeId,
+                title: isB ? 'Starter B' : 'Starter A',
+                description: isB ? 'The second starter.' : 'The first starter.',
+                version: 1,
+                artifacts: 1,
+                parameters: [
+                  {
+                    key: isB ? 'bParam' : 'aParam',
+                    label: isB ? 'B parameter' : 'A parameter',
+                    type: 'text',
+                    required: true,
+                    default: isB ? 'B value' : 'A value',
+                  },
+                ],
+                prerequisites: [],
+                checklist: [],
+              },
+            };
           }
           return {
             recipe: {
@@ -88,6 +117,7 @@ vi.mock('../../../app/api', async (importOriginal) => {
         }
         if (name === 'recipes.preview') {
           if (h.checkError) throw h.checkError;
+          if (h.holdPreview) return new Promise((resolve) => h.previewHeld.push({ recipeId: String(input.recipeId), resolve }));
           return {
             ready: h.ready,
             prerequisites: [
@@ -103,6 +133,7 @@ vi.mock('../../../app/api', async (importOriginal) => {
         }
         if (name === 'recipes.install') {
           if (h.installError) throw h.installError;
+          if (h.holdInstall) return new Promise((resolve) => h.installHeld.push({ recipeId: String(input.recipeId), resolve }));
           return { artifacts: [{ artifactId: `eml_${'b'.repeat(32)}`, name: 'Weekly newsletter' }] };
         }
         throw new Error(`unexpected command ${name}`);
@@ -122,6 +153,11 @@ beforeEach(() => {
   h.ready = true;
   h.empty = false;
   h.two = false;
+  h.fastGet = false;
+  h.holdPreview = false;
+  h.previewHeld = [];
+  h.holdInstall = false;
+  h.installHeld = [];
   h.held = [];
   h.checkError = null;
   h.installError = null;
@@ -242,5 +278,72 @@ describe('Starters gallery (#526)', () => {
     expect(screen.getByText(/Create a template from scratch/)).toBeTruthy();
     // The empty list names its next action through the existing destination.
     expect(screen.getByRole('link', { name: 'Open e-mail templates' }).getAttribute('href')).toBe('/content/templates');
+  });
+
+  it('discards a prerequisite check that resolves after another starter is selected (#792)', async () => {
+    h.two = true;
+    h.fastGet = true;
+    renderPage();
+    await screen.findByRole('button', { name: /Starter A/ });
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Starter A' })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    // Start A's explicit check and keep it in flight.
+    h.holdPreview = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(h.previewHeld).toHaveLength(1));
+    expect(h.previewHeld[0].recipeId).toBe(`rcp_${'a'.repeat(32)}`);
+
+    // Select B while A's check is pending: B's own preview is read and resolves first.
+    await userEvent.click(screen.getByRole('button', { name: /Starter B/ }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Starter B' })).toBeTruthy());
+    await waitFor(() => expect(h.previewHeld).toHaveLength(2));
+    expect(h.previewHeld[1].recipeId).toBe(`rcp_${'b'.repeat(32)}`);
+    await act(async () => {
+      h.previewHeld[1].resolve({
+        ready: false,
+        prerequisites: [{ kind: 'purpose', description: 'B purpose', ok: false, message: 'B is missing a purpose.' }],
+        artifacts: [{ key: 'tpl_b', type: 'email_template', name: 'Starter B draft' }],
+      });
+    });
+    await screen.findByText('B is missing a purpose.');
+
+    // A's slower response must not land under B.
+    await act(async () => {
+      h.previewHeld[0].resolve({
+        ready: true,
+        prerequisites: [{ kind: 'purpose', description: 'A purpose', ok: true, message: '' }],
+        artifacts: [{ key: 'tpl_a', type: 'email_template', name: 'Starter A draft' }],
+      });
+    });
+    await act(async () => {});
+    expect(screen.queryByText('Starter A draft')).toBeNull();
+    expect(screen.queryByText('Everything is in place.')).toBeNull();
+    expect(screen.getByText('One or more prerequisites are missing.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
+  });
+
+  it('discards created drafts that resolve after another starter is selected (#792)', async () => {
+    h.two = true;
+    h.fastGet = true;
+    renderPage();
+    await screen.findByRole('button', { name: /Starter A/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    // Start A's install and keep it in flight.
+    h.holdInstall = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+    expect(h.installHeld[0].recipeId).toBe(`rcp_${'a'.repeat(32)}`);
+
+    await userEvent.click(screen.getByRole('button', { name: /Starter B/ }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Starter B' })).toBeTruthy());
+
+    await act(async () => {
+      h.installHeld[0].resolve({ artifacts: [{ artifactId: `eml_${'f'.repeat(32)}`, name: 'Starter A draft' }] });
+    });
+    await act(async () => {});
+    expect(screen.queryByText(/Created 1 drafts/)).toBeNull();
+    expect(screen.queryByText('Starter A draft')).toBeNull();
   });
 });

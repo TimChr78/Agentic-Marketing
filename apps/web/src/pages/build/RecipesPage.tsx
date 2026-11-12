@@ -100,13 +100,18 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
 
   const check = async () => {
     if (!recipe) return;
+    // A check belongs to the selection it was started for: a slower earlier response must not
+    // replace the newly selected starter's preview (#616, #792).
+    const seq = loadSeq.current;
     setChecking(true);
     setError(null);
     setCheckError(null);
     try {
-      setPreview(await api.call('recipes.preview', { recipeId: recipe.id, params: values }));
+      const next = await api.call('recipes.preview', { recipeId: recipe.id, params: values });
+      if (seq !== loadSeq.current) return;
+      setPreview(next);
     } catch (e) {
-      setCheckError(errText(e));
+      if (seq === loadSeq.current) setCheckError(errText(e));
     } finally {
       setChecking(false);
     }
@@ -114,13 +119,16 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
 
   const install = async () => {
     if (!recipe) return;
+    // Same rule as `check`: an install result may land under the starter it was started for.
+    const seq = loadSeq.current;
     setInstalling(true);
     setError(null);
     try {
       const out = await api.call('recipes.install', { recipeId: recipe.id, params: values });
+      if (seq !== loadSeq.current) return;
       setInstalled(out);
     } catch (e) {
-      setError(errText(e));
+      if (seq === loadSeq.current) setError(errText(e));
     } finally {
       setInstalling(false);
     }

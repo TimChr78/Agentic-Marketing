@@ -52,6 +52,9 @@ import { COMMIT, VERSION } from './version';
 
 // An invitation token is short; the limit runs before the session lookup and the body parse.
 const INVITATION_MAX_BODY = 8 * 1024;
+// A consent form is a decision and the signed authorization query; 16 KB leaves ample room while
+// refusing an unbounded body before Better Auth reads it (#790).
+const CONSENT_MAX_BODY = 16 * 1024;
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export interface ServerOverrides {
@@ -395,18 +398,24 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     withConsentRequest({ query: new URL(c.req.url).search, mode: 'authorize' }, () => auth.handler(withClientIp(c)));
   app.get('/api/auth/oauth2/authorize', authorize);
   app.get('/api/auth/oauth2/authorize/*', authorize);
-  app.post('/api/auth/oauth2/consent', async (c) => {
-    const raw = await c.req.text();
-    let query: string | undefined;
-    try {
-      const body = JSON.parse(raw) as { oauth_query?: unknown };
-      if (typeof body.oauth_query === 'string') query = body.oauth_query;
-    } catch {
-      // Not JSON: Better Auth answers with its own validation error for the replayed request.
-    }
-    const request = new Request(c.req.raw.url, { method: 'POST', headers: c.req.raw.headers, body: raw });
-    return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
-  });
+  app.post(
+    '/api/auth/oauth2/consent',
+    bodyLimit(CONSENT_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `Requests are limited to ${CONSENT_MAX_BODY / 1024} KB.` }, 413),
+    ),
+    async (c) => {
+      const raw = await c.req.text();
+      let query: string | undefined;
+      try {
+        const body = JSON.parse(raw) as { oauth_query?: unknown };
+        if (typeof body.oauth_query === 'string') query = body.oauth_query;
+      } catch {
+        // Not JSON: Better Auth answers with its own validation error for the replayed request.
+      }
+      const request = new Request(c.req.raw.url, { method: 'POST', headers: c.req.raw.headers, body: raw });
+      return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
+    },
+  );
   app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
 
   // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
@@ -539,6 +548,16 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider }));
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
   app.route('/', restApi({ auth, db, executor, assetMaxBytes: config.assetMaxBytes }));
+
+  // API-owned roots answer JSON on every role, even the ones whose implementation is not mounted
+  // here (an api-only or ingest-only pod). An unmatched /hooks, /oauth or /scim path must never
+  // become the admin SPA or Hono's text/plain 404 (#610, #751). Registered after every real route
+  // above, so it only catches what nothing else claimed.
+  const apiNotFound = (c: Context) => c.json({ error: 'not_found', message: 'Not found.' }, 404);
+  for (const root of ['/hooks', '/oauth', '/scim']) {
+    app.all(root, apiNotFound);
+    app.all(`${root}/*`, apiNotFound);
+  }
 
   // Last, so every API route above wins. Without a build (packages/tests, server-only install) the
   // middleware is a no-op and the server behaves exactly as before.

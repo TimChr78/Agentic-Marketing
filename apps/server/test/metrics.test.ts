@@ -115,7 +115,7 @@ describe('metrics exposition', () => {
     const body = await (await scrape(TOKEN)).text();
     expect(body).not.toContain(workspaceId);
     expect(body).not.toContain(owner.email);
-    const groups = new Set(['auth', 'v1', 'mcp', 'pages', 'public', 'ui', 'api', 'well-known', 'healthz', 'readyz']);
+    const groups = new Set(['auth', 'v1', 'mcp', 'pages', 'public', 'ui', 'api', 'oauth', 'well-known', 'healthz', 'readyz']);
     for (const match of body.matchAll(/route="([^"]*)"/g)) expect(groups.has(match[1]), match[1]).toBe(true);
     for (const match of body.matchAll(/status="([^"]*)"/g)) expect(match[1]).toMatch(/^[1-5]xx$/);
   });
@@ -137,6 +137,11 @@ describe('metric helpers', () => {
     expect(routeGroup('/hooks/inbound/abc')).toBe('public');
     expect(routeGroup('/assets/index-abc.js')).toBe('ui');
     expect(routeGroup('/readyz')).toBe('readyz');
+    // Identity-provider traffic is not the admin UI (#752).
+    expect(routeGroup('/scim/v2/Users')).toBe('api');
+    expect(routeGroup('/scim')).toBe('api');
+    expect(routeGroup('/oauth/callback')).toBe('oauth');
+    expect(routeGroup('/oauth/token-typo')).toBe('oauth');
     expect(statusClass(204)).toBe('2xx');
     expect(statusClass(418)).toBe('4xx');
     expect(statusClass(503)).toBe('5xx');

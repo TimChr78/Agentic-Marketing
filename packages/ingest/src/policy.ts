@@ -9,6 +9,13 @@ export interface SourceInfo {
   workspaceId: string;
   kind: 'browser' | 'server';
   requiredPurpose: string | null;
+  /**
+   * Every event this source produces is platform-defined rather than an operator's own product
+   * analytics: a connector maps a provider's payload to events (Shopify orders, Salesforce
+   * records, a generic webhook's JSONata mapping). A tracking plan must not reject them while
+   * the sender is told the delivery succeeded (#764). Only `acceptInternalItems` can use it.
+   */
+  platform?: boolean;
 }
 
 export interface WorkspacePolicy {
@@ -156,8 +163,10 @@ export function processEvent(
   const isConsentChange = e.type === 'track' && e.event === CONSENT_EVENT;
   // A workspace plan is about the operator's own tracking. The platform's carrier events are not
   // in it, and a strict plan must not drop the event that records a signup or imported consent.
-  // `internal` is only set by acceptInternalItems, never by the public gateway.
-  const platformEvent = opts.internal === true && isPlatformEvent(name);
+  // A connector's mapped events are equally platform-defined (#764): a Shopify order or a
+  // Salesforce record is not the operator's product analytics, whatever its name. `internal` is
+  // only set by acceptInternalItems, never by the public gateway.
+  const platformEvent = opts.internal === true && (isPlatformEvent(name) || source.platform === true);
 
   // A consent change is always recorded (also a "no"); nothing else is without the purpose allowed.
   if (!isConsentChange && !consentAllows(source, policy, consent)) return { kind: 'dropped', reason: 'no_consent' };

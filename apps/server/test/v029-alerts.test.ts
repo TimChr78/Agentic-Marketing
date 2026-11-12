@@ -138,10 +138,14 @@ const signupEvents = (workspaceId: string, at: string, count: number): BusEvent[
 
 const rulesIn = async (workspaceId = wsA) => (await api(workspaceId).call('alerts.list', {})).rules;
 const eventRows = async (workspaceId = wsA) => {
-  const { rows } = await t.srv.db.admin.query<{ state: string; value: number; threshold: number; resolved_at: Date | null }>(
-    'SELECT state, value, threshold, resolved_at FROM alert_events WHERE workspace_id = $1 ORDER BY fired_at',
-    [workspaceId],
-  );
+  const { rows } = await t.srv.db.admin.query<{
+    id: string;
+    rule_id: string;
+    state: string;
+    value: number;
+    threshold: number;
+    resolved_at: Date | null;
+  }>('SELECT id, rule_id, state, value, threshold, resolved_at FROM alert_events WHERE workspace_id = $1 ORDER BY fired_at', [workspaceId]);
   return rows;
 };
 const alertMessages = async (workspaceId = wsA) => {
@@ -559,6 +563,54 @@ describe('alert evaluation resilience and deleted history', () => {
     expect(broken.attempts()).toBe(3);
     await evaluateAlerts(depsWith, { now: new Date(base + 25 * 60_000) });
     expect(broken.attempts()).toBe(4);
+  }, 30_000);
+
+  it('keeps another rule’s episode when one rule’s write fails, and retries the failed rule next tick (#788)', async () => {
+    const base = T0 + 70 * HOUR;
+    await t.srv.events.insertMessageEvents([...messageEvents(wsA, T(70 * HOUR - 10 * 60_000), { sent: 200, bounced: 20 })]);
+    const config = { metric: 'bounce', window: 'PT1H', threshold: 0.05, minSent: 100 };
+    const channels: { type: 'webhook'; webhookId: string }[] = [{ type: 'webhook', webhookId: endpoint.id }];
+    // Names decide the tick order (A before Z), so the good rule commits first in the old shared
+    // transaction and the failing rule would roll its episode back with the transaction.
+    const good = await api().call('alerts.create', { name: 'A1 bounces', kind: 'deliverability', config, channels });
+    const bad = await api().call('alerts.create', { name: 'Z1 bounces', kind: 'deliverability', config, channels });
+
+    const client = await t.srv.db.admin.connect();
+    try {
+      // A real SQL failure on the episode write, not a mocked repository: this is the case #633
+      // left uncovered (measurement succeeded, the later statement aborts the transaction).
+      await client.query(
+        `CREATE OR REPLACE FUNCTION am_test_fail_alert_event() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN
+             IF NEW.rule_id = '${bad.rule.id}' THEN RAISE EXCEPTION 'injected alert_events write failure'; END IF;
+             RETURN NEW;
+           END $$`,
+      );
+      await client.query('DROP TRIGGER IF EXISTS am_test_fail_alert_event ON alert_events');
+      await client.query(
+        'CREATE TRIGGER am_test_fail_alert_event BEFORE INSERT ON alert_events FOR EACH ROW EXECUTE FUNCTION am_test_fail_alert_event()',
+      );
+
+      // Tick 1: the good rule's decision is committed even though the bad rule's insert fails.
+      await evaluate(base);
+      const first = await eventRows();
+      expect(first.filter((e) => e.state === 'firing').map((e) => e.rule_id)).toEqual([good.rule.id]);
+    } finally {
+      await client.query('DROP TRIGGER IF EXISTS am_test_fail_alert_event ON alert_events').catch(() => {});
+      await client.query('DROP FUNCTION IF EXISTS am_test_fail_alert_event()').catch(() => {});
+      client.release();
+    }
+
+    // Tick 2 is five minutes later and not forced: the failed rule must not have booked its
+    // minimum interval (PT1H → 15 minutes) from a measurement whose transaction rolled back.
+    await evaluateAlerts(deps(), { now: new Date(base + 5 * 60_000) });
+    const second = await eventRows();
+    expect(
+      second
+        .filter((e) => e.state === 'firing')
+        .map((e) => e.rule_id)
+        .sort(),
+    ).toEqual([good.rule.id, bad.rule.id].sort());
   }, 30_000);
 
   it('deletes a rule’s episodes with it and never shows history for a missing rule (#620)', async () => {

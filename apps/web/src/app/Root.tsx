@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect } from 'react';
 import { AutonomyProvider } from '../features/agents/AutonomyProvider';
 import { Alert, AuthSkeleton, Button, LoadingBlock, ToastProvider, useToast } from '../ui';
+import { RouteErrorBoundary } from './ErrorBoundary';
 import { ForgotPassword } from './ForgotPassword';
 import { ResetPassword } from './ResetPassword';
 import { useLocation } from './router';
@@ -66,9 +67,12 @@ function Gate() {
     <AutonomyProvider>
       <Suspense fallback={<LoadingBlock lines={6} label="Loading the shell" />}>
         <Shell>
-          <Suspense fallback={<LoadingBlock lines={6} label="Loading this page" />}>
-            <Routes />
-          </Suspense>
+          {/* Clears a failed route on navigation without remounting the lazy route tree (#791). */}
+          <RouteErrorBoundary resetKey={path}>
+            <Suspense fallback={<LoadingBlock lines={6} label="Loading this page" />}>
+              <Routes />
+            </Suspense>
+          </RouteErrorBoundary>
         </Shell>
       </Suspense>
     </AutonomyProvider>

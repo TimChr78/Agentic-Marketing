@@ -18,3 +18,4 @@ export function selectReleasePullRequests(options: {
 export function issuesForRelease(options: { prs: { number: number; body?: string }[]; changelog: string; version?: string }): number[];
 export function readChangelogAtTag(version: string, run?: (args: string[]) => string): string;
 export function previousTagFrom(tags: string[], version: string): string | null;
+export function commitsInRange(root: string, previous: string | null, version: string): string[];

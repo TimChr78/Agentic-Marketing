@@ -29,7 +29,7 @@ _Last updated: 2026-11-12_
   - **0.14.5** (analytics correctness) is released and verified. Sol approved after six rounds; one shared `campaignIdentityMap` (window and current hash version) now feeds the headline, member rows and holdouts. The suppression gap is filed as #692.
   - **0.14.6** (admin UI stale data, migration 0089) is released and verified (the first release run hit an `expectLinear` flake; `expectLinear` now re-measures, #730).
   - **0.14.7** (authoring, approvals and forms) is released and verified. P3 follow-ups: #735.
-  - **0.14.8** (alerts, schedules and jobs) is being released: the last of the seven audit releases. Sol approved after three rounds (DST resolution cross-checked against a minute scan in nine zones; retry-stable, strictly increasing refresh tokens). Up to four delegates run at once (raised 2026-11-12).
+  - **0.14.8** (alerts, schedules and jobs) is released and verified: the last of the seven audit releases. Sol approved after three rounds (DST resolution cross-checked against a minute scan in nine zones; retry-stable, strictly increasing refresh tokens). Up to four delegates run at once (raised 2026-11-12).
   - **0.14.9** (dependency updates, #727) is in progress: the auth stack, `htmlparser2` 12 and `jsdom` 31 now; Biome 2.6 and the remaining group after 0.14.8. Flaky axe test: #732.
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
@@ -76,4 +76,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.7 (verified); v0.14.8 is being released from `main` at `9c747fe`.
+- The last release is v0.14.8 (verified), released from `main` at `311460e`.

@@ -598,7 +598,7 @@ describe('journeys.splitResult (#313)', () => {
 
     const r = await eventually(
       () => api().call('journeys.splitResult', { journeyId, node: 'split', minSampleSize: 100 }),
-      (x) => x.arms.reduce((n, arm) => n + arm.entered, 0) === 400,
+      (x) => x.arms.reduce((n, arm) => n + (arm.entered ?? 0), 0) === 400,
     );
     expect(r.arms).toMatchObject([
       { arm: 0, weight: 50, entered: 200, converted: 20 },
@@ -607,5 +607,72 @@ describe('journeys.splitResult (#313)', () => {
     expect(r.comparisons[0]).toMatchObject({ arm: 1, versus: 0, verdict: 'treatment_better', minSampleSizeMet: true });
     expect(r.note).toContain('arm 1 converts better');
     expect((await rejects(api().call('journeys.splitResult', { journeyId, node: 'a' }))).message).toContain('not a split');
+  });
+
+  it('suppresses an arm below k, its comparisons and the verdict (#757)', async () => {
+    const a = await api().call('artifacts.create', {
+      type: 'journey',
+      name: 'Split suppressed',
+      content: uniqueJourney({
+        purpose: 'onboarding',
+        nodes: [
+          { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Split Start', reentry: 'once' }, next: [{ to: 'split' }] },
+          { id: 'split', kind: 'split', label: 'A/B', config: { weights: [50, 50] }, next: [{ to: 'a' }, { to: 'b' }] },
+          { id: 'a', kind: 'wait', label: 'A', config: { duration: 'P1D' }, next: [{ to: 'done' }] },
+          { id: 'b', kind: 'wait', label: 'B', config: { duration: 'P2D' }, next: [{ to: 'done' }] },
+          { id: 'done', kind: 'exit', label: 'Done', config: {} },
+        ],
+      }) as never,
+    });
+    await api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' });
+    const journeyId = a.artifactId;
+    const at = new Date().toISOString();
+    // Arm 0 has six people; arm 1 has two, one of whom converted.
+    const people = [
+      ...Array.from({ length: 6 }, (_, i) => ({ participantId: 6000 + i, profileId: `prf_small_split_a_${i}`, arm: 1 })),
+      ...Array.from({ length: 2 }, (_, i) => ({ participantId: 6100 + i, profileId: `prf_small_split_b_${i}`, arm: 2 })),
+    ];
+    const base = { workspaceId: ws, journeyId, version: 1, seq: 1, at };
+    await t.srv.events.insertJourneyEvents(
+      people.map((p) => ({
+        ...base,
+        participantId: p.participantId,
+        profileId: p.profileId,
+        node: 'split',
+        type: 'step' as const,
+        detail: `variant ${p.arm}`,
+      })),
+    );
+    await t.srv.events.insertJourneyEvents([
+      {
+        ...base,
+        participantId: people[6]!.participantId,
+        profileId: people[6]!.profileId,
+        node: 'done',
+        type: 'converted' as const,
+        detail: 'Split Goal',
+      },
+    ]);
+
+    const r = await eventually(
+      () => api().call('journeys.splitResult', { journeyId, node: 'split', minSampleSize: 1 }),
+      (x) => x.arms.reduce((n, arm) => n + (arm.entered ?? 0), 0) === 8,
+    );
+    expect(r.k).toBe(5);
+    expect(r.suppressed).toBe(true);
+    // The arm below k carries no count or rate; the arm at k keeps its own.
+    expect(r.arms[0]).toMatchObject({ arm: 0, entered: 6, converted: 0, suppressed: false });
+    expect(r.arms[1]).toMatchObject({
+      arm: 1,
+      entered: null,
+      converted: null,
+      unsubscribed: null,
+      conversionRate: null,
+      unsubscribeRate: null,
+      suppressed: true,
+    });
+    // A comparison needs a readable baseline, so every comparison and its verdict is withheld.
+    expect(r.comparisons).toEqual([]);
+    expect(r.note).toContain('k=5');
   });
 });

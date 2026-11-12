@@ -7,12 +7,15 @@ import { api, type Out } from '../app/api';
 type Got = Out<'artifacts.get'>;
 const cache = new Map<string, Promise<Got>>();
 
-type ArtifactChangeListener = () => void;
+/** The artifact a change named, or undefined when the caller could not name one. */
+type ArtifactChangeListener = (id?: string) => void;
 const listeners = new Set<ArtifactChangeListener>();
 
 /**
  * Registers a cache that must be dropped whenever an artifact is created, renamed, saved,
- * published or deleted. Returns an unsubscribe.
+ * published or deleted. The listener receives the changed artifact's id when the change named one,
+ * so a cache that only reads some artifacts can ignore unrelated writes (#768). Returns an
+ * unsubscribe.
  */
 export function onArtifactsChanged(listener: ArtifactChangeListener): () => void {
   listeners.add(listener);
@@ -21,9 +24,13 @@ export function onArtifactsChanged(listener: ArtifactChangeListener): () => void
   };
 }
 
-/** Tells every registered cache that artifacts changed, e.g. after `artifacts.create`. */
-export function notifyArtifactsChanged() {
-  for (const listener of listeners) listener();
+/**
+ * Tells every registered cache that artifacts changed, e.g. after `artifacts.create`. Pass the
+ * changed id whenever it is known; `undefined` means "unknown" and reaches every listener, which is
+ * the safe fallback for a create whose id the caller did not keep.
+ */
+export function notifyArtifactsChanged(id?: string) {
+  for (const listener of listeners) listener(id);
 }
 
 export function getArtifact(id: string): Promise<Got> {
@@ -37,7 +44,7 @@ export function getArtifact(id: string): Promise<Got> {
 }
 export const invalidateArtifact = (id: string) => {
   cache.delete(id);
-  notifyArtifactsChanged();
+  notifyArtifactsChanged(id);
 };
 
 /** Drops one cached read without telling listeners: the next get re-reads, nothing changed. */
@@ -60,6 +67,17 @@ export function useArtifactRef(id: string | undefined | null) {
       live = false;
     };
   }, [id]);
+  // A publish, rename or delete in this tab must reach the pill that shows this pointer (#770).
+  // The change named the artifact, so an unrelated write never re-reads this one.
+  useEffect(() => {
+    if (!id) return;
+    return onArtifactsChanged((changed) => {
+      if (changed && changed !== id) return;
+      getArtifact(id)
+        .then(setA)
+        .catch((e) => setError(e.message ?? 'Not found'));
+    });
+  }, [id]);
   return { artifact: a, error };
 }
 
@@ -77,6 +95,20 @@ export function useArtifactNames(ids: string[]) {
       live = false;
     };
   }, [key]);
+  // Same signal as `useArtifactRef`: only a change to one of the named artifacts re-reads (#770),
+  // because an unrelated write cannot change a name in this lookup.
+  useEffect(
+    () =>
+      onArtifactsChanged((changed) => {
+        const wanted = key ? key.split(',') : [];
+        if (changed && !wanted.includes(changed)) return;
+        for (const id of wanted)
+          getArtifact(id)
+            .then((a) => setNames((n) => (n[id] === a.name ? n : { ...n, [id]: a.name })))
+            .catch(() => {});
+      }),
+    [key],
+  );
   return useCallback((id: string) => names[id], [names]);
 }
 

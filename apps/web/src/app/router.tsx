@@ -124,8 +124,16 @@ export function match(pattern: string, path: string): Record<string, string> | n
   const out: Record<string, string> = {};
   for (let i = 0; i < p.length; i++) {
     if (p[i] === '*') break;
-    if (p[i].startsWith(':')) out[p[i].slice(1)] = decodeURIComponent(s[i]);
-    else if (p[i] !== s[i]) return null;
+    if (p[i].startsWith(':')) {
+      // A path segment can carry a malformed percent escape (`%`, `%ZZ`, a truncated UTF-8
+      // sequence): the URL parser keeps it verbatim, so decoding here would throw URIError and
+      // unmount the whole app. Keep the raw segment, as `redirects.carry` does (#791).
+      try {
+        out[p[i].slice(1)] = decodeURIComponent(s[i]);
+      } catch {
+        out[p[i].slice(1)] = s[i];
+      }
+    } else if (p[i] !== s[i]) return null;
   }
   return out;
 }

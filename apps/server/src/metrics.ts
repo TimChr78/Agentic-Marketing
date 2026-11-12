@@ -46,10 +46,17 @@ export function routeGroup(path: string): string {
   if (path === '/mcp' || path.startsWith('/mcp/')) return 'mcp';
   if (path === '/login' || path === '/consent' || path === '/invite') return 'pages';
   if (path.startsWith('/.well-known/')) return 'well-known';
+  // SCIM is identity-provider provisioning through the API, not admin-UI traffic: a SCIM outage
+  // or an IDP retry storm must not page as an admin UI regression (#752).
+  if (path === '/scim' || path.startsWith('/scim/')) return 'api';
   if (path.startsWith('/api/')) return 'api';
   const root = path.split('/')[1] ?? '';
   // The public edge: forms, unsubscribe/preference links, hosted pages, assets, inbound hooks.
   if (['f', 'u', 'c', 'a', 'n', 'hooks'].includes(root)) return 'public';
+  // The connect/callback edge of connector and MCP OAuth. Its own group, so a failing identity
+  // provider is visible without being counted as the admin UI; documented in
+  // docs/deployment/operations.md (#752).
+  if (root === 'oauth') return 'oauth';
   // The admin UI's static files and its client-side routes.
   return 'ui';
 }

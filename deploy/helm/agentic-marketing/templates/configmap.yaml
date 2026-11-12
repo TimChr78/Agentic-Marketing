@@ -1,3 +1,13 @@
+{{- /*
+A leftover config.PORT from pre-0.14.3 values only changes the environment: the container port,
+both probes and the Service target come from the top-level port. The app would listen on the
+config.PORT value while Kubernetes probes another port, so readiness never passes and
+`helm upgrade --wait` times out (#774). Refuse the divergent combination as the ingress and HPA
+templates refuse theirs.
+*/ -}}
+{{- if and (hasKey .Values.config "PORT") (ne (toString .Values.config.PORT) (toString .Values.port)) }}
+{{- fail (printf "config.PORT is %s but the chart's port is %s. config.PORT only changes the environment: the container port, the /healthz and /readyz probes and the Service target all use the top-level port, so the pod would never pass readiness. Remove config.PORT and set port, or set both to the same value. See docs/deployment/kubernetes.md. (#774)" (toString .Values.config.PORT) (toString .Values.port)) }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

@@ -15,10 +15,13 @@ export const API_PATH_PREFIXES = [
   '/n',
   '/hooks',
   '/scim',
+  '/oauth',
   '/.well-known',
   '/healthz',
   '/readyz',
   '/openapi.json',
+  // Route-registration order alone used to keep /metrics out of the shell; list it like the rest.
+  '/metrics',
 ] as const;
 
 /**
