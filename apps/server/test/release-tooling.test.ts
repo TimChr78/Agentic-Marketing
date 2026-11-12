@@ -157,6 +157,14 @@ describe('the architecture status lines (#784)', () => {
     put(root, 'docs/architecture/overview.md', '> Status: rewritten without a release number.\n');
     expect(architectureStatusVersions(root)[1]).toEqual({ file: 'docs/architecture/overview.md', version: null });
   });
+
+  it('reads a prerelease back after bumping to it (0.14.14 review)', () => {
+    const root = versionFixture();
+    bumpVersions(root, '1.0.0-rc.1');
+    expect(architectureStatusVersions(root).map((status) => status.version)).toEqual(['1.0.0-rc.1', '1.0.0-rc.1', '1.0.0-rc.1']);
+    bumpVersions(root, '1.0.0');
+    expect(architectureStatusVersions(root).map((status) => status.version)).toEqual(['1.0.0', '1.0.0', '1.0.0']);
+  });
 });
 
 describe('the env-history source', () => {
@@ -193,7 +201,11 @@ describe('the release check', () => {
       "export const ENV_SINCE: Record<string, string> = {\n  AUTH_SECRET: '0.1.0',\n  AM_VERSION: '0.1.1',\n};\n",
     );
     put(root, '.env.example', 'AUTH_SECRET=\nAM_VERSION=0.13.0\n');
-    put(root, 'docs/status/current.md', '- **0.13.0** (release tooling) is released and verified.\n');
+    put(
+      root,
+      'docs/status/current.md',
+      `## Now\n\n- **0.13.0** (release tooling) is released and verified.\n\n## Last green\n\n- The last release is v0.13.0.\n`,
+    );
     const changelog = (breaking: string) =>
       `## [0.13.0] - 2026-11-08\n\n### Added\n\n- New.\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Configuration:** no new environment variables.\n- **Breaking changes:** ${breaking}\n- **Manual steps:** none.\n- **Upgrade:** pull.\n`;
     put(root, 'CHANGELOG.md', changelog('TODO: fill this in.'));
@@ -217,31 +229,63 @@ describe('the release check', () => {
     );
 
     expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/docs\/status\/current\.md is missing/);
-    put(root, 'docs/status/current.md', '- **0.12.0** (previous) is released and verified.\n');
+    put(
+      root,
+      'docs/status/current.md',
+      `## Now\n\n- **0.12.0** (previous) is released and verified.\n\n## Last green\n\n- The last release is v0.12.0.\n`,
+    );
     expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/does not name \*\*0\.13\.0\*\*/);
-    put(root, 'docs/status/current.md', '- **0.13.0** (release tooling) is being released.\n');
-    expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/still says 0\.13\.0 is being released/);
-    put(root, 'docs/status/current.md', '- **0.13.0** (release tooling) is released and verified.\n');
+    put(
+      root,
+      'docs/status/current.md',
+      `## Now\n\n- **0.13.0** (release tooling) is being released.\n\n## Last green\n\n- The last release is v0.13.0.\n`,
+    );
+    expect(checkRelease({ root, version: '0.13.0' }).join('\n')).toMatch(/does not say 0\.13\.0 is released/);
+    put(
+      root,
+      'docs/status/current.md',
+      `## Now\n\n- **0.13.0** (release tooling) is released and verified.\n\n## Last green\n\n- The last release is v0.13.0.\n`,
+    );
     expect(checkRelease({ root, version: '0.13.0' })).toEqual([]);
   });
 });
 
 describe('the release handoff gate (#785)', () => {
   it('reads the status file, not just the changelog', () => {
-    const status = '- **0.14.8** (alerts) is released and verified.\n- The last release is v0.14.8.\n';
+    const status = '## Now\n\n- **0.14.8** (alerts) is released and verified.\n\n## Last green\n\n- The last release is v0.14.8.\n';
     expect(statusProblems(status, '0.14.8')).toEqual([]);
+    // 0.14.14 review: an unfinished state, a stale last release, or a mention outside "Now" fail.
+    const now = (line: string, last = 'v0.14.8') => `## Now\n\n${line}\n\n## Last green\n\n- The last release is ${last}.\n`;
+    expect(statusProblems(now('- **0.14.8** (alerts) is in progress.'), '0.14.8')[0]).toMatch(/does not say 0\.14\.8 is released/);
+    expect(statusProblems(now('- **0.14.8** (alerts) is released.', 'v0.14.7'), '0.14.8')[0]).toMatch(/last release/);
+    expect(
+      statusProblems(
+        '## Now\n\n- Nothing.\n\n## History\n\n- **0.14.8** is released.\n\n## Last green\n\n- The last release is v0.14.8.\n',
+        '0.14.8',
+      )[0],
+    ).toMatch(/does not name \*\*0\.14\.8\*\*/);
     expect(statusProblems(status, '0.14.9')[0]).toMatch(/does not name \*\*0\.14\.9\*\*/);
-    expect(statusProblems('- **0.14.8** (alerts) is being released.\n', '0.14.8')[0]).toMatch(/still says 0\.14\.8 is being released/);
+    expect(statusProblems(now('- **0.14.8** (alerts) is being released.'), '0.14.8')[0]).toMatch(/does not say 0\.14\.8 is released/);
     expect(statusProblems(null, '0.14.8')[0]).toMatch(/is missing/);
   });
 
   it('fails the release-notes gate the workflow runs, before publishing', () => {
     const changelog =
       '## [0.13.0] - 2026-11-08\n\n### Upgrading from 0.12.0\n\n- **Migrations:** none.\n- **Configuration:** no new environment variables.\n- **Breaking changes:** none.\n- **Manual steps:** none.\n- **Upgrade:** pull.\n';
-    expect(releaseNotesErrors({ changelog, version: '0.13.0', status: '**0.13.0** is released.\n' })).toEqual([]);
-    expect(releaseNotesErrors({ changelog, version: '0.13.0', status: '**0.13.0** is being released.\n' })).toEqual([
-      'docs/status/current.md still says 0.13.0 is being released; mark it released before the release',
-    ]);
+    expect(
+      releaseNotesErrors({
+        changelog,
+        version: '0.13.0',
+        status: `## Now\n\n- **0.13.0** is released.\n\n## Last green\n\n- The last release is v0.13.0.\n`,
+      }),
+    ).toEqual([]);
+    expect(
+      releaseNotesErrors({
+        changelog,
+        version: '0.13.0',
+        status: `## Now\n\n- **0.13.0** is being released.\n\n## Last green\n\n- The last release is v0.13.0.\n`,
+      }),
+    ).toEqual(['docs/status/current.md does not say 0.13.0 is released in its "Now" state; mark it released before the release']);
     // Without a status argument the changelog-only tests keep working.
     expect(releaseNotesErrors({ changelog, version: '0.13.0' })).toEqual([]);
   });
@@ -486,6 +530,19 @@ describe('the floating major.minor image tag (#773)', () => {
     expect(isNewestInLine('0.14.2', ['v0.14.10'])).toBe(false);
   });
 
+  it('publishes latest only for the newest stable release of all lines (0.14.14 review)', () => {
+    // An older patch retried after a newer release must not move latest.
+    expect(imageTagSpec('0.14.13', ['v0.14.13', 'v0.14.14'])).not.toContain('latest');
+    expect(imageTagSpec('0.14.14', ['v0.14.13', 'v0.14.14'])).toContain('type=raw,value=latest');
+    // The newest patch of an older line moves its line tag but not latest.
+    expect(imageTagSpec('0.13.9', ['v0.13.8', 'v0.14.2'])).toContain('{{major}}.{{minor}}');
+    expect(imageTagSpec('0.13.9', ['v0.13.8', 'v0.14.2'])).not.toContain('latest');
+    // A prerelease never becomes latest, and a newer prerelease does not block a release.
+    expect(imageTagSpec('0.15.0-rc.1', ['v0.14.14'])).not.toContain('latest');
+    expect(imageTagSpec('0.14.14', ['v0.15.0-rc.1'])).toContain('type=raw,value=latest');
+    expect(imageTagSpec('0.14.9', [], { exactOnly: true })).not.toContain('latest');
+  });
+
   it('publishes the exact tag alone when the line cannot be read', () => {
     expect(imageTagSpec('0.14.9', [], { exactOnly: true })).toBe('type=semver,pattern={{version}},value=0.14.9');
     expect(parseTags('# comment\nv0.14.1\n\nv0.14.2\n')).toEqual(['v0.14.1', 'v0.14.2']);
@@ -580,10 +637,15 @@ describe('the release workflow concurrency (#648)', () => {
 
   it('guards the floating tag with the tested image-tags script', () => {
     expect(job('release')).toContain('scripts/release/image-tags.mjs');
-    expect(job('release')).toMatch(/matching-refs\/tags\/v\$\{LINE\}\./);
     expect(job('release')).toMatch(/tags: \$\{\{ steps\.tags\.outputs\.spec \}\}/);
     // The old static tag list let every patch move the line tag.
     expect(job('release')).not.toMatch(/tags: \|\n\s+type=semver,pattern=\{\{version\}\}/);
+  });
+
+  it("turns off the metadata action's automatic latest tag", () => {
+    expect(job('release')).toMatch(/flavor: \|?\s*\n?\s*latest=false/);
+    // Every tag is listed, so latest can be compared across lines.
+    expect(job('release')).toMatch(/matching-refs\/tags\/v"/);
   });
 
   it('normalises a leading v for both a tag push and a manual run in one place', () => {

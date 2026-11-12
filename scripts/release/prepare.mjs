@@ -121,9 +121,9 @@ export function renderUpgradeBlock({ previous, version, migrations = [], envVars
  * number, check-versions.mjs compares it, so a page cannot pin an old release again.
  */
 export const ARCHITECTURE_STATUS = [
-  ['docs/architecture/README.md', /^(> Status: \*\*0\.x — release )(\d+\.\d+\.\d+)(\.\*\*)/m],
-  ['docs/architecture/overview.md', /^(> Status: describes \*\*)(\d+\.\d+\.\d+)(\*\*\.)/m],
-  ['docs/architecture/roadmap.md', /(\bThe current release is )(\d+\.\d+\.\d+)(\.)/],
+  ['docs/architecture/README.md', /^(> Status: \*\*0\.x — release )(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(\.\*\*)/m],
+  ['docs/architecture/overview.md', /^(> Status: describes \*\*)(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(\*\*\.)/m],
+  ['docs/architecture/roadmap.md', /(\bThe current release is )(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(\.)(?=\s|$)/],
 ];
 
 /** The release version each architecture status line names, or null when the line is missing. */
@@ -144,11 +144,19 @@ export const STATUS_FILE = 'docs/status/current.md';
 export function statusProblems(status, version) {
   if (typeof status !== 'string') return [`${STATUS_FILE} is missing`];
   const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  if (!new RegExp(`\\*\\*${escaped}\\*\\*`).test(status))
-    return [`${STATUS_FILE} does not name **${version}** in its "Now" state; update it before the release`];
-  if (new RegExp(`\\*\\*${escaped}\\*\\*[^\\n]*\\bis being\\b`, 'i').test(status))
-    return [`${STATUS_FILE} still says ${version} is being released; mark it released before the release`];
-  return [];
+  // Only the "Now" section counts: a mention under History or Next says nothing about this release.
+  const nowStart = status.search(/^## Now\b/m);
+  const afterNow = nowStart === -1 ? '' : status.slice(nowStart + 1);
+  const nextHeading = afterNow.search(/^## /m);
+  const now = nextHeading === -1 ? afterNow : afterNow.slice(0, nextHeading);
+  const line = now.split('\n').find((l) => new RegExp(`\\*\\*${escaped}\\*\\*`).test(l));
+  if (!line) return [`${STATUS_FILE} does not name **${version}** in its "Now" state; update it before the release`];
+  const problems = [];
+  if (!/\breleased\b/i.test(line) || /\b(is being|in progress|pending|not yet|to be released)\b/i.test(line))
+    problems.push(`${STATUS_FILE} does not say ${version} is released in its "Now" state; mark it released before the release`);
+  if (!new RegExp(`\\bThe last release is v${escaped}(?![0-9A-Za-z.-]*[0-9A-Za-z])`).test(status))
+    problems.push(`${STATUS_FILE} does not say "The last release is v${version}"; update the last release line`);
+  return problems;
 }
 
 /** Bump every surface check-versions.mjs knows, plus the README's version default and release line. */

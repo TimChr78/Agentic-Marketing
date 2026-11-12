@@ -136,7 +136,8 @@ jobs:
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentic-marketing" >> "$GITHUB_OUTPUT"
       # A re-run of an older patch may start after a newer one finished. Concurrency queues a line,
       # and this guard makes the floating major.minor tag follow semver, never publish order: the
-      # line tag is pushed only when this version is the newest release in the line (#773).
+      # line tag is pushed only when this version is the newest release in the line (#773), and
+      # latest only for the newest stable release of all lines.
       - name: Decide the image tags
         id: tags
         env:
@@ -144,13 +145,13 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           LINE: ${{ needs.prepare.outputs.line }}
         run: |
-          if gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v${LINE}." --paginate --jq '.[].ref' \
+          if gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" --paginate --jq '.[].ref' \
               > "$RUNNER_TEMP/line-tags.raw"; then
             sed 's#^refs/tags/##' "$RUNNER_TEMP/line-tags.raw" > "$RUNNER_TEMP/line-tags.txt"
             spec="$(node scripts/release/image-tags.mjs "$VERSION" "$RUNNER_TEMP/line-tags.txt")"
           else
             # An unreadable tag list must not move the floating tag: publish the exact version only.
-            echo "::warning::cannot list tags in the v${LINE} line; publishing only ${VERSION}"
+            echo "::warning::cannot list release tags; publishing only ${VERSION} (no line tag, no latest)"
             spec="$(node scripts/release/image-tags.mjs "$VERSION" --exact-only)"
           fi
           {
@@ -163,6 +164,10 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/agentic-marketing
           tags: ${{ steps.tags.outputs.spec }}
+          # latest is decided by image-tags.mjs (newest stable release of all lines), never added
+          # automatically: a retried older release must not move it (0.14.14 review).
+          flavor: |
+            latest=false
           labels: |
             org.opencontainers.image.title=Agentic Marketing
             org.opencontainers.image.licenses=MIT

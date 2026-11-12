@@ -8,7 +8,7 @@
 //   node scripts/release/image-tags.mjs <version> <tags-file>
 //   node scripts/release/image-tags.mjs <version> --exact-only
 //
-// <tags-file> holds one existing tag per line (`v0.14.5`), as the workflow lists them. The output
+// <tags-file> holds every existing release tag, one per line (`v0.14.5`), as the workflow lists them. The output
 // is the `tags:` input of docker/metadata-action. --exact-only is the conservative path for when
 // the tag list cannot be read: publishing a stale floating tag is worse than not moving it.
 import { readFileSync } from 'node:fs';
@@ -44,11 +44,30 @@ export function isNewestInLine(version, tags) {
   });
 }
 
-/** The docker/metadata-action `tags:` input for this release. */
+/**
+ * Whether `version` is a stable release newer than every other stable release among `tags`, in any
+ * line. Prereleases never become `latest` and never block it.
+ */
+export function isNewestStable(version, tags) {
+  const target = versionKey(version);
+  if (!target) throw new Error(`not a version: ${version}`);
+  if (target[3] === 0) return false;
+  return tags.every((tag) => {
+    const key = versionKey(String(tag).trim().replace(/^v/, ''));
+    return key === null || key[3] === 0 || compareKeys(key, target) <= 0;
+  });
+}
+
+/**
+ * The docker/metadata-action `tags:` input for this release. The workflow sets `flavor: latest=false`
+ * so the action never adds `latest` on its own; it is listed here only for the newest stable release.
+ * `tags` must be every release tag, not just this line's.
+ */
 export function imageTagSpec(version, tags, { exactOnly = false } = {}) {
   const lines = [`type=semver,pattern={{version}},value=${version}`];
   if (exactOnly) return lines.join('\n');
   if (isNewestInLine(version, tags)) lines.push(`type=semver,pattern={{major}}.{{minor}},value=${version}`);
+  if (isNewestStable(version, tags)) lines.push('type=raw,value=latest');
   return lines.join('\n');
 }
 
