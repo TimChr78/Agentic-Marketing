@@ -10,6 +10,11 @@ export interface CachedEmailParts {
   styles: string;
 }
 
+/** A computed result, plus whether it may be memoised (a wall-clock failure may not, #777). */
+export interface ComputedEmailParts extends CachedEmailParts {
+  cacheable?: boolean;
+}
+
 export const EMAIL_PARTS_CACHE_MAX_ENTRIES = 256;
 export const EMAIL_PARTS_CACHE_MAX_BYTES = 32 * 1024 * 1024;
 
@@ -76,12 +81,15 @@ const cache = new EmailPartsCache();
 export const emailPartsCacheKey = (html: string): string => createHash('sha256').update(html).digest('hex');
 
 /** The cached parts for `html`, computing them once when this hash is new. */
-export function cachedEmailParts(html: string, compute: (html: string) => CachedEmailParts): CachedEmailParts {
+export function cachedEmailParts(html: string, compute: (html: string) => ComputedEmailParts): CachedEmailParts {
   const key = emailPartsCacheKey(html);
   const hit = cache.get(key);
   if (hit) return hit;
-  const parts = compute(html);
-  cache.set(key, parts);
+  const computed = compute(html);
+  const parts = { body: computed.body, styles: computed.styles };
+  // A result that depended on the wall clock is this request's, not the HTML's: serve it once and
+  // let the next request try again, rather than pinning a fail-closed answer (#777).
+  if (computed.cacheable !== false) cache.set(key, parts);
   return parts;
 }
 

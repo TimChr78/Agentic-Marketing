@@ -9,6 +9,7 @@ import {
   activeUrl,
   clearEmailPartsCache,
   emailParts,
+  emailPartsCacheStats,
   MAX_EMAIL_LENGTH,
   MAX_EMAIL_NESTING,
   MAX_EMAIL_PARSE_MS,
@@ -940,6 +941,32 @@ describe('archive sanitising: the time backstop is a hard ceiling (#673)', () =>
 
     // The clock is only mocked for the call above.
     expect(sanitiseEmailBody('<p>ok</p>')).toBe('<p>ok</p>');
+  });
+});
+
+describe('archive sanitising: the parts cache does not pin a timed-out parse (#777)', () => {
+  const inner = '<p>hello</p>'.repeat(500);
+  const html = `<style>.issue{color:#111827}</style><body>${inner}</body>`;
+
+  it('re-parses the same HTML after a wall-clock failure instead of serving escaped source', () => {
+    clearEmailPartsCache();
+    // The first clock read starts the budget, every later one is far past it, so the parse trips
+    // the wall-clock guard exactly like a large foster-heavy issue on a busy request.
+    let calls = 0;
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => (calls++ === 0 ? 0 : MAX_EMAIL_PARSE_MS * 2));
+    let timedOut: { body: string; styles: string };
+    try {
+      timedOut = emailParts(html);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(timedOut.body.startsWith('&lt;p&gt;')).toBe(true);
+    // A time-dependent failure is not a function of the HTML, so it must not be memoised.
+    expect(emailPartsCacheStats().entries).toBe(0);
+
+    const fresh = emailParts(html);
+    expect(fresh.body).toBe(inner);
+    expect(emailPartsCacheStats().entries).toBe(1);
   });
 });
 

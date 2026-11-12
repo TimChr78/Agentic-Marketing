@@ -17,7 +17,7 @@ import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { type DefaultTreeAdapterTypes, defaultTreeAdapter, parse, serialize, type TreeAdapter } from 'parse5';
 import { z } from 'zod';
-import { cachedEmailParts } from './emailPartsCache';
+import { type ComputedEmailParts, cachedEmailParts } from './emailPartsCache';
 
 export { clearEmailPartsCache, emailPartsCacheStats } from './emailPartsCache';
 
@@ -572,10 +572,16 @@ const STACK_READ_CHECK_EVERY = 4_096;
 /** A wall-clock budget for one sanitiser call. Throws like the depth cap, so the caller fails closed. */
 type Tick = () => void;
 
+/**
+ * Thrown by the parse budget alone. Distinct from the deterministic bounds: the same HTML parses
+ * fine on another request, so a fail-closed result caused by it must never be cached (#777).
+ */
+class EmailParseTimeoutError extends Error {}
+
 function parseBudget(): Tick {
   const startedAt = performance.now();
   return () => {
-    if (performance.now() - startedAt > MAX_EMAIL_PARSE_MS) throw new EmailNestingError();
+    if (performance.now() - startedAt > MAX_EMAIL_PARSE_MS) throw new EmailParseTimeoutError();
   };
 }
 
@@ -901,7 +907,7 @@ function cleanActiveContent(markup: string, tick: Tick = () => {}): string {
  * remove it from the parse5 tree, serialize, and check the serialization again. If one cleaning
  * round cannot make it inert (mutation XSS), escape the whole body and fail closed.
  */
-export function sanitiseEmailBody(body: string, isActive?: (html: string) => boolean): string {
+export function sanitiseEmailBody(body: string, isActive?: (html: string) => boolean, onTimeout?: () => void): string {
   // Avoid even scanning input past the budget; the scan can also expand unterminated "<" to "&lt;".
   if (body.length > MAX_EMAIL_LENGTH) return escapeHtml(body);
   // One budget for the whole call: the scan, every parse and the sweep share it, so the work a
@@ -917,9 +923,11 @@ export function sanitiseEmailBody(body: string, isActive?: (html: string) => boo
     const cleaned = cleanActiveContent(scanned, tick);
     if (!active(cleaned)) return cleaned;
     return escapeHtml(body);
-  } catch {
+  } catch (err) {
     // Fail closed on every parser and scanner failure (depth sentinel, attribute bound, RangeError
     // from a pathological tree): a public page must never return a 500 for crafted content.
+    // A wall-clock failure is reported so the caller can avoid caching a request-dependent result.
+    if (err instanceof EmailParseTimeoutError) onTimeout?.();
     return escapeHtml(body);
   }
 }
@@ -1080,7 +1088,7 @@ function extractEmailParts(html: string): EmailExtraction {
 }
 
 /** Splits MJML's complete document into the parts that can sit inside our page. */
-function computeEmailParts(html: string): { body: string; styles: string } {
+function computeEmailParts(html: string): ComputedEmailParts {
   const { styles, bodyStart, bodyEnd, pixels } = extractEmailParts(html);
   const hasBody = bodyStart >= 0 && bodyEnd >= bodyStart;
   const offset = hasBody ? bodyStart : 0;
@@ -1093,12 +1101,18 @@ function computeEmailParts(html: string): { body: string; styles: string } {
       .filter((pixel) => (hasBody ? pixel.start >= bodyStart && pixel.end <= bodyEnd : true))
       .map((pixel) => [pixel.start - offset, pixel.end - offset] as const),
   );
-  return {
-    body: sanitiseEmailBody(body),
+  let timedOut = false;
+  const parts = {
+    body: sanitiseEmailBody(body, undefined, () => {
+      timedOut = true;
+    }),
     // The styles go back into the page's own <style>. CSS reads `\3c ` as `<`, so escaping every
     // `<` keeps the rules while making `</style>` (and anything after it) impossible to inject.
     styles: styles.join('\n').replace(/</g, '\\3c '),
   };
+  // The wall clock is not a property of the HTML: a parse that ran out of time must be retried on
+  // the next request instead of pinning escaped source for this issue (#777).
+  return timedOut ? { ...parts, cacheable: false } : parts;
 }
 
 /**
