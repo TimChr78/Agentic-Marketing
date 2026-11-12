@@ -112,6 +112,7 @@ function summaryMeasured(overrides: Record<string, unknown> = {}) {
     goal,
     headline: {
       recipients: 2400,
+      emailSent: 2400,
       delivered: 2400,
       clickers: 192,
       unsubscribers: 12,
@@ -140,6 +141,7 @@ function summaryMeasured(overrides: Record<string, unknown> = {}) {
         clickRate: 0.08,
         unsubscribeRate: 0.005,
         converters: 96,
+        suppressed: false,
       },
       {
         artifactId: journeyId,
@@ -151,6 +153,7 @@ function summaryMeasured(overrides: Record<string, unknown> = {}) {
         clickRate: 0.08,
         unsubscribeRate: 0.005,
         converters: 48,
+        suppressed: false,
       },
     ],
     holdouts: [journeyHoldout()],
@@ -524,6 +527,26 @@ describe('campaign roll-up holdouts (#511)', () => {
     expect(screen.getByText(/Zero control conversion makes relative lift unavailable/)).toBeTruthy();
   });
 
+  it('renders a suppressed campaign-wide holdout without counts or lift', async () => {
+    h.holdout = campaignHoldout({
+      suppressed: true,
+      k: 5,
+      verdict: 'not_enough_data',
+      minSampleSizeMet: false,
+      absoluteLift: null,
+      relativeLift: null,
+      ci95: null,
+      control: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null, revenue: {} },
+      treatment: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null, revenue: {} },
+      note: 'Suppressed: fewer than k=5 people in the control or treatment arm, so counts, rates, revenue and lift are hidden.',
+    });
+
+    render(<CampaignHoldoutCard campaignId={campaignId} artifact={campaignArtifact()} />);
+    await screen.findByText('Campaign-wide holdout');
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(1);
+    expect(screen.queryByText(/absolute lift/)).toBeNull();
+  });
+
   it('keeps journey controls separate from the campaign-wide holdout', async () => {
     renderTab();
     await screen.findByText('Campaign-wide holdout');
@@ -537,6 +560,48 @@ describe('campaign roll-up holdouts (#511)', () => {
     expect(
       within(campaign).getByText('Campaign-wide; includes every sending member. Separate from journey controls; no broadcast-only lift.'),
     ).toBeTruthy();
+  });
+
+  it('suppresses a journey holdout when its member row is below k (#586)', async () => {
+    const base = summaryMeasured();
+    h.summary = summaryMeasured({
+      members: [
+        {
+          ...base.members[1],
+          sent: null,
+          delivered: null,
+          clickRate: null,
+          unsubscribeRate: null,
+          converters: null,
+          suppressed: true,
+        },
+      ],
+      holdouts: [
+        journeyHoldout({
+          suppressed: true,
+          control: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+          treatment: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+          absoluteLift: null,
+          relativeLift: null,
+          ci95: null,
+          minSampleSizeMet: false,
+          verdict: 'not_enough_data',
+          note: 'Suppressed: fewer than k=5 people in an arm or in the journey member row, so no uplift is shown.',
+        }),
+      ],
+      meta: {
+        ...meta,
+        suppressed: 2,
+        notes: ['Member rows and journey holdouts with fewer than k=5 people reached have their counts suppressed.'],
+      },
+    });
+
+    renderTab();
+    const journey = await screen.findByRole('region', { name: 'Welcome series · Journey holdout' });
+    expect(within(journey).getAllByText('Suppressed').length).toBeGreaterThan(0);
+    expect(within(journey).queryByText('0')).toBeNull();
+    expect(within(journey).queryByText('400')).toBeNull();
+    expect(screen.getByText(/k = 5/)).toBeTruthy();
   });
 
   it('shows no assignments as unavailable, not a healthy zero result', async () => {
@@ -589,6 +654,7 @@ describe('campaign roll-up states (#511)', () => {
     h.summary = summaryMeasured({
       headline: {
         recipients: 0,
+        emailSent: 0,
         delivered: 0,
         clickers: 0,
         unsubscribers: 0,
@@ -646,17 +712,30 @@ describe('campaign roll-up states (#511)', () => {
     expect(screen.queryByText('0%')).toBeNull();
   });
 
-  it('withholds the headline and funnel when the server suppressed cells', async () => {
+  it('keeps the headline and shows suppressed member cells when the server suppressed rows (#586)', async () => {
+    const base = summaryMeasured();
     h.summary = summaryMeasured({
-      meta: { ...meta, suppressed: 2, k: 5, notes: ['Two groups were suppressed.'] },
+      meta: { ...meta, suppressed: 1, k: 5, notes: ['One member row had fewer than k=5 people reached.'] },
+      members: [
+        { ...base.members[0], sent: null, delivered: null, clickRate: null, unsubscribeRate: null, converters: null, suppressed: true },
+        base.members[1],
+      ],
     });
 
     renderTab();
-    await screen.findByText('Values unavailable — fewer than 5 people');
-    expect(screen.getByText(/k=5|k = 5/)).toBeTruthy();
-    expect(screen.getByText('Two groups were suppressed.')).toBeTruthy();
-    expect(screen.queryByText('Recipients')).toBeNull();
-    expect(screen.queryByText('Campaign funnel')).toBeNull();
+    await screen.findByText('Some member rows are suppressed');
+    expect(screen.getByText(/k = 5/)).toBeTruthy();
+    expect(screen.getByText(/One member row had fewer than k=5 people reached\./)).toBeTruthy();
+    // The headline is a total, so it stays visible; only the small member row is hidden.
+    expect(screen.getAllByText('Recipients').length).toBeGreaterThan(0);
+    expect(screen.getByRole('table', { name: 'Campaign funnel' })).toBeTruthy();
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(0);
+  });
+
+  it('prints the k line only when suppression applies (#586)', async () => {
+    renderTab();
+    await screen.findAllByText('2,400');
+    expect(screen.queryByText(/k = 5/)).toBeNull();
   });
 
   it('replaces old values while refreshing and keeps a failure local with Retry', async () => {
@@ -723,7 +802,7 @@ describe('campaign roll-up states (#511)', () => {
 
     expect(screen.getAllByText(/30 Oct–5 Nov 2026 · UTC · Latest event in period: 5 Nov 2026, 21:42/).length).toBeGreaterThan(0);
     expect(screen.getByText('144 / 2,400 recipients = 6%')).toBeTruthy();
-    expect(screen.getByText('12 / 2,400 delivered people = 0.5%')).toBeTruthy();
+    expect(screen.getByText('12 / 2,400 delivered e-mails = 0.5%')).toBeTruthy();
   });
 
   it('labels a missing event timestamp as Unavailable and never as an epoch', async () => {
@@ -781,6 +860,15 @@ describe('campaign roll-up chart and table parity (#511)', () => {
     const table = screen.getByRole('table', { name: 'Campaign funnel' });
     expect(within(table).getByText('144% of Clicked')).toBeTruthy();
     expect(screen.getByText(/Step rate divides by the previous stage/)).toBeTruthy();
+  });
+
+  it('labels the delivered step rate against e-mail sent (#586)', async () => {
+    renderTab();
+    await screen.findByRole('table', { name: 'Campaign funnel' });
+
+    expect(screen.getByText('100% of E-mail sent')).toBeTruthy();
+    expect(screen.getByText(/delivered ÷ e-mail sent/)).toBeTruthy();
+    expect(screen.queryByText('100% of Recipients')).toBeNull();
   });
 
   it('keeps member counts separate from the distinct recipients total', async () => {

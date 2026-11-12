@@ -1,7 +1,7 @@
 {
   "name": "agentic-marketing",
   "private": true,
-  "version": "0.14.3",
+  "version": "0.14.6",
   "license": "MIT",
   "packageManager": "pnpm@10.28.0",
   "engines": {
@@ -42,7 +42,8 @@
       "happy-dom": "^21.0.4",
       "minimatch": "11.0.1",
       "mjml-browser": "5.4.1",
-      "smtp-server>nodemailer": "10.1.4"
+      "smtp-server>nodemailer": "10.1.4",
+      "@better-auth/sso>fast-xml-parser": "5.12.0"
     },
     "auditConfig": {
       "ignoreGhsas": ["GHSA-w5hq-g745-h8pq"]

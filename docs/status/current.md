@@ -2,7 +2,7 @@
 
 Durable handoff for the agent working on this repository. Update it when a long run starts, when work lands, and at every handoff. A new session should be able to resume from this file alone.
 
-_Last updated: 2026-11-10_
+_Last updated: 2026-11-12_
 
 ## Now
 
@@ -24,8 +24,12 @@ _Last updated: 2026-11-10_
   - The `uuid` Dependabot alert is still accepted, because it only affects the dev spike.
 - **The audit-fix plan runs as patch releases 0.14.2 to 0.14.8.** The 2026-11-08 audit filed 81 issues (#574–#654). Each was validated against the code: 79 are real, 1 is a duplicate and 1 is not reproducible.
   - **0.14.2** fixes all eight S1s (security and compliance) and is released. Its review ran four rounds; HY4 reviewed the last one after the Codex quota ran out.
-  - **0.14.3** (install, deploy and release tooling) is being released.
-  - **Next:** 0.14.4 (consent, privacy records and delivery reliability, plus #664), then 0.14.5 analytics, 0.14.6 UI stale data, 0.14.7 authoring and forms, and 0.14.8 alerts and jobs.
+  - **0.14.3** (install, deploy and release tooling) is released.
+  - **0.14.4** (consent, privacy records and delivery reliability, plus #664) is released and verified. Sol approved after 11 rounds; most were on the unsubscribe-link check (hiding forms, then super-linear inputs). The check now has a 1 s budget and a 512-level nesting cap, and its remaining limits are tracked in #707. `fast-xml-parser` is pinned to 5.12.0 (Dependabot 21).
+  - **0.14.5** (analytics correctness) is released and verified. Sol approved after six rounds; one shared `campaignIdentityMap` (window and current hash version) now feeds the headline, member rows and holdouts. The suppression gap is filed as #692.
+  - **0.14.6** (admin UI stale data, migration 0089) is being released.
+  - **0.14.7** (authoring, approvals and forms) is in progress on `patch/0.14.7`, branched from `patch/0.14.6`.
+  - **0.14.8** (alerts, schedules and jobs) is in progress on `patch/0.14.8`, branched from `patch/0.14.6`. Up to four delegates run at once (raised 2026-11-12).
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
@@ -48,6 +52,13 @@ When these are signed off, the Wave 5 epic #439 can close.
   - `ui/Button.tsx:68`: an iconless button can change width while busy. Reserving the slot widened idle buttons and wrapped the People filter row at 390, so a fix needs a layout-neutral approach.
   - `apps/web/test/phase28-bundle.test.ts`: strengthen missing-import rejection, the accounting of automatically mounted dynamic closures, and artifact-type, alias and tab completeness.
 
+## Lessons from 0.14.4–0.14.6
+
+- **A static visibility check needs a work budget from the start.** Reviews of the unsubscribe check alternated between new hiding forms and new super-linear inputs; a time budget and caps on nesting, selector classes and colour length ended the loop. Decide early which limits are P3 (documented) and which block.
+- **Key every read by what identifies it.** `useApi` keeps the previous data during a reload, which is wrong whenever the id, filter or period changes. `useKeyedApi` plus a guard test with an allowlist found 15 more sites.
+- **One shared function for one decision.** The campaign headline, member rows and holdout each scoped the identity map differently and disagreed near the bound; a single `campaignIdentityMap` fixed it.
+- **Run the full server suite before reporting.** Delegates ran focused files and missed `v075-measurement` and `sent-at-migration`, which CI then caught.
+
 ## Lessons from 0.14.1
 
 - **Check GitHub code scanning and Dependabot at every release.** Twelve high CodeQL alerts sat untriaged for nine days.
@@ -64,4 +75,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.1 (tag `v0.14.1`, `cbb7386`), released and verified.
+- The last release is v0.14.5 (verified); v0.14.6 is being released from `main` at `0c490ab`.

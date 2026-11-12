@@ -21,7 +21,7 @@ import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { LinkSigner } from '@agentic-marketing/email';
 import type { EventBus } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
-import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
+import { acceptInternalItems, bodyLimit, PLATFORM_EVENT, sourceLookups } from '@agentic-marketing/ingest';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import { type KeyProvider, readSecret } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -34,8 +34,8 @@ import { z } from 'zod';
 // identify and a "Form Submitted" event on the bus, from the form as a trusted source; the consent
 // hook then records the consent, or sends the double opt-in confirmation first.
 
-export const SUBMITTED = 'Form Submitted';
-export const CONFIRMED = 'Subscription Confirmed';
+export const SUBMITTED = PLATFORM_EVENT.formSubmitted;
+export const CONFIRMED = PLATFORM_EVENT.subscriptionConfirmed;
 export const DOI_DAYS = 7;
 
 // A form submission is a few hundred bytes of fields; 64 KB leaves room for long custom answers
@@ -315,7 +315,7 @@ export function formsApi(deps: FormsDeps) {
       ];
       // The form is the source: the consent hook only trusts these events from frm_ sources.
       const source = { id: c.req.param('id'), workspaceId: form.ws, kind: 'server' as const, requiredPurpose: null };
-      const { accepted, rejected } = acceptItems(items, source, await loadPolicy(form.ws));
+      const { accepted, rejected } = acceptInternalItems(items, source, await loadPolicy(form.ws));
       if (rejected.length) {
         logger.warn({ form: c.req.param('id'), rejected }, 'form submission rejected');
         return done(false, 'invalid');
@@ -374,7 +374,11 @@ export function formsApi(deps: FormsDeps) {
         consent_text: consentTextHash(form.def.consentText),
       },
     };
-    const { accepted } = acceptItems([item], { id: t.f, workspaceId: t.w, kind: 'server', requiredPurpose: null }, await loadPolicy(t.w));
+    const { accepted } = acceptInternalItems(
+      [item],
+      { id: t.f, workspaceId: t.w, kind: 'server', requiredPurpose: null },
+      await loadPolicy(t.w),
+    );
     await deps.bus.publish(accepted);
     // Without a thank-you page of its own, the site shows the branded confirmed page in place.
     if (form.def.confirmedUrl) return c.redirect(form.def.confirmedUrl, 303);

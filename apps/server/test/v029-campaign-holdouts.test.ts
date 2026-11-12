@@ -280,7 +280,7 @@ describe('campaign control group', () => {
     expect(result.minSampleSizeMet).toBe(false);
     expect(result.verdict).toBe('not_enough_data');
     expect(result.goal).toMatchObject({ kind: 'conversion', event: 'Campaign Purchase', attributionDays: 7 });
-    expect(result.control.entered + result.treatment.entered).toBe(CAMPAIGN_PEOPLE);
+    expect(result.control.entered! + result.treatment.entered!).toBe(CAMPAIGN_PEOPLE);
     expect(result.control.revenue).toEqual({});
   });
 });

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { invalidDimensionMessage } from '../src/compile';
-import { type QueryInput, queryInput, runAnalyticsQuery } from '../src/query';
+import { invalidDimensionMessage, measureScope } from '../src/compile';
+import { freshness, type QueryInput, queryInput, runAnalyticsQuery } from '../src/query';
 import { MEASURES } from '../src/registry';
 
 // Validation happens before anything touches Postgres or ClickHouse, so these tests can use a deps
@@ -135,5 +135,72 @@ describe('query input schema', () => {
     expect(queryInput.safeParse({ ...base, filters: { template: ['eml_a', 'eml_b'] } }).success).toBe(true);
     expect(queryInput.safeParse({ ...base, filters: { template: [] } }).success).toBe(false);
     expect(queryInput.safeParse({ ...base, filters: { template: '' } }).success).toBe(false);
+  });
+});
+
+// #589: the page shows freshness next to the result, so the probe must ask the same question the
+// compiled query asks. A fake ClickHouse that honours the name list keeps the test about the
+// filters freshness applies, not about ClickHouse's semantics.
+const freshnessDeps = (rows: (query: { query: string; query_params: Record<string, unknown> }) => { m: string }[]) => {
+  let seen: { query: string; query_params: Record<string, unknown> } | null = null;
+  const client = {
+    query: async (query: { query: string; query_params: Record<string, unknown> }) => {
+      seen = query;
+      return { json: async () => rows(query) };
+    },
+  };
+  const deps = { tx: {}, events: { client, settingsFor: async () => ({}) }, workspaceId: 'ws_01' } as never;
+  return { deps, seen: () => seen };
+};
+
+describe('freshness', () => {
+  it('applies the measures’ event types and channels (#589, #682)', async () => {
+    const fake = freshnessDeps(() => [{ m: '2026-03-01 10:00:00.000' }]);
+    const value = await freshness(fake.deps, {
+      source: 'message_events',
+      from: '2026-03-01T00:00:00.000Z',
+      to: '2026-03-02T00:00:00.000Z',
+      filters: {},
+      names: [],
+      scope: measureScope([MEASURES['email.sent']!]),
+    });
+    expect(value).toBe('2026-03-01T10:00:00.000Z');
+    expect(fake.seen()!.query).toContain('type IN {types:Array(String)}');
+    expect(fake.seen()!.query_params.types).toEqual(['sent']);
+    expect(fake.seen()!.query).toContain('channel IN {channels:Array(String)}');
+    expect(fake.seen()!.query_params.channels).toEqual(['email']);
+  });
+
+  it('returns null when the conversion-name set can match nothing (#589)', async () => {
+    // The compiled query for events always applies `name IN {names}`; with no map and no filter
+    // that list is empty, so the main query has zero rows by construction.
+    const fake = freshnessDeps((query) =>
+      (query.query_params.names as string[] | undefined)?.length ? [{ m: '2026-03-01 10:00:00.000' }] : [],
+    );
+    const value = await freshness(fake.deps, {
+      source: 'events',
+      from: '2026-03-01T00:00:00.000Z',
+      to: '2026-03-02T00:00:00.000Z',
+      filters: {},
+      names: [],
+      scope: measureScope([MEASURES.conversions!]),
+    });
+    expect(value).toBeNull();
+    expect(fake.seen()!.query).toContain('name IN {names:Array(String)}');
+    expect(fake.seen()!.query_params.names).toEqual([]);
+  });
+
+  it('still returns the newest event when the names can match', async () => {
+    const fake = freshnessDeps(() => [{ m: '2026-03-01 10:00:00.000' }]);
+    const value = await freshness(fake.deps, {
+      source: 'events',
+      from: '2026-03-01T00:00:00.000Z',
+      to: '2026-03-02T00:00:00.000Z',
+      filters: {},
+      names: ['Order Completed'],
+      scope: measureScope([MEASURES.conversions!]),
+    });
+    expect(value).toBe('2026-03-01T10:00:00.000Z');
+    expect(fake.seen()!.query_params.names).toEqual(['Order Completed']);
   });
 });

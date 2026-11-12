@@ -4,24 +4,28 @@ import { Alert, ListSkeleton, StatusPill, Table, TableFrame, Td, THead, Th, Tr }
 // stats page and the campaign evaluation card so both say the same thing about a holdout.
 
 export type HoldoutArm = {
-  entered: number;
-  converted: number;
-  unsubscribed: number;
-  conversionRate: number;
-  unsubscribeRate: number;
+  entered: number | null;
+  converted: number | null;
+  unsubscribed: number | null;
+  conversionRate: number | null;
+  unsubscribeRate: number | null;
   revenue?: Record<string, number>;
 };
 
 export type HoldoutResult = {
   controlGroup: { percent: number; minSampleSize: number; hashVersion: string };
+  /** The k floor the server measured against; absent on older responses. */
+  k?: number;
   control: HoldoutArm;
   treatment: HoldoutArm;
-  absoluteLift: number;
+  absoluteLift: number | null;
   relativeLift: number | null;
   ci95: [number, number] | null;
   minSampleSizeMet: boolean;
   verdict: 'not_enough_data' | 'no_clear_difference' | 'treatment_better' | 'treatment_worse';
   note: string;
+  /** True when an arm held fewer than k people, so the server sent no counts, rates or lift. */
+  suppressed?: boolean;
 };
 
 const VERDICT: Record<HoldoutResult['verdict'], { label: string; tone: 'neutral' | 'good' | 'warn' | 'bad' }> = {
@@ -58,12 +62,15 @@ export function HoldoutCard({
     );
   if (!result) return loading ? <ListSkeleton label="Loading the holdout result" rows={2} columns={5} /> : null;
   const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
-  const v = VERDICT[result.verdict];
+  const suppressed = result.suppressed === true;
+  const v = suppressed ? { label: 'Suppressed', tone: 'warn' as const } : VERDICT[result.verdict];
   const arms = [
     { label: 'Control', ...result.control },
     { label: 'Treatment', ...result.treatment },
   ];
   const currencies = [...new Set(arms.flatMap((a) => Object.keys(a.revenue ?? {})))];
+  const armText = (value: number | null, format: (n: number) => string) =>
+    suppressed ? 'Suppressed' : value === null ? 'Unavailable' : format(value);
   return (
     <div className="rounded-lg border border-line bg-surface p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -75,10 +82,16 @@ export function HoldoutCard({
         </div>
         <StatusPill tone={v.tone}>{v.label}</StatusPill>
       </div>
-      {result.verdict === 'not_enough_data' && (
-        <Alert tone="info" className="mt-3" title="Not enough data yet">
-          {result.note}
+      {suppressed ? (
+        <Alert tone="warn" className="mt-3" title="Suppressed">
+          Groups smaller than k={result.k ?? 5} are hidden. Counts, rates and lift are suppressed; no estimate is substituted.
         </Alert>
+      ) : (
+        result.verdict === 'not_enough_data' && (
+          <Alert tone="info" className="mt-3" title="Not enough data yet">
+            {result.note}
+          </Alert>
+        )
       )}
       <div className="mt-3">
         <TableFrame columns={currencies.length ? 6 : 5} isEmpty={false}>
@@ -99,10 +112,10 @@ export function HoldoutCard({
                   <Td>
                     <span className="font-medium text-fg">{a.label}</span>
                   </Td>
-                  <Td align="right">{a.entered.toLocaleString()}</Td>
-                  <Td align="right">{a.converted.toLocaleString()}</Td>
-                  <Td align="right">{pct(a.conversionRate)}</Td>
-                  <Td align="right">{pct(a.unsubscribeRate)}</Td>
+                  <Td align="right">{armText(a.entered, (n) => n.toLocaleString())}</Td>
+                  <Td align="right">{armText(a.converted, (n) => n.toLocaleString())}</Td>
+                  <Td align="right">{armText(a.conversionRate, pct)}</Td>
+                  <Td align="right">{armText(a.unsubscribeRate, pct)}</Td>
                   {currencies.length > 0 && <Td align="right">{currencies.map((c) => money(a.revenue?.[c] ?? 0, c)).join(' · ')}</Td>}
                 </Tr>
               ))}
@@ -110,14 +123,24 @@ export function HoldoutCard({
           </Table>
         </TableFrame>
       </div>
-      <p className="mt-3 text-[12px] text-fg-2">
-        Lift: <strong>{pct(result.absoluteLift)}</strong> absolute
-        {result.relativeLift !== null ? ` (${pct(result.relativeLift)} relative)` : ''}
-        {result.ci95 ? ` · 95% CI ${pct(result.ci95[0])} to ${pct(result.ci95[1])}` : ''}
-      </p>
+      {suppressed ? (
+        <p className="mt-3 text-[12px] text-fg-2">
+          <strong>Suppressed</strong> · the k={result.k ?? 5} anonymity rule hides the counts, rates and lift.
+        </p>
+      ) : (
+        <p className="mt-3 text-[12px] text-fg-2">
+          Lift: <strong>{result.absoluteLift === null ? 'Unavailable' : pct(result.absoluteLift)}</strong> absolute
+          {result.relativeLift !== null
+            ? ` (${pct(result.relativeLift)} relative)`
+            : result.absoluteLift === null
+              ? ''
+              : ' (relative lift unavailable)'}
+          {result.ci95 ? ` · 95% CI ${pct(result.ci95[0])} to ${pct(result.ci95[1])}` : ''}
+        </p>
+      )}
       <p className="mt-1 text-[12px] text-muted">
         Difference of conversion rates, Newcombe's interval. Unsubscribes are the e-mail guardrail; control gets no e-mail, so its rate is
-        expected to be zero. {result.verdict !== 'not_enough_data' ? result.note : ''}
+        expected to be zero. {!suppressed && result.verdict !== 'not_enough_data' ? result.note : ''}
       </p>
     </div>
   );

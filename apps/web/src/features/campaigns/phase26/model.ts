@@ -201,22 +201,25 @@ export interface FunnelBar {
 export function funnelBars(funnel: FunnelStep[]): FunnelBar[] {
   const largest = Math.max(1, ...funnel.map((step) => step.count));
   return funnel.map((step) => {
-    const previous = PREVIOUS_STEP[step.step];
+    const previousStep = PREVIOUS_STEP[step.step];
+    // Delivered divides by e-mail sent, not by all-channel recipients (#586 P3).
+    const previous = step.step === 'delivered' ? 'E-mail sent' : previousStep ? STEP_LABEL[previousStep] : null;
+    const shareBase = step.step === 'delivered' || step.step === 'clicked' ? 'e-mail sent' : 'recipients';
     return {
       step: step.step,
       label: STEP_LABEL[step.step],
       count: step.count,
       width: Math.max(0, Math.min(100, (step.count / largest) * 100)),
       stepRate: percentText(step.stepRate),
-      previous: previous ? STEP_LABEL[previous] : null,
+      previous,
       sharePercent: step.shareOfRecipients === null ? 'Unavailable' : percentText(step.shareOfRecipients),
       shareLabel:
-        step.shareOfRecipients === null ? 'Share of recipients unavailable' : `${percentText(step.shareOfRecipients)} of recipients`,
+        step.shareOfRecipients === null ? `Share of ${shareBase} unavailable` : `${percentText(step.shareOfRecipients)} of ${shareBase}`,
     };
   });
 }
 
-export function memberRateLabel(rate: number | null | undefined, delivered: number): string {
+export function memberRateLabel(rate: number | null | undefined, delivered: number | null | undefined): string {
   if (typeof delivered !== 'number' || delivered <= 0) return 'Unavailable';
   if (typeof rate !== 'number' || !Number.isFinite(rate)) return 'Unavailable';
   return `${percentText(rate)} of ${int(delivered)} delivered`;

@@ -15,8 +15,19 @@ export const SUPPRESSED_NOTICE = 'Some step counts are suppressed. Step reach is
 export const NONMONOTONE_NOTICE = 'Step reach is not monotone. Step reach is not a cohort funnel.';
 export const VERSION_NOTICE = 'Saved versions differ, so version-specific counts are unavailable. Step reach is not a cohort funnel.';
 export const EMPTY_NOTICE = 'No participants entered this period. Step reach is not a cohort funnel.';
+export const REACH_NOTICE =
+  'The server reports reach, not a drop-off chain. Drop-off is shown only for linear journeys. A linear journey whose step counts rise (for example after a migration) is reach too.';
 
-export type GateReason = 'branching' | 'looping' | 'unmapped' | 'missing-stage' | 'suppressed' | 'nonmonotone' | 'versioned' | 'empty';
+export type GateReason =
+  | 'reach'
+  | 'branching'
+  | 'looping'
+  | 'unmapped'
+  | 'missing-stage'
+  | 'suppressed'
+  | 'nonmonotone'
+  | 'versioned'
+  | 'empty';
 
 export interface FunnelStage {
   /** The node id, or null for the "Entered" stage. */
@@ -32,6 +43,8 @@ export interface FunnelStage {
 export type FunnelGateResult = { pass: true; stages: FunnelStage[]; notice: string } | { pass: false; reason: GateReason; notice: string };
 
 export interface FunnelGateInput {
+  /** The server's basis: only a published straight line can carry a drop-off chain. */
+  basis?: FunnelResult['basis'];
   latestVersion: number | null;
   publishedVersion: number | null;
   nodes: JNode[];
@@ -47,10 +60,12 @@ const fail = (reason: GateReason, notice: string): FunnelGateResult => ({ pass: 
  * The funnel gate (#507). A funnel is only honest for one linear published topology whose event
  * steps all map to it, on this phase's single-version provenance, with every stage present,
  * unsuppressed, monotone reach and at least one entrant. Anything else gets independent bars and
- * an explanation; a negative difference is never clamped or hidden.
+ * an explanation; a negative difference is never clamped or hidden. The server's reach basis
+ * always wins: it is the one statement that knows the topology it counted (#591).
  */
 export function funnelGate(input: FunnelGateInput): FunnelGateResult {
-  const { nodes, steps, entered, suppressed } = input;
+  const { basis = 'published', nodes, steps, entered, suppressed } = input;
+  if (basis === 'reach') return fail('reach', REACH_NOTICE);
   const byId = new Map(nodes.map((node) => [node.id, node]));
 
   // A single path from one trigger, with no branch or split step and no unreachable node.

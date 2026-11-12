@@ -12,7 +12,7 @@ import { AppError, isoDateTime, newId, newUuid } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
-import { consentStateOf, purposeAllowed } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -187,7 +187,7 @@ export const journeyHoldoutResult = defineCommand({
   name: 'journeys.holdoutResult',
   title: 'Journey uplift against its control group',
   description:
-    "Per arm (control, treatment): people assigned, goal conversions, conversion rate and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero.",
+    "Per arm (control, treatment): people assigned, goal conversions, conversion rate and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. When either arm holds fewer than k=5 people, every count, rate and lift is null, suppressed is true and k is reported, so a small control arm is never readable here.",
   input: z.object({
     journeyId: JourneyId,
     from: isoDateTime('from').optional().describe('Count assignments and goal events at or after this time'),
@@ -200,26 +200,28 @@ export const journeyHoldoutResult = defineCommand({
       .describe('The live scope and its hash version'),
     from: z.string().nullable(),
     to: z.string().nullable(),
+    k: z.number().int().describe('The k-anonymity floor; an arm below it is suppressed'),
     control: z.object({
-      entered: z.number().int(),
-      converted: z.number().int(),
-      unsubscribed: z.number().int().describe('E-mail unsubscribes, the guardrail'),
-      conversionRate: z.number(),
-      unsubscribeRate: z.number(),
+      entered: z.number().int().nullable().describe('People assigned to the arm; null when the holdout is suppressed'),
+      converted: z.number().int().nullable().describe('People in the arm who converted; null when the holdout is suppressed'),
+      unsubscribed: z.number().int().nullable().describe('E-mail unsubscribes, the guardrail; null when the holdout is suppressed'),
+      conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
+      unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
     }),
     treatment: z.object({
-      entered: z.number().int(),
-      converted: z.number().int(),
-      unsubscribed: z.number().int().describe('E-mail unsubscribes, the guardrail'),
-      conversionRate: z.number(),
-      unsubscribeRate: z.number(),
+      entered: z.number().int().nullable().describe('People assigned to the arm; null when the holdout is suppressed'),
+      converted: z.number().int().nullable().describe('People in the arm who converted; null when the holdout is suppressed'),
+      unsubscribed: z.number().int().nullable().describe('E-mail unsubscribes, the guardrail; null when the holdout is suppressed'),
+      conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
+      unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
     }),
-    absoluteLift: z.number().describe('Treatment conversion rate minus control'),
+    absoluteLift: z.number().nullable().describe('Treatment conversion rate minus control; null when the holdout is suppressed'),
     relativeLift: z.number().nullable().describe('Absolute lift divided by the control rate; null when control never converted'),
     ci95: z.tuple([z.number(), z.number()]).nullable().describe("Newcombe's 95% interval for the difference of proportions"),
     minSampleSizeMet: z.boolean(),
     verdict: z.enum(['not_enough_data', 'no_clear_difference', 'treatment_better', 'treatment_worse']),
     note: z.string(),
+    suppressed: z.boolean().describe('True when an arm held fewer than k people, so counts, rates and lift are hidden'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -688,7 +690,9 @@ export const simulateJourney = defineCommand({
   }),
   permission: 'artifacts:read',
   effect: 'read',
-  target: (i) => i.artifactId,
+  // With a profile, the walk shows that person's consent verdicts and branch data.
+  auditReads: true,
+  target: (i) => i.profileId ?? i.artifactId,
   handler: async (input, ctx) => {
     const { version, def } = await loadDefinition(ctx.tx, input.artifactId, input.version);
     let graph: ReturnType<typeof compile>;
@@ -871,9 +875,7 @@ export const simulateJourney = defineCommand({
             (await (async () => {
               const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
               const basis = purposes.find((x) => x.key === graph.purpose)?.basis ?? 'consent';
-              const state = (await consentStateOf(ctx.tx, ws, input.profileId!)).find(
-                (x) => x.purpose === graph.purpose && (x.channel === '' || x.channel === 'webhook'),
-              );
+              const state = currentConsent(await consentStateOf(ctx.tx, ws, input.profileId!), graph.purpose, 'webhook');
               return purposeAllowed(basis, state?.status);
             })());
           detail = allowed ? `would send a webhook to ${eff.endpoint}` : `would not send: no lawful basis for purpose "${graph.purpose}"`;

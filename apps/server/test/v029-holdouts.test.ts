@@ -283,14 +283,59 @@ describe('treatment and control (#67)', () => {
       () => journeyEvents(journeyId, treatment.profileId),
       (rows) => rows.some((r) => r.type === 'converted'),
     );
-    // Two assigned people cannot meet the default minimum of 200 per arm.
+    // Two assigned people cannot meet the default minimum of 200 per arm, and an arm below k=5 is
+    // suppressed rather than reported as a count (#590).
     const result = await api().call('journeys.holdoutResult', { journeyId });
+    expect(result.suppressed).toBe(true);
+    expect(result.k).toBe(5);
     expect(result.minSampleSizeMet).toBe(false);
     expect(result.verdict).toBe('not_enough_data');
-    expect(result.control.entered).toBeGreaterThan(0);
-    expect(result.treatment.entered).toBeGreaterThan(0);
-    expect(result.control.conversionRate).toBeCloseTo(1, 10);
-    expect(result.treatment.conversionRate).toBeCloseTo(1, 10);
+    expect(result.control).toMatchObject({ entered: null, converted: null, unsubscribed: null });
+    expect(result.treatment).toMatchObject({ entered: null, converted: null, unsubscribed: null });
+    expect(result.control.conversionRate).toBeNull();
+    expect(result.treatment.conversionRate).toBeNull();
+    expect(result.absoluteLift).toBeNull();
+    expect(result.relativeLift).toBeNull();
+    expect(result.ci95).toBeNull();
+    expect(result.note).toContain('k=5');
+  });
+});
+
+describe('the k floor (#590)', () => {
+  it('suppresses a holdout whose control arm holds two people', async () => {
+    const journeyId = await createMeasurementJourney('Small control', 50, 200);
+    const first = 800_001;
+    const last = first + 7;
+    await t.srv.db.admin.query(
+      `INSERT INTO profiles (workspace_id, id)
+       SELECT $1, 'prf_' || lpad(to_hex(g), 32, '0') FROM generate_series($2::int, $3::int) AS g ON CONFLICT DO NOTHING`,
+      [ws, first, last],
+    );
+    const profile = (g: number) => `prf_${g.toString(16).padStart(32, '0')}`;
+    const control = [profile(first), profile(first + 1)];
+    const treatment = Array.from({ length: 6 }, (_, i) => profile(first + 2 + i));
+    const hash = holdoutHashVersion(50);
+    await t.srv.db.admin.query(
+      `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm)
+       SELECT $1, 'journey', $2, $3, x, 'control' FROM unnest($4::text[]) AS x`,
+      [ws, journeyId, hash, control],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm)
+       SELECT $1, 'journey', $2, $3, x, 'treatment' FROM unnest($4::text[]) AS x`,
+      [ws, journeyId, hash, treatment],
+    );
+
+    const result = await api().call('journeys.holdoutResult', { journeyId });
+    expect(result.suppressed).toBe(true);
+    expect(result.control).toMatchObject({ entered: null, converted: null, conversionRate: null, unsubscribeRate: null });
+    expect(result.treatment).toMatchObject({ entered: null, converted: null, conversionRate: null, unsubscribeRate: null });
+    expect(result.absoluteLift).toBeNull();
+    expect(result.relativeLift).toBeNull();
+    expect(result.ci95).toBeNull();
+    expect(result.minSampleSizeMet).toBe(false);
+    expect(result.verdict).toBe('not_enough_data');
+    expect(result.note).toContain('k=5');
   });
 });
 
