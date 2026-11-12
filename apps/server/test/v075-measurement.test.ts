@@ -299,6 +299,8 @@ describe('journey split attribution (#369)', () => {
       step(109, 'prf_bypass', 1, base),
       step(111, 'prf_before2', 1, base),
       step(112, 'prf_before2', 2, base + 3_000, 2),
+      // A fifth arm-1 entrant keeps both arms at k while the attribution cases above stay visible.
+      step(113, 'prf_extra', 2, base),
     ]);
     await t.srv.events.insertJourneyEvents([
       converted(101, 'prf_reentry', base + 1_000),
@@ -369,7 +371,7 @@ describe('journey split attribution (#369)', () => {
     ]);
 
     const arms = await t.srv.events.journeySplitArms(ws, { journeyId, node: 'split' });
-    expect(arms).toHaveLength(10);
+    expect(arms).toHaveLength(11);
     expect(arms.find((a) => a.participantId === 107)?.arm).toBe(0);
     expect(arms.find((a) => a.participantId === 106)?.arm).toBe(1);
     const later = await t.srv.events.journeySplitArms(ws, {
@@ -388,7 +390,7 @@ describe('journey split attribution (#369)', () => {
       to: at(base + 5_000),
       minSampleSize: 1,
     });
-    // Entrants: arm0 = 101/105/107/108/109/111 (6), arm1 = 102/103/106/112 (4). Conversions:
+    // Entrants: arm0 = 101/105/107/108/109/111 (6), arm1 = 102/103/106/112/113 (5). Conversions:
     // 101 once for its first entry, 107 once for its first take, 102 for its own take. 103 and 112
     // converted before their own take, 110 never took the split and 0 is not a participant, so none
     // may borrow an earlier profile entry (#419). 108's conversion is out of the report window.
@@ -396,9 +398,9 @@ describe('journey split attribution (#369)', () => {
     // equal-time prf_tie unsubscribe goes to the higher participant id (106, arm 1).
     expect(result.arms).toMatchObject([
       { arm: 0, entered: 6, converted: 2, unsubscribed: 1 },
-      { arm: 1, entered: 4, converted: 1, unsubscribed: 2 },
+      { arm: 1, entered: 5, converted: 1, unsubscribed: 2 },
     ]);
-    expect(result.arms.reduce((n, a) => n + a.converted, 0)).toBe(3);
+    expect(result.arms.reduce((n, a) => n + (a.converted ?? 0), 0)).toBe(3);
   }, 120_000);
 });
 
