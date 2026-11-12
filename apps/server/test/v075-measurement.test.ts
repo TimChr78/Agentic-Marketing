@@ -92,6 +92,20 @@ describe('campaign conversion measurement (#366)', () => {
       [ws, campaignId, holdoutHashVersion(50), profileId, assignedAt],
     );
 
+    // Both arms need k people or the result is suppressed (0.14.5): four more treatment people and
+    // five control people, none of whom converts.
+    for (const [arm, n] of [['treatment', 4], ['control', 5]] as const) {
+      for (let i = 0; i < n; i++) {
+        const filler = `prf_${arm}_filler_${i}_${stamp}`;
+        await t.srv.db.admin.query("INSERT INTO profiles (workspace_id, id, traits) VALUES ($1, $2, '{}')", [ws, filler]);
+        await t.srv.db.admin.query(
+          `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm, assigned_at)
+           VALUES ($1, 'campaign', $2, $3, $4, $5, $6)`,
+          [ws, campaignId, holdoutHashVersion(50), filler, arm, assignedAt],
+        );
+      }
+    }
+
     // 100k unrelated goal events, all earlier than the decisive conversion.
     const settings = await t.srv.events.settingsFor(ws);
     await t.srv.events.client.command({
@@ -138,8 +152,8 @@ describe('campaign conversion measurement (#366)', () => {
     });
     expect(empty).toEqual([]);
     const result = await api.call('campaigns.holdoutResult', { campaignId });
-    expect(result.treatment).toMatchObject({ entered: 1, converted: 1 });
-    expect(result.control).toMatchObject({ entered: 0, converted: 0 });
+    expect(result.treatment).toMatchObject({ entered: 5, converted: 1 });
+    expect(result.control).toMatchObject({ entered: 5, converted: 0 });
   }, 180_000);
 
   it('ai.calibration sees a late outcome behind more than 100k scoped events', async () => {
