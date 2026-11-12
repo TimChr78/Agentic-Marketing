@@ -605,6 +605,19 @@ describe('approval consequence review follow-ups (0.14.10)', () => {
     expect(plan.artifacts).not.toContain(pur);
   });
 
+  it('does not treat a free-text purpose field as a purpose reference (0.14.10 review)', () => {
+    const pur = id('pur', 'f');
+    const plan = buildReadPlan({
+      artifactId: eml,
+      type: 'email_template',
+      version: 4,
+      content: { subject: 'Hello', mandate: { purpose: 'Grow the newsletter list by 20% this quarter.' } },
+      bundleVersions: { [pur]: 3 },
+      capabilities,
+    });
+    expect(plan.artifacts).not.toContain(pur);
+  });
+
   it('finds purpose keys nested in the artifact content (#735)', () => {
     const pur = id('pur', 'f');
     const plan = buildReadPlan({

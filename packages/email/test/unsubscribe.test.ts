@@ -15,6 +15,17 @@ const URL = 'https://links.example.com/u/token';
 const link = (attrs = '', text = 'Unsubscribe') => `<a href="${URL}"${attrs}>${text}</a>`;
 
 const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'missing' }[] = [
+  // #775 and the 0.14.10 review: specificity decides before document order.
+  {
+    name: 'an id rule hides the link despite a later class rule that shows it',
+    html: `<html><head><style>#x{display:none} .u{display:block}</style></head><body><a id="x" class="u" href="${URL}">Unsubscribe</a></body></html>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a class rule makes the text white on white despite a later tag rule',
+    html: `<html><head><style>.f{color:#fff} a{color:#000}</style></head><body style="background:#fff"><a class="f" href="${URL}">Unsubscribe</a></body></html>`,
+    reason: 'hidden',
+  },
   { name: 'inline display:none', html: link(' style="display:none"'), reason: 'hidden' },
   { name: 'the hidden attribute', html: link(' hidden'), reason: 'hidden' },
   { name: 'aria-hidden="true"', html: link(' aria-hidden="true"'), reason: 'hidden' },
@@ -617,6 +628,13 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
       '<mj-text><svg width="12" height="12"><circle r="6" /></svg> <a href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>',
     );
     expect(await validateTemplate(t)).toEqual([]);
+  });
+
+  it('keeps a footer visible when a more specific rule gives it a dark colour (0.14.10 review)', () => {
+    const html = `<html><head><style>#footer{color:black} a{color:white}</style></head><body style="background:#fff"><a id="footer" href="${URL}">Unsubscribe</a></body></html>`;
+    expect(unsubscribeLinkProblem(html, URL)).toBeNull();
+    const shown = `<html><head><style>#x{display:block} a{display:none}</style></head><body><a id="x" href="${URL}">Unsubscribe</a></body></html>`;
+    expect(unsubscribeLinkProblem(shown, URL)).toBeNull();
   });
 
   it('rejects transparent text at save and at publish', async () => {
