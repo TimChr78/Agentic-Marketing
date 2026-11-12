@@ -973,7 +973,7 @@ export const simulateJourney = defineCommand({
     // withheld rather than reworded, so nothing about the person leaks through the walk.
     if (input.profileId && !ctx.principal.permissions.has('profiles:pii'))
       for (const step of steps)
-        if (personalDataInText(step.detail).length)
+        if (personalDataInText(step.detail, { strict: true }).length)
           step.detail = 'withheld: this step would show personal data, which needs the profiles:pii permission';
     return { version, outcome, converted: state.converted, steps, entry };
   },
