@@ -109,7 +109,7 @@ export function consentProofFor(
       continue;
     }
     // The key is allowlisted, but the value can still be an e-mail address, a phone number, etc.
-    if (typeof value === 'string' && personalDataInText(value).length > 0) {
+    if (typeof value === 'string' && personalDataInText(value, { strict: true }).length > 0) {
       withheld = true;
       continue;
     }

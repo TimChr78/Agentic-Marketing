@@ -141,6 +141,41 @@ describe('inbound replay protection for every scheme (#787)', () => {
     expect(await events()).toHaveLength(2);
   });
 
+  it('keeps same-body deliveries whose mapped headers differ outside messageId (0.14.11 round 2)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Device-keyed generic',
+      settings: { mapping: '$merge([body, {"anonymousId": headers."x-device", "timestamp": headers."x-sent-at"}])' },
+      secrets: {},
+    });
+    const body = tracked('device-keyed', 'd-1');
+    const first = await post(connection.inboundPath!, body, { 'x-device': 'dev-a', 'x-sent-at': '2026-11-12T10:00:00Z' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    const second = await post(connection.inboundPath!, body, { 'x-device': 'dev-b', 'x-sent-at': '2026-11-12T10:05:00Z' });
+    expect(await second.json()).toMatchObject({ success: true, accepted: 1 });
+    // A different per-hop header (user-agent) does not make a replay distinct.
+    const replay = await post(connection.inboundPath!, body, {
+      'x-device': 'dev-b',
+      'x-sent-at': '2026-11-12T10:05:00Z',
+      'user-agent': 'retry/2',
+    });
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
+  it('still recognises a replay when the mapping generates a fresh messageId (0.14.11 round 2)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Clock-keyed generic',
+      settings: { mapping: '$merge([body, {"messageId": $string($millis())}])' },
+      secrets: {},
+    });
+    const body = tracked('clock-keyed', 'c-1');
+    const first = await post(connection.inboundPath!, body);
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    const replay = await post(connection.inboundPath!, body);
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
   it('publishes a byte-identical unsigned replay once and a different body again', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'webhook',

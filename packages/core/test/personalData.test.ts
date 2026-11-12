@@ -40,14 +40,20 @@ describe('phone numbers (#765)', () => {
 });
 
 describe('Danish and Norwegian 8-digit numbers (0.14.11 review)', () => {
-  it('detects 8-digit numbers, spaced or contiguous', () => {
-    for (const phone of ['12345678', '12 34 56 78', '1234 5678', '+45 12345678', '0045 12 34 56 78'])
-      expect(personalDataInText(`call ${phone}`), phone).toContain('[phone]');
+  it('detects 8-digit numbers, spaced or contiguous, in strict mode', () => {
+    for (const phone of ['12345678', '12 34 56 78', '1234 5678'])
+      expect(personalDataInText(`call ${phone}`, { strict: true }), phone).toContain('[phone]');
+    for (const phone of ['+45 12345678', '0045 12 34 56 78']) expect(personalDataInText(`call ${phone}`), phone).toContain('[phone]');
   });
 
-  it('keeps date-shaped 8-digit runs and attached ids out', () => {
-    expect(personalDataInText('batch 20261112')).not.toContain('[phone]');
-    expect(personalDataInText('ref ORD-12345678')).not.toContain('[phone]');
+  it('keeps date-shaped 8-digit runs and attached ids out in strict mode', () => {
+    expect(personalDataInText('batch 20261112', { strict: true })).not.toContain('[phone]');
+    expect(personalDataInText('ref ORD-12345678', { strict: true })).not.toContain('[phone]');
+  });
+
+  it('leaves an 8-digit order number alone outside strict mode (the AI context, 0.14.11 review)', () => {
+    expect(personalDataInText('order_id 12345678')).not.toContain('[phone]');
+    expect(redactText('order 12345678 shipped')).toBe('order 12345678 shipped');
   });
 });
 
