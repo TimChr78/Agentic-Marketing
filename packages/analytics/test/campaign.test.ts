@@ -74,12 +74,13 @@ describe('campaign query compiler', () => {
   it('compiles recipients, converters and the conversion rate into the shared result shape', () => {
     const compiled = buildCampaignQuery(input());
 
-    expect(compiled.sql).toContain('WITH recipient AS');
+    expect(compiled.sql).toContain('WITH identity AS');
+    expect(compiled.sql).toContain('recipient AS');
     expect(compiled.sql).toContain('goal_map AS');
     expect(compiled.sql).toContain('conversion AS');
     expect(compiled.sql).toContain('rec_roll AS');
     expect(compiled.sql).toContain('conv_roll AS');
-    expect(compiled.sql).toContain('FROM message_events FINAL');
+    expect(compiled.sql).toContain('FROM message_events m FINAL');
     expect(compiled.sql).toContain("type IN ('sent', 'delivered')");
     expect(compiled.sql).toContain('arrayElement({campaign_map_ids:Array(String)}');
     expect(compiled.sql).toContain('FROM events e FINAL');
@@ -295,11 +296,17 @@ describe('campaign query compiler', () => {
       }),
     );
 
-    expect(compiled.params.identity_keys).toEqual(['anon-before-merge', 'previous-profile', 'user-before-merge']);
-    expect(compiled.params.identity_profiles).toEqual([CAMPAIGN, CAMPAIGN, CAMPAIGN]);
-    expect(compiled.params.identity_kinds).toEqual(['anonymous_id', 'profile', 'user_id']);
+    expect(compiled.params.identity_keys_0).toEqual(['anon-before-merge', 'previous-profile', 'user-before-merge']);
+    expect(compiled.params.identity_profiles_0).toEqual([CAMPAIGN, CAMPAIGN, CAMPAIGN]);
+    expect(compiled.params.identity_kinds_0).toEqual(['anonymous_id', 'profile', 'user_id']);
     expect(compiled.params.identity_count).toBe(3);
     expect(compiled.sql).toContain('event_identity AS');
+    // The recipient resolves through the same map as the conversion, so a send stored under a
+    // merged-away profile matches an event stored under the survivor (#590).
+    expect(compiled.sql).toContain(
+      "LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'",
+    );
+    expect(compiled.sql.indexOf('identity AS')).toBeLessThan(compiled.sql.indexOf('recipient AS'));
     expect(compiled.sql).toContain("LEFT JOIN identity by_user ON by_user.identity_key = e.user_id AND by_user.kind = 'user_id'");
     expect(compiled.sql).toContain(
       "LEFT JOIN identity by_anonymous ON by_anonymous.identity_key = e.anonymous_id AND by_anonymous.kind = 'anonymous_id'",
@@ -321,11 +328,30 @@ describe('campaign query compiler', () => {
       }),
     );
     expect(compiled.params.identity_count).toBe(0);
-    expect(compiled.params.identity_keys).toEqual([]);
-    expect(compiled.params.identity_profiles).toEqual([]);
-    expect(compiled.params.identity_kinds).toEqual([]);
+    expect(compiled.params.identity_keys_0).toEqual([]);
+    expect(compiled.params.identity_profiles_0).toEqual([]);
+    expect(compiled.params.identity_kinds_0).toEqual([]);
     // The SQL is still valid: it falls back to the stored profile id, which the caller reports.
     expect(compiled.sql).toContain('event_identity AS');
+  });
+
+  it('splits a campaign-sized identity map across form fields (#590)', () => {
+    // 5,000 pairs of 36-character keys are ~190 KiB per array, above ClickHouse's 128 KiB field
+    // limit. The map must become several fields that arrayConcat restores in order.
+    const pairs = Array.from({ length: 5_000 }, (_, i) => ({
+      key: `anon_${i.toString().padStart(31, '0')}`,
+      profileId: `prf_${i.toString().padStart(32, '0')}`,
+      kind: 'anonymous_id' as const,
+    }));
+    const compiled = buildCampaignQuery(input({ identity: { pairs, overLimit: false, limit: 100_000 } }));
+    expect(compiled.params.identity_count).toBe(5_000);
+    expect(compiled.params.identity_keys_1).toBeDefined();
+    expect(compiled.sql).toContain('arrayConcat(');
+    const first = compiled.params.identity_keys_0 as string[];
+    const second = compiled.params.identity_keys_1 as string[];
+    expect(first.length + second.length).toBe(5_000);
+    expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(120 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(second))).toBeLessThanOrEqual(120 * 1024);
   });
 
   it('refuses a measure that is not a campaign measure', () => {

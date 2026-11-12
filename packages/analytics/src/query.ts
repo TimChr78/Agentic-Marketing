@@ -1,5 +1,5 @@
 import { publishedSingleton } from '@agentic-marketing/artifacts';
-import { loadIdentityMap } from '@agentic-marketing/campaigns';
+import { identityUnresolvedNote, loadIdentityMap } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -344,6 +344,32 @@ async function segmentQuery(deps: Deps, input: QueryInput, filters: NormalizedFi
   };
 }
 
+/**
+ * The profile ids the campaign actually reached in the window, as ClickHouse stored them. The
+ * identity map is scoped to this set so it is bounded by the campaign's recipients rather than by
+ * every merge in the workspace (#590). Exported because the campaign summary builds the same map
+ * for its per-member rows.
+ */
+export async function campaignRecipientProfileIds(
+  deps: Pick<Deps, 'events' | 'workspaceId'>,
+  memberIds: readonly string[],
+  from: string,
+  to: string,
+): Promise<string[]> {
+  if (!memberIds.length) return [];
+  const result = await deps.events.client.query({
+    query: `SELECT DISTINCT profile_id FROM message_events FINAL
+            WHERE workspace_id = {ws:UUID} AND journey_id IN {members:Array(String)}
+              AND at >= {from:DateTime64(3, 'UTC')} AND at <= {to:DateTime64(3, 'UTC')}
+              AND type IN ('sent', 'delivered') AND profile_id != ''`,
+    query_params: { ws: deps.workspaceId, members: [...memberIds], from: from.replace('Z', ''), to: to.replace('Z', '') },
+    format: 'JSONEachRow',
+    clickhouse_settings: { ...(await deps.events.settingsFor(deps.workspaceId)), max_execution_time: 10 } as never,
+  });
+  const rows = await result.json<{ profile_id: string }>();
+  return [...new Set(rows.map((r) => r.profile_id).filter(Boolean))];
+}
+
 async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], dimensions: DimensionId[], filters: NormalizedFilters) {
   const source = measures[0].source;
   if (source === 'segment_memberships') return segmentQuery(deps, input, filters);
@@ -360,8 +386,13 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
     ? await loadCampaignQueryMap(deps.tx, filters.campaign, campaignSource ? conversion.rules.map((r) => r.event) : [])
     : undefined;
   // Campaign conversions resolve identity the same way the holdout card does (#590). The map is
-  // omitted above its transport bound; the note below says the result is then not identity-resolved.
-  const identity = campaignSource ? await loadIdentityMap(deps.tx, deps.workspaceId) : undefined;
+  // scoped to this campaign's recipients, so unrelated merges cannot exhaust the bound; above the
+  // bound it is omitted and the note below says the result is not identity-resolved.
+  const identity = campaignSource
+    ? await loadIdentityMap(deps.tx, deps.workspaceId, {
+        profileIds: await campaignRecipientProfileIds(deps, queryMap?.map.memberIds ?? [], input.from, input.to),
+      })
+    : undefined;
 
   const compiled: CompiledQuery = campaignSource
     ? buildCampaignQuery({
@@ -475,10 +506,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
     notes.push(
       'Campaign conversions are people who got a campaign message and converted within the goal’s attribution window of their first campaign message (first touch).',
     );
-  if (campaignSource && identity?.overLimit)
-    notes.push(
-      `Conversions are not identity-resolved for this query: the workspace has more than ${identity.limit} merged identity mappings, so they are matched on the profile id stored with the event.`,
-    );
+  if (campaignSource && identity?.overLimit) notes.push(identityUnresolvedNote(identity.limit));
   if (suppressed) notes.push(`Groups smaller than k=${K} have their measures suppressed.`);
 
   return {

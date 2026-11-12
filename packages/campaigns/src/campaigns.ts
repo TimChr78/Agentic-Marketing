@@ -15,7 +15,7 @@ import { and, eq, gte, inArray, isNotNull, lte, max } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
 import { goalEventsFor } from './goal';
-import { loadIdentityMap } from './identity';
+import { identityUnresolvedNote, loadIdentityMap } from './identity';
 
 // Campaigns (#65) stay thin: a published campaign version groups existing artifacts under one goal
 // and one UTM campaign. Membership is read from those published versions rather than from a join
@@ -463,28 +463,35 @@ export const campaignHoldoutResult = defineCommand({
       c.goal,
       (conversionMap?.rules ?? []).map((r) => r.event),
     );
+    let identityLimit: number | null = null;
     if (people.size && names.length) {
       const assignedTimes = [...people.values()].map((p) => p.assignedAt.getTime());
       const first = new Date(Math.min(...assignedTimes));
       const last = new Date(Math.max(...assignedTimes) + c.goal.attributionDays * 86_400_000);
       const windowTo = to && to < last ? to : last;
       // One identity resolution, shared with the campaign summary and the measure queries (#590):
-      // an event stored under an identifier or a merged-away profile counts for the survivor.
+      // an event stored under an identifier or a merged-away profile counts for the survivor. Above
+      // the bound the headline ships no map, so the holdout omits it too and both surfaces report
+      // the same note rather than disagreeing.
       const identity = await loadIdentityMap(ctx.tx, ws, { profileIds: [...people.keys()] });
-      const userProfiles = new Map(identity.pairs.filter((p) => p.kind === 'user_id').map((p) => [p.key, p.profileId]));
-      const anonymousProfiles = new Map(identity.pairs.filter((p) => p.kind === 'anonymous_id').map((p) => [p.key, p.profileId]));
-      const mergedProfiles = new Map(identity.pairs.filter((p) => p.kind === 'profile').map((p) => [p.key, p.profileId]));
+      if (identity.overLimit) identityLimit = identity.limit;
+      const pairs = identity.overLimit ? [] : identity.pairs;
+      const userProfiles = new Map(pairs.filter((p) => p.kind === 'user_id').map((p) => [p.key, p.profileId]));
+      const anonymousProfiles = new Map(pairs.filter((p) => p.kind === 'anonymous_id').map((p) => [p.key, p.profileId]));
+      const mergedProfiles = new Map(pairs.filter((p) => p.kind === 'profile').map((p) => [p.key, p.profileId]));
       // The event query is scoped to the campaign's people (profile ids plus their identifiers) and
       // pages the whole attribution window, so a busy workspace cannot hide a late conversion behind
-      // an unrelated 100k-event cap (#366).
+      // an unrelated 100k-event cap (#366). The merged-away profile ids are part of that scope: an
+      // event that still carries only the historical id would otherwise be filtered out before
+      // mergedProfiles can resolve it (#590).
       const events = await ctx.services.events.conversionEvents(ws, {
         names,
         from: first,
         to: windowTo,
-        profileIds: [...people.keys()],
+        profileIds: [...new Set([...people.keys(), ...mergedProfiles.keys()])],
         identifiers: {
-          anonymousIds: [...new Set(identity.pairs.filter((p) => p.kind === 'anonymous_id').map((p) => p.key))],
-          userIds: [...new Set(identity.pairs.filter((p) => p.kind === 'user_id').map((p) => p.key))],
+          anonymousIds: [...new Set(pairs.filter((p) => p.kind === 'anonymous_id').map((p) => p.key))],
+          userIds: [...new Set(pairs.filter((p) => p.kind === 'user_id').map((p) => p.key))],
         },
       });
       const conversions = new Map<string, { timestamp: number; name: string; properties: Record<string, unknown> }[]>();
@@ -532,13 +539,19 @@ export const campaignHoldoutResult = defineCommand({
       // The guardrail covers the campaign's own sends only: messages from unrelated journeys or
       // broadcasts are not the campaign's doing.
       const unsubscribed = sendingIds.length
-        ? new Set(await ctx.services.events.unsubscribedProfiles(ws, { journeyIds: sendingIds, from, to }))
+        ? new Set(
+            (await ctx.services.events.unsubscribedProfiles(ws, { journeyIds: sendingIds, from, to })).map(
+              // The guardrail resolves through the same merge map: an unsubscribe stored under the
+              // historical profile still belongs to the survivor who is being measured (#590).
+              (id) => mergedProfiles.get(id) ?? id,
+            ),
+          )
         : new Set<string>();
       for (const [profileId, person] of people) if (unsubscribed.has(profileId)) counts[person.arm].unsubscribed++;
     }
 
     const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
-    const note =
+    const verdictNote =
       analysis.verdict === 'not_enough_data'
         ? `Need at least ${cg.minSampleSize} people in each arm; ${counts.control.entered} control and ${counts.treatment.entered} treatment so far.`
         : analysis.verdict === 'no_clear_difference'
@@ -546,6 +559,9 @@ export const campaignHoldoutResult = defineCommand({
           : analysis.verdict === 'treatment_better'
             ? 'Treatment converted at a higher rate and the 95% interval excludes zero; the campaign looks incremental.'
             : 'Treatment converted at a lower rate and the 95% interval excludes zero; the campaign looks harmful.';
+    // The same note the headline shows when the campaign's map is over its bound, so the two
+    // surfaces always explain an unresolved result the same way (#590).
+    const note = identityLimit === null ? verdictNote : `${verdictNote} ${identityUnresolvedNote(identityLimit)}`;
     return {
       campaignId: input.campaignId,
       goal: { kind: c.goal.kind, event: c.goal.event ?? null, attributionDays: c.goal.attributionDays },
