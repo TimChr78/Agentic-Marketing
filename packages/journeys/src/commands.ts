@@ -760,7 +760,17 @@ export const simulateJourney = defineCommand({
           duplicate: false,
           note: 'the key property is missing, so the entry would be skipped',
         };
-      else {
+      else if (!ctx.principal.permissions.has('profiles:read')) {
+        // A duplicate check looks up existing participants by key (often an e-mail address), so it
+        // would reveal whether that person is in the journey. Without profiles:read the dry run
+        // resolves the key from the sample event only (0.14.11 review).
+        entry = {
+          key: choice.key,
+          source: choice.source,
+          duplicate: false,
+          note: 'participant state is not checked: looking up whether this key already entered needs the "profiles:read" permission',
+        };
+      } else {
         const keyed = graph.trigger.entryKey?.source === 'event_property';
         let duplicate = false;
         if (keyed) duplicate = await duplicateEntryKey(ctx.tx, input.artifactId, choice.key, graph.trigger.reentry);
