@@ -26,8 +26,14 @@ export const ROLE_PERMISSIONS: Record<Role, readonly Permission[]> = {
   viewer: ['artifacts:read'],
 };
 
-export interface Principal {
-  type: 'user' | 'agent';
+export interface AgentRef {
+  id: string;
+  name: string;
+  status: 'active' | 'paused' | 'revoked';
+  statusReason: string | null;
+}
+
+interface PrincipalFields {
   /** The person; for agents, the person the agent acts for. */
   userId: string;
   /** OAuth client id when the principal is an agent. */
@@ -36,9 +42,16 @@ export interface Principal {
   role: Role;
   /** Effective permissions: the role's permissions, intersected with granted scopes for agents. */
   permissions: ReadonlySet<Permission>;
-  /** The agent this principal acts as (ADR-0016); set for API tokens and OAuth clients. */
-  agent?: { id: string; name: string; status: 'active' | 'paused' | 'revoked'; statusReason: string | null };
 }
+
+/**
+ * A person using the UI or REST API (`user`), or an agent acting for a person (`agent`).
+ *
+ * An agent principal always names its agent record (ADR-0016, #811). The policy engine, the status
+ * check, the per-agent limits and the action ledger all key off that record, so building one
+ * without it would run a write with every guard skipped; the executor refuses such a write.
+ */
+export type Principal = (PrincipalFields & { type: 'user'; agent?: undefined }) | (PrincipalFields & { type: 'agent'; agent: AgentRef });
 
 export function userPrincipal(userId: string, workspaceId: string, role: Role): Principal {
   return { type: 'user', userId, workspaceId, role, permissions: new Set(ROLE_PERMISSIONS[role]) };
@@ -50,6 +63,7 @@ export function agentPrincipal(
   workspaceId: string,
   role: Role,
   grantedScopes: Iterable<string>,
+  agent: AgentRef,
 ): Principal {
   const granted = new Set(grantedScopes);
   return {
@@ -59,5 +73,6 @@ export function agentPrincipal(
     workspaceId,
     role,
     permissions: new Set(ROLE_PERMISSIONS[role].filter((p) => granted.has(p))),
+    agent,
   };
 }

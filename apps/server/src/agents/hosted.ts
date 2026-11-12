@@ -624,15 +624,19 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     return disabled ? ('disabled' as const) : ('failed' as const);
   }
 
-  const principal: Principal = {
-    ...agentPrincipal(loaded.agent.sponsorUserId, `hosted:${loaded.agent.id}`, workspaceId, loaded.role, loaded.hosted.scopes),
-    agent: {
+  const principal: Principal = agentPrincipal(
+    loaded.agent.sponsorUserId,
+    `hosted:${loaded.agent.id}`,
+    workspaceId,
+    loaded.role,
+    loaded.hosted.scopes,
+    {
       id: loaded.agent.id,
       name: loaded.agent.name,
       status: loaded.agent.status,
       statusReason: loaded.agent.statusReason,
     },
-  };
+  );
 
   const attemptStarted = Date.now();
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0 };
