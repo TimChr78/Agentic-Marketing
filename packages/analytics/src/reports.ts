@@ -162,7 +162,7 @@ export const analyticsJourneyFunnel = defineCommand({
   name: 'analytics.journeyFunnel',
   title: 'Journey funnel',
   description:
-    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) and compare consecutive steps; any other topology reports reach per node in breadth-first order with null drop-off. Counts use only the published version when the journey has one. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed.',
+    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. Counts use only the published version when the journey has one. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed.',
   input: z.object({
     journeyId: JourneyId,
     from: isoDateTime('from'),
@@ -173,7 +173,7 @@ export const analyticsJourneyFunnel = defineCommand({
     basis: z
       .enum(['published', 'reach'])
       .describe(
-        'published: a straight-line published topology, so drop-off is a chain; reach: no straight-line published topology (none, branching, loop or reconvergence), so steps are reach without a chain',
+        'published: a straight-line published topology with non-increasing counts, so drop-off is a chain; reach: no straight-line published topology (none, branching, loop or reconvergence) or counts that rise along the walk (people joining mid-journey, for example after a migration), so steps are reach without a chain',
       ),
     entered: z.number(),
     goalReached: z.number(),
@@ -228,31 +228,45 @@ export const analyticsJourneyFunnel = defineCommand({
     // A published topology defines both the steps and their order; without one the event order
     // is the only order there is, and it stays cross-version reach.
     const stepIds = published ? published.order : stepsResult.rows.map((row) => String(row[0]));
-    let previous: number | null = entered;
-    const steps = stepIds.flatMap((step) => {
+    const reachedSteps = stepIds.flatMap((step) => {
       if (!reachedByStep.has(step)) return [];
-      const reached = reachedByStep.get(step) ?? null;
-      // A drop-off chain needs one straight line: no fork, loop or reconvergence. It never goes
-      // below zero, even when events for a later step arrive out of order.
-      const dropOff = published?.linear && previous !== null && reached !== null ? Math.max(0, previous - reached) : null;
-      const dropOffRate = dropOff === null || previous === null || previous === 0 ? null : dropOff / previous;
+      return [{ step, reached: reachedByStep.get(step) ?? null }];
+    });
+    // A drop-off chain needs one straight line: no fork, loop or reconvergence. It also needs its
+    // counts to fall along the walk. Migration moves a participant to the new version without a new
+    // entry (journeys.migrate), so a later step can outnumber the entry step; a negative drop-off is
+    // never clamped to zero, and the report falls back to reach instead (#591).
+    let previous: number | null = entered;
+    let monotone = true;
+    for (const { reached } of reachedSteps) {
+      if (reached === null) continue;
+      if (previous !== null && reached > previous) monotone = false;
       previous = reached;
-      return [{ step, reached, dropOff, dropOffRate }];
+    }
+    const chain = published?.linear === true && monotone;
+    let previousReach: number | null = entered;
+    const steps = reachedSteps.map(({ step, reached }) => {
+      const dropOff = chain && previousReach !== null && reached !== null ? previousReach - reached : null;
+      const dropOffRate = dropOff === null || previousReach === null || previousReach === 0 ? null : dropOff / previousReach;
+      if (reached !== null) previousReach = reached;
+      return { step, reached, dropOff, dropOffRate };
     });
 
     const notes = [
       ...new Set([
         ...stepsResult.meta.notes,
-        published?.linear
-          ? `Steps follow the published journey v${published.version}’s linear topology; drop-off compares each step with the previous one, and only entries recorded for v${published.version} are counted.`
-          : published
-            ? `The published journey v${published.version} is not a straight line (it branches, splits, waits with alternative exits or loops), so there is no sequential drop-off. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted. Drop-off is shown only for linear journeys.`
-            : 'No published version is selected, so steps are cross-version reach without a drop-off chain.',
+        published?.linear && !monotone
+          ? `People joined the published journey v${published.version} after a later step (for example after a version migration), so reach is not a drop-off chain. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted.`
+          : published?.linear
+            ? `Steps follow the published journey v${published.version}’s linear topology; drop-off compares each step with the previous one, and only entries recorded for v${published.version} are counted.`
+            : published
+              ? `The published journey v${published.version} is not a straight line (it branches, splits, waits with alternative exits or loops), so there is no sequential drop-off. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted. Drop-off is shown only for linear journeys.`
+              : 'No published version is selected, so steps are cross-version reach without a drop-off chain.',
       ]),
     ];
     return {
       journeyId: input.journeyId,
-      basis: published?.linear ? ('published' as const) : ('reach' as const),
+      basis: chain ? ('published' as const) : ('reach' as const),
       entered,
       goalReached: total('journey.goal_reached'),
       completed: total('journey.completed'),

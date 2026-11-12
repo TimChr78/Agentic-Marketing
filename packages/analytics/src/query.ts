@@ -1,5 +1,11 @@
-import { publishedSingleton } from '@agentic-marketing/artifacts';
-import { identityUnresolvedNote, loadIdentityMap } from '@agentic-marketing/campaigns';
+import { K, publishedSingleton } from '@agentic-marketing/artifacts';
+import {
+  type IdentityMap,
+  identityScopeProfileLimit,
+  identityUnresolvedNote,
+  loadIdentityMap,
+  overLimitIdentityMap,
+} from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -25,7 +31,8 @@ import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef
 // principal, and ClickHouse's row policy checks it again.
 
 const CACHE_TTL_MS = 60_000;
-export const K = 5;
+
+export { K };
 export const MAX_RANGE_DAYS = 400;
 
 const ValueOrList = z.union([z.string().min(1).max(200), z.array(z.string().min(1).max(200)).min(1).max(100)]);
@@ -347,27 +354,57 @@ async function segmentQuery(deps: Deps, input: QueryInput, filters: NormalizedFi
 /**
  * The profile ids the campaign actually reached in the window, as ClickHouse stored them. The
  * identity map is scoped to this set so it is bounded by the campaign's recipients rather than by
- * every merge in the workspace (#590). Exported because the campaign summary builds the same map
- * for its per-member rows.
+ * every merge in the workspace (#590). The read is capped at the map's bound, plus one row so the
+ * caller can tell "at the bound" from "over it"; over the bound it returns null rather than a
+ * partial list. Exported because the campaign summary builds the same map for its per-member rows.
  */
 export async function campaignRecipientProfileIds(
   deps: Pick<Deps, 'events' | 'workspaceId'>,
   memberIds: readonly string[],
   from: string,
   to: string,
-): Promise<string[]> {
+  limit = identityScopeProfileLimit(),
+): Promise<string[] | null> {
   if (!memberIds.length) return [];
   const result = await deps.events.client.query({
     query: `SELECT DISTINCT profile_id FROM message_events FINAL
             WHERE workspace_id = {ws:UUID} AND journey_id IN {members:Array(String)}
               AND at >= {from:DateTime64(3, 'UTC')} AND at <= {to:DateTime64(3, 'UTC')}
-              AND type IN ('sent', 'delivered') AND profile_id != ''`,
-    query_params: { ws: deps.workspaceId, members: [...memberIds], from: from.replace('Z', ''), to: to.replace('Z', '') },
+              AND type IN ('sent', 'delivered') AND profile_id != ''
+            LIMIT {limit:UInt32}`,
+    query_params: {
+      ws: deps.workspaceId,
+      members: [...memberIds],
+      from: from.replace('Z', ''),
+      to: to.replace('Z', ''),
+      limit: limit + 1,
+    },
     format: 'JSONEachRow',
     clickhouse_settings: { ...(await deps.events.settingsFor(deps.workspaceId)), max_execution_time: 10 } as never,
   });
   const rows = await result.json<{ profile_id: string }>();
-  return [...new Set(rows.map((r) => r.profile_id).filter(Boolean))];
+  const ids = [...new Set(rows.map((r) => r.profile_id).filter(Boolean))];
+  // `DISTINCT` and the map's own deduplication mean a row count over the cap is only possible when
+  // the scope itself is over it, so no partial map is ever shipped.
+  return ids.length > limit ? null : ids;
+}
+
+/**
+ * The one campaign-scoped identity map for every campaign surface (#590). Above the scope bound it
+ * returns the all-or-nothing over-limit map, so the headline, the member rows and the holdout all
+ * skip resolution and report the same note instead of disagreeing.
+ */
+export async function campaignRecipientIdentityMap(
+  tx: Tx,
+  deps: Pick<Deps, 'events' | 'workspaceId'>,
+  memberIds: readonly string[],
+  from: string,
+  to: string,
+  limit = identityScopeProfileLimit(),
+): Promise<IdentityMap> {
+  const profileIds = await campaignRecipientProfileIds(deps, memberIds, from, to, limit);
+  if (profileIds === null) return overLimitIdentityMap();
+  return loadIdentityMap(tx, deps.workspaceId, { profileIds });
 }
 
 async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], dimensions: DimensionId[], filters: NormalizedFilters) {
@@ -389,9 +426,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
   // scoped to this campaign's recipients, so unrelated merges cannot exhaust the bound; above the
   // bound it is omitted and the note below says the result is not identity-resolved.
   const identity = campaignSource
-    ? await loadIdentityMap(deps.tx, deps.workspaceId, {
-        profileIds: await campaignRecipientProfileIds(deps, queryMap?.map.memberIds ?? [], input.from, input.to),
-      })
+    ? await campaignRecipientIdentityMap(deps.tx, deps, queryMap?.map.memberIds ?? [], input.from, input.to)
     : undefined;
 
   const compiled: CompiledQuery = campaignSource

@@ -527,6 +527,26 @@ describe('campaign roll-up holdouts (#511)', () => {
     expect(screen.getByText(/Zero control conversion makes relative lift unavailable/)).toBeTruthy();
   });
 
+  it('renders a suppressed campaign-wide holdout without counts or lift', async () => {
+    h.holdout = campaignHoldout({
+      suppressed: true,
+      k: 5,
+      verdict: 'not_enough_data',
+      minSampleSizeMet: false,
+      absoluteLift: null,
+      relativeLift: null,
+      ci95: null,
+      control: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null, revenue: {} },
+      treatment: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null, revenue: {} },
+      note: 'Suppressed: fewer than k=5 people in the control or treatment arm, so counts, rates, revenue and lift are hidden.',
+    });
+
+    render(<CampaignHoldoutCard campaignId={campaignId} artifact={campaignArtifact()} />);
+    await screen.findByText('Campaign-wide holdout');
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(1);
+    expect(screen.queryByText(/absolute lift/)).toBeNull();
+  });
+
   it('keeps journey controls separate from the campaign-wide holdout', async () => {
     renderTab();
     await screen.findByText('Campaign-wide holdout');

@@ -2,10 +2,13 @@ import {
   analyseHoldout,
   artifactTypes,
   type CampaignDefinition,
+  holdoutBelowK,
   holdoutHashVersion,
+  K,
   publishedSingleton,
   publishValidators,
   referenceExtractors,
+  suppressHoldout,
 } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
@@ -15,7 +18,7 @@ import { and, eq, gte, inArray, isNotNull, lte, max } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
 import { goalEventsFor } from './goal';
-import { identityUnresolvedNote, loadIdentityMap } from './identity';
+import { identityScopeProfileLimit, identityUnresolvedNote, loadIdentityMap, overLimitIdentityMap } from './identity';
 
 // Campaigns (#65) stay thin: a published campaign version groups existing artifacts under one goal
 // and one UTM campaign. Membership is read from those published versions rather than from a join
@@ -340,7 +343,7 @@ export const campaignHoldoutResult = defineCommand({
   name: 'campaigns.holdoutResult',
   title: 'Campaign uplift against its control group',
   description:
-    "Per arm (control, treatment): people assigned, people who did the campaign goal within the attribution window after their assignment, conversion rate, revenue per currency and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. The campaign's control group covers every sending member.",
+    "Per arm (control, treatment): people assigned, people who did the campaign goal within the attribution window after their assignment, conversion rate, revenue per currency and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. The campaign's control group covers every sending member. When either arm holds fewer than k=5 people, every count, rate, revenue figure and lift is null or empty, suppressed is true and k is reported.",
   input: z.object({
     campaignId: CampaignId,
     from: isoDateTime('from').optional().describe('Count assignments at or after this time'),
@@ -358,28 +361,38 @@ export const campaignHoldoutResult = defineCommand({
       .describe('The live scope and its hash version'),
     from: z.string().nullable(),
     to: z.string().nullable(),
+    k: z.number().int().describe('The k-anonymity floor; an arm below it is suppressed'),
     control: z.object({
-      entered: z.number().int(),
-      converted: z.number().int(),
-      unsubscribed: z.number().int().describe('E-mail unsubscribes among the campaign’s sends, the guardrail'),
-      conversionRate: z.number(),
-      unsubscribeRate: z.number(),
-      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map'),
+      entered: z.number().int().nullable().describe('People assigned to the arm; null when the holdout is suppressed'),
+      converted: z.number().int().nullable().describe('People in the arm who converted; null when the holdout is suppressed'),
+      unsubscribed: z
+        .number()
+        .int()
+        .nullable()
+        .describe('E-mail unsubscribes among the campaign’s sends, the guardrail; null when the holdout is suppressed'),
+      conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
+      unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
+      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map; empty when suppressed'),
     }),
     treatment: z.object({
-      entered: z.number().int(),
-      converted: z.number().int(),
-      unsubscribed: z.number().int().describe('E-mail unsubscribes among the campaign’s sends, the guardrail'),
-      conversionRate: z.number(),
-      unsubscribeRate: z.number(),
-      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map'),
+      entered: z.number().int().nullable().describe('People assigned to the arm; null when the holdout is suppressed'),
+      converted: z.number().int().nullable().describe('People in the arm who converted; null when the holdout is suppressed'),
+      unsubscribed: z
+        .number()
+        .int()
+        .nullable()
+        .describe('E-mail unsubscribes among the campaign’s sends, the guardrail; null when the holdout is suppressed'),
+      conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
+      unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
+      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map; empty when suppressed'),
     }),
-    absoluteLift: z.number().describe('Treatment conversion rate minus control'),
+    absoluteLift: z.number().nullable().describe('Treatment conversion rate minus control; null when the holdout is suppressed'),
     relativeLift: z.number().nullable().describe('Absolute lift divided by the control rate; null when control never converted'),
     ci95: z.tuple([z.number(), z.number()]).nullable().describe("Newcombe's 95% interval for the difference of proportions"),
     minSampleSizeMet: z.boolean(),
     verdict: z.enum(['not_enough_data', 'no_clear_difference', 'treatment_better', 'treatment_worse']),
     note: z.string(),
+    suppressed: z.boolean().describe('True when an arm held fewer than k people, so counts, rates, revenue and lift are hidden'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -473,7 +486,11 @@ export const campaignHoldoutResult = defineCommand({
       // an event stored under an identifier or a merged-away profile counts for the survivor. Above
       // the bound the headline ships no map, so the holdout omits it too and both surfaces report
       // the same note rather than disagreeing.
-      const identity = await loadIdentityMap(ctx.tx, ws, { profileIds: [...people.keys()] });
+      // The same scope bound as the campaign measures (#590): over it, resolve nothing and report
+      // the shared note rather than attempting a map the transport cannot carry.
+      const scope = [...people.keys()];
+      const identity =
+        scope.length > identityScopeProfileLimit() ? overLimitIdentityMap() : await loadIdentityMap(ctx.tx, ws, { profileIds: scope });
       if (identity.overLimit) identityLimit = identity.limit;
       const pairs = identity.overLimit ? [] : identity.pairs;
       const userProfiles = new Map(pairs.filter((p) => p.kind === 'user_id').map((p) => [p.key, p.profileId]));
@@ -550,6 +567,25 @@ export const campaignHoldoutResult = defineCommand({
       for (const [profileId, person] of people) if (unsubscribed.has(profileId)) counts[person.arm].unsubscribed++;
     }
 
+    // The same k floor as the journey holdout and the summary (#590): an arm below k hides every
+    // count, rate, revenue figure and lift, so MCP cannot expose a control group the cards hide.
+    if (holdoutBelowK(counts)) {
+      const hidden = suppressHoldout(
+        `Suppressed: fewer than k=${K} people in the control or treatment arm, so counts, rates, revenue and lift are hidden.`,
+      );
+      return {
+        campaignId: input.campaignId,
+        goal: { kind: c.goal.kind, event: c.goal.event ?? null, attributionDays: c.goal.attributionDays },
+        controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },
+        from: input.from ?? null,
+        to: input.to ?? null,
+        k: K,
+        ...hidden,
+        control: { ...hidden.control, revenue: {} },
+        treatment: { ...hidden.treatment, revenue: {} },
+      };
+    }
+
     const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
     const verdictNote =
       analysis.verdict === 'not_enough_data'
@@ -568,6 +604,7 @@ export const campaignHoldoutResult = defineCommand({
       controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },
       from: input.from ?? null,
       to: input.to ?? null,
+      k: K,
       control: { ...analysis.control, revenue: revenue.control },
       treatment: { ...analysis.treatment, revenue: revenue.treatment },
       absoluteLift: analysis.absoluteLift,
@@ -576,6 +613,7 @@ export const campaignHoldoutResult = defineCommand({
       minSampleSizeMet: analysis.minSampleSizeMet,
       verdict: analysis.verdict,
       note,
+      suppressed: false,
     };
   },
 });

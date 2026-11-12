@@ -1,5 +1,5 @@
-import { publishedSingleton } from '@agentic-marketing/artifacts';
-import { type IdentityMap, identityUnresolvedNote, loadIdentityMap } from '@agentic-marketing/campaigns';
+import { publishedSingleton, suppressHoldout } from '@agentic-marketing/artifacts';
+import { type IdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -8,7 +8,8 @@ import { computeJourneyHoldout } from '@agentic-marketing/journeys';
 import { eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { type CampaignMember, type CampaignRecord, goalEventsFor, loadCampaignRecord } from './campaign';
-import { type AnalyticsResult, analyticsMeta, campaignRecipientProfileIds, K, MAX_RANGE_DAYS, runAnalyticsQuery } from './query';
+import { identityQueryParams } from './identityParams';
+import { type AnalyticsResult, analyticsMeta, campaignRecipientIdentityMap, K, MAX_RANGE_DAYS, runAnalyticsQuery } from './query';
 
 // The campaign summary (#66) is a named report over the campaign measures and the existing
 // e-mail measures. It keeps the raw runs out of the UI: the funnel, per-member rows and journey
@@ -89,6 +90,7 @@ const holdoutSchema = z.object({
   journeyId: z.string(),
   name: z.string(),
   controlGroup: z.object({ percent: z.number(), minSampleSize: z.number(), hashVersion: z.string() }),
+  k: z.number().int().describe('The k-anonymity floor; an arm below it is suppressed'),
   control: holdoutArm,
   treatment: holdoutArm,
   absoluteLift: z.number().nullable().describe('Treatment minus control conversion rate; null when the holdout is suppressed'),
@@ -196,14 +198,16 @@ async function memberBreakdown(
   attributionDays: number,
   identity: IdentityMap,
 ) {
-  const pairs = identity.overLimit ? [] : identity.pairs;
+  // The same chunked transport as the campaign measures: a large map must not exceed ClickHouse's
+  // per-field limit just because this surface builds its own query (#590).
+  const identityParams = identityQueryParams(identity.overLimit ? [] : identity.pairs);
   const result = await deps.events.client.query({
     query: `WITH
       identity AS (
         SELECT
-          arrayElement({identity_keys:Array(String)}, number + 1) AS identity_key,
-          arrayElement({identity_profiles:Array(String)}, number + 1) AS profile_id,
-          arrayElement({identity_kinds:Array(String)}, number + 1) AS kind
+          arrayElement(${identityParams.keys}, number + 1) AS identity_key,
+          arrayElement(${identityParams.profiles}, number + 1) AS profile_id,
+          arrayElement(${identityParams.kinds}, number + 1) AS kind
         FROM numbers({identity_count:UInt32})
       ),
       first AS (
@@ -277,10 +281,8 @@ async function memberBreakdown(
       to: to.replace('Z', ''),
       goal_events: goalEvents,
       attribution_days: attributionDays,
-      identity_keys: pairs.map((p) => p.key),
-      identity_profiles: pairs.map((p) => p.profileId),
-      identity_kinds: pairs.map((p) => p.kind),
-      identity_count: pairs.length,
+      ...identityParams.params,
+      identity_count: identityParams.count,
     },
     format: 'JSONEachRow',
     clickhouse_settings: { ...(await deps.events.settingsFor(deps.workspaceId)), max_execution_time: 10, max_result_rows: 500 } as never,
@@ -315,25 +317,21 @@ async function holdoutResults(
     try {
       const result = await computeJourneyHoldout(deps, member.artifactId, { from, to });
       // The same k rule as the member row: a suppressed row, or an arm with fewer than k people,
-      // hides every count, rate and lift on the holdout card (#586).
-      if (suppressedMembers.has(member.artifactId) || result.control.entered < K || result.treatment.entered < K) {
+      // hides every count, rate and lift on the holdout card (#586, #590). The journey command
+      // already applies the arm rule; this adds the member-row rule and one shared shape.
+      if (suppressedMembers.has(member.artifactId) || result.suppressed) {
         out.push({
           journeyId: result.journeyId,
           name: member.name,
           controlGroup: result.controlGroup,
-          control: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
-          treatment: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
-          absoluteLift: null,
-          relativeLift: null,
-          ci95: null,
-          minSampleSizeMet: false,
-          verdict: 'not_enough_data',
-          note: `Suppressed: fewer than k=${K} people in the control or treatment arm, or in the journey member row, so counts and rates are hidden.`,
-          suppressed: true,
+          k: result.k,
+          ...suppressHoldout(
+            `Suppressed: fewer than k=${K} people in the control or treatment arm, or in the journey member row, so counts and rates are hidden.`,
+          ),
         });
         continue;
       }
-      out.push({ ...result, name: member.name, suppressed: false });
+      out.push({ ...result, name: member.name });
     } catch (error) {
       // A journey without a control group (or without a publish) has no uplift to report; the
       // summary still shows its message performance.
@@ -416,9 +414,7 @@ export const analyticsCampaignSummary = defineCommand({
     });
     const { from, to } = window;
     // The same campaign-scoped identity map the measure queries and the holdout card use (#590).
-    const identity = await loadIdentityMap(ctx.tx, deps.workspaceId, {
-      profileIds: await campaignRecipientProfileIds(deps, memberIds, from, to),
-    });
+    const identity = await campaignRecipientIdentityMap(ctx.tx, deps, memberIds, from, to);
     const baseMeta = {
       timeZone,
       currency: null as string | null,

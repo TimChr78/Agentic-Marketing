@@ -132,6 +132,13 @@ export function newcombeDifference(
   return [Math.max(-1, lower), Math.min(1, upper)];
 }
 
+/**
+ * The k-anonymity floor for every read surface: a group smaller than this is never reported. It
+ * lives here because the holdout statistics are shared by campaigns and journeys, and both must
+ * apply the same floor (#586, #590).
+ */
+export const K = 5;
+
 export type HoldoutVerdict = 'not_enough_data' | 'no_clear_difference' | 'treatment_better' | 'treatment_worse';
 
 export interface ArmCounts {
@@ -176,4 +183,55 @@ export function analyseHoldout(control: ArmCounts, treatment: ArmCounts, minSamp
     else verdict = 'no_clear_difference';
   }
   return { control: c, treatment: t, absoluteLift, relativeLift, ci95, minSampleSizeMet, verdict };
+}
+
+/** True when an arm holds fewer people than k, so the whole comparison must be hidden. */
+export function holdoutBelowK(analysis: { control: { entered: number }; treatment: { entered: number } }, k = K): boolean {
+  return analysis.control.entered < k || analysis.treatment.entered < k;
+}
+
+export interface SuppressedArmResult {
+  entered: null;
+  converted: null;
+  unsubscribed: null;
+  conversionRate: null;
+  unsubscribeRate: null;
+}
+
+export interface SuppressedHoldoutAnalysis {
+  control: SuppressedArmResult;
+  treatment: SuppressedArmResult;
+  absoluteLift: null;
+  relativeLift: null;
+  ci95: null;
+  minSampleSizeMet: false;
+  verdict: 'not_enough_data';
+  suppressed: true;
+  note: string;
+}
+
+/**
+ * The one suppressed holdout shape, shared by the journey command, the campaign summary and the
+ * campaign-wide holdout. No count, rate or lift survives, and the verdict says there is not enough
+ * data, so a caller can never render the hidden arms as zero (#590).
+ */
+export function suppressHoldout(note: string): SuppressedHoldoutAnalysis {
+  const arm: SuppressedArmResult = {
+    entered: null,
+    converted: null,
+    unsubscribed: null,
+    conversionRate: null,
+    unsubscribeRate: null,
+  };
+  return {
+    control: { ...arm },
+    treatment: { ...arm },
+    absoluteLift: null,
+    relativeLift: null,
+    ci95: null,
+    minSampleSizeMet: false,
+    verdict: 'not_enough_data',
+    suppressed: true,
+    note,
+  };
 }
