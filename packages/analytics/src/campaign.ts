@@ -99,7 +99,11 @@ export async function loadCampaignQueryMap(
   filterCampaignIds: string[] | undefined,
   conversionMapEvents: readonly string[],
 ): Promise<CampaignQueryMap> {
-  const published = await publishedCampaigns(tx);
+  // Asking for a campaign by id is a historical report: an archived campaign is still measurable
+  // by id, so the query map (headline/funnel/revenue) must cover the same members the summary's
+  // member rows read from the record. Without this an archived campaign reported a zero headline
+  // beside populated member rows (#780).
+  const published = await publishedCampaigns(tx, { includeArchived: !!filterCampaignIds?.length });
   const chosen = (filterCampaignIds?.length ? published.filter((c) => filterCampaignIds.includes(c.id)) : published).slice(
     0,
     MAX_CAMPAIGNS,
@@ -356,24 +360,40 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
     ${groupBy.length ? `GROUP BY ${groupBy.join(', ')}` : ''}
   )`;
 
+  // Currency partitions revenue, not people. Grouping the converter roll by currency too would
+  // count a person once per conversion currency and make campaign.converters / conversion_rate
+  // depend on whether an unrelated revenue measure was requested (#779). Converters stay a single
+  // total per dimension group; a separate revenue roll is joined for the per-currency columns.
   const convSql = `conv_roll AS (
-    SELECT ${dimSql.length ? `${dimSql.join(', ')}, ` : ''}${revenue ? `currency AS ${currencyAlias}, ` : ''}
-      uniqExact(profile_id) AS base_campaign_converters
-      ${revenue ? ', sum(revenue_value) AS base_campaign_revenue' : ''}
+    SELECT ${dimSql.length ? `${dimSql.join(', ')}, ` : ''}uniqExact(profile_id) AS base_campaign_converters
     FROM conversion
-    ${groupBy.length || revenue ? `GROUP BY ${[...groupBy, ...(revenue ? ['currency'] : [])].join(', ')}` : ''}
-  )`;
+    ${groupBy.length ? `GROUP BY ${groupBy.join(', ')}` : ''}
+  )${
+    revenue
+      ? `, rev_roll AS (
+    SELECT ${dimSql.length ? `${dimSql.join(', ')}, ` : ''}currency AS ${currencyAlias},
+      sum(revenue_value) AS base_campaign_revenue,
+      uniqExact(profile_id) AS base_currency_converters
+    FROM conversion
+    GROUP BY ${[...groupBy, 'currency'].join(', ')}
+  )`
+      : ''
+  }`;
 
-  const outer: string[] = dimensions.map((d) => `r.${alias('dim', d)}`);
-  if (revenue) outer.push(`c.${currencyAlias}`);
+  const outer: string[] = dimensions.map((d) => `r.${alias('dim', d)} AS ${alias('dim', d)}`);
+  // Name every dimension column explicitly: rev_roll adds a second definition of the dimension
+  // columns, and ClickHouse otherwise emits the joined expression under its qualified name
+  // (`r.dim_campaign`), which the runner's alias lookup cannot read.
+  if (revenue) outer.push(`rv.${currencyAlias} AS ${currencyAlias}`);
   outer.push('r.base_campaign_recipients AS base_campaign_recipients');
   outer.push('ifNull(c.base_campaign_converters, 0) AS base_campaign_converters');
-  if (revenue) outer.push('ifNull(c.base_campaign_revenue, 0) AS base_campaign_revenue');
+  if (revenue) outer.push('ifNull(rv.base_campaign_revenue, 0) AS base_campaign_revenue');
   outer.push('r.base_campaign_recipients AS k_group');
-  // A currency row's subject is its converters, not the campaign's recipients: one EUR buyer on a
-  // fifty-recipient campaign is a group of one (#756). The query layer hides the revenue figures
-  // below k while the rest of the row stays.
-  if (revenue) outer.push('ifNull(c.base_campaign_converters, 0) AS k_revenue_group');
+  // A currency row's subject is its converters in that currency, not the campaign's recipients or
+  // its converters overall: one EUR buyer on a campaign with five converters is a group of one
+  // (#756). Since #779 conv_roll is no longer split by currency, so the count comes from rev_roll.
+  // The query layer hides the revenue figures below k while the rest of the row stays.
+  if (revenue) outer.push('ifNull(rv.base_currency_converters, 0) AS k_revenue_group');
 
   const measureSql: string[] = [];
   const outputs: Output[] = dimensions.map((d) => ({ kind: 'dimension', dimension: d, alias: alias('dim', d) }));
@@ -382,7 +402,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
     const target = alias('measure', id);
     if (id === 'campaign.recipients') return `r.base_campaign_recipients AS ${target}`;
     if (id === 'campaign.converters') return `ifNull(c.base_campaign_converters, 0) AS ${target}`;
-    if (id === 'campaign.revenue') return `ifNull(c.base_campaign_revenue, 0) AS ${target}`;
+    if (id === 'campaign.revenue') return `ifNull(rv.base_campaign_revenue, 0) AS ${target}`;
     throw new Error(`${id} is not a campaign measure`);
   };
   const selected = new Set<string>();
@@ -394,7 +414,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
       );
     else if (m.id === 'campaign.revenue_per_recipient')
       measureSql.push(
-        `if(r.base_campaign_recipients = 0, NULL, ifNull(c.base_campaign_revenue, 0) / r.base_campaign_recipients) AS ${target}`,
+        `if(r.base_campaign_recipients = 0, NULL, ifNull(rv.base_campaign_revenue, 0) / r.base_campaign_recipients) AS ${target}`,
       );
     else measureSql.push(baseSelect(m.id));
     selected.add(m.id);
@@ -417,9 +437,14 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   }
 
   const joinKeys = dimensions.map((d) => `r.${alias('dim', d)} = c.${alias('dim', d)}`);
-  // conv_roll only holds groups that converted, so the join must keep every recipient group:
-  // otherwise a campaign with recipients and no conversions disappears (#630).
-  const joined = `FROM rec_roll r LEFT JOIN conv_roll c${joinKeys.length ? ` ON ${joinKeys.join(' AND ')}` : ' ON 1 = 1'}`;
+  const revenueJoinKeys = dimensions.map((d) => `r.${alias('dim', d)} = rv.${alias('dim', d)}`);
+  // conv_roll and rev_roll only hold groups that converted, so each join must keep every
+  // recipient group: otherwise a campaign with recipients and no conversions disappears (#630).
+  // The revenue roll is joined separately on the dimensions only; its currency column is the
+  // breakdown, and each currency row repeats the same single-total converter count (#779).
+  const joined = `FROM rec_roll r LEFT JOIN conv_roll c${joinKeys.length ? ` ON ${joinKeys.join(' AND ')}` : ' ON 1 = 1'}${
+    revenue ? ` LEFT JOIN rev_roll rv${revenueJoinKeys.length ? ` ON ${revenueJoinKeys.join(' AND ')}` : ' ON 1 = 1'}` : ''
+  }`;
 
   const columns: Column[] = dimensions.map((d) => ({ name: d, kind: 'dimension' as const }));
   if (revenue) columns.push({ name: 'currency', kind: 'dimension' });
