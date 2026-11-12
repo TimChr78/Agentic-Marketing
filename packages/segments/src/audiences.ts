@@ -226,7 +226,7 @@ async function recordRun(tx: Tx, workspaceId: string, seg: PublishedSegment, ent
     exited,
     tookMs: 0,
   };
-  await tx
+  const [written] = await tx
     .insert(schema.segmentRuns)
     .values({ ...run, at: sql`clock_timestamp()` })
     .onConflictDoUpdate({
@@ -234,7 +234,11 @@ async function recordRun(tx: Tx, workspaceId: string, seg: PublishedSegment, ent
       // Strictly increasing, at full microsecond precision: `segments.preview` reports this stamp
       // and a client compares it, so two mutations must never share one (#771).
       set: { ...run, at: sql`GREATEST(clock_timestamp(), ${schema.segmentRuns.at} + interval '1 microsecond')` },
+    })
+    .returning({
+      stamp: sql<string>`to_char(${schema.segmentRuns.at} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
     });
+  return written?.stamp ?? null;
 }
 
 /** Publishes list change events before the command commits; stable ids make a retried batch harmless. */
@@ -405,6 +409,11 @@ export const importAudienceCsv = defineCommand({
     added: z.number().int().describe('People newly on the list'),
     existing: z.number().int().describe('People already on the list'),
     unmatched: z.array(z.object({ row: z.number().int(), reason: z.enum(['not_found', 'ambiguous', 'invalid']) })),
+    stamp: z
+      .string()
+      .nullable()
+      .optional()
+      .describe('When this list last changed membership, at microsecond precision; absent for a dry run'),
   }),
   permission: 'profiles:write',
   effect: 'write',
@@ -476,7 +485,7 @@ export const importAudienceCsv = defineCommand({
     }
 
     const published = asPublished(seg);
-    await recordRun(ctx.tx, ws, published, entered.length, 0);
+    const stamp = await recordRun(ctx.tx, ws, published, entered.length, 0);
     if (entered.length) await publishChanges(ctx, published, entered, [], `import:${newId('chg')}`);
     const importId = await recordImport(ctx.tx, ws, seg.id, {
       source: 'csv',
@@ -488,7 +497,7 @@ export const importAudienceCsv = defineCommand({
       fileSha256: createHash('sha256').update(input.csv).digest('hex'),
       actor: ctx.principal.userId,
     });
-    return { importId, rows: data.length, matched, added: added.length, existing: people.length - added.length, unmatched };
+    return { importId, rows: data.length, matched, added: added.length, existing: people.length - added.length, unmatched, stamp };
   },
 });
 

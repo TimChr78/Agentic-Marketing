@@ -103,9 +103,13 @@ export function useSharedArtifact(id: string | undefined | null, refreshKey = 0)
       const artifact = await getArtifact(id);
       if (n !== seq.current) return;
       setLoaded((prev) => (prev?.id === id && sameArtifact(prev.artifact, artifact) ? prev : { id, artifact, error: null }));
+      // This read is now the latest, whatever the effect or an explicit refresh still has in
+      // flight: it owns the loading state and clears it (0.14.13 review).
+      setLoading(false);
     } catch (e) {
       if (n !== seq.current) return;
       setLoaded({ id, artifact: null, error: e instanceof Error ? e.message : 'Not found' });
+      setLoading(false);
     }
   }, [id]);
   useFocusRecheck(() => void recheck());

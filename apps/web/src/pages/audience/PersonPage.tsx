@@ -366,90 +366,102 @@ export default function PersonPage({ params }: { params: Record<string, string> 
 
           {tab === 'topics' && (
             <div className="mt-4">
-              <TableFrame
-                loading={topics.loading}
-                loadingLabel="Loading topic choices"
-                error={topics.error}
-                onRetry={topics.reload}
-                columns={5}
-                isEmpty={topicRows.length === 0}
-                empty={
-                  <EmptyState compact title="No topic choices">
-                    A topic is a finer choice within a purpose; it never replaces consent for the purpose.
-                  </EmptyState>
-                }
-              >
-                <Table label="Topic preferences">
-                  <THead>
-                    <tr>
-                      <Th>Purpose</Th>
-                      <Th>Topic</Th>
-                      <Th>Choice</Th>
-                      <Th>Since</Th>
-                      <Th>Source</Th>
-                    </tr>
-                  </THead>
-                  <tbody>
-                    {topicRows.map((t) => (
-                      <Tr key={`${t.purpose}:${t.topic}`}>
-                        <Td className="font-medium text-fg">{t.purposeName}</Td>
-                        <Td>
-                          {t.name} <span className="text-muted">({t.topic})</span>
-                        </Td>
-                        <Td>
-                          <StatusPill tone={t.status === 'subscribed' ? 'good' : 'warn'}>{consentLabel(t.status)}</StatusPill>
-                          {!t.source && <span className="ml-1.5 text-[12px] text-muted">default</span>}
-                        </Td>
-                        <Td className="whitespace-nowrap" title={t.updatedAt ? formatDateTime(t.updatedAt) : undefined}>
-                          {t.updatedAt ? timeAgo(t.updatedAt) : <span className="text-muted">—</span>}
-                        </Td>
-                        <Td>{t.source ? t.source.replace(/_/g, ' ') : <span className="text-muted">Default</span>}</Td>
-                      </Tr>
-                    ))}
-                  </tbody>
-                </Table>
-              </TableFrame>
+              {topics.data?.withheld ? (
+                <EmptyState compact title="Topic choices are withheld">
+                  Reading topic names needs the “artifacts:read” permission. Ask a workspace administrator for access.
+                </EmptyState>
+              ) : (
+                <TableFrame
+                  loading={topics.loading}
+                  loadingLabel="Loading topic choices"
+                  error={topics.error}
+                  onRetry={topics.reload}
+                  columns={5}
+                  isEmpty={topicRows.length === 0}
+                  empty={
+                    <EmptyState compact title="No topic choices">
+                      A topic is a finer choice within a purpose; it never replaces consent for the purpose.
+                    </EmptyState>
+                  }
+                >
+                  <Table label="Topic preferences">
+                    <THead>
+                      <tr>
+                        <Th>Purpose</Th>
+                        <Th>Topic</Th>
+                        <Th>Choice</Th>
+                        <Th>Since</Th>
+                        <Th>Source</Th>
+                      </tr>
+                    </THead>
+                    <tbody>
+                      {topicRows.map((t) => (
+                        <Tr key={`${t.purpose}:${t.topic}`}>
+                          <Td className="font-medium text-fg">{t.purposeName}</Td>
+                          <Td>
+                            {t.name} <span className="text-muted">({t.topic})</span>
+                          </Td>
+                          <Td>
+                            <StatusPill tone={t.status === 'subscribed' ? 'good' : 'warn'}>{consentLabel(t.status)}</StatusPill>
+                            {!t.source && <span className="ml-1.5 text-[12px] text-muted">default</span>}
+                          </Td>
+                          <Td className="whitespace-nowrap" title={t.updatedAt ? formatDateTime(t.updatedAt) : undefined}>
+                            {t.updatedAt ? timeAgo(t.updatedAt) : <span className="text-muted">—</span>}
+                          </Td>
+                          <Td>{t.source ? t.source.replace(/_/g, ' ') : <span className="text-muted">Default</span>}</Td>
+                        </Tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                </TableFrame>
+              )}
             </div>
           )}
 
           {tab === 'segments' && (
             <div className="mt-4">
-              <TableFrame
-                loading={segments.loading}
-                loadingLabel="Loading segments"
-                error={segments.error}
-                onRetry={segments.reload}
-                columns={2}
-                isEmpty={segmentRows.length === 0}
-                empty={
-                  <EmptyState compact title="Not in any segment yet">
-                    Segments fill as the person matches their rules.
-                  </EmptyState>
-                }
-              >
-                <Table label="Segments">
-                  <THead>
-                    <tr>
-                      <Th>Segment</Th>
-                      <Th>Member since</Th>
-                    </tr>
-                  </THead>
-                  <tbody>
-                    {segmentRows.map((s) => (
-                      <Tr key={s.id}>
-                        <Td>
-                          <Link to={`/audience/segments/${s.id}`} className="font-medium text-fg hover:underline">
-                            {s.name}
-                          </Link>
-                        </Td>
-                        <Td className="whitespace-nowrap" title={formatDateTime(s.since)}>
-                          {timeAgo(s.since)}
-                        </Td>
-                      </Tr>
-                    ))}
-                  </tbody>
-                </Table>
-              </TableFrame>
+              {segments.data?.withheld ? (
+                <EmptyState compact title="Segment memberships are withheld">
+                  Reading segment names and ids needs the “artifacts:read” permission. Ask a workspace administrator for access.
+                </EmptyState>
+              ) : (
+                <TableFrame
+                  loading={segments.loading}
+                  loadingLabel="Loading segments"
+                  error={segments.error}
+                  onRetry={segments.reload}
+                  columns={2}
+                  isEmpty={segmentRows.length === 0}
+                  empty={
+                    <EmptyState compact title="Not in any segment yet">
+                      Segments fill as the person matches their rules.
+                    </EmptyState>
+                  }
+                >
+                  <Table label="Segments">
+                    <THead>
+                      <tr>
+                        <Th>Segment</Th>
+                        <Th>Member since</Th>
+                      </tr>
+                    </THead>
+                    <tbody>
+                      {segmentRows.map((s) => (
+                        <Tr key={s.id}>
+                          <Td>
+                            <Link to={`/audience/segments/${s.id}`} className="font-medium text-fg hover:underline">
+                              {s.name}
+                            </Link>
+                          </Td>
+                          <Td className="whitespace-nowrap" title={formatDateTime(s.since)}>
+                            {timeAgo(s.since)}
+                          </Td>
+                        </Tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                </TableFrame>
+              )}
             </div>
           )}
         </div>
