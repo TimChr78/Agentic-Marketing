@@ -79,6 +79,15 @@ beforeAll(async () => {
     source: 'import',
     proof: { messageId: 'msg_import_label', import_label: 'ada@example.com' },
   });
+  // Free text can hold a name, which no detector recognises (#672).
+  await api.call('consent.record', {
+    profileId,
+    purpose: 'marketing_sms',
+    status: 'granted',
+    channel: 'sms',
+    source: 'import',
+    proof: { messageId: 'msg_import_name', import_label: 'Alice Smith' },
+  });
 }, 60_000);
 
 afterAll(() => t?.close());
@@ -116,8 +125,13 @@ describe('consent.history proof without profiles:pii (#594)', () => {
       // An allowlisted key can still hold personal data in its value.
       const imported = importLabelRecordOf(history.records);
       expect(imported.proofWithheld).toBe(true);
-      expect(imported.proof).not.toHaveProperty('import_label');
+      expect(imported.proof).toMatchObject({ import_label: 'Imported' });
       expect(JSON.stringify(history)).not.toContain('ada@example.com');
+      // Free text such as a name is replaced with a fixed label, never rendered (#672).
+      const named = history.records.find((r) => r.proof.messageId === 'msg_import_name')!;
+      expect(named.proofWithheld).toBe(true);
+      expect(named.proof).toMatchObject({ import_label: 'Imported' });
+      expect(JSON.stringify(history)).not.toContain('Alice Smith');
     });
   }
 
@@ -133,14 +147,17 @@ describe('consent.history proof without profiles:pii (#594)', () => {
       const imported = importLabelRecordOf(history.records);
       expect(imported.proofWithheld).toBe(false);
       expect(imported.proof).toMatchObject({ import_label: 'ada@example.com' });
+      const named = history.records.find((r) => r.proof.messageId === 'msg_import_name')!;
+      expect(named.proofWithheld).toBe(false);
+      expect(named.proof).toMatchObject({ import_label: 'Alice Smith' });
     });
   }
 
-  it('marks the import proof as not withheld for a marketer (it is all non-personal)', async () => {
+  it('keeps the non-personal import evidence for a marketer, with the free-text label replaced (#672)', async () => {
     const history = await t.api(marketer, ws).call('consent.history', { profileId });
     const imported = history.records.find((r) => r.proof.system === 'Kit')!;
-    expect(imported.proofWithheld).toBe(false);
-    expect(imported.proof).toMatchObject({ system: 'Kit', import: 'privacy ledger test' });
+    expect(imported.proofWithheld).toBe(true);
+    expect(imported.proof).toMatchObject({ system: 'Kit', import: 'privacy ledger test', import_label: 'Imported' });
   });
 
   it('is the same over an API token with only profiles:read', async () => {

@@ -114,7 +114,7 @@ export function ConsentHistoryTable({
                 {r.proofWithheld && (
                   <span
                     className="mt-0.5 block text-[12px] text-muted"
-                    title="Your role needs profiles:pii to see IP addresses, user agents and page URLs kept as consent proof."
+                    title="Your role needs profiles:pii to see IP addresses, user agents and page URLs kept as consent proof, or an import's own free-text label."
                   >
                     Hidden for your role
                   </span>
