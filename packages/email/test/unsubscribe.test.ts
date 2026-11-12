@@ -80,6 +80,25 @@ const rejected: { name: string; html: string; reason: 'hidden' | 'empty' | 'miss
   { name: 'a link inside an SVG title', html: `<svg><title><a href="${URL}">Unsubscribe</a></title></svg>`, reason: 'hidden' },
   { name: 'a link inside an SVG desc', html: `<svg><desc><a href="${URL}">Unsubscribe</a></desc></svg>`, reason: 'hidden' },
   { name: 'a link inside SVG metadata', html: `<svg><metadata><a href="${URL}">Unsubscribe</a></metadata></svg>`, reason: 'hidden' },
+  // 0.14.9 review round 3 (P2 and #707 P3s): nothing inside inline SVG or MathML counts.
+  { name: 'a link inside an SVG textarea', html: `<svg><textarea><a href="${URL}">Unsubscribe</a></textarea></svg>`, reason: 'hidden' },
+  { name: 'a link inside a MathML textarea', html: `<math><textarea><a href="${URL}">Unsubscribe</a></textarea></math>`, reason: 'hidden' },
+  { name: 'a link inside SVG defs', html: `<svg><defs><a href="${URL}">Unsubscribe</a></defs></svg>`, reason: 'hidden' },
+  {
+    name: 'a link inside an SVG clipPath',
+    html: `<svg><clipPath><a href="${URL}"><text>Unsubscribe</text></a></clipPath></svg>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a link inside a MathML annotation',
+    html: `<math><annotation-xml><a href="${URL}">Unsubscribe</a></annotation-xml></math>`,
+    reason: 'hidden',
+  },
+  {
+    name: 'a link inside SVG foreignObject',
+    html: `<svg><foreignObject><a href="${URL}">Unsubscribe</a></foreignObject></svg>`,
+    reason: 'hidden',
+  },
   // Review round 3 (P2): invisible colours, and the last declaration of a property winning.
   { name: 'transparent text', html: link(' style="color:transparent"'), reason: 'hidden' },
   { name: 'zero-alpha rgba text', html: link(' style="color:rgba(0,0,0,0)"'), reason: 'hidden' },
@@ -435,6 +454,19 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
     const t = template('<mj-text><svg><title><a href="{{ unsubscribe_url }}">Unsubscribe</a></title></svg></mj-text>');
     expect(await validateTemplate(t)).not.toEqual([]);
     expect(await emailPublishProblems(t, { marketing: true })).not.toEqual([]);
+  });
+
+  it('rejects a link inside an SVG textarea at save and at publish (0.14.9 review round 3)', async () => {
+    const t = template('<mj-text><svg><textarea><a href="{{ unsubscribe_url }}">Unsubscribe</a></textarea></svg></mj-text>');
+    expect(await validateTemplate(t)).not.toEqual([]);
+    expect(await emailPublishProblems(t, { marketing: true })).not.toEqual([]);
+  });
+
+  it('still accepts a visible footer link next to an inline SVG icon', async () => {
+    const t = template(
+      '<mj-text><svg width="12" height="12"><circle r="6" /></svg> <a href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>',
+    );
+    expect(await validateTemplate(t)).toEqual([]);
   });
 
   it('rejects transparent text at save and at publish', async () => {
