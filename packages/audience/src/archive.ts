@@ -1039,13 +1039,23 @@ function removeRanges(text: string, ranges: readonly (readonly [number, number])
 }
 
 /**
+ * Lower-cases only ASCII `A`–`Z`, so every offset in the result is the same offset in the input.
+ * JavaScript `toLowerCase()` is not length-preserving (`İ` becomes two code units), so its offsets
+ * must never be used to slice the original string (#748).
+ */
+function asciiLower(input: string): string {
+  return input.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+}
+
+/**
  * One linear, quote-aware pass over the rendered e-mail, collecting the `<style>` bodies, the
  * `<body>` content and the 1×1 images. Each tag is parsed once and every search pointer moves
  * only forward, so repeated openers with no close cannot make the extraction quadratic (#574,
  * #577).
  */
 function extractEmailParts(html: string): EmailExtraction {
-  const lower = html.toLowerCase();
+  // ASCII-only: a length-changing Unicode case fold would shift every offset used on `html`.
+  const lower = asciiLower(html);
   const styles: string[] = [];
   const pixels: { start: number; end: number }[] = [];
   let bodyStart = -1;

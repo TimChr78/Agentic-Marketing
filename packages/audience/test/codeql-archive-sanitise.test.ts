@@ -953,3 +953,30 @@ describe('archive sanitising: end tags that walk a long open stack are bounded (
     expectLinear(deepEndTags, (html) => sanitiseEmailBody(html), 2_500);
   });
 });
+
+describe('archive sanitising: case folding never shifts extraction indices (#748)', () => {
+  it('extracts the style and body around a case-expanding İ', () => {
+    expect(emailParts('İ<style>.x{color:red}</style><body><p>ok</p></body>')).toEqual({
+      body: '<p>ok</p>',
+      styles: '.x{color:red}',
+    });
+  });
+
+  it('finds mixed-case tags after İ, ẞ and ﬁ without shifting the slice', () => {
+    clearEmailPartsCache();
+    expect(emailParts('İẞﬁ<STYLE>.y{color:blue}</STYLE><BODY><p>İẞﬁ ok</p></BODY>')).toEqual({
+      body: '<p>İẞﬁ ok</p>',
+      styles: '.y{color:blue}',
+    });
+  });
+
+  it('keeps extraction unchanged when İ sits before a second style block', () => {
+    clearEmailPartsCache();
+    expect(
+      emailParts('<html><head><style>.a{color:red}</style>İ<STYLE>.b{color:blue}</STYLE></head><body><p>ok</p></body></html>'),
+    ).toEqual({
+      body: '<p>ok</p>',
+      styles: '.a{color:red}\n.b{color:blue}',
+    });
+  });
+});

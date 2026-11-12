@@ -79,7 +79,7 @@ interface Candidate {
   visible: boolean;
 }
 
-/** A simple class/id/tag selector whose rule sets display or visibility. */
+/** A simple class/id/tag selector whose rule sets a visibility-relevant property. */
 interface HideSelector {
   tag: string | null;
   id: string | null;
@@ -113,6 +113,9 @@ interface HiddenRules {
   display: RuleBucket;
   visibility: RuleBucket;
   background: RuleBucket;
+  opacity: RuleBucket;
+  'font-size': RuleBucket;
+  color: RuleBucket;
 }
 
 /**
@@ -172,8 +175,8 @@ const isSpace = (ch: string) => ch === ' ' || ch === '\t' || ch === '\n' || ch =
  * - an off-screen box: a `text-indent` of at most -1000px with hidden overflow, an absolutely
  *   positioned `left`/`top` of at most -1000px, `clip: rect(0,0,0,0)`, or a `clip-path` of
  *   `inset(50%)`/`inset(100%)`/`circle(0)`;
- * - a class or id matched by a simple `<style>` rule (outside an at-rule) that sets display,
- *   visibility or a background, cascaded with the inline style.
+ * - a class, id or tag matched by a simple `<style>` rule (outside an at-rule) that sets display,
+ *   visibility, opacity, font-size, colour or a background, cascaded with the inline style.
  *
  * Cascade scope: declarations in one style attribute or one rule use the last value, except that
  * `!important` beats a later value without it. `background` and `background-color` are one
@@ -341,6 +344,11 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
   const visibility =
     visibilityDecl === 'hidden' || visibilityDecl === 'collapse' ? 'hidden' : visibilityDecl === 'visible' ? 'visible' : parent.visibility;
 
+  // Opacity applies to the element itself (the subtree inherits the latched `hidden`), so the
+  // winning declaration only has to say whether it is zero.
+  const opacity = cascadeDeclaration(d.get('opacity'), matchRule(rules.opacity, el));
+  const opacityZero = opacity !== null && declarationIsZero(opacity);
+
   const overflow = declaredValue(d, 'overflow') ?? '';
   const clipped =
     (isZero(declaredValue(d, 'max-height')) || isZero(declaredValue(d, 'height')) || isZero(declaredValue(d, 'width'))) &&
@@ -350,12 +358,17 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
     'hidden' in el.attribs ||
     (el.attribs['aria-hidden'] ?? '').trim().toLowerCase() === 'true' ||
     display === 'none' ||
-    isZero(declaredValue(d, 'opacity')) ||
+    opacityZero ||
     clipped ||
     (declaredValue(d, 'mso-hide') ?? '') === 'all' ||
     isOffscreen(d);
 
-  const ownColour = d.has('color') ? colourValue(declaredValue(d, 'color')) : el.name === 'font' ? colourValue(el.attribs.color) : null;
+  // Font-size and colour are inherited: an element without a winning declaration keeps its
+  // parent's resolved value, and a child's own declaration replaces it (so font-size:0 on an
+  // ancestor does not hide text that resets the size).
+  const fontSize = cascadeDeclaration(d.get('font-size'), matchRule(rules['font-size'], el));
+  const colour = cascadeDeclaration(d.get('color'), matchRule(rules.color, el));
+  const ownColour = colour !== null ? declarationColour(colour) : el.name === 'font' ? colourValue(el.attribs.color) : null;
   const inlineBackground = d.get('background');
   const backgroundRule = matchRule(rules.background, el);
   const ruleWins = backgroundRule !== null && (!inlineBackground || (backgroundRule.important && !inlineBackground.important));
@@ -371,7 +384,7 @@ function nextState(el: ElementInfo, parent: VisibilityState, rules: HiddenRules)
     hidden,
     forbidden: parent.forbidden + (NOT_BODY.has(el.name) ? 1 : 0),
     visibility,
-    fontSizeZero: d.has('font-size') ? isZero(declaredValue(d, 'font-size')) : parent.fontSizeZero,
+    fontSizeZero: fontSize !== null ? declarationIsZero(fontSize) : parent.fontSizeZero,
     color: ownColour ?? parent.color,
     // A transparent background shows the ancestor's, and a semi-transparent one is composited
     // over a known ancestor background.
@@ -387,12 +400,19 @@ function contentVisible(state: VisibilityState): boolean {
 }
 
 /**
- * The winning value of an inline declaration against the winning simple rule. Inline wins unless
- * the rule is `!important` and the inline value is not; an inline `!important` also wins.
+ * The winning declaration of an inline declaration against the winning simple rule. Inline wins
+ * unless the rule is `!important` and the inline value is not; an inline `!important` also wins.
+ * The declaration is returned rather than its value so a rule's value can be parsed once and
+ * cached by declaration (review rounds 7 and 8).
  */
+function cascadeDeclaration(inline: Declaration | undefined, rule: RuleDecl | null): Declaration | null {
+  if (rule && (!inline || (rule.important && !inline.important))) return rule.declaration;
+  return inline ?? null;
+}
+
+/** The winning value, for properties whose value is compared directly. */
 function cascade(inline: Declaration | undefined, rule: RuleDecl | null): string | undefined {
-  if (rule && (!inline || (rule.important && !inline.important))) return rule.value;
-  return inline?.value;
+  return cascadeDeclaration(inline, rule)?.value;
 }
 
 /** The latest matching important rule, else the latest matching normal rule. */
@@ -628,6 +648,29 @@ function ruleBackgroundColour(rule: RuleDecl): string | null {
   return colour;
 }
 
+/**
+ * Each declaration's zero test and colour, parsed on first use like the background above. A rule
+ * value may be long and match many elements, so parsing it per element would make the check
+ * quadratic (#746).
+ */
+const declarationZeros = new WeakMap<Declaration, boolean>();
+const declarationColours = new WeakMap<Declaration, string | null>();
+
+function declarationIsZero(declaration: Declaration): boolean {
+  const cached = declarationZeros.get(declaration);
+  if (cached !== undefined) return cached;
+  const zero = isZero(declaration.value);
+  declarationZeros.set(declaration, zero);
+  return zero;
+}
+
+function declarationColour(declaration: Declaration): string | null {
+  if (declarationColours.has(declaration)) return declarationColours.get(declaration) ?? null;
+  const colour = colourValue(declaration.value);
+  declarationColours.set(declaration, colour);
+  return colour;
+}
+
 function backgroundColour(raw: string): string | null {
   const direct = colourValue(raw);
   if (direct !== null) return direct;
@@ -780,12 +823,21 @@ function isLetters(s: string): boolean {
 }
 
 /**
- * Simple display/visibility rules in document order, skipping comments and every at-rule block.
- * A rule that sets `display:block` is kept too, so it can override an earlier hide.
+ * Simple visibility-relevant rules (display, visibility, background, opacity, font-size, colour)
+ * in document order, skipping comments and every at-rule block. A rule that sets `display:block`
+ * is kept too, so it can override an earlier hide.
  */
 function hiddenRules(css: string): HiddenRules {
   const text = stripCssComments(css);
-  const rules: HiddenRules = { display: ruleBucket(), visibility: ruleBucket(), background: ruleBucket() };
+  const rules: HiddenRules = {
+    display: ruleBucket(),
+    visibility: ruleBucket(),
+    background: ruleBucket(),
+    opacity: ruleBucket(),
+    'font-size': ruleBucket(),
+    color: ruleBucket(),
+  };
+  const properties = ['display', 'visibility', 'background', 'opacity', 'font-size', 'color'] as const;
   let i = 0;
   let order = 0;
   while (i < text.length) {
@@ -804,7 +856,7 @@ function hiddenRules(css: string): HiddenRules {
     if (!prelude.startsWith('@')) {
       order++;
       const declarations = parseDeclarations(body);
-      for (const property of ['display', 'visibility', 'background'] as const) {
+      for (const property of properties) {
         const declaration = declarations.get(property);
         if (!declaration) continue;
         for (const part of prelude.split(',')) {
