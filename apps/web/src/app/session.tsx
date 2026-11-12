@@ -27,6 +27,8 @@ export interface SessionValue {
   refresh: () => Promise<void>;
   switchWorkspace: (id: string) => Promise<void>;
   signOut: () => Promise<void>;
+  /** A sign-out the server did not confirm (#614): the person is still signed in. */
+  signOutError: string | null;
   /** Pending approvals, for the nav badge. */
   pending: number;
   refreshPending: () => void;
@@ -54,6 +56,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [memberships, setMemberships] = useState<Membership[]>([]);
   const [pending, setPending] = useState(0);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
 
   // Recents are isolated per person and workspace; signing out clears this page's memory.
   useEffect(() => {
@@ -134,13 +137,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setStatus('loading');
         await load();
       },
+      signOutError,
       signOut: async () => {
-        await fetch('/api/auth/sign-out', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'content-type': 'application/json' },
-          body: '{}',
-        }).catch(() => {});
+        setSignOutError(null);
+        let response: Response;
+        try {
+          response = await fetch('/api/auth/sign-out', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'content-type': 'application/json' },
+            body: '{}',
+          });
+        } catch {
+          // The request never reached the server: the session cookie is still valid (#614).
+          setSignOutError('Sign-out did not go through. Your session is still active; try again.');
+          return;
+        }
+        // 401 means the session is already gone on the server, so the local session must go too.
+        if (!response.ok && response.status !== 401) {
+          setSignOutError('Sign-out did not go through. Your session is still active; try again.');
+          return;
+        }
         setWorkspaceId(null);
         setWorkspace(null);
         setUser(null);
@@ -149,7 +166,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setStatus('signed-out');
       },
     };
-  }, [status, user, workspace, memberships, load, pending, refreshPending]);
+  }, [status, user, workspace, memberships, load, pending, refreshPending, signOutError]);
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
