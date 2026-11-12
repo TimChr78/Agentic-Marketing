@@ -1,11 +1,13 @@
 import type { AddressInfo } from 'node:net';
 import { migrateAuth } from '@agentic-marketing/auth';
 import { type ApiError, type CommandInput, createClient } from '@agentic-marketing/client';
+import { defineCommand, userPrincipal } from '@agentic-marketing/commands';
 import { hashValue, newUuid } from '@agentic-marketing/core';
 import { migrate } from '@agentic-marketing/db';
 import { localKeyProvider, readSecret, rewrapDataKeys } from '@agentic-marketing/secrets';
 import { serve } from '@hono/node-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import type { Commands } from '../src/registry';
@@ -220,6 +222,35 @@ describe('people through REST and the typed client', () => {
     const b = await owner.call('artifacts.create', note('Idempotent'), { idempotencyKey: 'key-1' });
     expect(b).toEqual(a);
     expect((await rejects(owner.call('artifacts.create', note('Other'), { idempotencyKey: 'key-1' }))).status).toBe(409);
+  });
+
+  it('runs a concurrent request with the same idempotency key once (#812)', async () => {
+    // Two requests that overlap: both used to miss the lookup, both ran the handler, and the loser
+    // failed on the unique constraint instead of returning the winner's response. The handler waits
+    // so the second request provably reaches the executor while the first is still running.
+    let runs = 0;
+    const slow = defineCommand({
+      name: 'test.slowWrite',
+      title: 'Slow write',
+      description: 'Test-only command: one write that takes long enough to overlap a second call.',
+      permission: null,
+      effect: 'write',
+      input: z.object({ value: z.string() }),
+      output: z.object({ value: z.string() }),
+      async handler(input) {
+        runs++;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return { value: input.value };
+      },
+    });
+    const principal = userPrincipal(users.owner.id, wsA, 'owner');
+    const opts = { surface: 'rest' as const, idempotencyKey: 'key-concurrent' };
+    const [a, b] = await Promise.all([
+      srv.executor.execute(slow, { value: 'v' }, principal, opts),
+      srv.executor.execute(slow, { value: 'v' }, principal, opts),
+    ]);
+    expect(runs).toBe(1);
+    expect(b).toEqual(a);
   });
 });
 
