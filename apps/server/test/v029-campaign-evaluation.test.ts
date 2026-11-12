@@ -13,6 +13,10 @@ const FROM = '2026-02-28T00:00:00.000Z';
 const TO = '2026-03-10T00:00:00.000Z';
 const WIDE_FROM = '2026-02-01T00:00:00.000Z';
 const WIDE_TO = '2026-04-01T00:00:00.000Z';
+// A window far from WIDE, so the extra campaigns for #586–#588 and the channel scope stay out of
+// the campaign-dimension expectations above.
+const LATE_FROM = '2026-10-31T00:00:00.000Z';
+const LATE_TO = '2026-11-05T00:00:00.000Z';
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let wsA = '';
@@ -21,31 +25,54 @@ let campaignA = '';
 let campaignSmall = '';
 let campaignNew = '';
 let campaignOther = '';
+let campaignChannel = '';
+let campaignGuard = '';
+let campaignNoStart = '';
+let campaignOldStart = '';
 let template = '';
 let segment = '';
 let broadcastA = '';
 let broadcastSmall = '';
 let broadcastNew = '';
 let broadcastOther = '';
+let broadcastChannel = '';
+let broadcastGuard = '';
+let broadcastNoStart = '';
+let broadcastOldStart = '';
+let broadcastFuture = '';
 let journeyA = '';
+let journeyTiny = '';
+let journeyControlSmall = '';
+let journeyHealthy = '';
+let campaignTiny = '';
+let campaignControlSmall = '';
+let campaignHealthy = '';
+let campaignFuture = '';
 let profile = 0;
 const person = () => `prf_${(++profile).toString(16).padStart(32, '0')}`;
 const api = (workspaceId = wsA) => t.api(owner, workspaceId);
 
 const mjml = `<mjml><mj-body><mj-section><mj-column><mj-text>Hello</mj-text><mj-text><a href="{{ unsubscribe_url | raw }}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>`;
 
-function messageEvents(workspaceId: string, memberId: string, at: string, people: string[], counts: number[]): MessageEvent[] {
+function messageEvents(
+  workspaceId: string,
+  memberId: string,
+  at: string,
+  people: string[],
+  counts: number[],
+  channel = 'email',
+): MessageEvent[] {
   const [delivered, clicked, unsubscribed, complained] = counts;
   const out: MessageEvent[] = [];
   const add = (type: MessageEvent['type'], i: number) =>
     out.push({
       workspaceId,
-      messageId: `msg_${memberId}_${i}`,
-      eventId: `${memberId}:${type}:${i}`,
+      messageId: `msg_${memberId}_${channel}_${i}`,
+      eventId: `${memberId}:${channel}:${type}:${i}`,
       type,
       at,
       profileId: people[i]!,
-      channel: 'email',
+      channel,
       purpose: 'marketing_email',
       provider: 'log',
       templateId: '',
@@ -109,12 +136,13 @@ async function createCampaign(
   name: string,
   members: string[],
   goalInput: { kind?: 'conversion' | 'revenue'; days?: number; target?: number } = {},
+  startsAt: string | null = '2026-02-25T00:00:00.000Z',
 ) {
   const created = await api().call('artifacts.create', {
     type: 'campaign',
     name,
     content: {
-      startsAt: '2026-02-25T00:00:00.000Z',
+      ...(startsAt ? { startsAt } : {}),
       goal: {
         kind: goalInput.kind ?? 'conversion',
         event: 'Order Completed',
@@ -178,29 +206,82 @@ beforeAll(async () => {
   broadcastA = await broadcast('Launch broadcast');
   broadcastSmall = await broadcast('Small broadcast');
   broadcastNew = await broadcast('New broadcast');
-  await api().call('artifacts.requestPublishBundle', { artifactIds: [broadcastA, broadcastSmall, broadcastNew], note: 'broadcasts' });
+  broadcastChannel = await broadcast('Channel broadcast');
+  broadcastGuard = await broadcast('Guard broadcast');
+  broadcastNoStart = await broadcast('No-start broadcast');
+  broadcastOldStart = await broadcast('Old-start broadcast');
+  broadcastFuture = await broadcast('Future broadcast');
+  await api().call('artifacts.requestPublishBundle', {
+    artifactIds: [
+      broadcastA,
+      broadcastSmall,
+      broadcastNew,
+      broadcastChannel,
+      broadcastGuard,
+      broadcastNoStart,
+      broadcastOldStart,
+      broadcastFuture,
+    ],
+    note: 'broadcasts',
+  });
 
+  const journeyContent = {
+    purpose: 'marketing_email',
+    controlGroup: { percent: 50, minSampleSize: 5 },
+    nodes: [
+      { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Launch Start', reentry: 'once' } },
+      { id: 'email', kind: 'email', label: 'Mail', config: { template }, next: [{ to: 'goal' }] },
+      { id: 'goal', kind: 'goal', label: 'Goal', config: { event: 'Order Completed', within: 'P14D' }, next: [{ to: 'done' }] },
+      { id: 'done', kind: 'exit', label: 'Done', config: {} },
+    ],
+  } as never;
   const journey = await api().call('artifacts.create', {
     type: 'journey',
     name: 'Launch journey',
-    content: {
-      purpose: 'marketing_email',
-      controlGroup: { percent: 50, minSampleSize: 5 },
-      nodes: [
-        { id: 'trigger', kind: 'trigger', label: 'Start', config: { event: 'Launch Start', reentry: 'once' } },
-        { id: 'email', kind: 'email', label: 'Mail', config: { template }, next: [{ to: 'goal' }] },
-        { id: 'goal', kind: 'goal', label: 'Goal', config: { event: 'Order Completed', within: 'P14D' }, next: [{ to: 'done' }] },
-        { id: 'done', kind: 'exit', label: 'Done', config: {} },
-      ],
-    } as never,
+    content: journeyContent,
   });
   await api().call('artifacts.requestPublish', { artifactId: journey.artifactId, note: 'journey' });
   journeyA = journey.artifactId;
 
+  const createJourney = async (name: string) => {
+    const created = await api().call('artifacts.create', { type: 'journey', name, content: journeyContent });
+    await api().call('artifacts.requestPublish', { artifactId: created.artifactId, note: name });
+    return created.artifactId;
+  };
+  journeyTiny = await createJourney('Tiny holdout journey');
+  journeyControlSmall = await createJourney('Small control journey');
+  journeyHealthy = await createJourney('Healthy holdout journey');
+
   campaignA = await createCampaign('Launch campaign', [broadcastA, journeyA], { target: 10 });
   campaignSmall = await createCampaign('Small campaign', [broadcastSmall]);
   campaignNew = await createCampaign('Not sent campaign', [broadcastNew]);
-  await api().call('artifacts.requestPublishBundle', { artifactIds: [campaignA, campaignSmall, campaignNew], note: 'campaigns' });
+  campaignChannel = await createCampaign('Channel campaign', [broadcastChannel]);
+  campaignGuard = await createCampaign('Guard campaign', [broadcastGuard]);
+  campaignNoStart = await createCampaign('No start campaign', [broadcastNoStart], {}, null);
+  campaignOldStart = await createCampaign('Old start campaign', [broadcastOldStart], {}, '2025-06-01T00:00:00.000Z');
+  campaignTiny = await createCampaign('Tiny holdout campaign', [journeyTiny], {}, '2026-11-01T00:00:00.000Z');
+  campaignControlSmall = await createCampaign('Small control campaign', [journeyControlSmall], {}, '2026-11-01T00:00:00.000Z');
+  campaignHealthy = await createCampaign('Healthy holdout campaign', [journeyHealthy], {}, '2026-11-01T00:00:00.000Z');
+  // A campaign that starts tomorrow: the default window must not reject its own start (#588).
+  campaignFuture = await createCampaign('Future campaign', [broadcastFuture], {}, new Date(Date.now() + 86_400_000).toISOString());
+  await api().call('artifacts.requestPublishBundle', {
+    artifactIds: [
+      campaignA,
+      campaignSmall,
+      campaignNew,
+      campaignChannel,
+      campaignGuard,
+      campaignNoStart,
+      campaignOldStart,
+      campaignTiny,
+      campaignControlSmall,
+    ],
+    note: 'campaigns',
+  });
+  await api().call('artifacts.requestPublishBundle', {
+    artifactIds: [campaignHealthy, campaignFuture],
+    note: 'holdout fixture campaigns',
+  });
 
   // A campaign in another workspace, with its own sends; it must never appear in wsA's reports.
   const tplB = await api(wsB).call('artifacts.create', {
@@ -226,11 +307,31 @@ beforeAll(async () => {
   const pJ = Array.from({ length: 4 }, person);
   const pS = Array.from({ length: 3 }, person);
   const pO = Array.from({ length: 8 }, person);
+  const pChannelEmail = Array.from({ length: 6 }, person);
+  const pChannelSms = Array.from({ length: 4 }, person);
+  const pGuard = Array.from({ length: 6 }, person);
+  const pNoStart = Array.from({ length: 5 }, person);
+  const pOldStart = Array.from({ length: 5 }, person);
+  const pTiny = Array.from({ length: 3 }, person);
+  const pControlSmall = Array.from({ length: 8 }, person);
+  const pHealthy = Array.from({ length: 10 }, person);
   await t.srv.events.insertMessageEvents([
     ...messageEvents(wsA, broadcastA, '2026-03-01T10:00:00.000Z', pA, [5, 2, 1, 1]),
     ...messageEvents(wsA, journeyA, '2026-03-02T10:00:00.000Z', pJ, [4, 1, 1, 0]),
     ...messageEvents(wsA, broadcastSmall, '2026-03-03T10:00:00.000Z', pS, [3, 0, 0, 0]),
     ...messageEvents(wsB, broadcastOther, '2026-03-02T10:00:00.000Z', pO, [8, 4, 1, 0]),
+    // E-mail and SMS through the same campaign member (#682 channel scope).
+    ...messageEvents(wsA, broadcastChannel, '2026-11-01T10:00:00.000Z', pChannelEmail, [5, 2, 1, 0]),
+    ...messageEvents(wsA, broadcastChannel, '2026-11-01T10:00:00.000Z', pChannelSms, [4, 0, 0, 0], 'sms'),
+    // A member with enough people for k, plus a send with no profile id added inside the test.
+    ...messageEvents(wsA, broadcastGuard, '2026-11-02T10:00:00.000Z', pGuard, [6, 2, 0, 0]),
+    ...messageEvents(wsA, broadcastNoStart, '2026-11-01T12:00:00.000Z', pNoStart, [5, 0, 0, 0]),
+    ...messageEvents(wsA, broadcastOldStart, '2026-11-01T13:00:00.000Z', pOldStart, [5, 0, 0, 0]),
+    // Journey members for the holdout suppression rule (#586): 3 treatment people, a member
+    // with a control arm below k, and one whose member row and both arms reach k.
+    ...messageEvents(wsA, journeyTiny, '2026-11-03T10:00:00.000Z', pTiny, [3, 0, 0, 0]),
+    ...messageEvents(wsA, journeyControlSmall, '2026-11-03T10:00:00.000Z', pControlSmall, [8, 0, 0, 0]),
+    ...messageEvents(wsA, journeyHealthy, '2026-11-03T10:00:00.000Z', pHealthy, [10, 0, 0, 0]),
   ]);
 
   await t.srv.events.insertJourneyEvents(
@@ -245,6 +346,10 @@ beforeAll(async () => {
     goal(wsA, pJ[0]!, 75, 'DKK', '2026-03-04T12:00:00.000Z'),
     goal(wsA, pJ[1]!, 40, 'EUR', '2026-03-14T12:00:00.000Z'),
     goal(wsB, pO[0]!, 500, 'DKK', '2026-03-02T11:00:00.000Z'),
+    // Three conversions among the e-mail recipients of the multi-channel campaign.
+    goal(wsA, pChannelEmail[0]!, 100, 'DKK', '2026-11-01T11:00:00.000Z'),
+    goal(wsA, pChannelEmail[1]!, 50, 'DKK', '2026-11-01T11:30:00.000Z'),
+    goal(wsA, pChannelEmail[2]!, 25, 'DKK', '2026-11-01T12:00:00.000Z'),
   ]);
 
   // A journey control group large enough for a verdict, with outcomes for both arms.
@@ -264,6 +369,27 @@ beforeAll(async () => {
   await t.srv.events.insertJourneyEvents(
     converted.map((p, i) => journeyEvent(wsA, journeyA, p, 'converted', 100 + i, '2026-03-05T10:00:00.000Z')),
   );
+
+  await t.srv.db.admin.query(`INSERT INTO profiles (workspace_id, id) SELECT $1, p FROM unnest($2::text[]) AS p ON CONFLICT DO NOTHING`, [
+    wsA,
+    [...pTiny, ...pControlSmall, ...pHealthy],
+  ]);
+  const assignJourney = async (journeyId: string, controlPeople: string[], treatmentPeople: string[]) => {
+    for (const [arm, people] of [
+      ['control', controlPeople],
+      ['treatment', treatmentPeople],
+    ] as const) {
+      if (!people.length) continue;
+      await t.srv.db.admin.query(
+        `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm, assigned_at)
+         SELECT $1, 'journey', $2, $3, p, $4, '2026-11-03T09:00:00.000Z' FROM unnest($5::text[]) AS p`,
+        [wsA, journeyId, hashVersion, arm, people],
+      );
+    }
+  };
+  await assignJourney(journeyTiny, [], pTiny);
+  await assignJourney(journeyControlSmall, pControlSmall.slice(0, 2), pControlSmall.slice(2));
+  await assignJourney(journeyHealthy, pHealthy.slice(0, 5), pHealthy.slice(5));
 }, 90_000);
 
 async function createCampaignIn(workspaceId: string, members: string[]) {
@@ -399,20 +525,213 @@ describe('analytics.campaignSummary', () => {
       clickRate: 2 / 5,
       unsubscribeRate: 1 / 5,
       converters: 2,
+      suppressed: false,
     });
-    expect(members.journey).toMatchObject({ sent: 4, delivered: 4, clickRate: 1 / 4, unsubscribeRate: 1 / 4, converters: 1 });
+    // The journey reached four people, below k=5: every count and rate in its row is hidden.
+    expect(members.journey).toMatchObject({
+      sent: null,
+      delivered: null,
+      clickRate: null,
+      unsubscribeRate: null,
+      converters: null,
+      suppressed: true,
+    });
 
     expect(summary.holdouts).toHaveLength(1);
-    expect(summary.holdouts[0]).toMatchObject({ journeyId: journeyA, verdict: 'treatment_better', minSampleSizeMet: true });
-    expect(summary.holdouts[0]!.control).toMatchObject({ entered: 20, converted: 2 });
-    expect(summary.holdouts[0]!.treatment).toMatchObject({ entered: 20, converted: 10 });
+    // The journey row reached four people, below k=5, so its holdout card is suppressed too.
+    expect(summary.holdouts[0]).toMatchObject({
+      journeyId: journeyA,
+      suppressed: true,
+      verdict: 'not_enough_data',
+      minSampleSizeMet: false,
+    });
+    expect(summary.holdouts[0]!.control).toMatchObject({
+      entered: null,
+      converted: null,
+      unsubscribed: null,
+      conversionRate: null,
+      unsubscribeRate: null,
+    });
+    expect(summary.holdouts[0]!.treatment).toMatchObject({
+      entered: null,
+      converted: null,
+      unsubscribed: null,
+      conversionRate: null,
+      unsubscribeRate: null,
+    });
+    expect(summary.holdouts[0]!.absoluteLift).toBeNull();
+    expect(summary.holdouts[0]!.relativeLift).toBeNull();
+    expect(summary.holdouts[0]!.ci95).toBeNull();
 
     expect(summary.meta.timeZone).toBe(TZ);
     expect(summary.meta.k).toBe(5);
     expect(summary.meta.currency).toBeNull();
+    expect(summary.meta.suppressed).toBe(2);
+    expect(summary.meta.notes.join(' ')).toContain('fewer than k');
     expect(summary.meta.notes.join(' ')).toContain(
       'got a campaign message and converted within 7 days of their first campaign message (first touch)',
     );
+  });
+
+  it('suppresses a member row below k and counts it in meta.suppressed (#586)', async () => {
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignSmall, from: FROM, to: TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+
+    // The headline is a total, so it is never suppressed by k.
+    expect(summary.headline.recipients).toBe(3);
+    expect(summary.members).toHaveLength(1);
+    expect(summary.members[0]).toMatchObject({
+      sent: null,
+      delivered: null,
+      clickRate: null,
+      unsubscribeRate: null,
+      converters: null,
+      suppressed: true,
+    });
+    expect(summary.meta.suppressed).toBe(1);
+    expect(summary.meta.notes.join(' ')).toContain('fewer than k=5');
+  });
+
+  it('suppresses a holdout whose member row is below k (#586)', async () => {
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignTiny, from: LATE_FROM, to: LATE_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+
+    // Three treatment recipients: the member row and the holdout card are both below k=5.
+    expect(summary.members).toHaveLength(1);
+    expect(summary.members[0]).toMatchObject({ suppressed: true, sent: null, delivered: null, converters: null });
+    expect(summary.holdouts).toHaveLength(1);
+    expect(summary.holdouts[0]).toMatchObject({ journeyId: journeyTiny, suppressed: true, minSampleSizeMet: false });
+    expect(summary.holdouts[0]!.control).toMatchObject({ entered: null, converted: null, conversionRate: null });
+    expect(summary.holdouts[0]!.treatment).toMatchObject({ entered: null, converted: null, conversionRate: null });
+    expect(summary.holdouts[0]!.absoluteLift).toBeNull();
+    expect(summary.holdouts[0]!.ci95).toBeNull();
+    expect(summary.meta.suppressed).toBe(2);
+  });
+
+  it('suppresses a holdout whose control arm is below k (#586)', async () => {
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignControlSmall, from: LATE_FROM, to: LATE_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+
+    // Eight people reached keeps the member row visible, but two control people are below k=5.
+    expect(summary.members[0]).toMatchObject({ suppressed: false, sent: 8, delivered: 8 });
+    expect(summary.holdouts[0]).toMatchObject({ journeyId: journeyControlSmall, suppressed: true, minSampleSizeMet: false });
+    expect(summary.holdouts[0]!.control).toMatchObject({ entered: null, converted: null });
+    expect(summary.holdouts[0]!.treatment).toMatchObject({ entered: null, converted: null });
+    expect(summary.meta.suppressed).toBe(1);
+  });
+
+  it('keeps a holdout visible when its member row and both arms reach k (#586)', async () => {
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignHealthy, from: LATE_FROM, to: LATE_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+
+    expect(summary.members[0]).toMatchObject({ suppressed: false, sent: 10, delivered: 10 });
+    expect(summary.holdouts[0]).toMatchObject({ journeyId: journeyHealthy, suppressed: false });
+    expect(summary.holdouts[0]!.control.entered).toBe(5);
+    expect(summary.holdouts[0]!.treatment.entered).toBe(5);
+    expect(summary.holdouts[0]!.control.conversionRate).toBe(0);
+    expect(summary.meta.suppressed).toBe(0);
+  });
+
+  it('returns readiness for a campaign that starts tomorrow even without dates (#588)', async () => {
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignFuture });
+    expect(summary.state).toBe('not_started');
+    if (summary.state !== 'not_started') return;
+
+    expect(summary.readiness).toMatchObject({ published: true, sendingMembers: 1, publishedSendingMembers: 1 });
+    expect(Date.parse(summary.meta.from)).toBeLessThanOrEqual(Date.parse(summary.meta.to));
+  });
+
+  it('does not let a send without a profile id change member counts or rates (#587)', async () => {
+    const load = () => api().call('analytics.campaignSummary', { campaignId: campaignGuard, from: LATE_FROM, to: LATE_TO });
+    const before = await load();
+    expect(before.state).toBe('measured');
+    if (before.state !== 'measured') return;
+    expect(before.members).toHaveLength(1);
+    expect(before.members[0]).toMatchObject({
+      sent: 6,
+      delivered: 6,
+      clickRate: 2 / 6,
+      unsubscribeRate: 0,
+    });
+
+    // The outbox can record a message without a profile id (packages/email/src/outbox.ts). It is
+    // not a person and must not add a phantom denominator to the member row.
+    const blank = (type: MessageEvent['type']): MessageEvent => ({
+      workspaceId: wsA,
+      messageId: `msg_${broadcastGuard}_blank_${type}`,
+      eventId: `${broadcastGuard}:blank:${type}`,
+      type,
+      at: '2026-11-02T10:00:00.000Z',
+      profileId: '',
+      channel: 'email',
+      purpose: 'marketing_email',
+      provider: 'log',
+      templateId: '',
+      templateVersion: 1,
+      journeyId: broadcastGuard,
+      variant: '',
+      reason: '',
+      url: '',
+    });
+    await t.srv.events.insertMessageEvents([blank('sent'), blank('delivered')]);
+    const after = await load();
+    expect(after.state).toBe('measured');
+    if (after.state !== 'measured') return;
+    expect(after.members[0]).toMatchObject({
+      sent: 6,
+      delivered: 6,
+      clickRate: 2 / 6,
+      unsubscribeRate: 0,
+    });
+  });
+
+  it('clamps the documented default window to the 400-day cap and says so (#588)', async () => {
+    for (const campaignId of [campaignNoStart, campaignOldStart]) {
+      const summary = await api().call('analytics.campaignSummary', { campaignId });
+      expect(summary.state).toBe('measured');
+      if (summary.state !== 'measured') continue;
+      expect(Date.parse(summary.meta.to) - Date.parse(summary.meta.from)).toBe(400 * 86_400_000);
+      expect(summary.meta.notes.join(' ')).toContain('400 days');
+      expect(summary.meta.notes.join(' ')).toContain('pass from');
+    }
+  });
+
+  it('rejects a reversed window with a message that names the fix (#588)', async () => {
+    const error = await rejects(api().call('analytics.campaignSummary', { campaignId: campaignA, from: TO, to: FROM }));
+    expect(error.message).toContain('from must be before to');
+    expect(error.message).toContain('omit from');
+  });
+
+  it('keeps all-channel recipients and computes e-mail rates on the e-mail base (#682)', async () => {
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignChannel, from: LATE_FROM, to: LATE_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+
+    // Six e-mail people plus four SMS people: recipients covers every channel, delivery is e-mail.
+    expect(summary.headline.recipients).toBe(10);
+    expect(summary.headline.delivered).toBe(5);
+    expect(summary.headline.clickers).toBe(2);
+    expect(summary.headline.converters).toBe(3);
+    expect(summary.headline.conversionRate).toBeCloseTo(3 / 10, 5);
+
+    const funnel = Object.fromEntries(summary.funnel.map((step) => [step.step, step]));
+    expect(funnel.delivered).toMatchObject({ count: 5, stepRate: 5 / 6, shareOfRecipients: 5 / 6 });
+    expect(funnel.clicked).toMatchObject({ count: 2, stepRate: 2 / 5, shareOfRecipients: 2 / 6 });
+
+    expect(summary.members).toHaveLength(1);
+    expect(summary.members[0]).toMatchObject({
+      sent: 6,
+      delivered: 5,
+      clickRate: 2 / 5,
+      unsubscribeRate: 1 / 5,
+      converters: 3,
+      suppressed: false,
+    });
+    expect(summary.headline.emailSent).toBe(6);
   });
 
   it('returns readiness instead of zeros before the first send', async () => {

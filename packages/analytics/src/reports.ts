@@ -1,5 +1,8 @@
+import { artifactTypes } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { isoDateTime } from '@agentic-marketing/core';
+import { schema, type Tx } from '@agentic-marketing/db';
+import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { analyticsMeta, analyticsResult, type QueryInput, runAnalyticsQuery } from './query';
 
@@ -52,11 +55,114 @@ export const analyticsEmailPerformance = defineCommand({
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/, 'A journey id (jrn_…)');
 
+/**
+ * Kinds that must name their edges: unlike the others, they never fall through to the next node.
+ * Together with the edge fields they decide the branch rule: any node with more than one `next`
+ * edge forks, which is how `branch`, `split`, `decision` and `aiDecide` always appear, and how
+ * `waitEvent`, `waitUntil`, `goal` and `action` appear when they name a timeout or error exit. A
+ * single saved edge sends both outcomes down that edge, so it is still one step.
+ */
+const NO_IMPLICIT_NEXT = new Set(['branch', 'split', 'decision', 'aiDecide']);
+
+interface JourneyWalk {
+  /** Node ids in breadth-first order from the trigger, then any node the walk cannot reach. */
+  order: string[];
+  /** True only for a straight line that covers every published node exactly once. */
+  linear: boolean;
+}
+
+/**
+ * The published journey's walk (#591). Reach is breadth-first from the trigger, so each node
+ * appears once and at its earliest position. A linear journey is one chain the runtime can walk:
+ * every node has at most one outgoing step, the walk covers every node, no node is visited twice
+ * and no step reconverges. Branch, split, decision, AI-decision and two-edge wait/action nodes
+ * fork the walk, as does any node with more than one saved edge.
+ */
+function publishedWalk(content: unknown): JourneyWalk | null {
+  const parsed = artifactTypes.journey.content.safeParse(content);
+  if (!parsed.success) return null;
+  const nodes = parsed.data.nodes;
+  const byId = new Map(nodes.map((node, index) => [node.id, { node, index }]));
+  const trigger = nodes.find((node) => node.kind === 'trigger');
+  if (!trigger) return null;
+
+  let forks = false;
+  const outgoing = (id: string): string[] => {
+    const found = byId.get(id);
+    if (!found) return [];
+    const { node, index } = found;
+    // The runtime always ends an exit node, whatever its saved edge fields say.
+    if (node.kind === 'exit') return [];
+    const next = node.next ?? [];
+    if (next.length > 1) {
+      forks = true;
+      return next.map((edge) => edge.to);
+    }
+    if (next.length === 1) return [next[0]!.to];
+    // An omitted `next` continues with the following saved node, exactly as the runtime does.
+    if (NO_IMPLICIT_NEXT.has(node.kind)) return [];
+    const following = nodes[index + 1]?.id;
+    return following ? [following] : [];
+  };
+
+  const order: string[] = [];
+  const seen = new Set<string>();
+  const queue = [trigger.id];
+  while (queue.length) {
+    const id = queue.shift()!;
+    if (seen.has(id) || !byId.has(id)) continue;
+    seen.add(id);
+    order.push(id);
+    for (const to of outgoing(id)) if (!seen.has(to)) queue.push(to);
+  }
+  const reachable = order.length;
+  for (const node of nodes) {
+    if (seen.has(node.id)) continue;
+    seen.add(node.id);
+    order.push(node.id);
+  }
+
+  const linear =
+    !forks &&
+    reachable === nodes.length &&
+    order.every((id, index) => {
+      const out = outgoing(id);
+      return index === order.length - 1 ? out.length === 0 : out.length === 1 && out[0] === order[index + 1];
+    });
+  return { order, linear };
+}
+
+interface PublishedJourney extends JourneyWalk {
+  version: number;
+}
+
+/** The published journey's version and walk, or null when it has no published topology. */
+async function publishedJourney(tx: Tx, workspaceId: string, journeyId: string): Promise<PublishedJourney | null> {
+  const [artifact] = await tx
+    .select({ publishedVersion: schema.artifacts.publishedVersion })
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, journeyId), eq(schema.artifacts.type, 'journey')));
+  if (!artifact?.publishedVersion) return null;
+  const [row] = await tx
+    .select({ content: schema.artifactVersions.content })
+    .from(schema.artifactVersions)
+    .where(
+      and(
+        eq(schema.artifactVersions.workspaceId, workspaceId),
+        eq(schema.artifactVersions.artifactId, journeyId),
+        eq(schema.artifactVersions.number, artifact.publishedVersion),
+      ),
+    );
+  if (!row) return null;
+  const walk = publishedWalk(row.content);
+  return { version: artifact.publishedVersion, order: walk?.order ?? [], linear: walk?.linear ?? false };
+}
+
 export const analyticsJourneyFunnel = defineCommand({
   name: 'analytics.journeyFunnel',
   title: 'Journey funnel',
   description:
-    'One journey over a period: entered → each step reached → goal reached → completed or exited, with the drop-off and drop-off rate between steps. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed.',
+    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. Counts use only the published version when the journey has one. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed.',
   input: z.object({
     journeyId: JourneyId,
     from: isoDateTime('from'),
@@ -64,6 +170,11 @@ export const analyticsJourneyFunnel = defineCommand({
   }),
   output: z.object({
     journeyId: z.string(),
+    basis: z
+      .enum(['published', 'reach'])
+      .describe(
+        'published: a straight-line published topology with non-increasing counts, so drop-off is a chain; reach: no straight-line published topology (none, branching, loop or reconvergence) or counts that rise along the walk (people joining mid-journey, for example after a migration), so steps are reach without a chain',
+      ),
     entered: z.number(),
     goalReached: z.number(),
     completed: z.number(),
@@ -83,6 +194,10 @@ export const analyticsJourneyFunnel = defineCommand({
   handler: async (input, ctx) => {
     const deps = { tx: ctx.tx, events: ctx.services.events, workspaceId: ctx.principal.workspaceId };
     const filters = { journey: [input.journeyId] };
+    // Journey events record the version that produced them. When a published version exists,
+    // every count describes that version alone (#591); without one there is nothing to select.
+    const published = await publishedJourney(ctx.tx, ctx.principal.workspaceId, input.journeyId);
+    const versionScope = published ? { journeyVersion: published.version } : {};
     const totals = await runAnalyticsQuery(deps, {
       measures: ['journey.entered', 'journey.goal_reached', 'journey.completed', 'journey.exited'],
       dimensions: [],
@@ -90,6 +205,7 @@ export const analyticsJourneyFunnel = defineCommand({
       to: input.to,
       filters,
       limit: 1,
+      ...versionScope,
     });
     const stepsResult = await runAnalyticsQuery(deps, {
       measures: ['journey.step_reached'],
@@ -99,6 +215,7 @@ export const analyticsJourneyFunnel = defineCommand({
       filters,
       limit: 5000,
       order: { by: 'journey_step', dir: 'asc' },
+      ...versionScope,
     });
 
     const total = (measure: string) => {
@@ -107,22 +224,49 @@ export const analyticsJourneyFunnel = defineCommand({
       return typeof value === 'number' ? value : 0;
     };
     const entered = total('journey.entered');
+    const reachedByStep = new Map(stepsResult.rows.map((row) => [String(row[0]), typeof row[1] === 'number' ? row[1] : null] as const));
+    // A published topology defines both the steps and their order; without one the event order
+    // is the only order there is, and it stays cross-version reach.
+    const stepIds = published ? published.order : stepsResult.rows.map((row) => String(row[0]));
+    const reachedSteps = stepIds.flatMap((step) => {
+      if (!reachedByStep.has(step)) return [];
+      return [{ step, reached: reachedByStep.get(step) ?? null }];
+    });
+    // A drop-off chain needs one straight line: no fork, loop or reconvergence. It also needs its
+    // counts to fall along the walk. Migration moves a participant to the new version without a new
+    // entry (journeys.migrate), so a later step can outnumber the entry step; a negative drop-off is
+    // never clamped to zero, and the report falls back to reach instead (#591).
     let previous: number | null = entered;
-    const steps = stepsResult.rows.map((row) => {
-      const step = String(row[0]);
-      const value = row[1];
-      const reached = typeof value === 'number' ? value : null;
-      const dropOff = previous === null || reached === null ? null : previous - reached;
-      const dropOffRate = dropOff === null || previous === null || previous === 0 ? null : dropOff / previous;
+    let monotone = true;
+    for (const { reached } of reachedSteps) {
+      if (reached === null) continue;
+      if (previous !== null && reached > previous) monotone = false;
       previous = reached;
+    }
+    const chain = published?.linear === true && monotone;
+    let previousReach: number | null = entered;
+    const steps = reachedSteps.map(({ step, reached }) => {
+      const dropOff = chain && previousReach !== null && reached !== null ? previousReach - reached : null;
+      const dropOffRate = dropOff === null || previousReach === null || previousReach === 0 ? null : dropOff / previousReach;
+      if (reached !== null) previousReach = reached;
       return { step, reached, dropOff, dropOffRate };
     });
 
     const notes = [
-      ...new Set([...stepsResult.meta.notes, 'Steps are counted from journey_events; drop-off compares each step with the previous one.']),
+      ...new Set([
+        ...stepsResult.meta.notes,
+        published?.linear && !monotone
+          ? `People joined the published journey v${published.version} after a later step (for example after a version migration), so reach is not a drop-off chain. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted.`
+          : published?.linear
+            ? `Steps follow the published journey v${published.version}’s linear topology; drop-off compares each step with the previous one, and only entries recorded for v${published.version} are counted.`
+            : published
+              ? `The published journey v${published.version} is not a straight line (it branches, splits, waits with alternative exits or loops), so there is no sequential drop-off. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted. Drop-off is shown only for linear journeys.`
+              : 'No published version is selected, so steps are cross-version reach without a drop-off chain.',
+      ]),
     ];
     return {
       journeyId: input.journeyId,
+      basis: chain ? ('published' as const) : ('reach' as const),
       entered,
       goalReached: total('journey.goal_reached'),
       completed: total('journey.completed'),

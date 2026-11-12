@@ -1,3 +1,4 @@
+import { clearAnalyticsCache } from '@agentic-marketing/analytics';
 import type { BusEvent, JourneyEvent, MessageEvent } from '@agentic-marketing/events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { rejects, startTestServer, testPort, type User } from './harness';
@@ -10,7 +11,7 @@ const TZ = 'Europe/Stockholm';
 const FROM = '2026-02-28T00:00:00.000Z';
 const TO = '2026-03-06T00:00:00.000Z';
 const WIDE_FROM = '2026-02-01T00:00:00.000Z';
-const JOURNEY = `jrn_${'9'.repeat(32)}`;
+let JOURNEY = '';
 const B1 = `bct_${'1'.repeat(32)}`;
 const B2 = `bct_${'2'.repeat(32)}`;
 const B3 = `bct_${'3'.repeat(32)}`;
@@ -221,6 +222,24 @@ beforeAll(async () => {
   });
   await api().call('artifacts.requestPublish', { artifactId: map.artifactId, note: 'v029 analytics test' });
 
+  // A real published journey, so the funnel report has a published topology to order by.
+  JOURNEY = (
+    await api().call('artifacts.create', {
+      type: 'journey',
+      name: 'Analytics funnel',
+      content: {
+        purpose: 'marketing_email',
+        nodes: [
+          { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+          { id: 's1', kind: 'wait', label: 'Wait one', config: { duration: 'P1D' } },
+          { id: 's2', kind: 'wait', label: 'Wait two', config: { duration: 'P1D' } },
+          { id: 'done', kind: 'exit', label: 'Done', config: {} },
+        ],
+      },
+    })
+  ).artifactId;
+  await api().call('artifacts.requestPublish', { artifactId: JOURNEY, note: 'v029 analytics test' });
+
   await t.srv.events.insertMessageEvents([
     ...messageEvents(wsA, bursts),
     ...messageEvents(wsB, [
@@ -386,6 +405,44 @@ describe('analytics.query', () => {
     );
     expect(catalog.dimensions.map((d) => d.id)).toEqual(expect.arrayContaining(['day', 'broadcast', 'journey_step', 'variant']));
   });
+
+  it('keeps SMS and push sends out of the e-mail measures (#682)', async () => {
+    // SMS and push write the same sent/delivered event types under their own channel. The e-mail
+    // measures are named and described as e-mail, so they must not count these rows. wsB has no
+    // e-mail activity on 4 March, so anything this query returns is a wrong-channel row.
+    const at = '2026-03-04T10:00:00.000Z';
+    const events: MessageEvent[] = [];
+    for (const channel of ['sms', 'push'] as const)
+      for (let i = 0; i < 6; i++)
+        for (const type of ['sent', 'delivered'] as const)
+          events.push({
+            workspaceId: wsB,
+            messageId: `msg_${channel}_${i}`,
+            eventId: `${channel}:${type}:${i}`,
+            type,
+            at,
+            profileId: person(),
+            channel,
+            purpose: 'marketing_email',
+            provider: 'log',
+            templateId: T1,
+            templateVersion: 1,
+            journeyId: B_OTHER,
+            variant: '',
+            reason: '',
+            url: '',
+          });
+    await t.srv.events.insertMessageEvents(events);
+    clearAnalyticsCache();
+
+    const result = await api(wsB).call('analytics.query', {
+      measures: ['email.sent', 'email.delivered'],
+      dimensions: ['channel'],
+      from: '2026-03-04T00:00:00.000Z',
+      to: '2026-03-05T00:00:00.000Z',
+    });
+    expect(result.rows).toEqual([]);
+  });
 });
 
 describe('named reports', () => {
@@ -408,5 +465,236 @@ describe('named reports', () => {
     expect(funnel.steps[1].dropOff).toBe(1);
     expect(funnel.steps[1].dropOffRate).toBeCloseTo(1 / 6, 5);
     expect(funnel.meta.suppressed).toBe(0);
+    expect(funnel.basis).toBe('published');
+  });
+
+  it('computes the drop-off chain over the published version only (#591)', async () => {
+    const api = t.api(owner);
+    const def = (nodes: unknown[]) => ({ purpose: 'marketing_email', nodes });
+    const created = await api.call('artifacts.create', {
+      type: 'journey',
+      name: 'Twice published',
+      content: def([
+        { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+        { id: 'alpha', kind: 'wait', label: 'Alpha', config: { duration: 'P1D' } },
+        { id: 'beta', kind: 'wait', label: 'Beta', config: { duration: 'P1D' } },
+        { id: 'exit', kind: 'exit', label: 'Exit', config: {} },
+      ]),
+    });
+    await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'v1' });
+    await api.call('artifacts.updateDraft', {
+      artifactId: created.artifactId,
+      content: def([
+        { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+        { id: 'beta', kind: 'wait', label: 'Beta', config: { duration: 'P1D' } },
+        { id: 'gamma', kind: 'wait', label: 'Gamma', config: { duration: 'P1D' } },
+        { id: 'exit', kind: 'exit', label: 'Exit', config: {} },
+      ]),
+    });
+    await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'v2' });
+
+    const events: JourneyEvent[] = [];
+    const add = (version: number, profileId: string, seq: number, node: string, type: JourneyEvent['type']) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: created.artifactId,
+        version,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // v1 reached alpha (6) then beta (5); v2 retired alpha and used beta (6) then gamma (5).
+    for (let i = 0; i < 6; i++) {
+      const p = person();
+      add(1, p, 0, 'trigger', 'entered');
+      add(1, p, 1, 'alpha', 'step');
+      if (i < 5) add(1, p, 2, 'beta', 'step');
+      const q = person();
+      add(2, q, 0, 'trigger', 'entered');
+      add(2, q, 1, 'beta', 'step');
+      if (i < 5) add(2, q, 2, 'gamma', 'step');
+    }
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: created.artifactId, from: FROM, to: TO });
+    // Only the published v2 counts: alpha is v1-only and the six v1 entrants never entered v2.
+    expect(funnel.steps.map((s) => s.step)).toEqual(['beta', 'gamma']);
+    expect(funnel.entered).toBe(6);
+    expect(funnel.steps[0].reached).toBe(6);
+    expect(funnel.steps[0].dropOff).toBe(0);
+    expect(funnel.steps[1].reached).toBe(5);
+    expect(funnel.steps[1].dropOff).toBe(1);
+    expect(funnel.basis).toBe('published');
+  });
+
+  it('reports reach, not an invented zero, when migration moves people into a later step (#591)', async () => {
+    const api = t.api(owner);
+    const def = (nodes: unknown[]) => ({ purpose: 'marketing_email', nodes });
+    const created = await api.call('artifacts.create', {
+      type: 'journey',
+      name: 'Migrated into a later step',
+      content: def([
+        { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+        { id: 'alpha', kind: 'wait', label: 'Alpha', config: { duration: 'P1D' } },
+        { id: 'beta', kind: 'wait', label: 'Beta', config: { duration: 'P1D' } },
+        { id: 'exit', kind: 'exit', label: 'Exit', config: {} },
+      ]),
+    });
+    await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'v1' });
+    // The same straight line published again: migration moves participants to v2 without a new
+    // entry, so v2's later step can outnumber its entry step.
+    await api.call('artifacts.updateDraft', {
+      artifactId: created.artifactId,
+      content: def([
+        { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+        { id: 'alpha', kind: 'wait', label: 'Alpha', config: { duration: 'P2D' } },
+        { id: 'beta', kind: 'wait', label: 'Beta', config: { duration: 'P1D' } },
+        { id: 'exit', kind: 'exit', label: 'Exit', config: {} },
+      ]),
+    });
+    await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'v2' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: created.artifactId,
+        version: 2,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // Ten v2 entrants walk alpha then beta.
+    for (let i = 0; i < 10; i++) {
+      const p = person();
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'alpha', 'step', 1);
+      add(p, 'beta', 'step', 2);
+    }
+    // Ten more people migrated into v2 at beta, with no v2 entry event.
+    for (let i = 0; i < 10; i++) add(person(), 'beta', 'step', 1);
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: created.artifactId, from: FROM, to: TO });
+    expect(funnel.entered).toBe(10);
+    expect(funnel.steps.map((s) => [s.step, s.reached])).toEqual([
+      ['alpha', 10],
+      ['beta', 20],
+    ]);
+    // Beta outnumbers the entry step. There is no drop-off chain to report, and zero would be a
+    // fabricated number: the server falls back to reach.
+    expect(funnel.basis).toBe('reach');
+    expect(funnel.steps.every((s) => s.dropOff === null && s.dropOffRate === null)).toBe(true);
+    expect(funnel.meta.notes.some((note) => note.includes('migration'))).toBe(true);
+  });
+
+  it('reports reach, not a negative drop-off, for a split that reconverges (#591)', async () => {
+    const api = t.api(owner);
+    const journey = (
+      await api.call('artifacts.create', {
+        type: 'journey',
+        name: 'Split and reconverge',
+        content: {
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' }, next: [{ to: 'split' }] },
+            { id: 'split', kind: 'split', label: 'Choose arm', config: { weights: [70, 30] }, next: [{ to: 'arm_a' }, { to: 'arm_b' }] },
+            { id: 'arm_a', kind: 'wait', label: 'Arm A', config: { duration: 'P1D' }, next: [{ to: 'join' }] },
+            { id: 'arm_b', kind: 'wait', label: 'Arm B', config: { duration: 'P1D' }, next: [{ to: 'join' }] },
+            { id: 'join', kind: 'wait', label: 'Join', config: { duration: 'P1D' }, next: [{ to: 'done' }] },
+            { id: 'done', kind: 'exit', label: 'Done', config: {} },
+          ],
+        },
+      })
+    ).artifactId;
+    await api.call('artifacts.requestPublish', { artifactId: journey, note: 'split funnel' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: journey,
+        version: 1,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // 100 people: 70 take arm A, 30 take arm B, and all 100 reconverge at join.
+    const people = Array.from({ length: 100 }, person);
+    people.forEach((p, i) => {
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'trigger', 'step', 1);
+      add(p, i < 70 ? 'arm_a' : 'arm_b', 'step', 2);
+      add(p, 'join', 'step', 3);
+    });
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: journey, from: FROM, to: TO });
+    expect(funnel.basis).toBe('reach');
+    expect(funnel.entered).toBe(100);
+    expect(funnel.steps.map((s) => s.step)).toEqual(['trigger', 'arm_a', 'arm_b', 'join']);
+    expect(funnel.steps.map((s) => s.reached)).toEqual([100, 70, 30, 100]);
+    expect(funnel.steps.some((s) => (s.dropOff ?? 0) < 0)).toBe(false);
+    expect(funnel.steps.every((s) => s.dropOff === null && s.dropOffRate === null)).toBe(true);
+  });
+
+  it('reports each node once for a looping journey, without a drop-off chain (#591)', async () => {
+    const api = t.api(owner);
+    const journey = (
+      await api.call('artifacts.create', {
+        type: 'journey',
+        name: 'Loops back',
+        content: {
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' }, next: [{ to: 'first' }] },
+            { id: 'first', kind: 'wait', label: 'First', config: { duration: 'P1D' }, next: [{ to: 'second' }] },
+            { id: 'second', kind: 'wait', label: 'Second', config: { duration: 'P1D' }, next: [{ to: 'first' }] },
+          ],
+        },
+      })
+    ).artifactId;
+    await api.call('artifacts.requestPublish', { artifactId: journey, note: 'loop funnel' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: journey,
+        version: 1,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    const people = Array.from({ length: 10 }, person);
+    people.forEach((p) => {
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'trigger', 'step', 1);
+      add(p, 'first', 'step', 2);
+      add(p, 'second', 'step', 3);
+    });
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: journey, from: FROM, to: TO });
+    expect(funnel.basis).toBe('reach');
+    expect(funnel.steps.map((s) => s.step)).toEqual(['trigger', 'first', 'second']);
+    expect(new Set(funnel.steps.map((s) => s.step)).size).toBe(funnel.steps.length);
+    expect(funnel.steps.every((s) => s.dropOff === null && s.dropOffRate === null)).toBe(true);
   });
 });

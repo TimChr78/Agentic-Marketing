@@ -451,4 +451,28 @@ describe('preview and results', () => {
     const r = await t.api(owner).call('experiences.results', { artifactId: hero });
     expect(r.method).toBe('bayesian');
   });
+
+  it('reads the published version, so editing a draft does not rewrite a live experiment’s results (#631)', async () => {
+    const api = t.api(owner);
+    const before = await api.call('experiences.results', { artifactId: hero });
+    expect(before).toMatchObject({ method: 'bayesian', goal: 'Order Completed', version: 1 });
+
+    // A draft that drops the goal, swaps the control variant and changes the analysis method.
+    await api.call('artifacts.updateDraft', {
+      artifactId: hero,
+      content: {
+        placement: 'home_hero',
+        variants: [{ id: 'b', name: 'Offer', weight: 100, content: { html: '<h1>Draft offer</h1>' } }],
+        analysis: { method: 'fixed' },
+      },
+    });
+    const artifact = await api.call('artifacts.get', { artifactId: hero });
+    expect(artifact.latestVersion).toBeGreaterThan(artifact.publishedVersion!);
+
+    const after = await api.call('experiences.results', { artifactId: hero });
+    expect(after.version).toBe(artifact.publishedVersion);
+    expect(after.method).toBe('bayesian');
+    expect(after.goal).toBe('Order Completed');
+    expect(after.recommendation).not.toContain('Set a goal event');
+  });
 });

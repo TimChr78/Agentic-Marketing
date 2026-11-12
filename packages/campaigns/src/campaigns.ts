@@ -2,10 +2,13 @@ import {
   analyseHoldout,
   artifactTypes,
   type CampaignDefinition,
+  holdoutBelowK,
   holdoutHashVersion,
+  K,
   publishedSingleton,
   publishValidators,
   referenceExtractors,
+  suppressHoldout,
 } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
@@ -14,6 +17,9 @@ import type {} from '@agentic-marketing/events';
 import { and, eq, gte, inArray, isNotNull, lte, max } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
+import { goalEventsFor } from './goal';
+import { identityUnresolvedNote } from './identity';
+import { campaignIdentityMap } from './identityScope';
 
 // Campaigns (#65) stay thin: a published campaign version groups existing artifacts under one goal
 // and one UTM campaign. Membership is read from those published versions rather than from a join
@@ -338,7 +344,7 @@ export const campaignHoldoutResult = defineCommand({
   name: 'campaigns.holdoutResult',
   title: 'Campaign uplift against its control group',
   description:
-    "Per arm (control, treatment): people assigned, people who did the campaign goal within the attribution window after their assignment, conversion rate, revenue per currency and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. The campaign's control group covers every sending member.",
+    "Per arm (control, treatment): people assigned, people who did the campaign goal within the attribution window after their assignment, conversion rate, revenue per currency and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. The campaign's control group covers every sending member. When either arm holds fewer than k=5 people, every count, rate, revenue figure and lift is null or empty, suppressed is true and k is reported.",
   input: z.object({
     campaignId: CampaignId,
     from: isoDateTime('from').optional().describe('Count assignments at or after this time'),
@@ -356,28 +362,38 @@ export const campaignHoldoutResult = defineCommand({
       .describe('The live scope and its hash version'),
     from: z.string().nullable(),
     to: z.string().nullable(),
+    k: z.number().int().describe('The k-anonymity floor; an arm below it is suppressed'),
     control: z.object({
-      entered: z.number().int(),
-      converted: z.number().int(),
-      unsubscribed: z.number().int().describe('E-mail unsubscribes among the campaign’s sends, the guardrail'),
-      conversionRate: z.number(),
-      unsubscribeRate: z.number(),
-      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map'),
+      entered: z.number().int().nullable().describe('People assigned to the arm; null when the holdout is suppressed'),
+      converted: z.number().int().nullable().describe('People in the arm who converted; null when the holdout is suppressed'),
+      unsubscribed: z
+        .number()
+        .int()
+        .nullable()
+        .describe('E-mail unsubscribes among the campaign’s sends, the guardrail; null when the holdout is suppressed'),
+      conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
+      unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
+      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map; empty when suppressed'),
     }),
     treatment: z.object({
-      entered: z.number().int(),
-      converted: z.number().int(),
-      unsubscribed: z.number().int().describe('E-mail unsubscribes among the campaign’s sends, the guardrail'),
-      conversionRate: z.number(),
-      unsubscribeRate: z.number(),
-      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map'),
+      entered: z.number().int().nullable().describe('People assigned to the arm; null when the holdout is suppressed'),
+      converted: z.number().int().nullable().describe('People in the arm who converted; null when the holdout is suppressed'),
+      unsubscribed: z
+        .number()
+        .int()
+        .nullable()
+        .describe('E-mail unsubscribes among the campaign’s sends, the guardrail; null when the holdout is suppressed'),
+      conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
+      unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
+      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map; empty when suppressed'),
     }),
-    absoluteLift: z.number().describe('Treatment conversion rate minus control'),
+    absoluteLift: z.number().nullable().describe('Treatment conversion rate minus control; null when the holdout is suppressed'),
     relativeLift: z.number().nullable().describe('Absolute lift divided by the control rate; null when control never converted'),
     ci95: z.tuple([z.number(), z.number()]).nullable().describe("Newcombe's 95% interval for the difference of proportions"),
     minSampleSizeMet: z.boolean(),
     verdict: z.enum(['not_enough_data', 'no_clear_difference', 'treatment_better', 'treatment_worse']),
     note: z.string(),
+    suppressed: z.boolean().describe('True when an arm held fewer than k people, so counts, rates, revenue and lift are hidden'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -454,50 +470,68 @@ export const campaignHoldoutResult = defineCommand({
           )
       : [];
     const sendingIds = sends.filter((s) => SENDING_TYPES.has(s.type)).map((s) => s.id);
-    const names =
-      c.goal.kind === 'revenue'
-        ? [...new Set(((await publishedSingleton(ctx.tx, 'conversion_map'))?.rules ?? []).map((r) => r.event))]
-        : [c.goal.event!];
+    const conversionMap = await publishedSingleton(ctx.tx, 'conversion_map');
+    // A revenue goal counts the map's events and the campaign's own goal.event; with no map
+    // published that is the goal event alone (#632).
+    const names = goalEventsFor(
+      c.goal,
+      (conversionMap?.rules ?? []).map((r) => r.event),
+    );
+    let identityLimit: number | null = null;
     if (people.size && names.length) {
       const assignedTimes = [...people.values()].map((p) => p.assignedAt.getTime());
       const first = new Date(Math.min(...assignedTimes));
       const last = new Date(Math.max(...assignedTimes) + c.goal.attributionDays * 86_400_000);
       const windowTo = to && to < last ? to : last;
-      const identifiers = await ctx.tx
-        .select({ type: schema.identifiers.type, value: schema.identifiers.value, profileId: schema.identifiers.profileId })
-        .from(schema.identifiers)
-        .where(
-          and(inArray(schema.identifiers.profileId, [...people.keys()]), inArray(schema.identifiers.type, ['anonymous_id', 'user_id'])),
-        );
-      // Event profile ids are historical; current identifiers follow the canonical merge survivor.
-      const userProfiles = new Map(identifiers.filter((i) => i.type === 'user_id').map((i) => [i.value, i.profileId]));
-      const anonymousProfiles = new Map(identifiers.filter((i) => i.type === 'anonymous_id').map((i) => [i.value, i.profileId]));
+      // One identity map, shared with the campaign summary and the measure queries (#590): sent
+      // recipients union this campaign's holdout assignments, both arms. The union is what keeps
+      // the headline and the holdout on the same side of the bound; above it both omit the map and
+      // report the same note rather than one resolving a conversion the other misses.
+      const identity = await campaignIdentityMap(
+        { tx: ctx.tx, events: ctx.services.events, workspaceId: ws },
+        {
+          campaignIds: [input.campaignId],
+          memberIds: sendingIds,
+          ...(input.from ? { from: input.from } : {}),
+          ...(input.to ? { to: input.to } : {}),
+        },
+      );
+      if (identity.overLimit) identityLimit = identity.limit;
+      const pairs = identity.overLimit ? [] : identity.pairs;
+      const userProfiles = new Map(pairs.filter((p) => p.kind === 'user_id').map((p) => [p.key, p.profileId]));
+      const anonymousProfiles = new Map(pairs.filter((p) => p.kind === 'anonymous_id').map((p) => [p.key, p.profileId]));
+      const mergedProfiles = new Map(pairs.filter((p) => p.kind === 'profile').map((p) => [p.key, p.profileId]));
       // The event query is scoped to the campaign's people (profile ids plus their identifiers) and
       // pages the whole attribution window, so a busy workspace cannot hide a late conversion behind
-      // an unrelated 100k-event cap (#366).
+      // an unrelated 100k-event cap (#366). The merged-away profile ids are part of that scope: an
+      // event that still carries only the historical id would otherwise be filtered out before
+      // mergedProfiles can resolve it (#590).
       const events = await ctx.services.events.conversionEvents(ws, {
         names,
         from: first,
         to: windowTo,
-        profileIds: [...people.keys()],
+        profileIds: [...new Set([...people.keys(), ...mergedProfiles.keys()])],
         identifiers: {
-          anonymousIds: identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-          userIds: identifiers.filter((i) => i.type === 'user_id').map((i) => i.value),
+          anonymousIds: [...new Set(pairs.filter((p) => p.kind === 'anonymous_id').map((p) => p.key))],
+          userIds: [...new Set(pairs.filter((p) => p.kind === 'user_id').map((p) => p.key))],
         },
       });
       const conversions = new Map<string, { timestamp: number; name: string; properties: Record<string, unknown> }[]>();
       for (const e of events) {
+        // Event profile ids are historical; identifiers and merged ids lead to the survivor.
         const profileId =
-          userProfiles.get(e.userId) ?? anonymousProfiles.get(e.anonymousId) ?? (people.has(e.profileId) ? e.profileId : undefined);
+          userProfiles.get(e.userId) ??
+          anonymousProfiles.get(e.anonymousId) ??
+          mergedProfiles.get(e.profileId) ??
+          (people.has(e.profileId) ? e.profileId : undefined);
         if (!profileId || !people.has(profileId)) continue;
         const list = conversions.get(profileId) ?? [];
         list.push(e);
         conversions.set(profileId, list);
       }
       if (c.goal.kind === 'revenue') {
-        const map = await publishedSingleton(ctx.tx, 'conversion_map');
-        const rules = new Map<string, NonNullable<typeof map>['rules'][number]>();
-        for (const rule of map?.rules ?? []) if (!rules.has(rule.event)) rules.set(rule.event, rule);
+        const rules = new Map<string, NonNullable<typeof conversionMap>['rules'][number]>();
+        for (const rule of conversionMap?.rules ?? []) if (!rules.has(rule.event)) rules.set(rule.event, rule);
         for (const [profileId, person] of people) {
           const end = Math.min(person.assignedAt.getTime() + c.goal.attributionDays * 86_400_000, windowTo.getTime());
           let converted = false;
@@ -527,13 +561,38 @@ export const campaignHoldoutResult = defineCommand({
       // The guardrail covers the campaign's own sends only: messages from unrelated journeys or
       // broadcasts are not the campaign's doing.
       const unsubscribed = sendingIds.length
-        ? new Set(await ctx.services.events.unsubscribedProfiles(ws, { journeyIds: sendingIds, from, to }))
+        ? new Set(
+            (await ctx.services.events.unsubscribedProfiles(ws, { journeyIds: sendingIds, from, to })).map(
+              // The guardrail resolves through the same merge map: an unsubscribe stored under the
+              // historical profile still belongs to the survivor who is being measured (#590).
+              (id) => mergedProfiles.get(id) ?? id,
+            ),
+          )
         : new Set<string>();
       for (const [profileId, person] of people) if (unsubscribed.has(profileId)) counts[person.arm].unsubscribed++;
     }
 
+    // The same k floor as the journey holdout and the summary (#590): an arm below k hides every
+    // count, rate, revenue figure and lift, so MCP cannot expose a control group the cards hide.
+    if (holdoutBelowK(counts)) {
+      const hidden = suppressHoldout(
+        `Suppressed: fewer than k=${K} people in the control or treatment arm, so counts, rates, revenue and lift are hidden.`,
+      );
+      return {
+        campaignId: input.campaignId,
+        goal: { kind: c.goal.kind, event: c.goal.event ?? null, attributionDays: c.goal.attributionDays },
+        controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },
+        from: input.from ?? null,
+        to: input.to ?? null,
+        k: K,
+        ...hidden,
+        control: { ...hidden.control, revenue: {} },
+        treatment: { ...hidden.treatment, revenue: {} },
+      };
+    }
+
     const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
-    const note =
+    const verdictNote =
       analysis.verdict === 'not_enough_data'
         ? `Need at least ${cg.minSampleSize} people in each arm; ${counts.control.entered} control and ${counts.treatment.entered} treatment so far.`
         : analysis.verdict === 'no_clear_difference'
@@ -541,12 +600,16 @@ export const campaignHoldoutResult = defineCommand({
           : analysis.verdict === 'treatment_better'
             ? 'Treatment converted at a higher rate and the 95% interval excludes zero; the campaign looks incremental.'
             : 'Treatment converted at a lower rate and the 95% interval excludes zero; the campaign looks harmful.';
+    // The same note the headline shows when the campaign's map is over its bound, so the two
+    // surfaces always explain an unresolved result the same way (#590).
+    const note = identityLimit === null ? verdictNote : `${verdictNote} ${identityUnresolvedNote(identityLimit)}`;
     return {
       campaignId: input.campaignId,
       goal: { kind: c.goal.kind, event: c.goal.event ?? null, attributionDays: c.goal.attributionDays },
       controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },
       from: input.from ?? null,
       to: input.to ?? null,
+      k: K,
       control: { ...analysis.control, revenue: revenue.control },
       treatment: { ...analysis.treatment, revenue: revenue.treatment },
       absoluteLift: analysis.absoluteLift,
@@ -555,6 +618,7 @@ export const campaignHoldoutResult = defineCommand({
       minSampleSizeMet: analysis.minSampleSizeMet,
       verdict: analysis.verdict,
       note,
+      suppressed: false,
     };
   },
 });

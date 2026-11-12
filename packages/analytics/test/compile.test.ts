@@ -91,6 +91,30 @@ describe('query compiler', () => {
     expect(compiled.params.types).toEqual(['sent', 'delivered', 'bounced']);
   });
 
+  it('scopes the e-mail measures to the e-mail channel (#682)', () => {
+    // SMS and push write the same sent/delivered message types under their own channel, so the
+    // measures named and described as e-mail must never count them.
+    const compiled = buildQuery(input({ measures: [measure('email.sent')] }));
+    expect(compiled.sql).toContain('channel IN {channels:Array(String)}');
+    expect(compiled.params.channels).toEqual(['email']);
+
+    // A ratio brings its bases' channel with it.
+    const rate = buildQuery(input({ measures: [measure('email.click_rate')] }));
+    expect(rate.params.channels).toEqual(['email']);
+
+    // Journey measures are not channel-scoped.
+    const journey = buildQuery(
+      input({ source: 'journey_events', measures: [measure('journey.step_reached')], dimensions: ['journey_step'] }),
+    );
+    expect(journey.sql).not.toContain('channel IN {channels:Array(String)}');
+    expect(journey.params.channels).toBeUndefined();
+
+    // The e-mail channel constraint is additive to an explicit channel filter.
+    const filtered = buildQuery(input({ measures: [measure('email.sent')], filters: { channel: ['sms'] } }));
+    expect(filtered.params.channels).toEqual(['email']);
+    expect(filtered.params.filter_channel).toEqual(['sms']);
+  });
+
   it('aggregates ratio bases in the inner query and divides them outside, null on a zero denominator', () => {
     const compiled = buildQuery(input({ measures: [measure('email.click_rate')], dimensions: ['template'] }));
 

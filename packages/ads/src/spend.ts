@@ -322,8 +322,11 @@ export const adPerformance = defineCommand({
     const conversions = names.length
       ? await (
           await ch.query({
+            // No anonymous_id filter here: a server-side conversion may carry only a user id. It
+            // has no campaign touch either way, so it must reach the loop below and be counted in
+            // `unattributed` rather than disappear before attribution (#640).
             query: `SELECT anonymous_id, timestamp, name, toString(properties) AS properties FROM events FINAL
-                    WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)} AND anonymous_id != ''
+                    WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)}
                       AND timestamp >= {since:DateTime64(3, 'UTC')} AND timestamp < {untilEnd:DateTime64(3, 'UTC')}
                     LIMIT 100000`,
             query_params: { ws, names, since: `${since} 00:00:00`, untilEnd: `${day(new Date(Date.parse(until) + 86_400_000))} 00:00:00` },
@@ -332,7 +335,8 @@ export const adPerformance = defineCommand({
           })
         ).json<{ anonymous_id: string; timestamp: string; name: string; properties: string }>()
       : [];
-    const visitors = [...new Set(conversions.map((c) => c.anonymous_id))];
+    // Empty identifiers never have a touch to look up; a user-id-only conversion stays unattributed.
+    const visitors = [...new Set(conversions.map((c) => c.anonymous_id).filter((id) => id !== ''))];
     const touches = visitors.length
       ? await (
           await ch.query({
