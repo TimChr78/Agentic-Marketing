@@ -1,6 +1,6 @@
 import type { EventBus } from '@agentic-marketing/events';
 import { publishedSegments, publishInSlices, refreshSegment } from '@agentic-marketing/segments';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // #628: a segment refresh's change-event cause is derived from the state the transaction commits,
@@ -58,6 +58,18 @@ const waitForRoomInTheMinute = async () => {
   const left = 60_000 - (Date.now() % 60_000);
   if (left < 20_000) await new Promise((r) => setTimeout(r, left + 100));
 };
+
+const refreshIds = (artifactId: string) =>
+  t.srv.db.withWorkspace(ws, async (tx) => {
+    const all = await publishedSegments(tx);
+    const seg = all.find((s) => s.id === artifactId);
+    if (!seg) throw new Error('segment not found');
+    const run = await refreshSegment(tx, ws, seg, t.srv.events, all);
+    return run.changes.map((e) => e.messageId);
+  });
+
+const removeMembership = (artifactId: string) =>
+  t.srv.db.admin.query('DELETE FROM segment_memberships WHERE workspace_id = $1 AND segment_id = $2', [ws, artifactId]);
 
 describe('two committed refreshes in the same minute (#628)', () => {
   it('publishes both runs with distinct messageIds', async () => {
@@ -140,13 +152,47 @@ describe('a refresh whose publish fails partway', () => {
     expect(firstIds).toHaveLength(2);
 
     // The retry sees the same committed token and the same change set, so its ids match.
-    const retryIds = await t.srv.db.withWorkspace(ws, async (tx) => {
-      const all = await publishedSegments(tx);
-      const seg = all.find((s) => s.id === artifactId);
-      if (!seg) throw new Error('segment not found');
-      const run = await refreshSegment(tx, ws, seg, t.srv.events, all);
-      return run.changes.map((e) => e.messageId);
-    });
+    const retryIds = await refreshIds(artifactId);
     expect(retryIds).toEqual(firstIds);
+  }, 60_000);
+});
+
+describe('a refresh token that would repeat its predecessor', () => {
+  it('still gives the next changes new messageIds after a streaming reversal', async () => {
+    const api = t.api(owner);
+    const { artifactId } = await api.call('artifacts.create', {
+      type: 'segment',
+      name: 'People in Stavanger',
+      content: { condition: { trait: 'city', op: 'eq', value: 'Stavanger' } },
+    });
+    await api.call('artifacts.requestPublish', { artifactId, note: 'First version' });
+    await eventually(
+      () => api.call('segments.members', { artifactId }),
+      (r) => r.total === 0 && r.members.length === 0,
+    );
+    await setCity(adaId, 'Stavanger');
+
+    // Freeze the wall clock: `new Date()` returns the same millisecond for every run. A streaming
+    // update reverses the membership between runs, so the unchanged `in` change repeats. The token
+    // written by each refresh must still advance (GREATEST(clock_timestamp(), previous + 1µs)).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-06-01T12:00:00.000Z'));
+    let runs: string[][] = [];
+    try {
+      const first = await refreshIds(artifactId);
+      await removeMembership(artifactId);
+      const second = await refreshIds(artifactId);
+      await removeMembership(artifactId);
+      const third = await refreshIds(artifactId);
+      runs = [first, second, third];
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(runs[0]).toHaveLength(1);
+    expect(runs[1]).toHaveLength(1);
+    expect(runs[2]).toHaveLength(1);
+    // The second and third runs share the same change set; only an advancing token separates them.
+    expect(runs[1]).not.toEqual(runs[2]);
   }, 60_000);
 });

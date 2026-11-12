@@ -8,6 +8,7 @@ import { describeHostedSchedule, nextHostedRunAt, parseHostedSchedule } from '..
 
 const at = (iso: string) => new Date(iso);
 const HOUR = 3_600_000;
+const DAY_MS = 24 * HOUR;
 
 describe('hosted schedules', () => {
   it('parses and describes the three forms', () => {
@@ -53,12 +54,24 @@ describe('resolving a wall time around a transition', () => {
     // 06:30Z. now (05:45Z) is after the first.
     expect(nextHostedRunAt('daily:01:30', 'America/New_York', at('2026-11-01T05:45:00Z'))).toEqual(at('2026-11-01T06:30:00Z'));
   });
+
+  it('moves to the next week when this week’s occurrence is skipped', () => {
+    // Troll jumps two hours (01:00Z to 03:00Z local) on 2026-03-29, so Sunday 02:30 does not exist.
+    // The next run is Sunday 2026-04-05 at 02:30 (+02) = 00:30Z.
+    expect(nextHostedRunAt('weekly:sun:02:30', 'Antarctica/Troll', at('2026-03-23T00:00:00Z'))).toEqual(at('2026-04-05T00:30:00Z'));
+  });
+
+  it('moves past a skipped calendar date', () => {
+    // Apia skipped 2011-12-30 entirely when it moved across the date line, so that Friday has no
+    // 10:00. The next Friday is 2012-01-06 10:00 (+14, southern-summer DST) = 2012-01-05T20:00Z.
+    expect(nextHostedRunAt('weekly:fri:10:00', 'Pacific/Apia', at('2011-12-26T00:00:00Z'))).toEqual(at('2012-01-05T20:00:00Z'));
+  });
 });
 
 // A minute-by-minute reference over the DST weeks of 2026, kept in the test only. It is the
 // definition the jump-based implementation must reproduce for every zone, including 30-minute and
 // southern-hemisphere transitions.
-const REFERENCE_LIMIT = { hourly: 61, daily: 9 * 24 * 60, weekly: 9 * 24 * 60 } as const;
+const REFERENCE_LIMIT = { hourly: 61, daily: 4 * 24 * 60, weekly: 28 * 24 * 60 } as const;
 
 function referenceParts(date: Date, timeZone: string, formatters: Map<string, Intl.DateTimeFormat>) {
   let formatter = formatters.get(timeZone);
@@ -72,9 +85,9 @@ function referenceParts(date: Date, timeZone: string, formatters: Map<string, In
     });
     formatters.set(timeZone, formatter);
   }
-  const parts = formatter.formatToParts(date);
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
-  return { weekday: get('weekday').toLowerCase().slice(0, 3), hour: Number(get('hour')), minute: Number(get('minute')) };
+  const match = /^(\w+)\s+(\d{1,2}):(\d{2})/.exec(formatter.format(date));
+  if (!match) throw new Error(`could not read ${date.toISOString()} in ${timeZone}`);
+  return { weekday: match[1]!.toLowerCase().slice(0, 3), hour: Number(match[2]), minute: Number(match[3]) };
 }
 
 function referenceNext(schedule: string, timeZone: string, now: Date, formatters: Map<string, Intl.DateTimeFormat>): Date {
@@ -98,26 +111,37 @@ describe('the jump-based computation matches a minute scan across the DST weeks 
     { zone: 'Australia/Lord_Howe', transitions: ['2026-04-05', '2026-10-04'] },
     { zone: 'Australia/Sydney', transitions: ['2026-04-05', '2026-10-04'] },
     { zone: 'America/Santiago', transitions: ['2026-04-05', '2026-09-06'] },
+    // A two-hour transition (01:00Z to 03:00Z local) skips a weekly 02:30 run.
+    { zone: 'Antarctica/Troll', transitions: ['2026-03-29', '2026-10-25'] },
+    // Samoa moved across the date line: 2011-12-30 never existed. Apia has no DST in 2026.
+    { zone: 'Pacific/Apia', transitions: ['2011-12-29', '2011-12-30'] },
   ];
   const schedules = ['hourly', 'daily:02:30', 'weekly:sun:02:30'];
 
   it('agrees on every sampled zone, kind and transition week', () => {
     const formatters = new Map<string, Intl.DateTimeFormat>();
+    let comparisons = 0;
     for (const { zone, transitions } of zones) {
       for (const date of transitions) {
         const day = new Date(`${date}T00:00:00Z`).getTime();
-        for (const offset of [-12 * HOUR, 0, 12 * HOUR]) {
-          const now = new Date(day + offset);
-          for (const schedule of schedules) {
-            const expected = referenceNext(schedule, zone, now, formatters);
-            const actual = nextHostedRunAt(schedule, zone, now);
-            expect(actual, `${schedule} in ${zone} after ${now.toISOString()}`).toEqual(expected);
-            expect(actual.getTime()).toBeGreaterThan(now.getTime());
+        // The seven days around the transition, every six hours.
+        for (let d = -3; d <= 3; d++) {
+          for (let h = 0; h < 24; h += 6) {
+            const now = new Date(day + d * DAY_MS + h * HOUR);
+            for (const schedule of schedules) {
+              const expected = referenceNext(schedule, zone, now, formatters);
+              const actual = nextHostedRunAt(schedule, zone, now);
+              expect(actual, `${schedule} in ${zone} after ${now.toISOString()}`).toEqual(expected);
+              expect(actual.getTime()).toBeGreaterThan(now.getTime());
+              comparisons++;
+            }
           }
         }
       }
     }
-  });
+    // 9 zones x 2 transitions x 28 samples x 3 kinds.
+    expect(comparisons).toBe(1512);
+  }, 180_000);
 });
 
 describe('computing a weekly run does not scan minutes (#622)', () => {

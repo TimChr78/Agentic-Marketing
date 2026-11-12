@@ -207,15 +207,19 @@ export async function refreshSegment(tx: Tx, workspaceId: string, seg: Published
   // The cause is deterministic for what this transaction is about to commit (#628): the last
   // committed refresh token plus the sorted change set. A publish that fails rolls the transaction
   // back, so the retry sees the same token and the same changes and reuses the messageIds (which
-  // JetStream then deduplicates); a refresh that commits moves `segment_runs.at`, so a later run
-  // with the same change set gets new ids. The token only advances with a committed refresh.
-  const [prior] = await tx
-    .select({ at: schema.segmentRuns.at })
-    .from(schema.segmentRuns)
-    .where(and(eq(schema.segmentRuns.workspaceId, workspaceId), eq(schema.segmentRuns.segmentId, seg.id)));
+  // JetStream then deduplicates); a refresh that commits moves the token, so a later run with the
+  // same change set gets new ids. `at` is read as text at full microsecond precision (never a JS
+  // Date, which would truncate it) and the upsert advances it with GREATEST(), so it strictly
+  // increases even when the wall clock repeats within a millisecond.
+  const prior = (
+    await tx.execute<{ token: string }>(sql`
+      SELECT to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS token
+      FROM segment_runs
+      WHERE workspace_id = ${workspaceId} AND segment_id = ${seg.id}`)
+  ).rows[0]?.token;
   const changesKey = [...entered.map((r) => `${r.profile_id}:in`), ...announcingExits.map((r) => `${r.profile_id}:out`)].sort();
   const cause = `run:${createHash('sha256')
-    .update(`${seg.id}\n${prior?.at.toISOString() ?? 'first'}\n${changesKey.join('\n')}`)
+    .update(`${seg.id}\n${prior ?? 'first'}\n${changesKey.join('\n')}`)
     .digest('hex')
     .slice(0, 32)}`;
   const changes: BusEvent[] = [];
@@ -234,12 +238,14 @@ export async function refreshSegment(tx: Tx, workspaceId: string, seg: Published
     entered: entered.length,
     exited: exited.length,
     tookMs: Date.now() - started,
-    at: new Date(),
   };
   await tx
     .insert(schema.segmentRuns)
-    .values(run)
-    .onConflictDoUpdate({ target: [schema.segmentRuns.workspaceId, schema.segmentRuns.segmentId], set: run });
+    .values({ ...run, at: sql`clock_timestamp()` })
+    .onConflictDoUpdate({
+      target: [schema.segmentRuns.workspaceId, schema.segmentRuns.segmentId],
+      set: { ...run, at: sql`GREATEST(clock_timestamp(), ${schema.segmentRuns.at} + interval '1 microsecond')` },
+    });
   return {
     members: members.size,
     entered: entered.length,
