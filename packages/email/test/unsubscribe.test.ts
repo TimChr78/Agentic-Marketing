@@ -307,6 +307,31 @@ describe('the unsubscribe link must be visible and clickable (#637 review)', () 
     expect(unsubscribeLinkProblem(`<a href="${URL}">Unsubscribe</a>`, URL)).toBeNull();
   });
 
+  it('stays linear for many entities inside a link with long style values (review round 9)', () => {
+    expectLinear(
+      (n) => {
+        const x = 'x'.repeat(n);
+        return `<a href="${URL}" style="color:rgb(${x}b);background:rgb(${x}c)">${'&amp;'.repeat(n)}</a>`;
+      },
+      (html) => unsubscribeLinkProblem(html, URL),
+      20_000,
+    );
+  });
+
+  it('checks the time budget inside text, not only at opening tags (review round 9)', () => {
+    let calls = 0;
+    const spy = vi.spyOn(performance, 'now').mockImplementation(() => {
+      calls++;
+      // The first calls (start, style pass, the anchor's opening tag) stay within the budget.
+      return calls <= 3 ? 0 : MAX_UNSUBSCRIBE_CHECK_MS * 2;
+    });
+    try {
+      expect(unsubscribeLinkProblem(`<a href="${URL}">${'&amp;'.repeat(50)}</a>`, URL)).toBe('too_complex');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('still applies a compound hiding rule in a normal stylesheet', () => {
     const html = `<html><head><style>.foot.gone{display:none}</style></head><body><a class="foot gone" href="${URL}">Unsubscribe</a></body></html>`;
     expect(unsubscribeLinkProblem(html, URL)).toBe('hidden');

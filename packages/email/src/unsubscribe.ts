@@ -218,11 +218,18 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
         }
       },
       ontext(text) {
-        if (!text.trim() || anchors.length === 0) return;
+        // Entity decoding can split one text run into many calls, so the budget is checked here
+        // too, not only at opening tags (review round 9).
+        if (overBudget()) {
+          tooDeep = true;
+          parser.pause();
+          return;
+        }
+        if (anchors.length === 0) return;
+        const c = anchors[anchors.length - 1];
+        if (!c || c.visible || !text.trim()) return;
         const state = stack.length > 0 ? stack[stack.length - 1]!.state : INITIAL;
         if (state.forbidden > 0) return;
-        const c = anchors[anchors.length - 1];
-        if (!c) return;
         c.content = true;
         if (contentVisible(state)) c.visible = true;
       },
@@ -539,8 +546,11 @@ function zeroClipPath(raw: string): boolean {
  * transparent and zero-alpha colours become `#rrggbb00`. Other names compare verbatim, and a
  * nonzero-alpha `hsl()` is not converted.
  */
+/** No real CSS colour value is longer; longer values are not colours (review round 9). */
+const MAX_COLOUR_LENGTH = 64;
+
 function colourValue(raw: string | undefined): string | null {
-  if (!raw) return null;
+  if (!raw || raw.length > MAX_COLOUR_LENGTH) return null;
   const value = raw.trim().toLowerCase();
   if (!value) return null;
   if (value.startsWith('#')) {
