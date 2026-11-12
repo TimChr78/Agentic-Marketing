@@ -14,9 +14,11 @@ const listeners = new Set<ArtifactChangeListener>();
  * Registers a cache that must be dropped whenever an artifact is created, renamed, saved,
  * published or deleted. Returns an unsubscribe.
  */
-export function onArtifactsChanged(listener: ArtifactChangeListener) {
+export function onArtifactsChanged(listener: ArtifactChangeListener): () => void {
   listeners.add(listener);
-  return () => listeners.delete(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 /** Tells every registered cache that artifacts changed, e.g. after `artifacts.create`. */
@@ -36,6 +38,11 @@ export function getArtifact(id: string): Promise<Got> {
 export const invalidateArtifact = (id: string) => {
   cache.delete(id);
   notifyArtifactsChanged();
+};
+
+/** Drops one cached read without telling listeners: the next get re-reads, nothing changed. */
+export const forgetArtifact = (id: string) => {
+  cache.delete(id);
 };
 
 export function useArtifactRef(id: string | undefined | null) {
