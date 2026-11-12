@@ -195,6 +195,48 @@ describe('the independent model check (#231)', () => {
     expect(req.user).toContain('<published-content>');
   });
 
+  // #642: a successful generateText means the provider billed tokens. The old finally released the
+  // hold even when the usage row could not be written, so those tokens were counted nowhere.
+  it('keeps the billed check covered when its usage row cannot be written', async () => {
+    await t.srv.db.admin.query(`CREATE OR REPLACE FUNCTION check_ai_call_fail_fn() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.kind = 'check' THEN RAISE EXCEPTION 'injected ai_calls failure'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await t.srv.db.admin.query('DROP TRIGGER IF EXISTS check_ai_call_fail_trg ON ai_calls');
+    await t.srv.db.admin.query(
+      'CREATE TRIGGER check_ai_call_fail_trg BEFORE INSERT ON ai_calls FOR EACH ROW EXECUTE FUNCTION check_ai_call_fail_fn()',
+    );
+    try {
+      const api = t.api(owner);
+      const before = (await api.call('aiProviders.list', {})).providers[0]!.usedThisMonth;
+      const checksBefore = (await api.call('ai.calls', { kind: 'check' })).calls.length;
+      const id = await draftBroadcast();
+      const out = await call('artifacts.requestPublish', { artifactId: id, note: 'Send this week’s issue' });
+      // The check could not record its usage, so the action fails closed to a person.
+      expect(out.body.status).toBe('in_review');
+      expect((await api.call('ai.calls', { kind: 'check' })).calls.length).toBe(checksBefore);
+
+      // The hold is the only record of the billed tokens, and the month still counts it.
+      const held = await t.srv.db.admin.query<{ tokens: number; expires_at: Date }>(
+        'SELECT tokens, expires_at FROM ai_token_reservations WHERE provider_id = $1',
+        [providerId],
+      );
+      expect(held.rows).toHaveLength(1);
+      const providers = await api.call('aiProviders.list', {});
+      expect(providers.providers[0]!.usedThisMonth).toBe(before + held.rows[0]!.tokens);
+      // Not the five-minute default: it survives the billing month.
+      const now = new Date();
+      expect(held.rows[0]!.expires_at.getTime()).toBeGreaterThanOrEqual(
+        new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)).getTime(),
+      );
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS check_ai_call_fail_trg ON ai_calls');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS check_ai_call_fail_fn()');
+      await t.srv.db.admin.query('DELETE FROM ai_token_reservations WHERE provider_id = $1', [providerId]);
+    }
+  }, 60_000);
+
   it('fails closed when no AI provider is set up', async () => {
     // Draft while the provider still exists; then remove it and publish, as an operator might.
     const id = await draftBroadcast();

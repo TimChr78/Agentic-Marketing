@@ -101,13 +101,20 @@ interface FormState {
   errorWindow: string;
   errorThreshold: string;
   journeyId: string;
-  webhookIds: string[];
-  userIds: string[];
+  /**
+   * The saved channel list, kept per entry. Flattening the e-mail channels into one set and
+   * rebuilding them rewrote a rule's notification targets on any unrelated edit (#601).
+   */
+  channels: Channel[];
 }
 
 function formFor(rule: Rule | null): FormState {
   const config = (rule?.config ?? {}) as Record<string, unknown>;
-  const channels = rule?.channels ?? [];
+  const channels = (rule?.channels ?? []).map((channel) =>
+    channel.type === 'email'
+      ? ({ type: 'email', userIds: [...channel.userIds] } satisfies Channel)
+      : ({ type: 'webhook', webhookId: channel.webhookId } satisfies Channel),
+  );
   return {
     name: rule?.name ?? '',
     kind: rule?.kind ?? 'deliverability',
@@ -123,8 +130,7 @@ function formFor(rule: Rule | null): FormState {
     errorWindow: rule?.kind === 'journey_errors' ? String(config.window ?? 'PT1H') : 'PT1H',
     errorThreshold: String(config.threshold ?? 5),
     journeyId: String(config.journeyId ?? ''),
-    webhookIds: channels.flatMap((c) => (c.type === 'webhook' ? [c.webhookId] : [])),
-    userIds: channels.flatMap((c) => (c.type === 'email' ? c.userIds : [])),
+    channels,
   };
 }
 
@@ -457,8 +463,41 @@ function AlertForm({
   useEffect(() => setForm(formFor(rule)), [rule]);
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => setForm((f) => ({ ...f, [key]: value }));
 
-  const toggle = (key: 'webhookIds' | 'userIds', id: string) =>
-    setForm((f) => ({ ...f, [key]: f[key].includes(id) ? f[key].filter((x) => x !== id) : [...f[key], id] }));
+  const hasWebhook = (webhookId: string) => form.channels.some((channel) => channel.type === 'webhook' && channel.webhookId === webhookId);
+  const hasMember = (userId: string) => form.channels.some((channel) => channel.type === 'email' && channel.userIds.includes(userId));
+
+  const toggleWebhook = (webhookId: string) =>
+    setForm((f) => ({
+      ...f,
+      channels: f.channels.some((channel) => channel.type === 'webhook' && channel.webhookId === webhookId)
+        ? f.channels.filter((channel) => !(channel.type === 'webhook' && channel.webhookId === webhookId))
+        : [...f.channels, { type: 'webhook', webhookId }],
+    }));
+
+  const toggleMember = (userId: string) =>
+    setForm((f) => {
+      if (f.channels.some((channel) => channel.type === 'email' && channel.userIds.includes(userId)))
+        return {
+          ...f,
+          channels: f.channels
+            .map((channel) =>
+              channel.type === 'email'
+                ? ({ type: 'email', userIds: channel.userIds.filter((id) => id !== userId) } satisfies Channel)
+                : channel,
+            )
+            .filter((channel) => channel.type !== 'email' || channel.userIds.length > 0),
+        };
+      // A newly picked person joins the last e-mail channel, so the other channels keep the
+      // grouping they were saved with.
+      const last = f.channels.reduce((index, channel, i) => (channel.type === 'email' ? i : index), -1);
+      if (last < 0) return { ...f, channels: [...f.channels, { type: 'email', userIds: [userId] }] };
+      return {
+        ...f,
+        channels: f.channels.map((channel, i) =>
+          i === last && channel.type === 'email' ? ({ type: 'email', userIds: [...channel.userIds, userId] } satisfies Channel) : channel,
+        ),
+      };
+    });
 
   const kind = form.kind;
   const config =
@@ -477,10 +516,9 @@ function AlertForm({
             ...(form.journeyId ? { journeyId: form.journeyId } : {}),
           };
 
-  const channels: Channel[] = [
-    ...form.webhookIds.map((webhookId) => ({ type: 'webhook' as const, webhookId })),
-    ...(form.userIds.length ? [{ type: 'email' as const, userIds: form.userIds }] : []),
-  ];
+  // Saved exactly as the form holds them: an untouched channel list (including several e-mail
+  // channels) is written back unchanged.
+  const channels = form.channels.filter((channel) => channel.type !== 'email' || channel.userIds.length > 0);
 
   const save = async () => {
     if (!form.name.trim()) return onError('Give the rule a name.');
@@ -601,8 +639,8 @@ function AlertForm({
                 key={endpoint.id}
                 label={endpoint.name}
                 hint={endpoint.url}
-                checked={form.webhookIds.includes(endpoint.id)}
-                onChange={() => toggle('webhookIds', endpoint.id)}
+                checked={hasWebhook(endpoint.id)}
+                onChange={() => toggleWebhook(endpoint.id)}
               />
             ))}
           </div>
@@ -618,8 +656,8 @@ function AlertForm({
                 key={member.userId}
                 label={member.name || member.email}
                 hint={member.email}
-                checked={form.userIds.includes(member.userId)}
-                onChange={() => toggle('userIds', member.userId)}
+                checked={hasMember(member.userId)}
+                onChange={() => toggleMember(member.userId)}
               />
             ))}
           </div>
