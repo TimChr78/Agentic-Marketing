@@ -171,8 +171,70 @@ async function rolePrivileges(client: RoleClient, role: string) {
   return rows[0];
 }
 
-const privilegesOf = (row: { rolsuper: boolean; rolbypassrls: boolean } | undefined) =>
-  [row?.rolsuper ? 'SUPERUSER' : '', row?.rolbypassrls ? 'BYPASSRLS' : ''].filter(Boolean).join(' and ');
+const privilegesOf = (row: { superuser: boolean; bypassrls: boolean } | undefined) =>
+  [row?.superuser ? 'SUPERUSER' : '', row?.bypassrls ? 'BYPASSRLS' : ''].filter(Boolean).join(' and ');
+
+/** One role the app role can `SET ROLE` into, and the chain of memberships that gets it there. */
+export interface AppRoleReach {
+  role: string;
+  superuser: boolean;
+  bypassrls: boolean;
+  /** `[app]` for the app role itself, otherwise app → … → role. */
+  chain: string[];
+}
+
+/**
+ * Every role `$1` can `SET ROLE` into, transitively, and the chain that reaches it (0.14.11 round
+ * 4). `NOINHERIT` does not stop `SET ROLE`, so a membership is enough to reach a role's
+ * attributes: an app role with neither attribute can still become a member that has BYPASSRLS.
+ * Shared by the migration and `am doctor`'s `postgres.app-role` check (#813).
+ */
+export const appRoleReachSql = `WITH RECURSIVE reach(role, chain) AS (
+    SELECT r.oid, ARRAY[r.rolname]::text[]
+      FROM pg_roles r
+     WHERE r.rolname = $1
+    UNION ALL
+    SELECT m.roleid, reach.chain || r.rolname
+      FROM reach
+      JOIN pg_auth_members m ON m.member = reach.role
+      JOIN pg_roles r ON r.oid = m.roleid
+     WHERE NOT r.rolname = ANY(reach.chain)
+  )
+  SELECT DISTINCT ON (r.rolname)
+         r.rolname AS role, r.rolsuper AS superuser, r.rolbypassrls AS bypassrls, reach.chain
+    FROM reach
+    JOIN pg_roles r ON r.oid = reach.role
+   ORDER BY r.rolname, cardinality(reach.chain), reach.chain`;
+
+/** Runs {@link appRoleReachSql}; the role itself is one of the rows, with a one-role chain. */
+export async function appRoleReach(client: Pick<pg.Client, 'query'>, role: string): Promise<AppRoleReach[]> {
+  const { rows } = await client.query<AppRoleReach>(appRoleReachSql, [role]);
+  return rows;
+}
+
+/**
+ * Why the app role may bypass row-level security, or undefined when it may not (0.14.11 round 4).
+ * Its own attributes are the first case; a role it can `SET ROLE` into is the second, and the
+ * message names the membership chain and the `REVOKE` that removes it.
+ */
+export async function appRolePrivilegeProblem(client: Pick<pg.Client, 'query'>, role: string): Promise<string | undefined> {
+  const reach = await appRoleReach(client, role);
+  const self = reach.find((r) => r.role === role);
+  if (self?.superuser || self?.bypassrls)
+    return (
+      `The app role “${role}” still has ${privilegesOf(self)}; row-level security would be bypassed. ` +
+      `Run "ALTER ROLE ${role} NOSUPERUSER NOBYPASSRLS" as a superuser, or set APP_DB_ROLE to an unprivileged role, then run the migration again.`
+    );
+  const reached = reach.filter((r) => r.role !== role && (r.superuser || r.bypassrls));
+  if (!reached.length) return undefined;
+  const list = reached.map((r) => `“${r.role}” (${privilegesOf(r)}) via ${r.chain.join(' → ')}`).join('; ');
+  const fix = reached.map((r) => `"REVOKE ${r.role} FROM ${role}"`).join(' ');
+  return (
+    `The app role “${role}” can SET ROLE to the privileged role ${list}, so row-level security would be bypassed. ` +
+    `NOINHERIT does not prevent this: a session can always SET ROLE to a role it is a member of. ` +
+    `Fix it as a superuser with ${fix} (or take the role out of that membership chain), or set APP_DB_ROLE to a dedicated unprivileged role, then run the migration again.`
+  );
+}
 
 /** Postgres refuses to change these attributes of a role the migration user does not administer. */
 const isPrivilegeDenied = (err: unknown) => {
@@ -190,7 +252,9 @@ const isPrivilegeDenied = (err: unknown) => {
  * The role must never bypass row-level security (#813), so an existing role is reset too: an
  * operator who pointed APP_DB_ROLE at a privileged role would otherwise run every request with
  * tenant isolation off. Changing a superuser's attributes needs a superuser; when the migration
- * user may not do it, this says so plainly instead of leaving the bypass in place.
+ * user may not do it, this says so plainly instead of leaving the bypass in place. A membership
+ * that reaches a privileged role is refused as well (0.14.11 round 4), because `SET ROLE` ignores
+ * `NOINHERIT`; startup runs the migration, so it refuses to start too.
  */
 export async function ensureAppRole(client: RoleClient, opts: { appRolePassword: string; appRole?: string }): Promise<string> {
   const role = opts.appRole ?? 'am_app';
@@ -203,15 +267,20 @@ export async function ensureAppRole(client: RoleClient, opts: { appRolePassword:
   for (let attempt = 1; ; attempt++) {
     const existing = await rolePrivileges(client, role);
     try {
-      await client.query(
-        existing
-          ? `ALTER ROLE ${role} WITH LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD ${pwd}`
-          : `CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
-      );
+      if (!existing) await client.query(`CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`);
+      else {
+        // Name SUPERUSER and BYPASSRLS only when they are actually set. PostgreSQL checks the
+        // statement, not the value, so a CREATEROLE migration user gets "permission denied to
+        // alter role" for NOSUPERUSER even on a role that is already safe — on every start after
+        // the first. LOGIN and PASSWORD are the 0.14.10 statement and stay allowed to the user
+        // that administers the role (0.14.11 round 4).
+        const reset = [existing.rolsuper ? 'NOSUPERUSER' : '', existing.rolbypassrls ? 'NOBYPASSRLS' : ''].filter(Boolean).join(' ');
+        await client.query(`ALTER ROLE ${role} WITH LOGIN PASSWORD ${pwd}${reset ? ` ${reset}` : ''}`);
+      }
     } catch (err) {
       if (existing && (existing.rolsuper || existing.rolbypassrls) && isPrivilegeDenied(err)) {
         throw new Error(
-          `The app role “${role}” has ${privilegesOf(existing)}, so row-level security would be bypassed, and the migration user may not reset it: ` +
+          `The app role “${role}” has ${privilegesOf({ superuser: existing.rolsuper, bypassrls: existing.rolbypassrls })}, so row-level security would be bypassed, and the migration user may not reset it: ` +
             `${(err as { message?: string }).message ?? String(err)}. Fix it as a superuser with "ALTER ROLE ${role} NOSUPERUSER NOBYPASSRLS", ` +
             'or set APP_DB_ROLE to a dedicated unprivileged role, then run the migration again.',
         );
@@ -222,14 +291,10 @@ export async function ensureAppRole(client: RoleClient, opts: { appRolePassword:
       await new Promise((r) => setTimeout(r, 50 * attempt));
       continue;
     }
-    // Read the attributes back: another session could have granted them again mid-migration, and
-    // a superuser role must never reach the running app.
-    const after = await rolePrivileges(client, role);
-    if (after?.rolsuper || after?.rolbypassrls)
-      throw new Error(
-        `The app role “${role}” still has ${privilegesOf(after)} after the migration; row-level security would be bypassed. ` +
-          `Run "ALTER ROLE ${role} NOSUPERUSER NOBYPASSRLS" as a superuser, or set APP_DB_ROLE to an unprivileged role.`,
-      );
+    // Read the attributes and the membership chains back: another session could have granted a
+    // privileged role mid-migration, and a superuser must never reach the running app.
+    const problem = await appRolePrivilegeProblem(client, role);
+    if (problem) throw new Error(problem);
     return role;
   }
 }

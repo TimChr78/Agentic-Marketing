@@ -59,6 +59,92 @@ describe.skipIf(!hasTestDatabase())('the app role has no SUPERUSER or BYPASSRLS 
     }
   }, 120_000);
 
+  it('refuses an app role that can SET ROLE into a privileged role by membership (0.14.11 round 4)', async () => {
+    const suffix = randomBytes(4).toString('hex');
+    const app = runScoped(`chain_app_${suffix}`);
+    const middle = runScoped(`chain_mid_${suffix}`);
+    const privileged = runScoped(`chain_priv_${suffix}`);
+    const admin = new pg.Client({ connectionString: maintenanceUrl() });
+    await admin.connect();
+    try {
+      // The reviewer's reproducer: neither NOINHERIT nor an unprivileged middle role stops
+      // `SET ROLE`, so app → middle → privileged reaches BYPASSRLS while the app role's own
+      // attributes are both false.
+      await admin.query(`DROP ROLE IF EXISTS ${app}`);
+      await admin.query(`DROP ROLE IF EXISTS ${middle}`);
+      await admin.query(`DROP ROLE IF EXISTS ${privileged}`);
+      await admin.query(`CREATE ROLE ${app} LOGIN PASSWORD 'chain-password' NOSUPERUSER NOBYPASSRLS NOINHERIT`);
+      await admin.query(`CREATE ROLE ${middle} NOSUPERUSER NOBYPASSRLS NOINHERIT`);
+      await admin.query(`CREATE ROLE ${privileged} NOSUPERUSER BYPASSRLS NOINHERIT`);
+      await admin.query(`GRANT ${middle} TO ${app}`);
+      await admin.query(`GRANT ${privileged} TO ${middle}`);
+
+      const attempt = ensureAppRole(admin, { appRole: app, appRolePassword: 'chain-password' });
+      await expect(attempt).rejects.toThrow(new RegExp(app));
+      await expect(ensureAppRole(admin, { appRole: app, appRolePassword: 'chain-password' })).rejects.toThrow(
+        new RegExp(`REVOKE ${privileged} FROM ${app}`),
+      );
+      // The message names the chain, not only the role at the end of it.
+      await expect(ensureAppRole(admin, { appRole: app, appRolePassword: 'chain-password' })).rejects.toThrow(
+        new RegExp(`${app} → ${middle} → ${privileged}`),
+      );
+    } finally {
+      await admin.query(`DROP ROLE IF EXISTS ${app}`).catch(() => {});
+      await admin.query(`DROP ROLE IF EXISTS ${middle}`).catch(() => {});
+      await admin.query(`DROP ROLE IF EXISTS ${privileged}`).catch(() => {});
+      await admin.end();
+    }
+  }, 60_000);
+
+  it('runs twice on a safe role as a CREATEROLE migration user (0.14.11 round 4)', async () => {
+    const suffix = randomBytes(4).toString('hex');
+    const migrationRole = runScoped(`mig_createrole_${suffix}`);
+    const appRole = runScoped(`safe_app_${suffix}`);
+    const admin = new pg.Client({ connectionString: maintenanceUrl() });
+    await admin.connect();
+    let limited: pg.Client | undefined;
+    try {
+      // A CREATEROLE, non-superuser migration user, as an operator may use instead of the owner.
+      // It creates the app role on the first run and finds it already safe on the second.
+      await admin.query(`DROP ROLE IF EXISTS ${migrationRole}`);
+      await admin.query(`DROP ROLE IF EXISTS ${appRole}`);
+      await admin.query(`CREATE ROLE ${migrationRole} LOGIN CREATEROLE PASSWORD 'mig-password' NOSUPERUSER NOBYPASSRLS`);
+
+      const url = new URL(maintenanceUrl());
+      url.username = migrationRole;
+      url.password = 'mig-password';
+      limited = new pg.Client({ connectionString: url.toString() });
+      await limited.connect();
+
+      await expect(ensureAppRole(limited, { appRole: appRole, appRolePassword: 'first-password' })).resolves.toBe(appRole);
+      // Nothing to reset: naming NOSUPERUSER/NOBYPASSRLS again is what a CREATEROLE user may not
+      // do, so the second run must leave them out and still set the password.
+      await expect(ensureAppRole(limited, { appRole: appRole, appRolePassword: 'second-password' })).resolves.toBe(appRole);
+
+      const { rows } = await admin.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+        'SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = $1',
+        [appRole],
+      );
+      expect(rows[0]).toEqual({ rolsuper: false, rolbypassrls: false });
+
+      const appUrl = new URL(maintenanceUrl());
+      appUrl.username = appRole;
+      appUrl.password = 'second-password';
+      const app = new pg.Client({ connectionString: appUrl.toString() });
+      await app.connect();
+      try {
+        expect((await app.query('SELECT current_user')).rows[0]).toEqual({ current_user: appRole });
+      } finally {
+        await app.end();
+      }
+    } finally {
+      await limited?.end().catch(() => {});
+      await admin.query(`DROP ROLE IF EXISTS ${appRole}`).catch(() => {});
+      await admin.query(`DROP ROLE IF EXISTS ${migrationRole}`).catch(() => {});
+      await admin.end();
+    }
+  }, 60_000);
+
   it('reports a clear error when the migration role cannot alter a superuser', async () => {
     const suffix = randomBytes(4).toString('hex');
     const migrationRole = runScoped(`mig_limited_${suffix}`);
