@@ -135,6 +135,79 @@ describe('segment estimate follows referenced publications (#599)', () => {
     expect(h.calls.filter((c) => c.name === 'artifacts.get' && c.input.artifactId === B).length).toBeGreaterThan(1);
   });
 
+  it('reads each watched segment once when focus and visibilitychange both fire (#735)', async () => {
+    render(editor);
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+
+    const reads = () => h.calls.filter((c) => c.name === 'artifacts.get' && c.input.artifactId === B).length;
+    const before = reads();
+    h.artifacts[B] = artifact(B, 'Engaged readers', 6);
+    // Returning to a tab fires both events; they are one return, not two reads.
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    await waitFor(() => expect(estimateText()).toContain('previous estimate'));
+    expect(reads()).toBe(before + 1);
+  });
+
+  it('reads once when focus arrives before visibilitychange (#735)', async () => {
+    render(editor);
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+
+    const reads = () => h.calls.filter((c) => c.name === 'artifacts.get' && c.input.artifactId === B).length;
+    const before = reads();
+    h.artifacts[B] = artifact(B, 'Engaged readers', 6);
+    // Browsers do not promise an order for the two signals of one return.
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+
+    await waitFor(() => expect(estimateText()).toContain('previous estimate'));
+    expect(reads()).toBe(before + 1);
+  });
+
+  it('still re-checks when the tab becomes visible without a focus event (#735)', async () => {
+    render(editor);
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+
+    const reads = () => h.calls.filter((c) => c.name === 'artifacts.get' && c.input.artifactId === B).length;
+    const before = reads();
+    h.artifacts[B] = artifact(B, 'Engaged readers', 7);
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    await waitFor(() => expect(estimateText()).toContain('previous estimate'));
+    expect(reads()).toBe(before + 1);
+  });
+
+  it('re-checks on a later return after the window lost focus (#735)', async () => {
+    render(editor);
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+
+    const reads = () => h.calls.filter((c) => c.name === 'artifacts.get' && c.input.artifactId === B).length;
+    // First return: both signals fire, one read.
+    const initialReads = reads();
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(reads()).toBe(initialReads + 1));
+    // Leaving and returning is a new return, so it reads again: the suppression covers one return.
+    const before = reads();
+    h.artifacts[B] = artifact(B, 'Engaged readers', 8);
+    act(() => {
+      window.dispatchEvent(new Event('blur'));
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(reads()).toBe(before + 1));
+  });
+
   it('treats a segment that lost its published version as a change', async () => {
     render(editor);
     fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));

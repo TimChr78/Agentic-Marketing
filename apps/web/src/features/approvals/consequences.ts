@@ -192,6 +192,26 @@ const asNumber = (value: unknown): number | undefined => (typeof value === 'numb
 
 export const isEmailTemplateId = (id: string | undefined) => !!id && id.startsWith('eml_');
 
+/** The purposes singleton's id shape: its type's prefix, `pur`, is how the server names it. */
+const PURPOSES_ID = /^pur_[0-9a-f]{32}$/;
+
+/**
+ * Whether content names purposes by key: `purpose` on a template or journey, `purposes` on a form,
+ * a mandate or a delivery policy's caps, and `consent` in a segment condition, including nested
+ * nodes. This is the only way an artifact refers to the purposes singleton; it never carries its id
+ * (#735).
+ */
+function namesPurpose(node: unknown): boolean {
+  if (!node || typeof node !== 'object') return false;
+  if (Array.isArray(node)) return node.some(namesPurpose);
+  for (const [key, value] of Object.entries(node)) {
+    if ((key === 'purpose' || key === 'consent') && asString(value)) return true;
+    if (key === 'purposes' && asArray(value).some((entry) => asString(entry))) return true;
+    if (namesPurpose(value)) return true;
+  }
+  return false;
+}
+
 /** The canonical source of dependency references: reviewed content, never the live version. */
 export function blockIdsIn(source: string): string[] {
   const ids = new Set<string>();
@@ -216,6 +236,15 @@ export function dependencyRefs(
     }
     out.set(id, { id, role, ...(bundleVersions[id] != null ? { bundleVersion: bundleVersions[id] } : {}) });
   };
+
+  // A purpose-keyed artifact names entries inside the purposes singleton, never its id. When the
+  // bundle carries that singleton, include it so its live version is read and a rollback warned
+  // (#735). The singleton's own content names purposes too, but it is not its own dependency.
+  if (type !== 'purposes' && namesPurpose(c)) {
+    for (const id of Object.keys(bundleVersions)) {
+      if (PURPOSES_ID.test(id)) add(id, 'Purposes');
+    }
+  }
 
   if (type === 'broadcast') {
     add(asString(c.template), 'Template');
