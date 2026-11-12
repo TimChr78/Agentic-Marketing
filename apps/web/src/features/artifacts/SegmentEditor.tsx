@@ -721,7 +721,16 @@ function useReferencedSegmentVersions(ids: string[]) {
   );
   useFocusRecheck(() => void read());
 
-  return versions;
+  // A fresh estimate names the exact reference state it counted. That answer is newer than any
+  // read still in flight, so it becomes the live state at once: re-estimating with the same rules
+  // after an import elsewhere must not label its own fresh count as previous (#771 review).
+  const adopt = useCallback((resolved: Record<string, ReferenceSnapshot> | undefined) => {
+    if (!resolved) return;
+    seq.current++;
+    setVersions((prev) => ({ ...prev, ...resolved }));
+  }, []);
+
+  return { versions, adopt };
 }
 
 function EstimatedSize({ condition }: { condition: Condition }) {
@@ -745,7 +754,7 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     () => (hasEstimate ? [...new Set([...directReferences, ...resolvedIds])] : []),
     [hasEstimate, directReferences, resolvedIds],
   );
-  const liveVersions = useReferencedSegmentVersions(watched);
+  const { versions: liveVersions, adopt } = useReferencedSegmentVersions(watched);
   const versionsKnown = watched.every((id) => id in liveVersions);
   const referencedChanged =
     !!estimate &&
@@ -788,7 +797,10 @@ function EstimatedSize({ condition }: { condition: Condition }) {
       const resolved = r.segments
         ? Object.fromEntries(r.segments.map((s) => [s.id, { version: s.version, stamp: s.stamp ?? null }]))
         : undefined;
-      if (resolved) setResolvedIds(Object.keys(resolved));
+      if (resolved) {
+        setResolvedIds(Object.keys(resolved));
+        adopt(resolved);
+      }
       setEstimate({ key, request, loading: false, count: r.count, resolved });
     } catch (e) {
       if (requestRef.current !== request || keyRef.current !== key) {

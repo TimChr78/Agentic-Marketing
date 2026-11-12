@@ -109,6 +109,9 @@ export const previewSegment = defineCommand({
   handler: async (input, ctx) => {
     let condition = input.condition;
     let listSegment: string | undefined;
+    // The resolved segments are artifact metadata: only a caller that may read artifacts learns
+    // their published version and membership stamp. The count itself still needs profiles:read.
+    const canReadArtifacts = ctx.principal.permissions.has('artifacts:read');
     if (!condition) {
       if (!input.artifactId) throw new AppError('invalid_input', 'Pass a segment artifactId or a condition.');
       const content = await segmentContent(ctx, input.artifactId, input.version);
@@ -139,7 +142,7 @@ export const previewSegment = defineCommand({
         count: row?.n ?? 0,
         sample: sample.map((r) => r.profileId),
         tookMs: Date.now() - started,
-        segments: [{ id: listSegment, version: artifact?.version ?? 0, stamp: stamps.get(listSegment) ?? null }],
+        segments: canReadArtifacts ? [{ id: listSegment, version: artifact?.version ?? 0, stamp: stamps.get(listSegment) ?? null }] : [],
       };
     }
     if (!condition) throw new AppError('invalid_input', 'The segment has no condition.');
@@ -172,7 +175,7 @@ export const previewSegment = defineCommand({
       count: members.size,
       sample: sample.rows.map((r) => r.profile_id),
       tookMs: Date.now() - started,
-      segments: resolved.map((s) => ({ ...s, stamp: stamps.get(s.id) ?? null })),
+      segments: canReadArtifacts ? resolved.map((s) => ({ ...s, stamp: stamps.get(s.id) ?? null })) : [],
     };
   },
 });

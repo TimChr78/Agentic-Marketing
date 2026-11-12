@@ -153,6 +153,32 @@ describe('segment estimate follows referenced publications (#599)', () => {
     await waitFor(() => expect(estimateText()).toContain('previous estimate'));
   });
 
+  it('shows a fresh Estimate again result as current after an import elsewhere (#771 review)', async () => {
+    // B is a static list: an import changes who it holds without any published version moving.
+    h.artifacts[B] = artifact(B, 'Partner list', 3, 'static');
+    h.listStamp = '2026-11-12T09:00:00.000000Z';
+    h.resolved = [{ id: B, version: 3, stamp: h.listStamp }];
+
+    render(editor);
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+
+    // An import elsewhere moves the list to a newer stamp; the window never regains focus, so the
+    // watcher still holds the old one. "Estimate again" answers with the new stamp.
+    h.listStamp = '2026-11-12T09:05:00.000000Z';
+    h.resolved = [{ id: B, version: 3, stamp: h.listStamp }];
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate again' }));
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+    expect(estimateText()).not.toContain('previous estimate');
+
+    // A genuinely later import is still noticed, so the fresh result does not pin the editor.
+    h.listStamp = '2026-11-12T09:10:00.000000Z';
+    h.resolved = [{ id: B, version: 3, stamp: h.listStamp }];
+    act(() => window.dispatchEvent(new Event('focus')));
+    await waitFor(() => expect(estimateText()).toContain('previous estimate'));
+    expect(estimateText()).toContain('42 people');
+  });
+
   it('turns the estimate into a previous estimate when a referenced list gains members (#771)', async () => {
     // B is a static list: an import changes who it holds without any published version moving.
     h.artifacts[B] = artifact(B, 'Partner list', 3, 'static');
