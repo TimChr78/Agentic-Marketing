@@ -76,8 +76,12 @@ export function captureClickIds(search: string, cookies: string, now = Date.now(
     const k = trimmed.slice(0, eq);
     const v = trimmed.slice(eq + 1);
     if (!v || !CLICK_VALUE.test(v)) continue;
-    if ((k === '_fbc' && !out.fbc) || k === '_fbp' || k === '_ttp') out[k.slice(1) as 'fbc' | 'fbp' | 'ttp'] = v;
-    else if (k === '_epik' && !out.epik) out.epik = v;
+    // First cookie wins for every conversion cookie: a browser can expose a legacy one at `/` and
+    // a newer one at a narrower path, and picking by document order was arbitrary (#754).
+    if (k === '_fbc' || k === '_fbp' || k === '_ttp') {
+      const field = k.slice(1) as 'fbc' | 'fbp' | 'ttp';
+      if (!out[field]) out[field] = v;
+    } else if (k === '_epik' && !out.epik) out.epik = v;
   }
   return out;
 }
