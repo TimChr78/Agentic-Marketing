@@ -1,5 +1,5 @@
 import { artifactTypes, type CampaignDefinition } from '@agentic-marketing/artifacts';
-import { goalEventsFor, IDENTITY_FIELD_BYTES, type IdentityMap, type IdentityPair, publishedCampaigns } from '@agentic-marketing/campaigns';
+import { goalEventsFor, type IdentityMap, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -12,6 +12,7 @@ import {
   type Output,
   revenueExpressions,
 } from './compile';
+import { identityQueryParams } from './identityParams';
 import type { DimensionId, MeasureDef, Unit } from './registry';
 
 // Campaign evaluation (#66) is a small SQL builder of its own. Recipients come from
@@ -217,51 +218,6 @@ export interface CampaignBuildInput {
 
 const alias = (prefix: string, id: string) => `${prefix}_${id.replace(/[^A-Za-z0-9_]/g, '_')}`;
 
-interface IdentityChunk {
-  keys: string[];
-  profiles: string[];
-  kinds: string[];
-}
-
-/**
- * Splits the three identity arrays into chunks whose serialised fields stay under ClickHouse's
- * per-field limit. Chunking keeps the three arrays index-aligned, which `arrayConcat` restores.
- */
-function identityChunks(pairs: readonly IdentityPair[]): IdentityChunk[] {
-  const chunks: IdentityChunk[] = [];
-  let chunk: IdentityChunk = { keys: [], profiles: [], kinds: [] };
-  let keyBytes = 2;
-  let profileBytes = 2;
-  let kindBytes = 2;
-  const flush = () => {
-    if (!chunk.keys.length) return;
-    chunks.push(chunk);
-    chunk = { keys: [], profiles: [], kinds: [] };
-    keyBytes = 2;
-    profileBytes = 2;
-    kindBytes = 2;
-  };
-  for (const pair of pairs) {
-    const key = Buffer.byteLength(JSON.stringify(pair.key)) + 1;
-    const profile = Buffer.byteLength(JSON.stringify(pair.profileId)) + 1;
-    const kind = Buffer.byteLength(JSON.stringify(pair.kind)) + 1;
-    if (
-      chunk.keys.length &&
-      (keyBytes + key > IDENTITY_FIELD_BYTES || profileBytes + profile > IDENTITY_FIELD_BYTES || kindBytes + kind > IDENTITY_FIELD_BYTES)
-    )
-      flush();
-    chunk.keys.push(pair.key);
-    chunk.profiles.push(pair.profileId);
-    chunk.kinds.push(pair.kind);
-    keyBytes += key;
-    profileBytes += profile;
-    kindBytes += kind;
-  }
-  flush();
-  if (!chunks.length) chunks.push({ keys: [], profiles: [], kinds: [] });
-  return chunks;
-}
-
 /** Compiles the campaign measures into the same shape analytics.query already consumes. */
 export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   // One entry per campaign, paired by campaign id: the member map is member-aligned, so a campaign
@@ -273,17 +229,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   // so unrelated merges elsewhere in the workspace cannot push it over the bound.
   const identity = input.identity?.overLimit ? [] : (input.identity?.pairs ?? []);
   // Each array is split below ClickHouse's per-field limit; the CTE concatenates the parts back.
-  const identityChunked = identityChunks(identity);
-  const identityArray = (field: 'keys' | 'profiles' | 'kinds') =>
-    identityChunked.length === 1
-      ? `{identity_${field}_0:Array(String)}`
-      : `arrayConcat(${identityChunked.map((_, i) => `{identity_${field}_${i}:Array(String)}`).join(', ')})`;
-  const identityParams: Record<string, unknown> = {};
-  identityChunked.forEach((chunk, i) => {
-    identityParams[`identity_keys_${i}`] = chunk.keys;
-    identityParams[`identity_profiles_${i}`] = chunk.profiles;
-    identityParams[`identity_kinds_${i}`] = chunk.kinds;
-  });
+  const identityParams = identityQueryParams(identity);
   const params: Record<string, unknown> = {
     ws: input.workspaceId,
     tz: input.timeZone,
@@ -294,8 +240,8 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
     campaign_map_ids: input.queryMap.map.memberCampaignIds,
     campaign_window_ids: [...windows.keys()],
     campaign_attr_days: [...windows.values()],
-    ...identityParams,
-    identity_count: identity.length,
+    ...identityParams.params,
+    identity_count: identityParams.count,
   };
   const conversion = revenueExpressions(input.conversionRules, params);
   const goalPairs = input.queryMap.scopes.flatMap((s) => s.goalEvents.map((event) => ({ campaignId: s.id, event })));
@@ -354,9 +300,9 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   // survivor. With an empty map it contributes no rows and the joins fall back to the stored ids.
   const identityMap = `identity AS (
     SELECT
-      arrayElement(${identityArray('keys')}, number + 1) AS identity_key,
-      arrayElement(${identityArray('profiles')}, number + 1) AS profile_id,
-      arrayElement(${identityArray('kinds')}, number + 1) AS kind
+      arrayElement(${identityParams.keys}, number + 1) AS identity_key,
+      arrayElement(${identityParams.profiles}, number + 1) AS profile_id,
+      arrayElement(${identityParams.kinds}, number + 1) AS kind
     FROM numbers({identity_count:UInt32})
   )`;
 

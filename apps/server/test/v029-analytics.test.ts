@@ -531,6 +531,71 @@ describe('named reports', () => {
     expect(funnel.basis).toBe('published');
   });
 
+  it('reports reach, not an invented zero, when migration moves people into a later step (#591)', async () => {
+    const api = t.api(owner);
+    const def = (nodes: unknown[]) => ({ purpose: 'marketing_email', nodes });
+    const created = await api.call('artifacts.create', {
+      type: 'journey',
+      name: 'Migrated into a later step',
+      content: def([
+        { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+        { id: 'alpha', kind: 'wait', label: 'Alpha', config: { duration: 'P1D' } },
+        { id: 'beta', kind: 'wait', label: 'Beta', config: { duration: 'P1D' } },
+        { id: 'exit', kind: 'exit', label: 'Exit', config: {} },
+      ]),
+    });
+    await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'v1' });
+    // The same straight line published again: migration moves participants to v2 without a new
+    // entry, so v2's later step can outnumber its entry step.
+    await api.call('artifacts.updateDraft', {
+      artifactId: created.artifactId,
+      content: def([
+        { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+        { id: 'alpha', kind: 'wait', label: 'Alpha', config: { duration: 'P2D' } },
+        { id: 'beta', kind: 'wait', label: 'Beta', config: { duration: 'P1D' } },
+        { id: 'exit', kind: 'exit', label: 'Exit', config: {} },
+      ]),
+    });
+    await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'v2' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: created.artifactId,
+        version: 2,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // Ten v2 entrants walk alpha then beta.
+    for (let i = 0; i < 10; i++) {
+      const p = person();
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'alpha', 'step', 1);
+      add(p, 'beta', 'step', 2);
+    }
+    // Ten more people migrated into v2 at beta, with no v2 entry event.
+    for (let i = 0; i < 10; i++) add(person(), 'beta', 'step', 1);
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: created.artifactId, from: FROM, to: TO });
+    expect(funnel.entered).toBe(10);
+    expect(funnel.steps.map((s) => [s.step, s.reached])).toEqual([
+      ['alpha', 10],
+      ['beta', 20],
+    ]);
+    // Beta outnumbers the entry step. There is no drop-off chain to report, and zero would be a
+    // fabricated number: the server falls back to reach.
+    expect(funnel.basis).toBe('reach');
+    expect(funnel.steps.every((s) => s.dropOff === null && s.dropOffRate === null)).toBe(true);
+    expect(funnel.meta.notes.some((note) => note.includes('migration'))).toBe(true);
+  });
+
   it('reports reach, not a negative drop-off, for a split that reconverges (#591)', async () => {
     const api = t.api(owner);
     const journey = (

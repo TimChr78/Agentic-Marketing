@@ -47,17 +47,19 @@ export function useCampaignControls(campaigns: CampaignMembership[]) {
   }, [key]);
 }
 
-const rateText = (rate: number, entered: number) => (entered > 0 ? pct(rate) : 'Unavailable');
+const rateText = (rate: number | null, entered: number | null) =>
+  rate === null || entered === null || entered <= 0 ? 'Unavailable' : pct(rate);
 
-function ArmCells({ arm }: { arm: HoldoutResult['control'] }) {
+function ArmCells({ arm, suppressed }: { arm: HoldoutResult['control']; suppressed: boolean }) {
+  const count = (value: number | null) => (suppressed ? 'Suppressed' : value === null ? 'Unavailable' : value.toLocaleString());
   return (
     <>
-      <Td align="right">{arm.entered.toLocaleString()}</Td>
-      <Td align="right">{arm.converted.toLocaleString()}</Td>
-      <Td align="right">{rateText(arm.conversionRate, arm.entered)}</Td>
-      <Td align="right">{arm.unsubscribed.toLocaleString()}</Td>
-      <Td align="right">{rateText(arm.unsubscribeRate, arm.entered)}</Td>
-      <Td align="right">{moneyMap(arm.revenue)}</Td>
+      <Td align="right">{count(arm.entered)}</Td>
+      <Td align="right">{count(arm.converted)}</Td>
+      <Td align="right">{suppressed ? 'Suppressed' : rateText(arm.conversionRate, arm.entered)}</Td>
+      <Td align="right">{count(arm.unsubscribed)}</Td>
+      <Td align="right">{suppressed ? 'Suppressed' : rateText(arm.unsubscribeRate, arm.entered)}</Td>
+      <Td align="right">{suppressed ? 'Suppressed' : moneyMap(arm.revenue)}</Td>
     </>
   );
 }
@@ -83,7 +85,8 @@ function CampaignHoldoutResult({
     );
   if (loading || !result) return <DetailSkeleton label="Loading the campaign holdout" />;
 
-  const verdict = holdoutVerdict(result);
+  const suppressed = result.suppressed;
+  const verdict = suppressed ? { label: 'Suppressed', tone: 'warn' as const } : holdoutVerdict(result);
   const interval = result.ci95 ? `${points(result.ci95[0])} to ${points(result.ci95[1])}` : 'Unavailable';
   const assignmentPeriod =
     result.from && result.to
@@ -124,22 +127,28 @@ function CampaignHoldoutResult({
               <Td>
                 <span className="font-medium text-fg">Control</span>
               </Td>
-              <ArmCells arm={result.control} />
+              <ArmCells arm={result.control} suppressed={suppressed} />
             </Tr>
             <Tr>
               <Td>
                 <span className="font-medium text-fg">Treatment</span>
               </Td>
-              <ArmCells arm={result.treatment} />
+              <ArmCells arm={result.treatment} suppressed={suppressed} />
             </Tr>
           </tbody>
         </Table>
       </div>
 
-      <p className="mt-3 text-[12px] leading-[18px] text-fg-2">
-        <strong>{points(result.absoluteLift)}</strong> absolute lift · {signedPercent(result.relativeLift)} relative lift · 95% interval{' '}
-        {interval} · {result.minSampleSizeMet ? 'Minimum sample met' : 'Insufficient sample'}
-      </p>
+      {suppressed ? (
+        <p className="mt-3 text-[12px] leading-[18px] text-fg-2">
+          <strong>Suppressed</strong> · the k={result.k} anonymity rule hides the counts, rates, revenue and lift.
+        </p>
+      ) : (
+        <p className="mt-3 text-[12px] leading-[18px] text-fg-2">
+          <strong>{points(result.absoluteLift!)}</strong> absolute lift · {signedPercent(result.relativeLift)} relative lift · 95% interval{' '}
+          {interval} · {result.minSampleSizeMet ? 'Minimum sample met' : 'Insufficient sample'}
+        </p>
+      )}
       <p className="mt-1 text-[12px] leading-[18px] text-muted">{result.note}</p>
       <p className="mt-1 text-[12px] leading-[18px] text-muted">
         Assignment period: {assignmentPeriod}. Conversion events follow the campaign attribution window.

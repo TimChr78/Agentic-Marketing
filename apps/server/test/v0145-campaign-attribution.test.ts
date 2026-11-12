@@ -475,8 +475,8 @@ describe('one identity resolution for the headline and the holdout card (#590)',
 
     const holdout = await api().call('campaigns.holdoutResult', { campaignId: campaignM });
     expect(summary.headline.converters).toBe(1);
-    expect(holdout.control.converted + holdout.treatment.converted).toBe(1);
-    expect(summary.headline.converters).toBe(holdout.control.converted + holdout.treatment.converted);
+    expect(holdout.control.converted! + holdout.treatment.converted!).toBe(1);
+    expect(summary.headline.converters).toBe(holdout.control.converted! + holdout.treatment.converted!);
     // The per-member row reads conversions the same way as the headline.
     expect(summary.members.map((m) => m.converters)).toEqual([1]);
   });

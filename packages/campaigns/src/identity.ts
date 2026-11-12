@@ -47,17 +47,13 @@ export interface IdentityMap {
 export const MAX_CAMPAIGN_RECIPIENTS = 100_000;
 
 /**
- * The most one recipient can add to the map: a merged-away profile, plus the two identifier kinds
- * an event can resolve by (user id and anonymous id). At three pairs per recipient the bound is the
- * largest campaign the platform supports, not an arbitrary transport number.
+ * At most this many pairs travel to ClickHouse as parameter arrays. The bound is stated in pairs,
+ * not recipients: one recipient can contribute more than three pairs (several anonymous ids,
+ * several user ids, a merged-away profile and its merge ancestors), so a per-recipient multiplier
+ * would understate the map. A campaign-scoped map cannot exceed it through unrelated workspace
+ * growth, because scoping happens before the bound is applied.
  */
-export const IDENTITY_PAIRS_PER_RECIPIENT = 3;
-
-/**
- * At most this many pairs travel to ClickHouse as parameter arrays. A campaign-scoped map cannot
- * exceed it through unrelated workspace growth, and the largest supported campaign fits it.
- */
-export const IDENTITY_MAP_LIMIT = MAX_CAMPAIGN_RECIPIENTS * IDENTITY_PAIRS_PER_RECIPIENT;
+export const IDENTITY_MAP_LIMIT = 300_000;
 
 /**
  * The byte bound that goes with the pair bound: at 36-character ids the worst case is
@@ -65,6 +61,26 @@ export const IDENTITY_MAP_LIMIT = MAX_CAMPAIGN_RECIPIENTS * IDENTITY_PAIRS_PER_R
  * body (`use_multipart_params_auto`), which is bounded by request size rather than by count.
  */
 export const IDENTITY_MAP_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * The most distinct recipient profile ids one campaign-scoped identity lookup reads. Reading one
+ * more id than `IDENTITY_MAP_LIMIT` is enough to prove the map would exceed its pair bound: each id
+ * can contribute at least one pair, so above the bound resolution is skipped rather than attempted.
+ * The cap is in ids only for this Postgres read; the map's own bound is in pairs and bytes above.
+ */
+export const IDENTITY_SCOPE_PROFILE_LIMIT = IDENTITY_MAP_LIMIT;
+
+/**
+ * The scope row cap, overridable in tests so the over-bound path does not need 300,000 rows. The
+ * value is read per call; production never sets it.
+ */
+export function identityScopeProfileLimit(): number {
+  const override = Number(process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT);
+  return Number.isInteger(override) && override > 0 ? override : IDENTITY_SCOPE_PROFILE_LIMIT;
+}
+
+/** The all-or-nothing map a caller ships when resolution was skipped at the bound. */
+export const overLimitIdentityMap = (limit = IDENTITY_MAP_LIMIT): IdentityMap => ({ pairs: [], overLimit: true, limit });
 
 /**
  * ClickHouse rejects an HTTP form field longer than `http_max_field_value_size` (128 KiB on the

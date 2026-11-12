@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { clearAnalyticsCache } from '@agentic-marketing/analytics';
 import type { BusEvent, MessageEvent } from '@agentic-marketing/events';
 import { holdoutHashVersion } from '@agentic-marketing/journeys';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -43,6 +44,8 @@ const pF = profileId();
 const extrasA = Array.from({ length: 4 }, profileId);
 const extrasB = Array.from({ length: 4 }, profileId);
 const extrasC = Array.from({ length: 4 }, profileId);
+// Holdout fillers keep both arms at k=5 without adding conversions or merges to the measured map.
+const fillers = Array.from({ length: 10 }, profileId);
 
 const stamp = Date.now();
 const api = () => t.api(owner, ws);
@@ -124,11 +127,11 @@ async function createCampaign(name: string, memberId: string) {
   return created.artifactId;
 }
 
-async function assign(profile: string, campaignId: string) {
+async function assign(profiles: string[], campaignId: string, arm: 'control' | 'treatment') {
   await t.srv.db.admin.query(
     `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm, assigned_at)
-     VALUES ($1, 'campaign', $2, $3, $4, 'treatment', $5)`,
-    [ws, campaignId, holdoutHashVersion(50), profile, ASSIGNED_AT],
+     SELECT $1, 'campaign', $2, $3, x, $4, $5 FROM unnest($6::text[]) AS x`,
+    [ws, campaignId, holdoutHashVersion(50), arm, ASSIGNED_AT, profiles],
   );
 }
 
@@ -201,7 +204,7 @@ beforeAll(async () => {
 
   await t.srv.db.admin.query(`INSERT INTO profiles (workspace_id, id) SELECT $1, p FROM unnest($2::text[]) AS p`, [
     ws,
-    [pA, pB, pC, pD, pE, pF, ...extrasA, ...extrasB, ...extrasC],
+    [pA, pB, pC, pD, pE, pF, ...extrasA, ...extrasB, ...extrasC, ...fillers],
   ]);
   // A → B, C → D and E → F: the recipient's historical profile merged into the survivor.
   await t.srv.db.admin.query(`UPDATE profiles SET merged_into = $3 WHERE workspace_id = $1 AND id = $2`, [ws, pA, pB]);
@@ -223,9 +226,14 @@ beforeAll(async () => {
     conversion(pF),
   ]);
 
-  await assign(pB, campaignA);
-  await assign(pD, campaignB);
-  await assign(pF, campaignC);
+  // Five people per arm so the k=5 floor does not hide the holdout this file measures (#590).
+  // The fillers never convert and never merge, so they cannot change the identity assertions.
+  await assign(fillers.slice(0, 5), campaignA, 'control');
+  await assign([pB, ...fillers.slice(5, 9)], campaignA, 'treatment');
+  await assign(fillers.slice(5, 10), campaignB, 'control');
+  await assign([pD, ...fillers.slice(0, 4)], campaignB, 'treatment');
+  await assign(fillers.slice(0, 5), campaignC, 'control');
+  await assign([pF, ...fillers.slice(5, 9)], campaignC, 'treatment');
 }, 180_000);
 
 afterAll(() => t?.close());
@@ -251,7 +259,7 @@ describe('a conversion after a merge (#590)', () => {
 
     const holdout = await api().call('campaigns.holdoutResult', { campaignId: campaignA });
     expect(holdout.treatment.converted).toBe(1);
-    expect(summary.headline.converters).toBe(holdout.control.converted + holdout.treatment.converted);
+    expect(summary.headline.converters).toBe(holdout.control.converted! + holdout.treatment.converted!);
   });
 });
 
@@ -281,14 +289,14 @@ describe('a workspace with thousands of unrelated merges (#590)', () => {
 
     const holdout = await api().call('campaigns.holdoutResult', { campaignId: campaignB });
     expect(holdout.treatment.converted).toBe(1);
-    expect(summary.headline.converters).toBe(holdout.control.converted + holdout.treatment.converted);
+    expect(summary.headline.converters).toBe(holdout.control.converted! + holdout.treatment.converted!);
   });
 });
 
 describe('a holdout and historical profile ids (#590)', () => {
   it('counts an event stored only under the merged-away profile', async () => {
     const holdout = await api().call('campaigns.holdoutResult', { campaignId: campaignB });
-    expect(holdout.treatment.entered).toBe(1);
+    expect(holdout.treatment.entered).toBe(5);
     expect(holdout.treatment.converted).toBe(1);
   });
 });
@@ -311,4 +319,120 @@ describe('a person reached as two profiles (#590)', () => {
     expect(summary.headline.recipients).toBe(5);
     expect(summary.members[0]).toMatchObject({ sent: 5, converters: 1 });
   });
+});
+
+// Sol's re-check of #590 found the member breakdown still shipped one unchunked identity array.
+// ClickHouse rejects a form field over 128 KiB, so 4,000 recipients with a mapped identifier each
+// (about 260 KB of keys) failed with HTTP 500 while the headline, which already chunked, succeeded.
+const BULK_RECIPIENTS = 4_000;
+
+describe('a campaign too large for one identity field (#590)', () => {
+  it('chunks the identity arrays, so 4,000 mapped recipients succeed and the rows agree', async () => {
+    const broadcast = (
+      await api().call('artifacts.create', {
+        type: 'broadcast',
+        name: 'Bulk broadcast',
+        content: { template, segment },
+      })
+    ).artifactId;
+    await api().call('artifacts.requestPublish', { artifactId: broadcast, note: 'bulk identity' });
+    const campaign = await createCampaign('Bulk campaign', broadcast);
+    await api().call('artifacts.requestPublish', { artifactId: campaign, note: 'bulk identity' });
+
+    const first = 900_001;
+    const last = first + BULK_RECIPIENTS - 1;
+    const profile = (g: number) => `prf_${g.toString(16).padStart(32, '0')}`;
+    await t.srv.db.admin.query(
+      `INSERT INTO profiles (workspace_id, id)
+       SELECT $1, 'prf_' || lpad(to_hex(g), 32, '0') FROM generate_series($2::int, $3::int) AS g ON CONFLICT DO NOTHING`,
+      [ws, first, last],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO identifiers (workspace_id, type, value, profile_id)
+       SELECT $1, 'user_id', 'bulk-user-' || g, 'prf_' || lpad(to_hex(g), 32, '0')
+       FROM generate_series($2::int, $3::int) AS g ON CONFLICT DO NOTHING`,
+      [ws, first, last],
+    );
+    const events: MessageEvent[] = Array.from({ length: BULK_RECIPIENTS }, (_, i) => {
+      const g = first + i;
+      return {
+        workspaceId: ws,
+        messageId: `msg_bulk_${g}`,
+        eventId: `bulk:${g}:sent`,
+        type: 'sent' as const,
+        at: SEND_AT,
+        profileId: profile(g),
+        channel: 'email',
+        purpose: 'marketing_email',
+        provider: 'log',
+        templateId: template,
+        templateVersion: 1,
+        journeyId: broadcast,
+        variant: '',
+        reason: '',
+        url: '',
+      };
+    });
+    await t.srv.events.insertMessageEvents(events);
+    clearAnalyticsCache();
+
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaign, from: FROM, to: TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+    expect(summary.headline.recipients).toBe(BULK_RECIPIENTS);
+    expect(summary.headline.emailSent).toBe(BULK_RECIPIENTS);
+    expect(summary.members).toHaveLength(1);
+    expect(summary.members[0]).toMatchObject({ sent: BULK_RECIPIENTS, suppressed: false });
+    expect(summary.members[0]!.sent).toBe(summary.headline.emailSent);
+  }, 180_000);
+});
+
+describe('the campaign recipient scope (#590)', () => {
+  it('skips resolution above the bound and reports the shared note on the summary and the holdout', async () => {
+    // The production bound is the identity map's pair bound (300,000). A test bound keeps the
+    // over-bound path fast without inserting that many rows.
+    process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT = '3';
+    try {
+      clearAnalyticsCache();
+      const summary = await api().call('analytics.campaignSummary', { campaignId: campaignB, from: FROM, to: TO });
+      expect(summary.state).toBe('measured');
+      if (summary.state !== 'measured') return;
+      expect(summary.meta.notes.some((note) => note.includes('not identity-resolved'))).toBe(true);
+      // The scope is skipped, not partially applied: stored profile ids still count.
+      expect(summary.headline.recipients).toBe(5);
+      expect(summary.members[0]).toMatchObject({ sent: 5, converters: 1, suppressed: false });
+
+      // The campaign-wide holdout reads the same bound: ten people in each arm is above k, but the
+      // twenty assignments are over the test scope, so it also ships no map and carries the note.
+      const hash = holdoutHashVersion(50);
+      const first = 910_001;
+      const last = first + 9;
+      await t.srv.db.admin.query(
+        `INSERT INTO profiles (workspace_id, id)
+         SELECT $1, 'prf_' || lpad(to_hex(g), 32, '0') FROM generate_series($2::int, $3::int) AS g ON CONFLICT DO NOTHING`,
+        [ws, first, last],
+      );
+      const profile = (g: number) => `prf_${g.toString(16).padStart(32, '0')}`;
+      const control = Array.from({ length: 5 }, (_, i) => profile(first + i));
+      const treatment = Array.from({ length: 5 }, (_, i) => profile(first + 5 + i));
+      await t.srv.db.admin.query(
+        `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm, assigned_at)
+         SELECT $1, 'campaign', $2, $3, x, 'control', $4 FROM unnest($5::text[]) AS x`,
+        [ws, campaignC, hash, ASSIGNED_AT, control],
+      );
+      await t.srv.db.admin.query(
+        `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm, assigned_at)
+         SELECT $1, 'campaign', $2, $3, x, 'treatment', $4 FROM unnest($5::text[]) AS x`,
+        [ws, campaignC, hash, ASSIGNED_AT, treatment],
+      );
+
+      const holdout = await api().call('campaigns.holdoutResult', { campaignId: campaignC });
+      expect(holdout.control.entered).toBe(10);
+      expect(holdout.treatment.entered).toBe(10);
+      expect(holdout.suppressed).toBe(false);
+      expect(holdout.note).toContain('not identity-resolved');
+    } finally {
+      delete process.env.CAMPAIGN_IDENTITY_SCOPE_LIMIT;
+    }
+  }, 60_000);
 });

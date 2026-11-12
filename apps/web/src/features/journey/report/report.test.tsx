@@ -706,4 +706,33 @@ describe('journey report states (#507)', () => {
     await waitFor(() => expect(calls('analytics.journeyFunnel')).toHaveLength(2));
     expect(calls('journeys.holdoutResult')).toHaveLength(1);
   });
+
+  it('shows a suppressed holdout as hidden counts and the k line, never as zero (#590)', async () => {
+    h.artifact = artifact({
+      version: {
+        number: 1,
+        state: 'published',
+        content: { purpose: 'marketing', goal: 'Signup', controlGroup: { percent: 10, minSampleSize: 200 }, nodes: linearNodes() },
+      },
+    });
+    h.holdout = {
+      ...holdout(),
+      k: 5,
+      suppressed: true,
+      control: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+      treatment: { entered: null, converted: null, unsubscribed: null, conversionRate: null, unsubscribeRate: null },
+      absoluteLift: null,
+      relativeLift: null,
+      ci95: null,
+      verdict: 'not_enough_data',
+      note: 'Suppressed: fewer than k=5 people in the control or treatment arm, so counts, rates and lift are hidden.',
+    };
+    renderReport();
+    await screen.findByText('Entered in period');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Holdout' }));
+    await waitFor(() => expect(calls('journeys.holdoutResult')).toHaveLength(1));
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(1);
+    expect(screen.getByText(/Groups smaller than k=5 are hidden/)).toBeTruthy();
+  });
 });

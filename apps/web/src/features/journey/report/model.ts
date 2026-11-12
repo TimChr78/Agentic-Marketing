@@ -15,7 +15,8 @@ export const SUPPRESSED_NOTICE = 'Some step counts are suppressed. Step reach is
 export const NONMONOTONE_NOTICE = 'Step reach is not monotone. Step reach is not a cohort funnel.';
 export const VERSION_NOTICE = 'Saved versions differ, so version-specific counts are unavailable. Step reach is not a cohort funnel.';
 export const EMPTY_NOTICE = 'No participants entered this period. Step reach is not a cohort funnel.';
-export const REACH_NOTICE = 'This journey is not a straight line, so there is no drop-off. Drop-off is shown only for linear journeys.';
+export const REACH_NOTICE =
+  'The server reports reach, not a drop-off chain. Drop-off is shown only for linear journeys. A linear journey whose step counts rise (for example after a migration) is reach too.';
 
 export type GateReason =
   | 'reach'

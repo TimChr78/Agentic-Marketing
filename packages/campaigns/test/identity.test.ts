@@ -2,11 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   IDENTITY_MAP_LIMIT,
   IDENTITY_MAP_MAX_BYTES,
-  IDENTITY_PAIRS_PER_RECIPIENT,
+  IDENTITY_SCOPE_PROFILE_LIMIT,
   type IdentityPair,
   identityMapOf,
   MAX_CAMPAIGN_RECIPIENTS,
   mergeComponent,
+  overLimitIdentityMap,
   survivorOf,
 } from '../src/identity';
 
@@ -53,21 +54,25 @@ describe('identity map', () => {
     expect(map.limit).toBe(IDENTITY_MAP_LIMIT);
   });
 
-  it('bounds the map by the largest campaign the platform supports (#590)', () => {
-    // The bound is the campaign size, not a transport constant: 100,000 recipients (the
-    // journeys.enrollSegment cap) times at most a merged profile and its two identifiers each.
-    expect(IDENTITY_MAP_LIMIT).toBe(MAX_CAMPAIGN_RECIPIENTS * IDENTITY_PAIRS_PER_RECIPIENT);
+  it('bounds the map in pairs, not recipients (#590)', () => {
+    // A recipient can contribute more than three pairs (several anonymous ids, merge ancestors), so
+    // the bound is the pair count itself and must not be derived from the audience size.
+    expect(IDENTITY_MAP_LIMIT).toBeGreaterThan(MAX_CAMPAIGN_RECIPIENTS);
+    // The scope read is capped at the same pair bound: one id contributes at least one pair.
+    expect(IDENTITY_SCOPE_PROFILE_LIMIT).toBe(IDENTITY_MAP_LIMIT);
 
     const pairs = Array.from({ length: 6 }, (_, i) => pair(`anon_${i}`, `prf_${i}`));
     const map = identityMapOf(pairs, 5);
     expect(map.pairs).toHaveLength(6);
     expect(map.overLimit).toBe(true);
     expect(map.limit).toBe(5);
+
+    expect(overLimitIdentityMap(7)).toEqual({ pairs: [], overLimit: true, limit: 7 });
   });
 
-  it('is over its byte bound at the largest campaign and stays under it in the worst case', () => {
-    // 300,000 pairs of 36-character keys and profile ids is 300,000 * (36 + 36 + 8) bytes.
-    const worstCase = MAX_CAMPAIGN_RECIPIENTS * IDENTITY_PAIRS_PER_RECIPIENT * (36 + 36 + 8);
+  it('keeps the pair bound inside its byte budget', () => {
+    // The pair bound of 300,000 at 36-character keys and profile ids is 300,000 * (36 + 36 + 8).
+    const worstCase = IDENTITY_MAP_LIMIT * (36 + 36 + 8);
     expect(worstCase).toBeLessThanOrEqual(IDENTITY_MAP_MAX_BYTES);
 
     const long = 'x'.repeat(48 * 1024);
