@@ -3,7 +3,7 @@ import { AppError, canonicalJson, hashValue } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { author, requestPublish, updateDraft, validateContent } from './commands';
+import { author, lockArtifacts, requestPublish, updateDraft, validateContent } from './commands';
 import { diffJson } from './diff';
 import { type ArtifactType, artifactTypeEnum, artifactTypes, isSingleton } from './types';
 
@@ -366,9 +366,19 @@ export const importConfig = defineCommand({
           `A bundle can contain only one ${type}, because a workspace has one. It contains ${ids.join(' and ')}; keep one and edit it with artifacts.updateDraft.`,
         );
 
-    // Resolve every existing artifact this bundle touches once, before the writes below.
+    // Resolve every existing artifact this bundle touches, then lock them all in id order before
+    // the first write: two imports of the same artifacts in opposite orders would otherwise
+    // deadlock (#871).
     const resolve = (item: { id: string; type: string }) =>
       byId.get(item.id) ?? (isSingleton(item.type) ? singletons.get(item.type as ArtifactType) : undefined);
+    if (!input.dryRun) {
+      const affected = new Set<string>();
+      for (const item of input.bundle.artifacts) {
+        const current = resolve(item);
+        if (current) affected.add(current.id);
+      }
+      await lockArtifacts(ctx, [...affected]);
+    }
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
