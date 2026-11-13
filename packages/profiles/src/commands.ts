@@ -330,7 +330,7 @@ export const profileEvents = defineCommand({
   name: 'profiles.events',
   title: 'A person’s events',
   description:
-    'Events of a person across all their anonymous and user ids, newest first. Page with `before`, `beforeId`, `beforeName` and `beforeAnonymousId` from nextCursor, the full replacing key; a cursor without the name and anonymous id still works and may repeat a tied row rather than skip it.',
+    'Events of a person across all their anonymous and user ids, newest first. Page with `before`, `beforeId`, `beforeName` and `beforeAnonymousId` from nextCursor, the full replacing key; a cursor without the name and anonymous id still works, uses the old `(timestamp, eventId)` order, and may skip a row that ties on both rather than repeat a page forever.',
   input: z.object({
     profileId: ProfileId,
     limit: z.number().int().min(1).max(500).default(100),
