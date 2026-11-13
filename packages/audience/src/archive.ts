@@ -17,7 +17,7 @@ import { and, asc, eq, sql } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import { type DefaultTreeAdapterTypes, defaultTreeAdapter, parse, serialize, type TreeAdapter } from 'parse5';
 import { z } from 'zod';
-import { type ComputedEmailParts, cachedEmailParts } from './emailPartsCache';
+import { type ComputedEmailParts, cachedEmailParts, EMAIL_PARTS_FAILURE_TTL_MS } from './emailPartsCache';
 
 export { clearEmailPartsCache, emailPartsCacheStats } from './emailPartsCache';
 
@@ -1110,9 +1110,9 @@ function computeEmailParts(html: string): ComputedEmailParts {
     // `<` keeps the rules while making `</style>` (and anything after it) impossible to inject.
     styles: styles.join('\n').replace(/</g, '\\3c '),
   };
-  // The wall clock is not a property of the HTML: a parse that ran out of time must be retried on
-  // the next request instead of pinning escaped source for this issue (#777).
-  return timedOut ? { ...parts, cacheable: false } : parts;
+  // The wall clock is not a property of the HTML: a parse that ran out of time is a fail-closed
+  // answer that is retried after a short window rather than on every request or never (#777).
+  return timedOut ? { ...parts, ttlMs: EMAIL_PARTS_FAILURE_TTL_MS } : parts;
 }
 
 /**

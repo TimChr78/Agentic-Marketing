@@ -261,7 +261,7 @@ describe('SNS certificate cache (#634)', () => {
     expect(calls).toBe(3);
   });
 
-  it('keeps the refetch throttle when churn evicts the certificate URL (#755)', async () => {
+  it('refuses a cache-miss fetch for a URL that is still in cooldown (#755)', async () => {
     const url = certUrl(90);
     const good = snsFixture(url);
     const attacker = snsFixture(url); // same URL, another key: the cached PEM fails to verify
@@ -280,16 +280,42 @@ describe('SNS certificate cache (#634)', () => {
     expect(calls).toBe(2);
 
     // Certificates are per AWS region: more distinct URLs than the cache holds evict this one, and
-    // the throttle used to live on the evicted entry. SigningCertURL is not part of the signature,
-    // so the same fixture verifies against every churned URL.
+    // SigningCertURL is not part of the signature, so the same fixture verifies against every
+    // churned URL.
     for (let i = 0; i < 70; i++) expect(await verifySnsMessage({ ...good.m, SigningCertURL: certUrl(200 + i) }, deps)).toBe(true);
+    const afterChurn = calls;
 
-    // A miss fetches once (there is no PEM to verify against); that fetch is not a refetch.
+    // The cached PEM is gone, but the URL is still inside its refetch cooldown. A miss must not
+    // turn into a fetch (the old code fetched first and only then consulted the throttle).
     expect(await verifySnsMessage(attacker.m, deps)).toBe(false);
-    const afterMiss = calls;
-    // A hit inside the same minute must not refetch: the throttle survived the eviction.
-    expect(await verifySnsMessage(attacker.m, deps)).toBe(false);
-    expect(calls).toBe(afterMiss);
+    expect(await verifySnsMessage(good.m, deps)).toBe(false);
+    expect(calls).toBe(afterChurn);
+  });
+
+  it('bounds a cycle of more certificate URLs than the cache holds (#755)', async () => {
+    const urls = Array.from({ length: 65 }, (_, i) => certUrl(300 + i));
+    const fixtures = urls.map((url) => snsFixture(url));
+    const pems = new Map(fixtures.map((f) => [f.m.SigningCertURL, f.pem]));
+    let calls = 0;
+    const now = 1_000_000;
+    const deps = {
+      fetch: (async (url: string | URL | Request) => {
+        calls++;
+        return new Response(pems.get(String(url)) ?? '');
+      }) as typeof globalThis.fetch,
+      now: () => now,
+    };
+
+    // The attack: more distinct certificate URLs than the 64-entry cache holds, cycled twice. The
+    // first pass fetches each URL once; the second must not fetch the evicted ones again.
+    for (const f of fixtures) expect(await verifySnsMessage(f.m, deps)).toBe(true);
+    expect(calls).toBe(65);
+    const second = [];
+    for (const f of fixtures) second.push(await verifySnsMessage(f.m, deps));
+    expect(calls).toBe(65);
+    // The 64 still cached verify; only the evicted first URL is refused (SNS retries later).
+    expect(second[0]).toBe(false);
+    expect(second.filter(Boolean)).toHaveLength(64);
   });
 
   it('coalesces concurrent fetches for the same certificate URL into one request', async () => {

@@ -5,7 +5,7 @@ import { z } from 'zod';
 // both accepted forms. This widens the old `z.iso.datetime()`, which only accepted `Z`.
 
 const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/i;
-const CALENDAR_FIELDS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/;
+const CALENDAR_FIELDS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?/i;
 
 /**
  * The calendar fields name a real instant. `Date.parse` normalises the impossible ones instead
