@@ -77,6 +77,12 @@ function formRow(name: string): ArtifactRow {
   };
 }
 
+/** A mounted picker selector, so a pending index can be observed while it loads. */
+function SegmentNames() {
+  const index = usePickerIndex('segment');
+  return <p>{index.loading ? 'loading' : (index.data?.artifacts.map((artifact) => artifact.name).join(', ') ?? 'none')}</p>;
+}
+
 function templateRow(): ArtifactRow {
   return {
     id: `eml_${'e'.repeat(32)}`,
@@ -166,11 +172,7 @@ describe('pending picker index (#525)', () => {
     const newer = deferredPage();
     h.listQueue = [older.load, newer.load];
 
-    function Names() {
-      const index = usePickerIndex('segment');
-      return <p>{index.loading ? 'loading' : (index.data?.artifacts.map((artifact) => artifact.name).join(', ') ?? 'none')}</p>;
-    }
-    render(<Names />);
+    render(<SegmentNames />);
     await waitFor(() => expect(callsOf('artifacts.list')).toHaveLength(1));
 
     // A rename arrives while the first list read is still pending.
@@ -191,11 +193,7 @@ describe('pending picker index (#525)', () => {
     const newer = deferredPage();
     h.listQueue = [older.load, newer.load];
 
-    function Names() {
-      const index = usePickerIndex('segment');
-      return <p>{index.loading ? 'loading' : (index.data?.artifacts.map((artifact) => artifact.name).join(', ') ?? 'none')}</p>;
-    }
-    render(<Names />);
+    render(<SegmentNames />);
     await waitFor(() => expect(callsOf('artifacts.list')).toHaveLength(1));
 
     const loaded = await readPickerIndex(ws, 'email_template', {

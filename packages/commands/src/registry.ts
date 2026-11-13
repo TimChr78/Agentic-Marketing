@@ -387,6 +387,26 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         throw err;
       };
 
+      // #811: an agent principal always names its agent record. A surface that builds one without
+      // it (a new credential kind, a test helper, a future integration) would otherwise run a
+      // write with the policy engine, the status check, the limits and the ledger all skipped.
+      // Fail closed: reads stay available, writes never reach a handler. The refusal is audited
+      // best-effort, so a failing audit cannot mask the forbidden error.
+      const agent = principal.type === 'agent' ? principal.agent : undefined;
+      if (principal.type === 'agent' && !agent && cmd.effect !== 'read') {
+        const refused = new AppError(
+          'forbidden',
+          `${cmd.name} changes data, but this connection acts as an agent without an agent record. Sign in again or create a new agent credential; only reads are allowed.`,
+        );
+        await db
+          .withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, refused))
+          .catch(() => {});
+        report('error');
+        span.setStatus({ code: SpanStatusCode.ERROR, message: refused.code });
+        span.end();
+        throw refused;
+      }
+
       if (unknown.length) {
         if (options.strictInputs) return fail(new AppError('invalid_input', unknownMessages.join(' '), { unknownKeys: unknown }));
       }
@@ -414,7 +434,6 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
           );
       }
 
-      const agent = principal.type === 'agent' ? principal.agent : undefined;
       if (agent && agent.status !== 'active')
         return fail(
           new AppError(
