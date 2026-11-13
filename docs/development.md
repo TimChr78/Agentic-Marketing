@@ -82,7 +82,7 @@ Requirements: Node 22+, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS), NATS with
 
 ```bash
 pnpm install
-cp .env.example .env          # fill AUTH_SECRET and MASTER_KEY (openssl rand -base64 32), point DATABASE_URL at Postgres; the passwords are hex (openssl rand -hex 32) because Compose puts POSTGRES_PASSWORD into DATABASE_URL raw
+cp .env.example .env          # fill POSTGRES_PASSWORD and APP_DB_PASSWORD (the template keeps them empty; hex, openssl rand -hex 32, because Compose puts POSTGRES_PASSWORD into DATABASE_URL raw), plus AUTH_SECRET and MASTER_KEY (openssl rand -base64 32); point DATABASE_URL at Postgres
 pnpm --silent --filter @agentic-marketing/server cli bootstrap --email you@example.com --workspace 'My shop'
 pnpm dev                       # API on http://localhost:3000 (migrates on start)
 pnpm dev:web                   # the admin UI on http://localhost:5173 (the demo is at /demo)
@@ -131,7 +131,7 @@ docker compose exec app am bootstrap --email … --workspace …
 
 In a checkout `.env.example` is already in the tree, so copying it and filling in the secrets is enough; a release install runs `am init` from the released image instead, which writes `.env` with generated secrets ([compose](deployment/compose.md)).
 
-The default file pulls `ghcr.io/timchr78/agentic-marketing:${AM_VERSION}` (pin the version in `.env`; `AM_PORT` changes the published port). The overlay builds this checkout and tags it `AM_BUILD_IMAGE` (default `agentic-marketing:local`); `scripts/smoke.sh` uses the same overlay. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default 2g), which covers the whole container; ClickHouse's own `max_server_memory_usage` still applies inside it. To keep data in host directories instead of named volumes, see the README: the services run as their own users, so the directories need matching ownership and permissions.
+The default file pulls `ghcr.io/timchr78/agentic-marketing:${AM_VERSION}` (pin the version in `.env`; `AM_PORT` changes the published port and `AM_BIND` the host address it is published on, loopback by default). The overlay builds this checkout and tags it `AM_BUILD_IMAGE` (default `agentic-marketing:local`); `scripts/smoke.sh` uses the same overlay. ClickHouse is capped at `CLICKHOUSE_MEM_LIMIT` (default 2g), which covers the whole container; ClickHouse's own `max_server_memory_usage` still applies inside it. To keep data in host directories instead of named volumes, see the README: the services run as their own users, so the directories need matching ownership and permissions.
 
 `am` runs the server CLI without pnpm's banner. The command prompts for the password without echo; for scripts use `docker compose exec -e AM_BOOTSTRAP_PASSWORD app am bootstrap …` (or pipe one line with `docker compose exec -T`). `am reset-password --email …` (with `AM_RESET_PASSWORD`) sets a new password. `--password` is deprecated.
 
