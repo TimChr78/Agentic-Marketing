@@ -82,3 +82,17 @@ describe('ads.performance conversion paging (#786)', () => {
     expect(result.totals.conversions).toBe(0);
   });
 });
+
+describe('attribution timeouts (0.14.12 review round 5)', () => {
+  it('recognises both the ClickHouse server deadline and the client request timeout', async () => {
+    const { isAttributionTimeout } = await import('../src/spend');
+    expect(isAttributionTimeout(new Error('Timeout exceeded: elapsed 30.1 seconds, maximum: 30. (TIMEOUT_EXCEEDED)'))).toBe(true);
+    expect(isAttributionTimeout(new Error('Timeout error.'))).toBe(true);
+    expect(isAttributionTimeout(new Error('Code: 241. Memory limit exceeded'))).toBe(false);
+  });
+
+  it('keeps the server deadline below the ClickHouse client request timeout (30 s by default)', async () => {
+    const { ATTRIBUTION_LIMITS } = await import('../src/spend');
+    expect(ATTRIBUTION_LIMITS.queryTimeoutSeconds).toBeLessThan(30);
+  });
+});

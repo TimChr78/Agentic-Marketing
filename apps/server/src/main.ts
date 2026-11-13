@@ -1,7 +1,7 @@
 import { migrateAuth } from '@agentic-marketing/auth';
 import { migrate, migrationFiles, recordServerVersion } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
-import { initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
+import { endpointLocation, initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
 import { serve } from '@hono/node-server';
 import { createServer } from './app';
 import { ConfigError, loadConfig } from './config';
@@ -52,7 +52,10 @@ await recordServerVersion(db.admin, VERSION).catch((err) =>
 const servers: { close: () => void }[] = [];
 if (config.roles.has('api') || config.roles.has('ingest')) {
   servers.push(
-    serve({ fetch: app.fetch, port: config.port }, () => logger.info({ url: config.publicUrl, roles: [...config.roles] }, 'api listening')),
+    serve({ fetch: app.fetch, port: config.port }, () =>
+      // PUBLIC_URL may hold userinfo or a token in its query; the log gets the origin and path.
+      logger.info({ url: endpointLocation(config.publicUrl), roles: [...config.roles] }, 'api listening'),
+    ),
   );
 }
 // Optional public edge: only the form, link and webhook routes, so a tunnel needs no path rule.
