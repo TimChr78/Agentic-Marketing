@@ -13,7 +13,7 @@ import {
 import { activeMandate } from '@agentic-marketing/artifacts';
 import { type Auth, principalFromSession } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
-import { AppError, newId, sha256 } from '@agentic-marketing/core';
+import { AppError, newId, redactCredentials, sha256 } from '@agentic-marketing/core';
 import { type Db, type Role, schema, type Tx } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -531,7 +531,9 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
             messages = [{ role: 'user', content: message }];
             emit({ type: 'done', conversationId: conversation.id, usage });
           } else {
-            error = (err as Error).message;
+            // Streamed to the browser (any member, viewers included) and stored with the
+            // conversation and the AI call: never an unexpected exception's text (#885 round 10).
+            error = copilotFailureText(err);
             logger.warn({ err }, 'copilot turn failed');
             emit({ type: 'error', message: `The model call failed: ${error}` });
           }
@@ -612,4 +614,17 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
     return new Response(body, { headers: { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' } });
   });
   return app;
+}
+
+/**
+ * What a failed copilot turn may say about itself (#885 round 10). An expected failure (an AppError
+ * or AiUnavailable, written for people) keeps its message, redacted; a provider's HTTP error is
+ * reduced to its status, because its body may echo the request's credentials; anything else gets a
+ * fixed text.
+ */
+export function copilotFailureText(err: unknown): string {
+  if (err instanceof AppError || err instanceof AiUnavailable) return redactCredentials(err.message);
+  const status = (err as { statusCode?: unknown } | null)?.statusCode;
+  if (typeof status === 'number') return `the AI provider answered HTTP ${status}`;
+  return 'an unexpected error occurred';
 }

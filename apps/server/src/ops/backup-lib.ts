@@ -6,6 +6,7 @@ import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'no
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { redactCredentials } from '@agentic-marketing/core';
 import {
   ensureAppRoleInDatabase,
   lastServerVersion,
@@ -1295,7 +1296,8 @@ export async function runScheduledBackups(
           delete status.lastError;
         } catch (err) {
           status.lastOk = false;
-          status.lastError = (err as Error).message;
+          // The status file is read by operators and `am doctor`: redact it like any stored error (#885).
+          status.lastError = redactCredentials((err as Error).message);
           log(`backup failed: ${status.lastError}`);
         }
         await heartbeat();
