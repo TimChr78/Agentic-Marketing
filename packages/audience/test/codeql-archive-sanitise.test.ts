@@ -9,6 +9,7 @@ import {
   activeUrl,
   clearEmailPartsCache,
   emailParts,
+  emailPartsCacheStats,
   MAX_EMAIL_LENGTH,
   MAX_EMAIL_NESTING,
   MAX_EMAIL_PARSE_MS,
@@ -16,7 +17,7 @@ import {
   sanitiseEmailBody,
   scanEmailBody,
 } from '../src/archive';
-import { EmailPartsCache } from '../src/emailPartsCache';
+import { EMAIL_PARTS_FAILURE_TTL_MS, EmailPartsCache } from '../src/emailPartsCache';
 
 // CodeQL alerts 4, 3, 2 and 1 (js/bad-tag-filter, js/incomplete-multi-character-sanitization):
 // the public archive renders e-mail HTML behind a strict CSP, and `emailParts` is the defence in
@@ -207,17 +208,27 @@ describe('archive sanitising: linear time', () => {
 
 describe('archive sanitising: the linear-time helper', () => {
   it('detects a deliberately quadratic function', () => {
-    let sink = 0;
-    const quadratic = (input: string) => {
-      let count = 0;
-      for (let i = 0; i < input.length; i++) {
-        for (let j = 0; j < input.length; j++) count++;
-      }
-      sink = count;
-    };
-
-    expect(() => expectLinear((n) => 'x'.repeat(n), quadratic, 2_000)).toThrow(/expected linear scaling/);
-    expect(sink).toBeGreaterThan(0);
+    // Drive `performance.now` from a synthetic clock: the helper measures only that, and a busy
+    // runner used to inflate one measurement and hide the quadratic ratio (#816).
+    let now = 0;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now);
+    try {
+      let sink = 0;
+      // Quadratic cost: 4× the input gives 16× the synthetic time.
+      const quadratic = (input: string) => {
+        sink += input.length;
+        now += input.length ** 2 / 100_000;
+      };
+      expect(() => expectLinear((n) => 'x'.repeat(n), quadratic, 2_000)).toThrow(/expected linear scaling/);
+      expect(sink).toBeGreaterThan(0);
+      // Linear cost on the same clock passes, so the failure above is the ratio, not the ceiling.
+      const linear = (input: string) => {
+        now += input.length / 10;
+      };
+      expect(() => expectLinear((n) => 'x'.repeat(n), linear, 2_000)).not.toThrow();
+    } finally {
+      clock.mockRestore();
+    }
   });
 });
 
@@ -930,6 +941,58 @@ describe('archive sanitising: the time backstop is a hard ceiling (#673)', () =>
 
     // The clock is only mocked for the call above.
     expect(sanitiseEmailBody('<p>ok</p>')).toBe('<p>ok</p>');
+  });
+});
+
+describe('archive sanitising: a timed-out parse is cached briefly (#777)', () => {
+  const inner = '<p>hello</p>'.repeat(500);
+  const html = `<style>.issue{color:#111827}</style><body>${inner}</body>`;
+
+  it('parses once inside the retry window and tries again after it', () => {
+    clearEmailPartsCache();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    try {
+      // The first clock read starts the budget, every later one is far past it, so the parse trips
+      // the wall-clock guard exactly like a large foster-heavy issue on a busy request.
+      let calls = 0;
+      const clock = vi.spyOn(performance, 'now').mockImplementation(() => (calls++ === 0 ? 0 : MAX_EMAIL_PARSE_MS * 2));
+      let timedOut: { body: string; styles: string };
+      try {
+        timedOut = emailParts(html);
+      } finally {
+        clock.mockRestore();
+      }
+      expect(timedOut.body.startsWith('&lt;p&gt;')).toBe(true);
+      // The fail-closed answer is held for the retry window instead of being re-parsed every time.
+      expect(emailPartsCacheStats().entries).toBe(1);
+
+      // Inside the window the cached answer is served without parsing at all.
+      const parseClock = vi.spyOn(performance, 'now');
+      expect(emailParts(html).body).toBe(timedOut.body);
+      expect(parseClock).not.toHaveBeenCalled();
+      parseClock.mockRestore();
+
+      // After the TTL a fresh parse runs and can succeed.
+      vi.setSystemTime(new Date(Date.now() + EMAIL_PARTS_FAILURE_TTL_MS));
+      const fresh = emailParts(html);
+      expect(fresh.body).toBe(inner);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a deterministic fail-closed result cached normally', () => {
+    clearEmailPartsCache();
+    // Nesting past the depth cap trips a deterministic bound (not the wall clock), so the escaped
+    // answer is a function of this HTML and is safe to keep. (A deep end-tag run no longer fails
+    // closed since parse5 8.1 indexes the open-element stack.)
+    const hostile = '<div>'.repeat(5_000);
+    const first = emailParts(hostile);
+    expect(first.body.startsWith('&lt;div&gt;')).toBe(true);
+    expect(emailPartsCacheStats().entries).toBe(1);
+    expect(emailParts(hostile).body).toBe(first.body);
+    expect(emailPartsCacheStats().entries).toBe(1);
   });
 });
 

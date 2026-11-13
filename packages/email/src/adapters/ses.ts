@@ -11,20 +11,73 @@ const SNS_HOST = /^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$/;
 /**
  * Successfully fetched signing certificates, keyed by URL. Only a verified, non-empty PEM is
  * cached: a failed request, a non-OK status or an error body must never poison the URL, or every
- * later SNS webhook for the process would be rejected (#634). A handful of AWS certificates is
- * all a workspace sees, so the map is bounded as an LRU.
+ * later SNS webhook for the process would be rejected (#634). Certificates are per AWS region and
+ * a multi-workspace install spans several, so the map holds comfortably more than a region set.
  */
-const CERTS_MAX = 8;
-/** A bad signature may force one refetch per certificate URL in this window. */
+const CERTS_MAX = 64;
+/** The window in which a bad signature may not force another fetch for the same URL. */
 const REFETCH_COOLDOWN_MS = 60_000;
+/**
+ * Certificate fetches allowed per process in a rolling minute. This is the amplification bound:
+ * a cooldown entry is evicted freely, because dropping one only permits another fetch of an AWS
+ * URL, so the total number of requests to AWS is capped here instead of by refusing a legitimate
+ * first verification. The limit leaves room for normal regional churn (a real install sees a
+ * handful of certificate URLs) while still capping a flood at two requests a second. A refusal
+ * here is transient (SNS retries it), never a permanent failure.
+ */
+export const SNS_CERT_FETCHES_PER_MINUTE = 120;
+const CERT_FETCH_WINDOW_MS = 60_000;
+/** URLs whose refetch cooldown is remembered: a bounded LRU, oldest cooldown evicted first. */
+const COOLDOWNS_MAX = 64;
 interface CertEntry {
   pem: string;
-  /** When a signature failure last forced a refetch; null for an ordinary first fetch. */
-  refetchedAt: number | null;
 }
 const certs = new Map<string, CertEntry>();
+/**
+ * When a signature failure last forced a refetch, keyed by URL. Kept out of the certificate map
+ * on purpose: the throttle used to live on the cached entry, so churning more URLs than the map
+ * holds handed the once-per-minute bound back to the flood (#755). A full map evicts the oldest
+ * cooldown rather than refusing the fetch; `SNS_CERT_FETCHES_PER_MINUTE` bounds that amplification.
+ */
+const refetchedAt = new Map<string, number>();
+/** Start times of the certificate fetches inside the rolling window. */
+let certFetches: number[] = [];
 /** One request per URL while a fetch is in flight, so a burst of webhooks cannot fan out. */
 const inflight = new Map<string, Promise<string>>();
+
+/** A transient verification failure: the webhook route answers 503 so SNS retries it. */
+class SnsRetryError extends Error {}
+
+/** True while `url` is inside its refetch cooldown; an expired entry is dropped on the way. */
+function coolingDown(url: string, now: number): boolean {
+  const when = refetchedAt.get(url);
+  if (when === undefined) return false;
+  if (now - when < REFETCH_COOLDOWN_MS) return true;
+  refetchedAt.delete(url);
+  return false;
+}
+
+/** Claims the once-per-minute refetch for `url`, or false while it is cooling down. */
+function reserveRefetch(url: string, now: number): boolean {
+  if (coolingDown(url, now)) return false;
+  refetchedAt.delete(url);
+  refetchedAt.set(url, now);
+  while (refetchedAt.size > COOLDOWNS_MAX) {
+    const oldest = refetchedAt.keys().next().value;
+    if (oldest === undefined) break;
+    refetchedAt.delete(oldest);
+  }
+  return true;
+}
+
+/** Claims one certificate fetch in the rolling minute, or refuses transiently at the limit. */
+function reserveFetch(now: number): void {
+  // Drop entries outside the window. A timestamp from a clock that went backwards is dropped too,
+  // so an injected test clock cannot leave a future entry behind and block every later fetch.
+  certFetches = certFetches.filter((at) => at <= now && now - at < CERT_FETCH_WINDOW_MS);
+  if (certFetches.length >= SNS_CERT_FETCHES_PER_MINUTE) throw new SnsRetryError('SNS certificate fetch rate limit reached; retry later');
+  certFetches.push(now);
+}
 
 function snsUrlOk(raw: unknown): raw is string {
   try {
@@ -47,9 +100,11 @@ async function fetchCert(url: string, deps: AdapterDeps): Promise<string> {
 }
 
 /** Coalesce concurrent fetches for one URL into a single request. */
-function fetchCertOnce(url: string, deps: AdapterDeps): Promise<string> {
+function fetchCertOnce(url: string, deps: AdapterDeps, now: number): Promise<string> {
   const running = inflight.get(url);
   if (running !== undefined) return running;
+  // Only a fetch that really starts spends the process's allowance; joiners ride on it.
+  reserveFetch(now);
   const p = fetchCert(url, deps).finally(() => {
     if (inflight.get(url) === p) inflight.delete(url);
   });
@@ -58,7 +113,7 @@ function fetchCertOnce(url: string, deps: AdapterDeps): Promise<string> {
 }
 
 /** The cached PEM, or a fresh one; `cached` tells the caller whether a failed verify may refetch. */
-async function getCert(url: string, deps: AdapterDeps, force: boolean, now: number): Promise<{ pem: string; cached: boolean }> {
+async function getCert(url: string, deps: AdapterDeps, force: boolean): Promise<{ pem: string; cached: boolean }> {
   const hit = force ? undefined : certs.get(url);
   if (hit !== undefined) {
     // Refresh the insertion order, so the entry a flood of URLs would evict is the least used.
@@ -66,9 +121,12 @@ async function getCert(url: string, deps: AdapterDeps, force: boolean, now: numb
     certs.set(url, hit);
     return { pem: hit.pem, cached: true };
   }
-  const pem = await fetchCertOnce(url, deps);
+  // A cache miss is always fetched when the rolling allowance has room: evicting a certificate (or
+  // its old cooldown) must never turn a legitimate message into a permanent refusal.
+  const pem = await fetchCertOnce(url, deps, deps.now?.() ?? Date.now());
+  // Only a successful fetch is cached: a timeout or an error body must not poison the URL (#634).
   certs.delete(url);
-  certs.set(url, { pem, refetchedAt: force ? now : null });
+  certs.set(url, { pem });
   while (certs.size > CERTS_MAX) {
     const oldest = certs.keys().next().value;
     if (oldest === undefined) break;
@@ -87,9 +145,16 @@ function verifyWith(cert: string, stringToSign: string, m: Record<string, string
   }
 }
 
+/**
+ * `valid` and `invalid` are final; `retry` means the answer is unknown because the certificate
+ * could not be fetched right now (rate limit, network, timeout, temporary unavailability). SNS
+ * retries 429 and 5xx, but treats 401 as permanent, so a transient failure must not be `invalid`.
+ */
+export type SnsVerification = 'valid' | 'invalid' | 'retry';
+
 /** Verifies an SNS message signature (versions 1 and 2), fetching and caching the signing certificate. */
-export async function verifySnsMessage(m: Record<string, string>, deps: AdapterDeps): Promise<boolean> {
-  if (!snsUrlOk(m.SigningCertURL) || !m.Signature) return false;
+export async function verifySnsMessage(m: Record<string, string>, deps: AdapterDeps): Promise<SnsVerification> {
+  if (!snsUrlOk(m.SigningCertURL) || !m.Signature) return 'invalid';
   const fields =
     m.Type === 'Notification'
       ? ['Message', 'MessageId', 'Subject', 'Timestamp', 'TopicArn', 'Type']
@@ -101,28 +166,32 @@ export async function verifySnsMessage(m: Record<string, string>, deps: AdapterD
   let cert: { pem: string; cached: boolean };
   const now = deps.now?.() ?? Date.now();
   try {
-    cert = await getCert(m.SigningCertURL, deps, false, now);
+    cert = await getCert(m.SigningCertURL, deps, false);
   } catch {
-    // The failure is not cached, so the next webhook fetches again instead of staying poisoned.
-    return false;
+    // A fetch failure (#634's timeout or a temporary 5xx) is not cached, and it is not a bad
+    // signature: tell the route to answer 503 so SNS delivers the message again.
+    return 'retry';
   }
-  if (verifyWith(cert.pem, stringToSign, m)) return true;
-  if (!cert.cached) return false;
+  if (verifyWith(cert.pem, stringToSign, m)) return 'valid';
+  if (!cert.cached) return 'invalid';
   // A cached certificate may be stale (AWS rotates one behind a stable URL) or was verified
   // against a body cached by an older build. Refetch once, but only once per URL per minute: a
-  // flood of bad signatures must not turn into a flood of requests to AWS (#634 review).
-  const entry = certs.get(m.SigningCertURL);
-  if (entry && entry.refetchedAt !== null && now - entry.refetchedAt < REFETCH_COOLDOWN_MS) return false;
-  // Start the cooldown before awaiting, so concurrent bad signatures join this one rather than
-  // starting their own refetch even if the fetch is slow or fails.
-  if (entry) entry.refetchedAt = now;
+  // flood of bad signatures must not turn into a flood of requests to AWS (#634 review). The
+  // claim starts the cooldown before awaiting, so concurrent bad signatures join this refetch.
+  // Inside the cooldown (or while another refetch is in flight) nothing new has been checked, so
+  // nothing proves the signature wrong: retry, never a permanent 401 for a message that may be
+  // signed with a rotated certificate (0.14.15 review round 3).
+  if (!reserveRefetch(m.SigningCertURL, now)) return 'retry';
   try {
-    cert = await getCert(m.SigningCertURL, deps, true, now);
+    cert = await getCert(m.SigningCertURL, deps, true);
   } catch {
-    return false;
+    // A failed refetch proved nothing either; release the cooldown so the next delivery refetches
+    // (still bounded by the global fetch rate).
+    refetchedAt.delete(m.SigningCertURL);
+    return 'retry';
   }
   // getCert just refreshed the entry, so this is a fresh body; verify and give the final answer.
-  return verifyWith(cert.pem, stringToSign, m);
+  return verifyWith(cert.pem, stringToSign, m) ? 'valid' : 'invalid';
 }
 
 /** SES event (configuration-set publishing or classic notification) → delivery events. */
@@ -197,7 +266,8 @@ export function sesWebhook(deps: AdapterDeps) {
       try {
         return await verifySnsMessage(JSON.parse(body), deps);
       } catch {
-        return false;
+        // The body is not a JSON SNS message at all; no retry can make it one.
+        return 'invalid' as const;
       }
     },
     async parseWebhook({ body }: WebhookRequest): Promise<DeliveryEvent[]> {

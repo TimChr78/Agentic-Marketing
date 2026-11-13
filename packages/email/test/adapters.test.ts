@@ -1,7 +1,15 @@
-import { createSign, generateKeyPairSync } from 'node:crypto';
+import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { SMTPServer } from 'smtp-server';
 import { afterAll, describe, expect, it } from 'vitest';
-import { adapters, type OutgoingEmail, parseBrevoWebhook, parsePostmarkWebhook, sesEvents, verifySnsMessage } from '../src/adapters';
+import {
+  adapters,
+  type OutgoingEmail,
+  parseBrevoWebhook,
+  parsePostmarkWebhook,
+  SNS_CERT_FETCHES_PER_MINUTE,
+  sesEvents,
+  verifySnsMessage,
+} from '../src/adapters';
 
 const msg: OutgoingEmail = {
   messageId: 'msg_0192abc',
@@ -151,9 +159,9 @@ describe('Amazon SES', () => {
     const sign = createSign('RSA-SHA256');
     sign.update(['Message', 'MessageId', 'Timestamp', 'TopicArn', 'Type'].map((k) => `${k}\n${m[k]}\n`).join(''));
     m.Signature = sign.sign(privateKey, 'base64');
-    expect(await verifySnsMessage(m, deps)).toBe(true);
-    expect(await verifySnsMessage({ ...m, Message: m.Message.replace('Complaint', 'Delivery') }, deps)).toBe(false);
-    expect(await verifySnsMessage({ ...m, SigningCertURL: 'https://evil.example.com/cert.pem' }, deps)).toBe(false);
+    expect(await verifySnsMessage(m, deps)).toBe('valid');
+    expect(await verifySnsMessage({ ...m, Message: m.Message.replace('Complaint', 'Delivery') }, deps)).toBe('invalid');
+    expect(await verifySnsMessage({ ...m, SigningCertURL: 'https://evil.example.com/cert.pem' }, deps)).toBe('invalid');
     expect(sesEvents(JSON.parse(m.Message))).toEqual([
       expect.objectContaining({ type: 'complained', messageId: 'msg_1', providerMessageId: 'ses-1' }),
     ]);
@@ -173,9 +181,9 @@ describe('Amazon SES', () => {
 describe('SNS certificate cache (#634)', () => {
   const certUrl = (n: number) => `https://sns.eu-west-1.amazonaws.com/SimpleNotificationService-cache-${n}.pem`;
 
-  /** A correctly signed Notification, plus the PEM that verifies it. */
-  function snsFixture(url: string) {
-    const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  /** A correctly signed Notification, plus the PEM that verifies it; `keys` reuses one RSA key. */
+  function snsFixture(url: string, keys?: { privateKey: KeyObject; publicKey: KeyObject }) {
+    const { privateKey, publicKey } = keys ?? generateKeyPairSync('rsa', { modulusLength: 2048 });
     const pem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
     const m: Record<string, string> = {
       Type: 'Notification',
@@ -205,8 +213,8 @@ describe('SNS certificate cache (#634)', () => {
       return new Response(pem);
     }) as typeof globalThis.fetch;
 
-    expect(await verifySnsMessage(m, { fetch })).toBe(false);
-    expect(await verifySnsMessage(m, { fetch })).toBe(true);
+    expect(await verifySnsMessage(m, { fetch })).toBe('retry');
+    expect(await verifySnsMessage(m, { fetch })).toBe('valid');
     expect(calls).toBe(2);
   });
 
@@ -218,8 +226,8 @@ describe('SNS certificate cache (#634)', () => {
       return calls === 1 ? new Response('<html>service unavailable</html>', { status: 503 }) : new Response(pem);
     }) as typeof globalThis.fetch;
 
-    expect(await verifySnsMessage(m, { fetch })).toBe(false);
-    expect(await verifySnsMessage(m, { fetch })).toBe(true);
+    expect(await verifySnsMessage(m, { fetch })).toBe('retry');
+    expect(await verifySnsMessage(m, { fetch })).toBe('valid');
     expect(calls).toBe(2);
   });
 
@@ -232,10 +240,10 @@ describe('SNS certificate cache (#634)', () => {
       return new Response(good.pem);
     }) as typeof globalThis.fetch;
 
-    expect(await verifySnsMessage(good.m, { fetch })).toBe(true);
+    expect(await verifySnsMessage(good.m, { fetch })).toBe('valid');
     // Different key, same URL: the cached certificate fails, so it is fetched again before the
     // signature is refused.
-    expect(await verifySnsMessage(attacker.m, { fetch })).toBe(false);
+    expect(await verifySnsMessage(attacker.m, { fetch })).toBe('invalid');
     expect(calls).toBe(2);
   });
 
@@ -252,13 +260,99 @@ describe('SNS certificate cache (#634)', () => {
       now: () => now,
     };
 
-    expect(await verifySnsMessage(good.m, deps)).toBe(true); // the initial fetch
-    for (let i = 0; i < 5; i++) expect(await verifySnsMessage(attacker.m, deps)).toBe(false);
-    // One refetch for the first bad signature; the next four stay inside the cooldown.
+    expect(await verifySnsMessage(good.m, deps)).toBe('valid'); // the initial fetch
+    // The first bad signature is checked against a fresh certificate: that proves it invalid.
+    expect(await verifySnsMessage(attacker.m, deps)).toBe('invalid');
+    // Inside the cooldown nothing new is fetched, so nothing is proven either: retry, never a
+    // permanent 401 (0.14.15 review round 3).
+    for (let i = 0; i < 4; i++) expect(await verifySnsMessage(attacker.m, deps)).toBe('retry');
     expect(calls).toBe(2);
     now += 60_001;
-    expect(await verifySnsMessage(attacker.m, deps)).toBe(false);
+    expect(await verifySnsMessage(attacker.m, deps)).toBe('invalid');
     expect(calls).toBe(3);
+  });
+
+  it('never refuses a rotated certificate while its refetch failed or is cooling down (0.14.15 round 3)', async () => {
+    const url = certUrl(5);
+    const oldCert = snsFixture(url);
+    const rotated = snsFixture(url); // AWS rotated the key behind the same URL
+    let calls = 0;
+    let failing = false;
+    let served = oldCert.pem;
+    let now = 3_000_000;
+    const deps = {
+      fetch: (async () => {
+        calls++;
+        if (failing) throw new Error('timeout');
+        return new Response(served);
+      }) as typeof globalThis.fetch,
+      now: () => now,
+    };
+    expect(await verifySnsMessage(oldCert.m, deps)).toBe('valid'); // caches the old certificate
+    served = rotated.pem;
+    failing = true;
+    expect(await verifySnsMessage(rotated.m, deps)).toBe('retry'); // the refetch timed out
+    // 20 s later the fetch works again: a failed refetch did not start a cooldown, so this
+    // refetches and verifies instead of refusing a legitimate message.
+    failing = false;
+    now += 20_000;
+    expect(await verifySnsMessage(rotated.m, deps)).toBe('valid');
+    expect(calls).toBe(3);
+  });
+
+  it('fetches an evicted certificate again instead of refusing a valid message (#755)', async () => {
+    const url = certUrl(90);
+    const good = snsFixture(url);
+    const attacker = snsFixture(url); // same URL, another key: the cached PEM fails to verify
+    let calls = 0;
+    // A fixed clock: the initial fetch's cooldown is still in force when the evicted URL comes
+    // back, which is the old refusal this test pins down.
+    const now = 2_000_000;
+    const deps = {
+      fetch: (async () => {
+        calls++;
+        return new Response(good.pem);
+      }) as typeof globalThis.fetch,
+      now: () => now,
+    };
+
+    expect(await verifySnsMessage(good.m, deps)).toBe('valid'); // the initial fetch
+    expect(await verifySnsMessage(attacker.m, deps)).toBe('invalid'); // one forced refetch starts the cooldown
+    expect(calls).toBe(2);
+
+    // Certificates are per AWS region: more distinct URLs than the cache holds evict this one, and
+    // SigningCertURL is not part of the signature, so the same fixture verifies against every
+    // churned URL.
+    for (let i = 0; i < 70; i++) expect(await verifySnsMessage({ ...good.m, SigningCertURL: certUrl(200 + i) }, deps)).toBe('valid');
+
+    // The cached PEM was evicted. A correctly signed message on that URL must be fetched again,
+    // not refused because an old cooldown entry outlived the certificate.
+    expect(await verifySnsMessage(good.m, deps)).toBe('valid');
+    expect(calls).toBe(73);
+  });
+
+  it('bounds certificate churn with a rolling fetch limit instead of a permanent refusal (#755)', async () => {
+    const limit = SNS_CERT_FETCHES_PER_MINUTE;
+    const keys = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const fixtures = Array.from({ length: limit + 1 }, (_, i) => snsFixture(certUrl(400 + i), keys));
+    const pems = new Map(fixtures.map((f) => [f.m.SigningCertURL, f.pem]));
+    let calls = 0;
+    const now = 3_000_000;
+    const deps = {
+      fetch: (async (url: string | URL | Request) => {
+        calls++;
+        return new Response(pems.get(String(url)) ?? '');
+      }) as typeof globalThis.fetch,
+      now: () => now,
+    };
+
+    const verdicts: string[] = [];
+    for (const f of fixtures) verdicts.push(await verifySnsMessage(f.m, deps));
+    // The rolling allowance admits normal churn; past it the answer is transient (`retry`, which
+    // the route turns into 503) rather than a permanent 401 that would lose the delivery event.
+    expect(verdicts.slice(0, limit)).toEqual(Array(limit).fill('valid'));
+    expect(verdicts.slice(limit)).toEqual(['retry']);
+    expect(calls).toBe(limit);
   });
 
   it('coalesces concurrent fetches for the same certificate URL into one request', async () => {
@@ -270,7 +364,7 @@ describe('SNS certificate cache (#634)', () => {
         return new Response(pem);
       }) as typeof globalThis.fetch,
     };
-    expect(await Promise.all([verifySnsMessage(m, deps), verifySnsMessage(m, deps)])).toEqual([true, true]);
+    expect(await Promise.all([verifySnsMessage(m, deps), verifySnsMessage(m, deps)])).toEqual(['valid', 'valid']);
     expect(calls).toBe(1);
   });
 });

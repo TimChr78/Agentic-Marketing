@@ -280,8 +280,27 @@ export async function streamUpdate(tx: Tx, workspaceId: string, resolved: Resolv
 }
 
 /**
+ * A token that differs for every recompute of a scope. `refreshSegment` advances
+ * `segment_runs.at`, but this path must not claim a full run there (its row's `members` count is
+ * the segment, while this only sees a scope), so it reads the database clock at microsecond
+ * precision instead. Clock reads inside one transaction repeat only if the transaction does.
+ */
+async function scopeRunToken(tx: Tx): Promise<string> {
+  const [row] = (
+    await tx.execute<{ token: string }>(sql`
+      SELECT to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS token`)
+  ).rows;
+  return row.token;
+}
+
+/**
  * Re-evaluates every segment for a few people after a change that reaches no event stream, such
  * as an unsubscribe link writing consent. Returns the change events to publish.
+ *
+ * `cause` names why the re-evaluation happened, but the caller's value is often fixed per link or
+ * per profile (`preferences:<profile>` from the reusable preference token), so it cannot be the
+ * whole id: a per-commit token is appended, as `refreshSegment` does (#628), so a re-entry inside
+ * JetStream's two-minute duplicate window still delivers (#781).
  */
 export async function refreshPeople(tx: Tx, workspaceId: string, profileIds: string[], events: EventStore, cause: string) {
   const scope = [...new Set(profileIds)];
@@ -292,7 +311,13 @@ export async function refreshPeople(tx: Tx, workspaceId: string, profileIds: str
     if (seg.definition.mode !== 'dynamic' || !seg.definition.condition) continue;
     const members = await evaluate(seg.definition.condition, contextFor(tx, workspaceId, events, segments, { scope }));
     const { entered, exited } = await applyDiff(tx, workspaceId, seg.id, members, scope);
-    out.push(...(await membershipEvents(tx, workspaceId, seg, entered, exited, () => cause)));
+    if (!entered.length && !exited.length) continue;
+    const changesKey = [...entered.map((p) => `${p}:in`), ...exited.map((p) => `${p}:out`)].sort();
+    const runCause = `run:${createHash('sha256')
+      .update(`${seg.id}\n${await scopeRunToken(tx)}\n${changesKey.join('\n')}`)
+      .digest('hex')
+      .slice(0, 32)}`;
+    out.push(...(await membershipEvents(tx, workspaceId, seg, entered, exited, () => `${cause}:${runCause}`)));
   }
   return out;
 }

@@ -1,11 +1,13 @@
 import type { AddressInfo } from 'node:net';
 import { migrateAuth } from '@agentic-marketing/auth';
 import { type ApiError, type CommandInput, createClient } from '@agentic-marketing/client';
+import { defineCommand, userPrincipal } from '@agentic-marketing/commands';
 import { hashValue, newUuid } from '@agentic-marketing/core';
 import { migrate } from '@agentic-marketing/db';
 import { localKeyProvider, readSecret, rewrapDataKeys } from '@agentic-marketing/secrets';
 import { serve } from '@hono/node-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import type { Commands } from '../src/registry';
@@ -220,6 +222,154 @@ describe('people through REST and the typed client', () => {
     const b = await owner.call('artifacts.create', note('Idempotent'), { idempotencyKey: 'key-1' });
     expect(b).toEqual(a);
     expect((await rejects(owner.call('artifacts.create', note('Other'), { idempotencyKey: 'key-1' }))).status).toBe(409);
+  });
+
+  it('runs a concurrent request with the same idempotency key once (#812)', async () => {
+    // Two requests that overlap: both used to miss the lookup, both ran the handler, and the loser
+    // failed on the unique constraint instead of returning the winner's response. The handler waits
+    // so the second request provably reaches the executor while the first is still running.
+    let runs = 0;
+    const slow = defineCommand({
+      name: 'test.slowWrite',
+      title: 'Slow write',
+      description: 'Test-only command: one write that takes long enough to overlap a second call.',
+      permission: null,
+      effect: 'write',
+      input: z.object({ value: z.string() }),
+      output: z.object({ value: z.string() }),
+      async handler(input) {
+        runs++;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return { value: input.value };
+      },
+    });
+    const principal = userPrincipal(users.owner.id, wsA, 'owner');
+    const opts = { surface: 'rest' as const, idempotencyKey: 'key-concurrent' };
+    const [a, b] = await Promise.all([
+      srv.executor.execute(slow, { value: 'v' }, principal, opts),
+      srv.executor.execute(slow, { value: 'v' }, principal, opts),
+    ]);
+    expect(runs).toBe(1);
+    expect(b).toEqual(a);
+  });
+
+  it('runs a concurrent read with the same idempotency key once (#812)', async () => {
+    // A read runs in REPEATABLE READ. Its snapshot used to be taken by the advisory-lock statement
+    // inside the transaction, before the winner committed, so the waiter re-ran the handler and
+    // then failed on the idempotency unique key.
+    let runs = 0;
+    const slowRead = defineCommand({
+      name: 'test.slowRead',
+      title: 'Slow read',
+      description: 'Test-only command: one read that takes long enough to overlap a second call.',
+      permission: null,
+      effect: 'read',
+      input: z.object({ value: z.string() }),
+      output: z.object({ value: z.string() }),
+      async handler(input) {
+        runs++;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        return { value: input.value };
+      },
+    });
+    const principal = userPrincipal(users.owner.id, wsA, 'owner');
+    const opts = { surface: 'rest' as const, idempotencyKey: 'key-concurrent-read' };
+    const [a, b] = await Promise.all([
+      srv.executor.execute(slowRead, { value: 'v' }, principal, opts),
+      srv.executor.execute(slowRead, { value: 'v' }, principal, opts),
+    ]);
+    expect(runs).toBe(1);
+    expect(b).toEqual(a);
+  });
+
+  it('lets a waiter run when the first request with the key fails (#812)', async () => {
+    let runs = 0;
+    const flaky = defineCommand({
+      name: 'test.flakyRead',
+      title: 'Flaky read',
+      description: 'Test-only command: the first request fails, the next one succeeds.',
+      permission: null,
+      effect: 'read',
+      input: z.object({ value: z.string() }),
+      output: z.object({ value: z.string() }),
+      async handler(input) {
+        runs++;
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        if (runs === 1) throw new Error('first request failed');
+        return { value: input.value };
+      },
+    });
+    const principal = userPrincipal(users.owner.id, wsA, 'owner');
+    const opts = { surface: 'rest' as const, idempotencyKey: 'key-fails-then-retries' };
+    const [first, second] = await Promise.allSettled([
+      srv.executor.execute(flaky, { value: 'v' }, principal, opts),
+      srv.executor.execute(flaky, { value: 'v' }, principal, opts),
+    ]);
+    // The failed transaction stored nothing, so the waiter must run the handler normally.
+    expect(first.status).toBe('rejected');
+    expect(second).toMatchObject({ status: 'fulfilled', value: { value: 'v' } });
+    expect(runs).toBe(2);
+  });
+
+  it('does not serialise the same key across two workspaces (#812)', async () => {
+    let markStarted = () => {};
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const gated = defineCommand({
+      name: 'test.gatedRead',
+      title: 'Gated read',
+      description: 'Test-only command: the first workspace waits until the second has run.',
+      permission: null,
+      effect: 'read',
+      input: z.object({ value: z.string() }),
+      output: z.object({ value: z.string() }),
+      async handler(input, ctx) {
+        if (ctx.principal.workspaceId === wsA) {
+          markStarted();
+          await gate;
+        }
+        return { value: input.value };
+      },
+    });
+    const inA = srv.executor.execute(gated, { value: 'a' }, userPrincipal(users.owner.id, wsA, 'owner'), {
+      surface: 'rest',
+      idempotencyKey: 'key-shared-across-workspaces',
+    });
+    await started;
+    // The lock key includes the workspace: the other workspace must not wait for this one.
+    const inB = await Promise.race([
+      srv.executor.execute(gated, { value: 'b' }, userPrincipal(users.outsider.id, wsB, 'owner'), {
+        surface: 'rest',
+        idempotencyKey: 'key-shared-across-workspaces',
+      }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('the second workspace was blocked')), 2_000)),
+    ]);
+    release();
+    expect(inB).toEqual({ value: 'b' });
+    expect(await inA).toEqual({ value: 'a' });
+  });
+
+  it('refuses the same key with different input after the replay, as before (#812)', async () => {
+    const read = defineCommand({
+      name: 'test.idempotentRead',
+      title: 'Idempotent read',
+      description: 'Test-only command: replays its stored response.',
+      permission: null,
+      effect: 'read',
+      input: z.object({ value: z.string() }),
+      output: z.object({ value: z.string() }),
+      handler: async (input) => ({ value: input.value }),
+    });
+    const principal = userPrincipal(users.owner.id, wsA, 'owner');
+    const opts = { surface: 'rest' as const, idempotencyKey: 'key-different-read-input' };
+    expect(await srv.executor.execute(read, { value: 'a' }, principal, opts)).toEqual({ value: 'a' });
+    expect(await srv.executor.execute(read, { value: 'a' }, principal, opts)).toEqual({ value: 'a' });
+    await expect(srv.executor.execute(read, { value: 'b' }, principal, opts)).rejects.toMatchObject({ code: 'conflict' });
   });
 });
 

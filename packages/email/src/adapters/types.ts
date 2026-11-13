@@ -57,11 +57,17 @@ export interface AdapterDeps {
  */
 export type TrackingCapability = 'forced' | 'configurable' | 'none';
 
+/**
+ * The verdict of a signed webhook. `retry` is transient: the route answers 503 and lets the
+ * provider deliver the message again, where a 4xx would be a permanent refusal.
+ */
+export type WebhookVerification = 'valid' | 'invalid' | 'retry';
+
 export interface EmailTransport {
   /** `events`: what the provider already knows from the send itself (e.g. a suppressed address). */
   send(msg: OutgoingEmail): Promise<{ providerMessageId: string | null; events?: DeliveryEvent[] }>;
   /** Called after the URL token matched; for providers that also sign their webhooks (SNS). */
-  verifyWebhook?(req: WebhookRequest): Promise<boolean>;
+  verifyWebhook?(req: WebhookRequest): Promise<WebhookVerification>;
   parseWebhook?(req: WebhookRequest): Promise<DeliveryEvent[]>;
   close?(): Promise<void>;
 }

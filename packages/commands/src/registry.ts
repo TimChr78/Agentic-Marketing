@@ -481,6 +481,8 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
               }
               if (opts.idempotencyKey) {
+                // The key was serialised before BEGIN, so any winner has committed and its row is
+                // visible even in this read's snapshot (#812).
                 const [hit] = await tx
                   .select()
                   .from(schema.idempotencyKeys)
@@ -532,7 +534,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               return out;
             },
             // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
-            { snapshot: cmd.effect === 'read' },
+            {
+              snapshot: cmd.effect === 'read',
+              // Serialise the key before BEGIN (#812). A read's REPEATABLE READ snapshot must not
+              // predate the winner's commit, or the waiter re-runs the handler and then loses on
+              // the unique key. A session-level lock on the same connection, released after commit
+              // or rollback, gives the waiter a snapshot taken after the winner committed.
+              ...(opts.idempotencyKey ? { advisoryLockKey: `idempotency:${principal.workspaceId}:${opts.idempotencyKey}` } : {}),
+            },
           ),
         );
         // An audited read is recorded in its own transaction: the hash chain must be appended under

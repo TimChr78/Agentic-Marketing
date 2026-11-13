@@ -60,6 +60,19 @@ describe('ad click ids', () => {
     expect(captureClickIds('', '_fbc=abcd1234; _ttp=abcd')).toEqual({ fbc: 'abcd1234', ttp: 'abcd' });
   });
 
+  it('takes the first of duplicate conversion cookies, like _fbc (#754)', () => {
+    // Two visible cookies (e.g. a legacy one at `/` and a new one at `/lp`): the browser lists
+    // both, and the old code let whichever came last win for _fbp and _ttp but not _fbc/_epik.
+    expect(captureClickIds('', '_fbp=fb.1.1690000000000.first; _fbp=fb.1.1690000000001.second')).toEqual({
+      fbp: 'fb.1.1690000000000.first',
+    });
+    expect(captureClickIds('', '_ttp=first-ttp; _ttp=second-ttp')).toEqual({ ttp: 'first-ttp' });
+    expect(captureClickIds('', '_fbc=fb.1.1690000000000.first; _fbc=fb.1.1690000000001.second')).toEqual({
+      fbc: 'fb.1.1690000000000.first',
+    });
+    expect(captureClickIds('', '_epik=first-epik; _epik=second-epik')).toEqual({ epik: 'first-epik' });
+  });
+
   it('sends and keeps them only with ad_measurement allowed', async () => {
     const h = harness({ search: '?gclid=Cj0KCQabc', cookies: '' });
     const a = h.make();

@@ -201,6 +201,18 @@ async function removeUnconfirmedSignup(deps: RetentionDeps, candidate: Candidate
                          AND a.type = 'anonymous_id' AND a.value = ${anon})
       ) AS blocked`);
     if (recheck.rows[0]?.blocked) return;
+    // Re-read the event store under the lock (#766): the round's history was a snapshot taken
+    // before any deletion, so a page view, a second form submission or any other event that landed
+    // since then is invisible to it. Only a fresh read can prove the person is still inactive; an
+    // unreadable store proves nothing and keeps them, as the round's own read does.
+    let fresh: StoredEvent[];
+    try {
+      fresh = await deps.events.eventsOfAnonymousIds(candidate.workspace_id, [anon], EVENT_WINDOW);
+    } catch (err) {
+      logger.warn({ err, profile: candidate.id }, 'retention: event history not re-read; keeping candidate');
+      return;
+    }
+    if (!onlyFormActivity(fresh)) return;
     await removeProfiles(tx, candidate.workspace_id, [candidate.id], deps, { suppress: false });
     removed = true;
   });

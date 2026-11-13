@@ -1,6 +1,6 @@
 # System overview
 
-> Status: describes **0.14.14**. Waves 1–3 are built through Phase 16; wave 4 shipped Phases 17–22 (0.3.0–0.8.0) and wave 5 shipped Phases 23–28 (0.9.0–0.14.0). See [roadmap.md](roadmap.md) for the wave 1 plan, [roadmap-wave-4.md](roadmap-wave-4.md) and [roadmap-wave-5.md](roadmap-wave-5.md) for the later waves, and [agentic-autonomy.md](agentic-autonomy.md) for what agents may do today.
+> Status: describes **0.14.15**. Waves 1–3 are built through Phase 16; wave 4 shipped Phases 17–22 (0.3.0–0.8.0) and wave 5 shipped Phases 23–28 (0.9.0–0.14.0). See [roadmap.md](roadmap.md) for the wave 1 plan, [roadmap-wave-4.md](roadmap-wave-4.md) and [roadmap-wave-5.md](roadmap-wave-5.md) for the later waves, and [agentic-autonomy.md](agentic-autonomy.md) for what agents may do today.
 
 ## 1. System context
 
@@ -183,7 +183,7 @@ sequenceDiagram
 
 - **Tenancy:** every table has `workspace_id` (plus `organization_id` reserved for SaaS); every bus subject and ClickHouse row carries it. Postgres Row Level Security is enabled from day one so a missed `WHERE` cannot leak data across workspaces.
 - **IDs:** UUIDv7 (time ordered, index friendly) everywhere; external-facing IDs prefixed (`jrn_`, `tpl_`, `prf_`).
-- **Idempotency:** every command and every side effect accepts an idempotency key; the send gateway deduplicates on `(participant, node, attempt-group)`.
+- **Idempotency:** every command and every side effect accepts an idempotency key; the send gateway deduplicates on `(participant, node, attempt-group)`. Two requests with the same key are serialised: the second returns the first one's response, or, if the first is still running after ten seconds, `409 conflict` so the caller retries instead of deadlocking the connection pool.
 - **Outbox:** state changes that must emit bus events write to an outbox table in the same transaction; a relay publishes to NATS. No dual writes.
 - **Time:** all timestamps UTC; per-profile timezone trait used for send-time and quiet hours.
 - **Observability:** OpenTelemetry traces/metrics/logs from every role; trace context propagated through bus messages and queue jobs. `GET /metrics` exposes Prometheus metrics when `METRICS_TOKEN` is set (0.5.0), and `am doctor` checks the queue and delivery health — see [deployment-and-scaling.md](deployment-and-scaling.md#5-operations--health).

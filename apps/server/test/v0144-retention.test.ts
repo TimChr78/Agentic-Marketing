@@ -119,6 +119,55 @@ describe('retention positive evidence (#627 review)', () => {
     expect((await api().call('consent.history', { profileId: id })).records.length).toBeGreaterThan(0);
   });
 
+  it('keeps a profile whose new activity lands after the history snapshot and before the delete (#766)', async () => {
+    const anon = 'form:late-activity';
+    const id = await seedProfile(anon, 'late-activity@example.com', new Date(Date.now() - 60 * 86_400_000));
+    await t.srv.events.insert([storedEvent(anon, 'Form Submitted')]);
+
+    // The round's history snapshot is taken once for the batch; an event that arrives after it and
+    // before the candidate's delete is not a Postgres row, so only a fresh store read sees it.
+    let inserted = false;
+    const events = {
+      ...t.srv.events,
+      async eventsOfAnonymousIds(...args: Parameters<typeof t.srv.events.eventsOfAnonymousIds>) {
+        const rows = await t.srv.events.eventsOfAnonymousIds(...args);
+        if (!inserted) {
+          inserted = true;
+          await t.srv.events.insert([storedEvent(anon, 'Page Viewed', { sourceId: 'src_site' })]);
+        }
+        return rows;
+      },
+    } as typeof t.srv.events;
+
+    expect((await runRetentionOnce({ ...retentionDeps(), events })).profiles).toBe(0);
+    expect(await profileExists(id)).toBe(true);
+  });
+
+  it('keeps the person when the event store cannot be re-read under the lock (#766)', async () => {
+    const anon = 'form:unreadable-recheck';
+    const id = await seedProfile(anon, 'unreadable-recheck@example.com', new Date(Date.now() - 60 * 86_400_000));
+    await t.srv.events.insert([storedEvent(anon, 'Form Submitted')]);
+
+    // The round's history read proves the person is a lone form signup, but the fresh read under
+    // the delete lock fails. An unreadable store proves nothing, so the person must stay.
+    let reads = 0;
+    const events = {
+      ...t.srv.events,
+      async eventsOfAnonymousIds(...args: Parameters<typeof t.srv.events.eventsOfAnonymousIds>) {
+        reads++;
+        if (reads > 1) throw new Error('injected event-store failure');
+        return t.srv.events.eventsOfAnonymousIds(...args);
+      },
+    } as typeof t.srv.events;
+
+    expect((await runRetentionOnce({ ...retentionDeps(), events })).profiles).toBe(0);
+    expect(reads).toBeGreaterThan(1); // the re-check was attempted
+    expect(await profileExists(id)).toBe(true);
+
+    // Leave no eligible signup behind for the next case in this file.
+    await t.srv.events.insert([storedEvent(anon, 'Page Viewed', { sourceId: 'src_site' })]);
+  });
+
   it('does not treat an unrelated identify with the same timestamp as the form identify', async () => {
     const anon = 'form:timestamp-collision';
     const id = await seedProfile(anon, 'timestamp-collision@example.com', new Date(Date.now() - 60 * 86_400_000));
