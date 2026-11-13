@@ -1,4 +1,4 @@
-import { type RefObject, useEffect } from 'react';
+import { type RefObject, useEffect, useRef } from 'react';
 
 const FOCUSABLE =
   'a[href], area[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), iframe, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
@@ -17,6 +17,10 @@ export function useFocusTrap(
   onEscape?: () => void,
   initialFocus: 'first' | 'container' = 'first',
 ) {
+  // The close handler is usually an inline arrow. Keeping it in a ref means a keystroke-driven
+  // re-render cannot re-run the trap and pull focus back to the first control mid-typing.
+  const escapeRef = useRef(onEscape);
+  escapeRef.current = onEscape;
   useEffect(() => {
     if (!active) return;
     const root = ref.current;
@@ -27,11 +31,11 @@ export function useFocusTrap(
     initial.focus({ preventScroll: true });
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && onEscape) {
+      if (e.key === 'Escape' && escapeRef.current) {
         // Let nested widgets (menus, selects) close first.
         if (e.defaultPrevented) return;
         e.stopPropagation();
-        onEscape();
+        escapeRef.current();
         return;
       }
       if (e.key !== 'Tab') return;
@@ -55,5 +59,5 @@ export function useFocusTrap(
       root.removeEventListener('keydown', onKey);
       if (previous && document.contains(previous)) previous.focus({ preventScroll: true });
     };
-  }, [ref, active, onEscape, initialFocus]);
+  }, [ref, active, initialFocus]);
 }
