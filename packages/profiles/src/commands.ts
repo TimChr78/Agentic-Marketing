@@ -595,12 +595,17 @@ export const topicPreferencesCommand = defineCommand({
         updatedAt: z.string().nullable(),
       }),
     ),
+    withheld: z.boolean().optional().describe('True when topic ids and names were withheld because your role needs artifacts:read'),
   }),
   permission: 'profiles:read',
   effect: 'read',
   auditReads: true,
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
+    // Topic keys, names and descriptions are content of the purposes artifact. Only a caller that
+    // may read artifacts learns them; without it the person's choices are withheld too, because a
+    // key alone would name what they chose (0.14.13 review).
+    if (!ctx.principal.permissions.has('artifacts:read')) return { topics: [], withheld: true };
     const p = await canonical(ctx, input.profileId);
     const purposes = await purposesOf(ctx);
     const choices = await topicChoicesOf(ctx.tx, ctx.principal.workspaceId, p.id);

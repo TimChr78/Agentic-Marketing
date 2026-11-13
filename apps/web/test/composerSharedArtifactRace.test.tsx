@@ -1,6 +1,7 @@
 // 0.14.13 review (P2): a focus re-check and the explicit "Refresh checks" read share the template
 // cache, so an older response that lands last must not put the composer back on a stale pointer.
 import { act, renderHook, waitFor } from '@testing-library/react';
+import { StrictMode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const A = `eml_${'a'.repeat(32)}`;
@@ -114,20 +115,60 @@ describe('the composer template read commits only its latest request (0.14.13 re
     expect(result.current.artifact?.publishedVersion).toBe(3);
   });
 
-  it('does not commit a focus read after the hook unmounts', async () => {
-    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      const { unmount } = renderHook(() => useSharedArtifact(A));
-      await settle(0, 1);
-      await waitFor(() => expect(h.pending).toHaveLength(1));
-      act(() => window.dispatchEvent(new Event('focus')));
-      await flush();
-      expect(h.pending).toHaveLength(2);
-      unmount();
-      await settle(1, 2);
-      expect(errors).not.toHaveBeenCalled();
-    } finally {
-      errors.mockRestore();
-    }
+  it('clears loading when a focus read during the StrictMode mount is the latest', async () => {
+    // The reviewer's repro: the mount reads and a focus re-check are all replaced by one shared
+    // sequence. The focus read answers first and commits; the effect's completion is suppressed.
+    // Loading belongs to whichever read commits last, so the focus read must clear it.
+    const { result } = renderHook(() => useSharedArtifact(A), { wrapper: StrictMode });
+    expect(result.current.loading).toBe(true);
+    expect(h.pending.length).toBeGreaterThanOrEqual(1);
+
+    act(() => window.dispatchEvent(new Event('focus')));
+    await flush();
+    const focus = h.pending.length - 1;
+    await settle(focus, 2);
+    expect(result.current.artifact?.publishedVersion).toBe(2);
+    expect(result.current.loading).toBe(false);
+
+    // Both mount responses land after the focus read. They are older and must neither win nor
+    // switch loading back on.
+    for (let i = 0; i < focus; i++) await settle(i, 1);
+    await flush();
+    expect(result.current.artifact?.publishedVersion).toBe(2);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('clears loading and shows the error when the latest read fails', async () => {
+    const { result } = renderHook(() => useSharedArtifact(A), { wrapper: StrictMode });
+    act(() => window.dispatchEvent(new Event('focus')));
+    await flush();
+    const focus = h.pending.length - 1;
+    await act(async () => {
+      h.pending[focus]!.reject(new Error('offline'));
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe('offline');
+
+    // The superseded mount responses must not clear the error or re-set loading.
+    for (let i = 0; i < focus; i++) await settle(i, 1);
+    await flush();
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe('offline');
+  });
+
+  it('updates no state after the hook unmounts', async () => {
+    // A render count, not console silence: a setState after unmount would re-render in some React
+    // versions, and the hook must not even try.
+    let renders = 0;
+    const { unmount } = renderHook(() => {
+      renders++;
+      return useSharedArtifact(A);
+    });
+    expect(h.pending).toHaveLength(1);
+    unmount();
+    const settled = renders;
+    await settle(0, 2);
+    await flush();
+    expect(renders).toBe(settled);
   });
 });

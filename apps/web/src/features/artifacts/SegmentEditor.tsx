@@ -673,6 +673,24 @@ interface ReferenceSnapshot {
 }
 
 /**
+ * The newer of two observations of one reference. Versions are integers and stamps are increasing
+ * microsecond timestamps (`YYYY-MM-DDTHH:MM:SS.ffffffZ`, so text order is time order); a missing
+ * version or stamp is older than a present one. Equal states return the first, which is the live
+ * one already held.
+ */
+function newerSnapshot(a: ReferenceSnapshot, b: ReferenceSnapshot): ReferenceSnapshot {
+  if (a.version !== b.version) {
+    if (a.version === null) return b;
+    if (b.version === null) return a;
+    return a.version > b.version ? a : b;
+  }
+  if (a.stamp === b.stamp) return a;
+  if (a.stamp === null) return b;
+  if (b.stamp === null) return a;
+  return a.stamp > b.stamp ? a : b;
+}
+
+/**
  * The referenced segments' current published versions, and the membership stamp of any that is a
  * static or snapshot list. A publish in another tab is not a local change, so the reads are forced
  * on the shared invalidation signal, on focus and when the tab becomes visible again: an estimate
@@ -721,13 +739,22 @@ function useReferencedSegmentVersions(ids: string[]) {
   );
   useFocusRecheck(() => void read());
 
-  // A fresh estimate names the exact reference state it counted. That answer is newer than any
-  // read still in flight, so it becomes the live state at once: re-estimating with the same rules
-  // after an import elsewhere must not label its own fresh count as previous (#771 review).
+  // A fresh estimate names the exact reference state it counted, so re-estimating with the same
+  // rules after an import elsewhere must not label its own fresh count as previous (#771 review).
+  //
+  // It is not always newer than the live state: an estimate queued before an import can answer
+  // after a focus re-check has read the newer state. Merge per reference and keep the newer of
+  // (version, stamp), so a stale answer can never pull the live state backwards. The watcher's
+  // sequence is left alone: a newer read still in flight must still commit.
   const adopt = useCallback((resolved: Record<string, ReferenceSnapshot> | undefined) => {
     if (!resolved) return;
-    seq.current++;
-    setVersions((prev) => ({ ...prev, ...resolved }));
+    setVersions((prev) => {
+      const next = { ...prev };
+      for (const [id, snapshot] of Object.entries(resolved)) {
+        next[id] = prev[id] ? newerSnapshot(prev[id], snapshot) : snapshot;
+      }
+      return next;
+    });
   }, []);
 
   return { versions, adopt };
