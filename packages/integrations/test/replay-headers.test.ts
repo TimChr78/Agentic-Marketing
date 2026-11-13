@@ -1,85 +1,72 @@
 import { describe, expect, it } from 'vitest';
-import { replayHeaderValues } from '../src/inbound';
+import { mappedReplayHeaders } from '../src/inbound';
 
-// The replay identity of a generic delivery includes the headers its mapping reads (0.14.11 review).
+// The replay identity of a generic delivery is the body plus the values of the headers its mapping
+// actually read while it ran (0.14.11 review round 7): any header read, by any JSONata construct,
+// is part of it; headers the mapping never touched are not.
 const headers = { 'x-event-id': 'e1', 'x-device': 'd1', 'user-agent': 'ua', host: 'h', 'x-other': 'o' };
 const all = 'host:h\nuser-agent:ua\nx-device:d1\nx-event-id:e1\nx-other:o';
 
-describe('replayHeaderValues', () => {
-  it('takes only the headers a mapping names, in any JSONata form', () => {
-    expect(replayHeaderValues({ mapping: '{"messageId": headers."x-event-id"}' }, headers)).toBe('x-event-id:e1');
-    expect(replayHeaderValues({ mapping: '{"a": headers.`x-device`, "b": headers."X-Event-Id"}' }, headers)).toBe(
+describe('mappedReplayHeaders', () => {
+  it('takes exactly the headers a mapping reads by name, in any JSONata form', async () => {
+    expect(await mappedReplayHeaders('{"messageId": headers."x-event-id"}', {}, headers)).toBe('x-event-id:e1');
+    expect(await mappedReplayHeaders('{"a": headers.`x-device`, "b": $lookup(headers, "x-event-id")}', {}, headers)).toBe(
       'x-device:d1\nx-event-id:e1',
     );
+    expect(await mappedReplayHeaders('{"id": $lookup(headers, "x-even" & "t-id")}', {}, headers)).toBe('x-event-id:e1');
   });
 
-  it('takes only a bare field reference (headers.x)', () => {
-    expect(replayHeaderValues({ mapping: '{"id": headers.x}' }, { ...headers, x: 'only' })).toBe('x:only');
+  it('takes every header when the mapping enumerates or copies the headers object', async () => {
+    expect(await mappedReplayHeaders('$merge([body, {"h": headers}])', {}, headers)).toBe(all);
+    expect(await mappedReplayHeaders('{"keys": $keys(headers)}', {}, headers)).toBe(all);
   });
 
-  it('takes every header when the mapping uses the headers object wholesale (0.14.11 round 5)', () => {
-    // A wholesale mapping can select any header, so every header counts, including the ones that
-    // change per delivery attempt: the mapping's output may depend on them.
-    expect(replayHeaderValues({ mapping: '$merge([body, {"h": headers}])' }, headers)).toBe(all);
+  it('is empty for a body-only mapping', async () => {
+    expect(await mappedReplayHeaders('body', { a: 1 }, headers)).toBe('');
   });
 
-  it('takes every header when the mapping enumerates their names (0.14.11 round 5)', () => {
-    expect(replayHeaderValues({ mapping: '{"keys": $keys(headers)}' }, headers)).toBe(all);
+  it('follows only the branch the mapping took for this body', async () => {
+    const mapping = 'body.useDevice ? {"id": headers."x-device"} : {"id": headers."x-event-id"}';
+    expect(await mappedReplayHeaders(mapping, { useDevice: true }, headers)).toBe('x-device:d1');
+    expect(await mappedReplayHeaders(mapping, { useDevice: false }, headers)).toBe('x-event-id:e1');
   });
 
-  it('is empty for a body-only mapping or a connector without a mapping expression', () => {
-    expect(replayHeaderValues({ mapping: 'body' }, headers)).toBe('');
-    expect(replayHeaderValues({}, headers)).toBe('');
+  it('records a header the mapping reads when only one delivery has it', async () => {
+    const mapping = '{"id": headers.x}';
+    expect(await mappedReplayHeaders(mapping, {}, { other: 'o' })).toBe('');
+    expect(await mappedReplayHeaders(mapping, {}, { other: 'o', x: 'p' })).toBe('x:p');
   });
 
-  it('keeps only a named header when the mapping reads it by name, even through $lookup (0.14.11 round 3)', () => {
-    const h = { ...headers, 'x-forwarded-for': '192.0.2.1' };
-    expect(replayHeaderValues({ mapping: '{"anonymousId": $lookup(headers, "x-forwarded-for")}' }, h)).toBe('x-forwarded-for:192.0.2.1');
-    expect(replayHeaderValues({ mapping: '{"anonymousId": $lookup(headers, \'x-forwarded-for\')}' }, h)).toBe('x-forwarded-for:192.0.2.1');
-    expect(replayHeaderValues({ mapping: '{"ip": headers."x-forwarded-for"}' }, h)).toBe('x-forwarded-for:192.0.2.1');
-  });
-
-  it('takes every header when a $lookup name is computed (0.14.11 round 5)', () => {
-    // The reviewer's reproducer: `$lookup(headers, "x-request-" & "id")` can read any header, so
-    // the per-attempt x-request-id must be part of the identity.
-    const h = { ...headers, 'x-request-id': 'person-a', date: 'Thu, 12 Nov 2026', traceparent: '00-abc-def-01' };
-    const values = replayHeaderValues({ mapping: '$merge([body, {"anonymousId": $lookup(headers, "x-request-" & "id")}])' }, h);
-    expect(values).toContain('x-request-id:person-a');
-    expect(values).toContain('date:Thu, 12 Nov 2026');
-    expect(values).toContain('traceparent:00-abc-def-01');
-    expect(values).toBe(
-      'date:Thu, 12 Nov 2026\nhost:h\ntraceparent:00-abc-def-01\nuser-agent:ua\nx-device:d1\nx-event-id:e1\nx-other:o\nx-request-id:person-a',
-    );
-  });
-
-  it('takes every header for an unrecognised use of the headers object (0.14.11 round 5)', () => {
-    const h = { ...headers, 'x-request-id': 'r1' };
-    expect(replayHeaderValues({ mapping: '{"id": headers["x-request-id"]}' }, h)).toBe(
-      'host:h\nuser-agent:ua\nx-device:d1\nx-event-id:e1\nx-other:o\nx-request-id:r1',
-    );
-    expect(replayHeaderValues({ mapping: '{"id": $each(headers, function($v, $k) {$k})}' }, h)).toContain('x-request-id:r1');
-  });
-
-  it('still joins a per-attempt header the mapping names as a string literal (0.14.11 round 3)', () => {
-    const h = { ...headers, traceparent: '00-abc-def-01' };
-    expect(replayHeaderValues({ mapping: '$lookup(headers, "traceparent")' }, h)).toContain('traceparent:00-abc-def-01');
-  });
-
-  it("adds the connector's own identity headers, such as the Shopify topic (0.14.11 round 3)", () => {
-    const h = { 'x-shopify-topic': 'orders/paid', 'x-shopify-webhook-id': 'w1' };
-    expect(replayHeaderValues({}, h, ['x-shopify-topic'])).toBe('x-shopify-topic:orders/paid');
-  });
-
-  it('reads the mapping through the JSONata parser, not a text scan (0.14.11 round 6)', () => {
-    const a = { x: 'person-a', other: 'o' };
-    const id = (expr: string) => replayHeaderValues({ mapping: `$merge([body, {"anonymousId": (${expr})}])` }, a);
-    // Comments and escapes are the parser's business: these all read header x statically.
-    for (const expr of ['/* " */ headers.x /* " */', 'headers."\\u0078"', '$lookup(headers, "\\u0078")', '"headers".x'])
-      expect(id(expr), expr).toBe('x:person-a');
-    // Context access, aliases, functions and $eval can read any header: every header counts.
-    for (const expr of ['$.headers.x', '($h := $; $h.headers.x)', '($f := function(){$$.headers.x}; $f())', '$eval(body.expr)'])
-      expect(id(expr), expr).toBe('other:o\nx:person-a');
-    // A mapping that does not parse is treated as dynamic too.
-    expect(replayHeaderValues({ mapping: 'headers.(' }, a)).toBe('other:o\nx:person-a');
+  it('catches every construct the round-6 and round-7 reviews used to read a header unseen', async () => {
+    const h = { x: 'person-a', other: 'o' };
+    const body = { type: 'track', event: 'Review', userId: 'u', expr: 'headers.x' };
+    const exprs = [
+      '/* " */ headers.x /* " */',
+      'headers."\\u0078"',
+      '$lookup(headers, "\\u0078")',
+      '$.headers.x',
+      '"headers".x',
+      '($h := $; $h.headers.x)',
+      '($f := function(){$$.headers.x}; $f())',
+      '$eval(body.expr)',
+      '($e := $eval; $e(body.expr))',
+      '*.x',
+      '**.x',
+      'body.%.(*.x)',
+      'body.%.(**.x)',
+      '($t := | * | {"seen": x} |; $string($t(*)))',
+      '$string()',
+      '$spread()',
+      '$spread().*.x',
+      '$each(function($v){$v})',
+      '$lookup($spread()[1], $keys()[1]).x',
+      '$match($string(), /person-[ab]/).match',
+      'headers.other{"v": $$.headers.x}',
+      '$lookup(headers, "other")[$$.headers.x = "person-a"]',
+    ];
+    for (const expr of exprs) {
+      const identity = await mappedReplayHeaders(`$merge([body, {"anonymousId": $string((${expr}))}])`, body, h);
+      expect(identity, expr).toContain('x:person-a');
+    }
   });
 });
