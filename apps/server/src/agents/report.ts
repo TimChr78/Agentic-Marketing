@@ -1,6 +1,7 @@
 import { runAnalyticsQuery } from '@agentic-marketing/analytics';
 import { artifactTypes } from '@agentic-marketing/artifacts';
 import type { AgentOutcomes } from '@agentic-marketing/commands';
+import { AppError, redactCredentials } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { computeJourneyHoldout } from '@agentic-marketing/journeys';
@@ -138,7 +139,7 @@ async function outcomesFromRan(
       const r = await computeJourneyHoldout(deps, id, { from: range.from.toISOString(), to: range.to.toISOString() });
       holdouts.push({ id, verdict: r.verdict, note: r.note });
     } catch (err) {
-      holdouts.push({ id, verdict: null, note: (err as Error).message });
+      holdouts.push({ id, verdict: null, note: outcomeNote(err, 'The journey result could not be computed.') });
     }
   }
 
@@ -154,8 +155,18 @@ async function outcomesFromRan(
       const met = value === null || g.target === undefined ? null : g.direction === 'up' ? value >= g.target : value <= g.target;
       goalResults.push({ ...g, value, met, note: value === null ? 'No value for the period (or the group is too small to show).' : null });
     } catch (err) {
-      goalResults.push({ ...g, value: null, met: null, note: (err as Error).message });
+      goalResults.push({ ...g, value: null, met: null, note: outcomeNote(err, 'The goal could not be measured.') });
     }
   }
   return { broadcasts: email, direct, journeys: holdouts, goals: goalResults };
+}
+
+/**
+ * The note for an outcome that could not be measured, returned by agents.report and agents.compare.
+ * An expected failure (an AppError, such as a measure the metric layer cannot answer) keeps its
+ * message, redacted; anything else (the event store, a driver, a bug) gets the fixed `fallback`, so
+ * its text never reaches the caller (#885 round 9).
+ */
+export function outcomeNote(err: unknown, fallback: string): string {
+  return err instanceof AppError ? redactCredentials(err.message) : fallback;
 }
