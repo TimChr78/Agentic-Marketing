@@ -2,6 +2,112 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.14] - 2026-11-13
+
+### Fixed
+
+- Alert evaluation commits one rule per transaction (#788): a rule whose episode or outbox write fails no longer rolls back the episodes of the rules that ran before it, and a rule's minimum interval starts only after its transaction commits, so a rolled-back decision is retried on the next tick instead of being suppressed for up to an hour. The bounded failure back-off is unchanged.
+- Release runs are serialised in one queue across all lines (every waiting release is kept, not replaced by a newer one), a manual release reserves its version tag before it pushes an image, and the floating `:<major>.<minor>` image tag is pushed only when the version is the newest release in its line (#773): an older patch finishing later can no longer move the tag backwards, and an unreadable tag list publishes the exact version alone. The `latest` image tag follows the same rule across all lines: it moves only for the newest stable release, never for a prerelease or a retried older release. A newer prerelease no longer holds the stable line tag back, and a tag that is not valid SemVer is ignored.
+- The Helm chart refuses to render when `config.PORT` is set and differs from the top-level `port` (#774), instead of producing a pod the probes and Service target on another port, which never passes readiness.
+- The release scripts refuse a shallow clone (#772): `prepare.mjs` and `close-issues.mjs` fail with `git fetch --unshallow --tags` instead of silently truncating the tag range, which skipped issues and rendered "Migrations: none." for a release that had migrations.
+- Unknown `/oauth/*` paths answer a JSON 404 instead of the admin SPA shell, `/metrics` is in the API path list, and the `/hooks`, `/oauth` and `/scim` JSON catch-alls are registered on every server role (#751), so an api-only or ingest-only pod answers JSON too.
+- `/scim` traffic is counted in the `api` route group and `/oauth` gets its own `oauth` group (#752), so an identity-provider outage no longer pages as an admin-UI regression; the group table in the metrics documentation is updated.
+- The backup documentation no longer says the scheduler does not verify its own backups (#783): since 0.14.3 it runs the read-back check after every scheduled backup, so the heartbeat and the verification age are real without a second container or host cron entry.
+- The architecture status pages are version surfaces again (#784): `prepare.mjs` bumps their release line and `check-versions.mjs` checks it, so they cannot pin an old release between releases. Prerelease versions (`1.0.0-rc.1`) are read back too. The release checks also require `docs/status/current.md` to call the version released in its "Now" section and to name it as the last release.
+- The release gates require `docs/status/current.md` to name the release being cut as released (#785): `prepare.mjs --check` and `check-notes.mjs` fail while the handoff still says it is in progress.
+
+### Upgrading from 0.14.13
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** the Helm chart refuses to render when `config.PORT` is set and differs from `port` (remove `config.PORT` and set `port`); unknown `/oauth/*` paths answer a JSON 404 instead of the admin app; the metrics `route_group` label counts `/scim` as `api` and `/oauth` as a new `oauth` group, so dashboards or alerts keyed on `ui` for those paths need updating.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.14.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.14 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.14` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.14). Run `docker compose exec app am doctor`.
+
+<!-- issues: 751, 752, 772, 773, 774, 783, 784, 785, 788 -->
+
+## [0.14.13] - 2026-11-13
+
+### Fixed
+
+- The broadcast composer re-reads its template and segment, and re-runs the evidence and audience estimate, when the window regains focus: a template or segment republished by another tab, person or agent no longer leaves "Live vN · Ready" evidence describing an older send.
+- An artifact change now names the artifact it changed, so saving a broadcast no longer forces the composer to re-read its template and segment or flips both evidence rows to "Checking"; the explicit "Refresh checks" still bypasses the cache.
+- Reference pills such as "Live vN" in a form or broadcast preview, and the shared artifact-name lookup, update after an in-tab publish or rename instead of staying on the pointer they first read.
+- Segment estimates track the membership of referenced static lists and snapshots: `segments.preview` reports a list's membership stamp and the editor turns a count into a previous estimate after an import, even though the list's published version did not move. If a referenced segment cannot be re-checked (for example after access to it is removed), the estimate is shown as possibly out of date instead of current. The referenced segments' versions and stamps are only returned to callers with `artifacts:read`; a caller with only `profiles:read` still gets the count.
+- **Breaking:** `segments.ofProfile` and `topics.preferences` no longer expose artifact ids and names to a token that has `profiles:read` without `artifacts:read`: both return no entries and set `withheld: true`. A caller with `artifacts:read` sees the same output as before.
+- A malformed percent escape in a route parameter (`/artifacts/%`) keeps the raw segment and shows the page's recoverable error, and a root error boundary replaces a blank page with a retryable error when a route throws.
+- Starter "Check prerequisites" and "Create drafts" results are sequenced like the detail read: a slower earlier starter can no longer show its prerequisites, draft list or created artifacts under the newly selected starter.
+- `templates.check` with `checkLinks: true` no longer fails with `invalid_input` on a template whose footer is a reusable block: the link-personalisation probe renders with the same block resolver as the main render, and a probe that still cannot render treats every link as personalised instead of failing the check (#782).
+- E-mail link rewriting decodes an href's character references once before it becomes a URL, so `&#38;`, `&#x26;` and `&amp;` all keep the query parameters after them instead of turning into a `#38;` fragment; tagging and click tracking write the value back with `&amp;` and sign the same decoded URL the unsubscribe check sees (#789).
+- A form's allowed origin drops the scheme's default port (`:443` for https, `:80` for http) on save and on comparison, so `https://MySite.com:443` accepts the `https://mysite.com` Origin a browser sends; a non-default port such as `:8443` is kept (#769). IDN hosts are not involved: the origin schema already rejects non-ASCII hosts.
+
+### Upgrading from 0.14.12
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** a token with `profiles:read` but without `artifacts:read` gets `{ segments: [], withheld: true }` from `segments.ofProfile` and `{ topics: [], withheld: true }` from `topics.preferences`, and `segments.preview` no longer lists the referenced segments' versions and stamps for it; grant `artifacts:read` to keep the details.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.13.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.13 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.13` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.13). Run `docker compose exec app am doctor`.
+
+<!-- issues: 767, 768, 769, 770, 771, 782, 789, 791, 792 -->
+
+## [0.14.12] - 2026-11-13
+
+### Fixed
+
+- Experiment results count exposure and conversion only for the version they describe. A republished experience whose variants were renamed no longer returns rows for the old variant ids, loses its control fallback or claims "Nothing to compare yet" under the new version's number (#758).
+- The results screen prints the version the server measured and the analysis settings of that version, so an open draft with a different `alpha`, `threshold` or method no longer rewrites the caption of a result computed from the published version; a version too new to have exposures says "No data for version N yet" (#758, #759).
+- Experiment results no longer leave exposures recorded without a version silently out of the counts: when the window holds any, the note says how many were excluded and that results count only the version they describe (#758).
+- The journey holdout card labels the absolute lift and its 95% interval in percentage points ("+5.0 pp"), like the campaign and broadcast holdout panels, instead of printing a rate-style percent (#794).
+- The Messages list loads the workspace's purposes and names a message's custom purpose; it no longer shows "Unavailable purpose" for every purpose an operator defined themselves (#793).
+- `campaign.converters` and `campaign.conversion_rate` are a campaign total again: currency partitions only the revenue roll, so requesting `campaign.revenue` (or `campaign.revenue_per_recipient`) no longer splits converters per conversion currency or divides a per-currency count by the all-channel recipients. The same campaign now reports the same converter count and rate with and without a revenue measure.
+- `ads.performance` reads conversion events through the paged reader keyed by the table's full replacing key, so a report window with more than 100,000 conversions counts every event instead of an arbitrary 100,000-row slice, and two conversions that tie on timestamp and event id are both counted. Each page is folded into the totals before the next is read, and the last `utm_campaign` touch is now chosen in ClickHouse per conversion within its window (the conversion chunk is the join's build side and touches stream past it), so the response is at most one row per conversion and neither the server nor ClickHouse holds a visitor's touch history, however long; a report counts its touch and conversion pairs before joining them and fails with a clear message, never partial totals, past 10 million pairs per batch, 50 million per report or 25 seconds per query (a ClickHouse or client timeout reports the same clear error); conversion tuples are chunked below ClickHouse's HTTP form-field limit, so a window whose conversions have more than 100,000 distinct anonymous ids succeeds instead of failing with “Field value too long”. A same-time touch tie is resolved deterministically by event id.
+- Campaign-source freshness is scoped to `sent` and `delivered`, the events the recipient count reads, so a later `failed`, `queued` or `skipped` send decision cannot become the “latest event in period”; an empty match now returns null rather than 1970-01-01.
+- `analytics.campaignSummary` includes an archived campaign when it is requested by id, so its headline, funnel and revenue describe the same members as its member rows instead of a zero headline beside populated rows.
+
+- After upgrading, expect these numbers to change: `campaign.converters` and `campaign.conversion_rate` rise to the campaign total on every per-currency row (for example DKK/EUR rows that reported 2 and 1 converters and rates 0.2/0.1 for a 10-recipient campaign now both report 3 converters and 0.3); `ads.performance` conversions, revenue, CPA and ROAS can rise for windows above 100,000 conversion events; campaign freshness moves back to the last `sent`/`delivered` event for SMS- or push-only campaigns; and an archived campaign’s summary headline becomes non-zero and matches its member rows.
+
+### Upgrading from 0.14.11
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `ads.performance` refuses, with `precondition_failed` and no partial totals, a report whose last-touch attribution would compare more than 10 million campaign touches with conversions in one batch (50 million per report) or take longer than 25 seconds; narrow the date range or the attribution window. `campaign.converters` and `campaign.conversion_rate` change to campaign totals (see the note above), and experiment results count only the version they describe.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.12.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.12 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.12` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.12). Run `docker compose exec app am doctor`.
+
+<!-- issues: 758, 759, 760, 779, 780, 786, 793, 794 -->
+
+## [0.14.11] - 2026-11-13
+
+### Fixed
+
+- Connector webhooks (Shopify, Salesforce and a generic mapping) no longer run the workspace tracking plan, so a strict plan cannot silently drop a mapped order or record while the sender is told the delivery succeeded. Senders see no status-code change: accepted deliveries still answer 200, and a replay is still a 200 that says nothing new was ingested.
+- Replay protection now covers every inbound connection, not only Standard Webhooks. A byte-identical body on an `hmac-sha256` or unsigned generic webhook is answered as already received and publishes nothing; a different body publishes again. Those schemes carry no timestamp, so the dedupe window is the hot-state TTL (10 minutes). The identity is the body plus the values of the headers the mapping read when it ran, however the expression reached them: a header it never reads (an extra header on a replayed signed body, a provider's per-attempt signature or timestamp) does not count, and deliveries whose mapped events differ because of a header never share an identity. If a mapping's choice of which headers to read depends on the clock or randomness, an identical retry may publish twice (never lose an event); Standard Webhooks, whose signed `webhook-id` is the replay key, avoids that. The Shopify topic is always part of the identity, so an order delivered as both `orders/create` and `orders/paid` records both.
+- A hard bounce or complaint that arrives while an SMS STOP suppression already holds the number now escalates the row instead of being dropped, so a later START cannot unsuppress a number that bounced or complained.
+
+### Security
+
+- A campaign revenue row is now keyed on the people who converted in its currency, not on the campaign's recipients: below k=5 converters its revenue and revenue per recipient are null and counted in `meta.suppressed`, while the row's recipient and converter counts stay readable (#756). `analytics.campaignSummary` follows the same rule, so a currency with fewer than five buyers no longer exposes one person's spend.
+- `journeys.splitResult` applies the shared k floor per arm (#757). An arm below k=5 returns null counts and rates with `suppressed: true`, the response adds `k` and a top-level `suppressed`, and every comparison and verdict is withheld; API consumers must handle the new nullable arm fields. The journey report's split card and the MCP tool description say so.
+- `POST /api/auth/oauth2/consent` now refuses a body over 16 KiB with a JSON `payload_too_large` 413 before reading it (#790). The route previously buffered an unbounded body, parsed it and replayed it into a second request before Better Auth checked the session; the 50 MB chunked case is refused while it is still arriving.
+- **Breaking:** `journeys.simulate` with a `profileId` now needs `profiles:read`, because a walk reveals the person's consent, topic and suppression state; a step whose detail would show personal data (such as a phone number in a profile update) is withheld without `profiles:pii`. The dry run without a `profileId` stays at `artifacts:read`.
+- Read audit entries now name the people a read reached: `profiles.find` records the profile it resolved, and `segments.preview` and an unfiltered `messages.list` record one entry per sampled or listed person (at most 50), so `audit.list` can answer "who accessed which person".
+- The shared personal-data detector now also finds national-format phone numbers (`555 123 4567`, `(555) 123-4567`, `020 7946 0958`) and postal addresses, so allowlisted consent-proof free text is withheld from roles without `profiles:pii`. ISO dates, plain counts and ids with letters are not treated as phones.
+- Hosted agent memory notes now refuse an 8-digit Danish or Norwegian phone number (`12345678`) as well, and `agents.memory.list` redacts one in a note saved before this release.
+- Copilot writes now go through the agent policy: the plain assistant acts as the workspace’s built-in Copilot agent, so the autonomy switch, the per-agent change and send limits, the guard and ownership holds, the mandate and the action ledger apply to it exactly as to any other agent; with agents switched off it is refused, and pausing that agent stops its writes. An agent principal that names no agent record can no longer run any write.
+- The OTLP endpoint is logged as its origin only, so `OTEL_EXPORTER_OTLP_ENDPOINT` credentials in the userinfo or a token in the query string no longer reach the startup logs.
+- Migration resets `SUPERUSER` and `BYPASSRLS` on an app role that already existed, and refuses an app role that can `SET ROLE` into a privileged one through a chain of memberships (a `NOINHERIT` middle role does not help): the error names the chain and the `REVOKE` that fixes it, so the migration — and therefore startup — stops instead of serving every request with row-level security off. When both attributes are already off the migration leaves them out of the `ALTER ROLE`, so a non-superuser `CREATEROLE` migration user can start a second time. `am doctor` fails with the same role, chain and fix.
+
+### Upgrading from 0.14.10
+
+- **Migrations:** `packages/db/migrations/0090_suppressions_update_grant.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `journeys.simulate` with a `profileId` needs `profiles:read`; `journeys.splitResult` returns null counts with `suppressed: true` for arms below k=5; OAuth consent bodies over 16 KiB are refused with 413; Copilot writes follow the agent policy, so with agents switched off its drafts and publishes are refused; generic webhooks whose mapping reads a header now dedupe on that header's value. Migration and startup refuse an app role that has, or can `SET ROLE` into, `SUPERUSER` or `BYPASSRLS`.
+- **Manual steps:** if startup refuses the app role, run the `REVOKE` the error names (or point `APP_DB_ROLE` at an unprivileged role), then start again; `am doctor` reports the same check as `postgres.app-role`.
+- **Upgrade:** download `agentic-marketing-compose-0.14.11.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.11 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.11` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.11). Run `docker compose exec app am doctor`.
+
+<!-- issues: 750, 756, 757, 762, 763, 764, 765, 787, 790, 808, 811, 813 -->
+
 ## [0.14.10] - 2026-11-12
 
 ### Fixed

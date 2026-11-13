@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -618,6 +618,80 @@ describe('the release version check (#671)', () => {
     }
     // The old parseArgs passed the version straight through; the shared check must refuse it first.
     expect(output).toMatch(/not a version: 0\.14\.3-\.\./);
+  });
+});
+
+/**
+ * Every `run:` script in a workflow's YAML text, decoded the way YAML would decode it (literal `|`
+ * keeps newlines, folded `>` joins lines with spaces; chomping and indentation indicators are
+ * accepted), with GitHub expressions replaced by a placeholder. 0.14.14 review rounds 4 and 5.
+ */
+function workflowRunScripts(text: string): { line: number; body: string }[] {
+  const lines = text.split('\n');
+  const scripts: { line: number; body: string }[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = /^(\s*)(?:- )?run:\s*(.*)$/.exec(lines[i]!);
+    if (!m) continue;
+    const keyIndent = m[1]!.length;
+    const value = m[2]!.trim();
+    const block = /^([|>])[0-9]?[+-]?[0-9]?$/.exec(value);
+    let body = value;
+    if (block) {
+      const raw: string[] = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const l = lines[j]!;
+        if (l.trim() !== '' && l.length - l.trimStart().length <= keyIndent) break;
+        raw.push(l);
+      }
+      const indent = Math.min(...raw.filter((l) => l.trim() !== '').map((l) => l.length - l.trimStart().length));
+      const content = raw.map((l) => l.slice(Number.isFinite(indent) ? indent : 0));
+      if (block[1] === '|') body = content.join('\n');
+      else {
+        // Folded: a line break between two non-empty, non-indented lines becomes a space.
+        body = '';
+        for (const [k, l] of content.entries()) {
+          const prev = content[k - 1];
+          const fold = k > 0 && l !== '' && prev !== undefined && prev !== '' && !/^\s/.test(l) && !/^\s/.test(prev);
+          body += k === 0 ? l : fold ? ` ${l}` : `\n${l}`;
+        }
+      }
+    }
+    scripts.push({ line: i + 1, body: body.replace(/\$\{\{[^}]*\}\}/g, 'X') });
+  }
+  return scripts;
+}
+
+const bashParses = (body: string) => spawnSync('bash', ['-n'], { input: body, encoding: 'utf8' });
+
+describe('workflow shell steps parse (0.14.14 review rounds 4 and 5)', () => {
+  const root = fileURLToPath(new URL('../../../', import.meta.url));
+
+  for (const file of ['.github/workflows/release.yml', '.github/workflows/ci.yml']) {
+    it(`every run step in ${file} is valid bash`, () => {
+      const scripts = workflowRunScripts(readFileSync(join(root, file), 'utf8'));
+      expect(scripts.length).toBeGreaterThan(3);
+      for (const { line, body } of scripts) {
+        const result = bashParses(body);
+        expect(result.status, `${file}:${line}: ${result.stderr}`).toBe(0);
+      }
+    });
+  }
+
+  it('decodes folded and chomped block scalars instead of checking their indicator', () => {
+    const yaml = (indicator: string, body: string[]) =>
+      ['jobs:', '  a:', '    steps:', `      - run: ${indicator}`, ...body.map((l) => `          ${l}`), '      - run: echo next'].join(
+        '\n',
+      );
+    // A broken folded script must fail; the old extractor checked only ">-" and passed it.
+    const [folded] = workflowRunScripts(yaml('>-', ['echo "unterminated', 'more words']));
+    expect(bashParses(folded!.body).status).not.toBe(0);
+    // A valid strip-chomped literal must pass; the old extractor checked "|-" itself.
+    const [literal] = workflowRunScripts(yaml('|-', ['if true; then', '  echo ok', 'fi']));
+    expect(literal!.body).toBe('if true; then\n  echo ok\nfi');
+    expect(bashParses(literal!.body).status).toBe(0);
+    // Folded lines join with spaces, so a multi-line command stays one command.
+    const [joined] = workflowRunScripts(yaml('>', ['docker run --rm', 'image:tag', 'npx playwright test']));
+    expect(joined!.body.trim()).toBe('docker run --rm image:tag npx playwright test');
   });
 });
 

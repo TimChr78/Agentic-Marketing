@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { googleEmail, metaEmail, metaPhone, sha256 } from '@agentic-marketing/ads';
+import { ATTRIBUTION_LIMITS, googleEmail, metaEmail, metaPhone, sha256 } from '@agentic-marketing/ads';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -582,6 +582,76 @@ describe('spend and ROAS', () => {
     expect(byId.get('last')).toMatchObject({ conversions: 1, revenue: 50, cpa: 10, roas: 5 });
     for (const id of ['noise', 'out', 'older', 'after', 'after-report']) expect(byId.get(id)!.conversions).toBe(0);
     expect(result.unattributed).toEqual({ conversions: 0, revenue: 0 });
+  });
+
+  it('refuses a report whose touch and conversion pairs exceed the attribution budget (0.14.12 review round 4)', async () => {
+    const work = await t.workspaceWith([[owner, 'owner']]);
+    const api = t.api(owner, work);
+    const microsoft = await api.call('connections.create', {
+      connector: 'microsoft_ads',
+      name: 'Microsoft',
+      settings: {
+        customerId: '111',
+        accountId: '222',
+        apiBase: `${platformUrl}/msads`,
+        authorizeUrl: `${platformUrl}/authorize`,
+        tokenUrl: `${platformUrl}/token`,
+      },
+      secrets: { clientId: 'mc', clientSecret: 'ms', developerToken: 'ms-dev-token' },
+    });
+    const map = await api.call('artifacts.create', {
+      type: 'conversion_map',
+      name: 'Budget attribution',
+      content: {
+        rules: [
+          {
+            event: 'Budget Purchase',
+            value: 'total',
+            currency: 'DKK',
+            microsoft: { connection: microsoft.id, conversionName: 'Purchase' },
+          },
+        ],
+      },
+    });
+    await api.call('artifacts.requestPublish', { artifactId: map.artifactId, note: 'budget' });
+    // One visitor, 20 campaign touches and 10 conversions: 200 candidate pairs.
+    const at = (i: number) => new Date(Date.parse('2026-01-20T00:00:00.000Z') + i * 60_000).toISOString();
+    await t.srv.events.insert([
+      ...Array.from({ length: 20 }, (_, i) =>
+        storedEvent(work, {
+          eventId: `budget-touch-${i}`,
+          type: 'page',
+          name: 'Page View',
+          at: at(i),
+          anonymousId: 'anon-budget',
+          context: { page: { url: 'https://shop.example.com/?utm_source=facebook&utm_campaign=Budget' } },
+        }),
+      ),
+      ...Array.from({ length: 10 }, (_, i) =>
+        storedEvent(work, {
+          eventId: `budget-conversion-${i}`,
+          type: 'track',
+          name: 'Budget Purchase',
+          at: at(30 + i),
+          anonymousId: 'anon-budget',
+          properties: { total: 10 },
+        }),
+      ),
+    ]);
+    const report = () => api.call('ads.performance', { since: '2026-01-01', until: '2026-01-31', windowDays: 7 });
+    const saved = { ...ATTRIBUTION_LIMITS };
+    try {
+      ATTRIBUTION_LIMITS.pairsPerQuery = 100;
+      await expect(report()).rejects.toMatchObject({ code: 'precondition_failed', message: expect.stringContaining('200') });
+      ATTRIBUTION_LIMITS.pairsPerQuery = saved.pairsPerQuery;
+      ATTRIBUTION_LIMITS.pairsPerReport = 150;
+      await expect(report()).rejects.toMatchObject({ code: 'precondition_failed' });
+    } finally {
+      Object.assign(ATTRIBUTION_LIMITS, saved);
+    }
+    // Within the budget the same report attributes every conversion.
+    const result = await report();
+    expect(result.unattributed).toEqual({ conversions: 10, revenue: 100 });
   });
 
   it('breaks a same-time touch tie deterministically by event id (#786)', async () => {

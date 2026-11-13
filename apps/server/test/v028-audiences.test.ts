@@ -207,6 +207,17 @@ describe('static and snapshot audiences', () => {
     // c1 is already on the list; the other three are new.
     expect(imports.reduce((n, r) => n + r.added, 0)).toBe(3);
 
+    // Each import answers with the stamp of its own run. Completion order is not write order, so
+    // order them: every intermediate write must be later than the one before it, not only the last
+    // one later than the first. A shared or reused stamp would let a polling client miss an import.
+    const written = imports.map((r) => {
+      expect(r.stamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+      return r.stamp as string;
+    });
+    const ordered = [...written].sort((a, b) => (micros(a) < micros(b) ? -1 : 1));
+    expect(micros(ordered[0]!)).toBeGreaterThan(micros(before));
+    for (let i = 1; i < ordered.length; i++) expect(micros(ordered[i]!)).toBeGreaterThan(micros(ordered[i - 1]!));
+
     const after = (await api().call('segments.preview', { artifactId: concurrent })).segments[0].stamp as string;
     expect(after).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
     // Four list writes (one adds nobody, but each records a run) ran concurrently after the stamp
@@ -242,6 +253,35 @@ describe('static and snapshot audiences', () => {
     const byId = await preview({ artifactId: hidden });
     expect(byId.status).toBe(200);
     expect(await byId.json()).toMatchObject({ count: 1, segments: [] });
+  });
+
+  it('withholds segment ids and names from segments.ofProfile without artifacts:read (#771 review)', async () => {
+    // A person on a list, created here so the test does not depend on another test's seed.
+    const member = await person('v028-profile-only', { city: 'Profileholm' });
+    const own = await createSegment('Profile-only list', { mode: 'static' });
+    await api().call('audiences.add', { segmentId: own, emails: [emailOf('v028-profile-only')] });
+
+    // A token limited to profiles:read may learn that the person is in some segments, but the ids
+    // and names are artifact metadata it cannot read.
+    const token = await api().call('apiTokens.create', { name: 'profile only', scopes: ['profiles:read'] });
+    const ofProfile = (profileId: string) =>
+      fetch(`${t.base}/v1/segments.ofProfile`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token.token}` },
+        body: JSON.stringify({ profileId }),
+      });
+
+    const withheld = await ofProfile(member);
+    expect(withheld.status).toBe(200);
+    const body = await withheld.json();
+    expect(body).toEqual({ segments: [], withheld: true });
+    expect(JSON.stringify(body)).not.toContain(own);
+    expect(JSON.stringify(body)).not.toContain('Profile-only list');
+
+    // A caller with artifacts:read sees the same entries as before; the flag is not added.
+    const full = await api().call('segments.ofProfile', { profileId: member });
+    expect(full.segments).toEqual(expect.arrayContaining([expect.objectContaining({ id: own, name: 'Profile-only list' })]));
+    expect(full).not.toHaveProperty('withheld');
   });
 
   it('a broadcast to a static list reaches members with consent only', async () => {

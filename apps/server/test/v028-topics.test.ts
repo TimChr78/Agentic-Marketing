@@ -291,6 +291,19 @@ describe('agent rules and erasure (#84)', () => {
     });
   });
 
+  it('withholds topic ids and names from a profiles:read token without artifacts:read (#771 review)', async () => {
+    const token = await api().call('apiTokens.create', { name: 'profile only', scopes: ['profiles:read'] });
+    const client = createClient<Commands>({ baseUrl: t.base, headers: { authorization: `Bearer ${token.token}` } });
+    const withheld = await client.call('topics.preferences', { profileId: people.get('dee')! });
+    expect(withheld).toEqual({ topics: [], withheld: true });
+    expect(JSON.stringify(withheld)).not.toContain('Weekly newsletter');
+
+    // A caller with artifacts:read sees the same output as before; the flag is not added.
+    const full = await api().call('topics.preferences', { profileId: people.get('dee')! });
+    expect(full.topics.some((t) => t.name === 'Weekly newsletter')).toBe(true);
+    expect(full).not.toHaveProperty('withheld');
+  });
+
   it('erases topic choices and their history with the profile', async () => {
     const id = people.get('bo')!;
     await api().call('topics.set', { profileId: id, topic: 'newsletter', status: 'unsubscribed' });

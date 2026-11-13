@@ -33,6 +33,20 @@ describe('telemetry log level', () => {
   });
 });
 
+describe('the public URL in the logs (0.14.11 round 4)', () => {
+  it('keeps the origin and path, and drops the userinfo and the query', async () => {
+    const { endpointLocation } = await import('../src/index');
+    expect(endpointLocation('https://user:pw@app.example.com/base?token=x#frag')).toBe('https://app.example.com/base');
+    expect(endpointLocation('https://app.example.com')).toBe('https://app.example.com');
+    expect(endpointLocation('http://localhost:3000/')).toBe('http://localhost:3000');
+  });
+
+  it('says plainly when the public URL is not a URL', async () => {
+    const { endpointLocation } = await import('../src/index');
+    expect(endpointLocation('app.example.com')).toBe('(invalid URL)');
+  });
+});
+
 describe('the OTLP endpoint in the logs (#808)', () => {
   it('drops the user, the path and the query from the endpoint', async () => {
     vi.resetModules();
