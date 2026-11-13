@@ -72,53 +72,68 @@ export function trackHeaderReads(headers: Record<string, string>): { proxy: Reco
 }
 
 /**
- * A delivery's replay identity from the headers: the values of the headers the mapping read (all
- * of them if it enumerated the object), plus the connector's own identity headers. Two deliveries
- * with one body and the same values for every header the mapping read take the same path through
- * the mapping and produce the same events, so this is exactly the part of the request that can make
- * them two events. A mapping that reads a per-attempt header (`x-request-id`, `date`, a trace id)
- * therefore treats a sender's retry that changes it as a new event; name only the headers you need,
- * or use Standard Webhooks, whose signed `webhook-id` is the replay key regardless of the mapping.
+ * Request headers that change when a sender retries one delivery (or a proxy forwards it again):
+ * dates, request and trace ids, client-IP and forwarding hops, the client string, and the
+ * Standard Webhooks timestamp and signature. Every other header is stable across a retry.
  */
-export function headerIdentity(
-  headers: Record<string, string>,
-  reads: HeaderReads | null,
-  connectorHeaders: readonly string[] = [],
-): string {
-  const keys = new Set<string>(connectorHeaders.map((h) => h.toLowerCase()));
-  if (reads) for (const k of reads.all ? Object.keys(headers) : reads.names) keys.add(k);
-  return [...keys]
+const PER_ATTEMPT_HEADERS = new Set([
+  'date',
+  'x-request-id',
+  'x-amzn-trace-id',
+  'traceparent',
+  'tracestate',
+  'cf-ray',
+  'cdn-loop',
+  'via',
+  'x-forwarded-for',
+  'x-forwarded-proto',
+  'x-forwarded-host',
+  'x-forwarded-port',
+  'x-real-ip',
+  'true-client-ip',
+  'cf-connecting-ip',
+  'cf-ipcountry',
+  'cf-visitor',
+  'user-agent',
+  'accept-encoding',
+  'connection',
+  'content-length',
+  'webhook-timestamp',
+  'webhook-signature',
+]);
+
+/**
+ * A delivery's replay identity from its headers (0.14.11 review round 9): every request header,
+ * except the per-attempt ones the mapping did not read in its real run. A connector that declares
+ * its identity headers (Shopify's topic) uses exactly those instead.
+ *
+ * - No distinct event is ever folded into another: if a header made two real outputs differ, at
+ *   least one of those runs read it, so it is in that delivery's identity and the keys differ; a
+ *   header neither run read did not change either output. This holds whatever the mapping does
+ *   with time, randomness or `$eval`.
+ * - An ordinary retry differs only in per-attempt headers; those it does not read are left out, so
+ *   it dedupes. A mapping that reads a per-attempt header (`x-request-id`, a trace id) makes a retry
+ *   that changes it a new delivery; use Standard Webhooks, whose signed `webhook-id` is the replay
+ *   key whatever the mapping does, if a sender stamps such headers.
+ */
+export function headerIdentity(headers: Record<string, string>, reads: HeaderReads, connectorHeaders?: readonly string[]): string {
+  const keys = connectorHeaders
+    ? connectorHeaders.map((h) => h.toLowerCase())
+    : Object.keys(headers).filter((k) => !PER_ATTEMPT_HEADERS.has(k) || reads.all || reads.names.has(k));
+  return [...new Set(keys)]
     .sort()
     .map((k) => `${k}:${headers[k] ?? ''}`)
     .join('\n');
 }
 
 /**
- * JSONata's only non-deterministic functions, frozen for the identity run: with them fixed, two
- * deliveries with one body and the same values of the headers read take the same path through the
- * mapping, whatever the clock or the random source says (0.14.11 review round 8). The events
- * themselves come from the normal evaluation, with real time.
- */
-const FROZEN = {
-  now: () => '1970-01-01T00:00:00.000Z',
-  millis: () => 0,
-  random: () => 0,
-};
-
-/**
- * The header identity of a JSONata mapping for one request: evaluate it once more against the
- * read-tracking proxy with time and randomness frozen, and copy the result the way the generic
- * connector does (which reads any header put into it). A mapping that fails in this run is taken to
- * read every header.
+ * The header identity a generic JSONata mapping gives one request, evaluated the way the generic
+ * connector maps it (one real run, output copied). Used by tests.
  */
 export async function mappedReplayHeaders(mapping: string, body: unknown, headers: Record<string, string>): Promise<string> {
   const { proxy, reads } = trackHeaderReads(headers);
-  try {
-    const v = await jsonata(mapping).evaluate({ body, headers: proxy }, FROZEN);
-    if (v !== undefined) JSON.stringify(v);
-  } catch {
-    reads.all = true;
-  }
+  const v = await jsonata(mapping).evaluate({ body, headers: proxy });
+  if (v !== undefined) JSON.stringify(v);
   return headerIdentity(headers, reads);
 }
 
@@ -214,14 +229,8 @@ export function inboundApi(deps: {
       // mapping or the connector reads (0.14.11 review, rounds 1 to 3).
       // A connector that declares its identity headers (Shopify's topic) uses exactly those; any other
       // uses the headers its mapping actually read.
-      // A JSONata mapping gets a deterministic identity run (time and randomness frozen); a connector
-      // that maps in code uses the reads recorded while it mapped (round 8).
-      const mapping = (ictx.settings as { mapping?: unknown } | undefined)?.mapping;
-      const replayHeaders = connector.inbound.replayHeaders
-        ? headerIdentity(headers, null, connector.inbound.replayHeaders)
-        : typeof mapping === 'string'
-          ? await mappedReplayHeaders(mapping, payload, headers)
-          : headerIdentity(headers, tracked.reads);
+      // Identity from the real run's reads: every header except unread per-attempt ones (round 9).
+      const replayHeaders = headerIdentity(headers, tracked.reads, connector.inbound.replayHeaders);
       const replayId =
         webhookId ??
         (scheme === 'standard-webhooks'

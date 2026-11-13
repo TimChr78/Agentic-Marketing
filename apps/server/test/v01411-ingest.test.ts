@@ -222,6 +222,7 @@ describe('inbound replay protection for every scheme (#787)', () => {
     for (const [name, expr] of [
       ['Descendant generic', '**.x'],
       ['Context string generic', '$match($string(), /person-[ab]/).match'],
+      ['Clock branch generic', '$millis() > 0 ? headers.x : "person-a"'],
     ] as const) {
       const connection = await api(plainWs).call('connections.create', {
         connector: 'webhook',
@@ -229,7 +230,7 @@ describe('inbound replay protection for every scheme (#787)', () => {
         settings: { mapping: `$merge([body, {"anonymousId": $string((${expr}))}])` },
         secrets: {},
       });
-      const body = tracked(`unnamed-${name.length}`, 'u-1');
+      const body = tracked(`unnamed-${name.replace(/\W/g, '-')}`, 'u-1');
       const first = await post(connection.inboundPath!, body, { x: 'person-a', other: 'o' });
       expect(await first.json(), expr).toMatchObject({ success: true, accepted: 1 });
       const second = await (await post(connection.inboundPath!, body, { x: 'person-b', other: 'o' })).json();
