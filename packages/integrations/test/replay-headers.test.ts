@@ -69,4 +69,17 @@ describe('replayHeaderValues', () => {
     const h = { 'x-shopify-topic': 'orders/paid', 'x-shopify-webhook-id': 'w1' };
     expect(replayHeaderValues({}, h, ['x-shopify-topic'])).toBe('x-shopify-topic:orders/paid');
   });
+
+  it('reads the mapping through the JSONata parser, not a text scan (0.14.11 round 6)', () => {
+    const a = { x: 'person-a', other: 'o' };
+    const id = (expr: string) => replayHeaderValues({ mapping: `$merge([body, {"anonymousId": (${expr})}])` }, a);
+    // Comments and escapes are the parser's business: these all read header x statically.
+    for (const expr of ['/* " */ headers.x /* " */', 'headers."\\u0078"', '$lookup(headers, "\\u0078")', '"headers".x'])
+      expect(id(expr), expr).toBe('x:person-a');
+    // Context access, aliases, functions and $eval can read any header: every header counts.
+    for (const expr of ['$.headers.x', '($h := $; $h.headers.x)', '($f := function(){$$.headers.x}; $f())', '$eval(body.expr)'])
+      expect(id(expr), expr).toBe('other:o\nx:person-a');
+    // A mapping that does not parse is treated as dynamic too.
+    expect(replayHeaderValues({ mapping: 'headers.(' }, a)).toBe('other:o\nx:person-a');
+  });
 });
