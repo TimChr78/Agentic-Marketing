@@ -32,7 +32,8 @@ _Last updated: 2026-11-12_
   - **0.14.8** (alerts, schedules and jobs) is released and verified: the last of the seven audit releases. Sol approved after three rounds (DST resolution cross-checked against a minute scan in nine zones; retry-stable, strictly increasing refresh tokens). Up to four delegates run at once (raised 2026-11-12).
   - **0.14.9** (dependency updates, #727) is released and verified: the auth stack, `htmlparser2` 12, `jsdom` 31, OpenTelemetry 0.301, Biome 2.6 and the remaining group.
   - **0.14.10** (bug follow-ups: #735, #732, #671, #672, #673, #746) is released. Sol approved. parse5 8.1 indexes the open-element stack, so the #673 read cap is now a backstop.
-  - **0.14.11–0.14.15** (the 2026-11-12 audit, 52 issues): in review. Plan: https://claude.ai/artifact/BDXuwrEBa6hevSKU4s9vAL
+  - **0.14.11** (privacy and security) is released: Sol approved after eleven rounds; webhook replay identity is the headers a mapping reads (documented residual: clock- or random-dependent reads may publish a retry twice, never lose one).
+  - **0.14.12–0.14.15** (the rest of the 2026-11-12 audit): approved, releasing in order. Plan: https://claude.ai/artifact/BDXuwrEBa6hevSKU4s9vAL
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)

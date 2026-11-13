@@ -2,6 +2,37 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.11] - 2026-11-13
+
+### Fixed
+
+- Connector webhooks (Shopify, Salesforce and a generic mapping) no longer run the workspace tracking plan, so a strict plan cannot silently drop a mapped order or record while the sender is told the delivery succeeded. Senders see no status-code change: accepted deliveries still answer 200, and a replay is still a 200 that says nothing new was ingested.
+- Replay protection now covers every inbound connection, not only Standard Webhooks. A byte-identical body on an `hmac-sha256` or unsigned generic webhook is answered as already received and publishes nothing; a different body publishes again. Those schemes carry no timestamp, so the dedupe window is the hot-state TTL (10 minutes). The identity is the body plus the values of the headers the mapping read when it ran, however the expression reached them: a header it never reads (an extra header on a replayed signed body, a provider's per-attempt signature or timestamp) does not count, and deliveries whose mapped events differ because of a header never share an identity. If a mapping's choice of which headers to read depends on the clock or randomness, an identical retry may publish twice (never lose an event); Standard Webhooks, whose signed `webhook-id` is the replay key, avoids that. The Shopify topic is always part of the identity, so an order delivered as both `orders/create` and `orders/paid` records both.
+- A hard bounce or complaint that arrives while an SMS STOP suppression already holds the number now escalates the row instead of being dropped, so a later START cannot unsuppress a number that bounced or complained.
+
+### Security
+
+- A campaign revenue row is now keyed on the people who converted in its currency, not on the campaign's recipients: below k=5 converters its revenue and revenue per recipient are null and counted in `meta.suppressed`, while the row's recipient and converter counts stay readable (#756). `analytics.campaignSummary` follows the same rule, so a currency with fewer than five buyers no longer exposes one person's spend.
+- `journeys.splitResult` applies the shared k floor per arm (#757). An arm below k=5 returns null counts and rates with `suppressed: true`, the response adds `k` and a top-level `suppressed`, and every comparison and verdict is withheld; API consumers must handle the new nullable arm fields. The journey report's split card and the MCP tool description say so.
+- `POST /api/auth/oauth2/consent` now refuses a body over 16 KiB with a JSON `payload_too_large` 413 before reading it (#790). The route previously buffered an unbounded body, parsed it and replayed it into a second request before Better Auth checked the session; the 50 MB chunked case is refused while it is still arriving.
+- **Breaking:** `journeys.simulate` with a `profileId` now needs `profiles:read`, because a walk reveals the person's consent, topic and suppression state; a step whose detail would show personal data (such as a phone number in a profile update) is withheld without `profiles:pii`. The dry run without a `profileId` stays at `artifacts:read`.
+- Read audit entries now name the people a read reached: `profiles.find` records the profile it resolved, and `segments.preview` and an unfiltered `messages.list` record one entry per sampled or listed person (at most 50), so `audit.list` can answer "who accessed which person".
+- The shared personal-data detector now also finds national-format phone numbers (`555 123 4567`, `(555) 123-4567`, `020 7946 0958`) and postal addresses, so allowlisted consent-proof free text is withheld from roles without `profiles:pii`. ISO dates, plain counts and ids with letters are not treated as phones.
+- Hosted agent memory notes now refuse an 8-digit Danish or Norwegian phone number (`12345678`) as well, and `agents.memory.list` redacts one in a note saved before this release.
+- Copilot writes now go through the agent policy: the plain assistant acts as the workspace’s built-in Copilot agent, so the autonomy switch, the per-agent change and send limits, the guard and ownership holds, the mandate and the action ledger apply to it exactly as to any other agent; with agents switched off it is refused, and pausing that agent stops its writes. An agent principal that names no agent record can no longer run any write.
+- The OTLP endpoint is logged as its origin only, so `OTEL_EXPORTER_OTLP_ENDPOINT` credentials in the userinfo or a token in the query string no longer reach the startup logs.
+- Migration resets `SUPERUSER` and `BYPASSRLS` on an app role that already existed, and refuses an app role that can `SET ROLE` into a privileged one through a chain of memberships (a `NOINHERIT` middle role does not help): the error names the chain and the `REVOKE` that fixes it, so the migration — and therefore startup — stops instead of serving every request with row-level security off. When both attributes are already off the migration leaves them out of the `ALTER ROLE`, so a non-superuser `CREATEROLE` migration user can start a second time. `am doctor` fails with the same role, chain and fix.
+
+### Upgrading from 0.14.10
+
+- **Migrations:** `packages/db/migrations/0090_suppressions_update_grant.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `journeys.simulate` with a `profileId` needs `profiles:read`; `journeys.splitResult` returns null counts with `suppressed: true` for arms below k=5; OAuth consent bodies over 16 KiB are refused with 413; Copilot writes follow the agent policy, so with agents switched off its drafts and publishes are refused; generic webhooks whose mapping reads a header now dedupe on that header's value. Migration and startup refuse an app role that has, or can `SET ROLE` into, `SUPERUSER` or `BYPASSRLS`.
+- **Manual steps:** if startup refuses the app role, run the `REVOKE` the error names (or point `APP_DB_ROLE` at an unprivileged role), then start again; `am doctor` reports the same check as `postgres.app-role`.
+- **Upgrade:** download `agentic-marketing-compose-0.14.11.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.11 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.11` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.11). Run `docker compose exec app am doctor`.
+
+<!-- issues: 750, 756, 757, 762, 763, 764, 765, 787, 790, 808, 811, 813 -->
+
 ## [0.14.10] - 2026-11-12
 
 ### Fixed
