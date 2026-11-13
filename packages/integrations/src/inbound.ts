@@ -93,12 +93,32 @@ export function headerIdentity(
     .join('\n');
 }
 
-/** The header identity a generic JSONata mapping produces for one request (used by tests). */
+/**
+ * JSONata's only non-deterministic functions, frozen for the identity run: with them fixed, two
+ * deliveries with one body and the same values of the headers read take the same path through the
+ * mapping, whatever the clock or the random source says (0.14.11 review round 8). The events
+ * themselves come from the normal evaluation, with real time.
+ */
+const FROZEN = {
+  now: () => '1970-01-01T00:00:00.000Z',
+  millis: () => 0,
+  random: () => 0,
+};
+
+/**
+ * The header identity of a JSONata mapping for one request: evaluate it once more against the
+ * read-tracking proxy with time and randomness frozen, and copy the result the way the generic
+ * connector does (which reads any header put into it). A mapping that fails in this run is taken to
+ * read every header.
+ */
 export async function mappedReplayHeaders(mapping: string, body: unknown, headers: Record<string, string>): Promise<string> {
   const { proxy, reads } = trackHeaderReads(headers);
-  const v = await jsonata(mapping).evaluate({ body, headers: proxy });
-  // The generic connector copies its output the same way, which reads any header put into it.
-  if (v !== undefined) JSON.stringify(v);
+  try {
+    const v = await jsonata(mapping).evaluate({ body, headers: proxy }, FROZEN);
+    if (v !== undefined) JSON.stringify(v);
+  } catch {
+    reads.all = true;
+  }
   return headerIdentity(headers, reads);
 }
 
@@ -194,9 +214,14 @@ export function inboundApi(deps: {
       // mapping or the connector reads (0.14.11 review, rounds 1 to 3).
       // A connector that declares its identity headers (Shopify's topic) uses exactly those; any other
       // uses the headers its mapping actually read.
+      // A JSONata mapping gets a deterministic identity run (time and randomness frozen); a connector
+      // that maps in code uses the reads recorded while it mapped (round 8).
+      const mapping = (ictx.settings as { mapping?: unknown } | undefined)?.mapping;
       const replayHeaders = connector.inbound.replayHeaders
         ? headerIdentity(headers, null, connector.inbound.replayHeaders)
-        : headerIdentity(headers, tracked.reads);
+        : typeof mapping === 'string'
+          ? await mappedReplayHeaders(mapping, payload, headers)
+          : headerIdentity(headers, tracked.reads);
       const replayId =
         webhookId ??
         (scheme === 'standard-webhooks'

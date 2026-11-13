@@ -238,6 +238,22 @@ describe('inbound replay protection for every scheme (#787)', () => {
     }
   });
 
+  it('dedupes an identical retry when a time-dependent branch reads a header only the first time (0.14.11 round 8)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Time-branch generic',
+      settings: { mapping: '$merge([body, {"anonymousId": $millis() < body.cutoff ? headers.x : "person-a"}])' },
+      secrets: {},
+    });
+    const body = JSON.stringify({ type: 'track', event: 'Order Completed', userId: 'time-branch', cutoff: Date.now() + 1_500 });
+    const first = await post(connection.inboundPath!, body, { x: 'person-a' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    // Past the cutoff the real evaluation no longer reads x, but the identity run is frozen in time.
+    const retry = await post(connection.inboundPath!, body, { x: 'person-a' });
+    expect(await retry.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
   it('keeps a Shopify order paid with the same body as its create (0.14.11 round 3)', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'shopify',
