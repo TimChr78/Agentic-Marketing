@@ -2,6 +2,61 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.10] - 2026-11-12
+
+### Fixed
+
+- A changelog fragment is folded once, not twice: resuming an interrupted release matches a fragment on its section and bullet text, so a `Security` entry that repeats an `Added` bullet keeps its section and its issue number, and a folded fragment that names an issue the section's marker lacks adds it before the fragment is deleted.
+- The release version is checked against the full SemVer 2.0.0 grammar in one script that the workflow's first job calls, so `0.14.3-..`, `01.2.3` and `1.2` fail the release before anything is built (`prepare.mjs` and the changelog fold use the same check).
+- An SMS body that splits its opt-out instruction with carrier boilerplate ("Reply STOP. Msg & data rates may apply. To opt out") no longer gets a second footer; a body with no instruction still gets one, and the match stays linear.
+- Consent proof shown to a role without `profiles:pii` no longer includes a free-text import label, which can name a person: it shows the fixed label "Imported" and marks the proof as withheld. A role with `profiles:pii` still sees the original label.
+- Returning to a segment tab re-reads each watched segment once, not once for focus and again for visibility. A bundled purposes rollback now shows the same “moves the live … back” warning as templates, segments and blocks.
+- An e2e settle timeout now names the condition still pending, the skeleton selectors or the on-screen images that never finished, so a flaky route explains itself.
+- The visible unsubscribe-link check now applies simple `<style>` rules that set `opacity`, `font-size` or `color`, using the same tag/class/id cascade and limits as `display`, `visibility` and `background`, so a stylesheet rule can no longer hide the link from the save and publish gates.
+- A campaign summary request whose `to` falls before a campaign that has sent later returns its readiness instead of rejecting the default window as reversed; an explicit `from` after `to` is still refused.
+- Archive and web-version extraction finds `<style>` and `<body>` tags in the original document with an ASCII-only case fold, so a character such as `İ` no longer shifts the body and stylesheet slices.
+
+### Security
+
+- The archive and web-version sanitiser now bounds a whole render by one clock, checks it while scanning and while walking a deep open-element stack, and decodes the whitespace entities that could hide a `meta refresh` from the scanner. Input past any bound still fails closed to escaped text.
+
+### Upgrading from 0.14.9
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** consent proof read by a role without `profiles:pii` shows "Imported" instead of a free-text import label and is marked withheld. E-mails whose unsubscribe link a `<style>` rule hides with `opacity`, `font-size` or `color` are now refused at save and publish.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.10.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.10 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.10` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.10). Run `docker compose exec app am doctor`.
+
+<!-- issues: 671, 672, 673, 732, 735, 746, 747, 748 -->
+
+## [0.14.9] - 2026-11-12
+
+### Changed
+
+- The rest of the grouped dependency update from #720 lands: OpenTelemetry `sdk-node` and the OTLP trace exporter move from 0.223 to 0.301, the Anthropic SDK from 1.0 to 1.8, Vite from 8.3.5 to 8.3.8, Biome from 2.5 to 2.6, Playwright from 1.64 to 1.65, and Vitest from 5.0 to 5.1, together with the current minors of the AI SDK, Hono, the MCP SDK, Tailwind, React Flow, GrapesJS, lucide, zustand and the e-mail, ClickHouse and parser libraries.
+- OpenTelemetry tracing now also reports `os.*` and `service.instance.id` resource attributes, and requires Node.js 22.15 or newer when it is enabled. Nothing needs to change in the tracing configuration.
+- Biome 2.6's new `noComponentHookFactories` rule flagged seven test-only helper components that were declared inside a test; they now sit at module scope. No rule was disabled, and the mechanical format/fix pass had nothing left to change.
+- Updated the HTML parser to htmlparser2 12. The e-mail unsubscribe-link check no longer counts a link inside inline SVG or MathML as visible: many e-mail clients strip inline SVG, and the new parser exposed links that Chromium never draws there. A normal footer link beside an SVG icon still passes.
+
+### Security
+
+- The auth stack moves to Better Auth 1.7.22 together: `better-auth`, `@better-auth/{core,oauth-provider,sso,mcp,cimd}`, `@better-auth/utils` 0.5.1, `@better-fetch/fetch` 1.3.3, `better-call` 1.4.5 and `jose` 6.2.16. The `pnpm` overrides that held three of those packages at 1.7.7 are gone; the new Dependabot group moves the whole stack in one PR.
+- A password reset that fails to save or to revoke the person's sessions no longer keeps the new password or burns the link, so the same link still works.
+- OAuth consent is per brand: granting an MCP client access in one brand is no longer reused, or overwritten, by a grant in another.
+- Sign-in is stricter with identity providers: OIDC SSO providers whose issuer does not match discovery are refused at registration, and SAML responses are checked against the clock skew and replay protection (including assertion IDs written as XML character references). SAML certificates and callback URLs can now be rotated for accounts that are already linked.
+- Revoking the current session or deleting the account now expires the session cookie immediately, and a `"false"` `email_verified` claim no longer counts as verified.
+
+### Upgrading from 0.14.8
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** an e-mail whose only unsubscribe link sits inside inline SVG or MathML is now refused at save and publish; move the link into the normal HTML footer. With OpenTelemetry tracing enabled, the server needs Node.js 22.15 or newer (the published images already ship it).
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.9.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.9 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.9` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.9). Run `docker compose exec app am doctor`.
+
+<!-- issues: 727 -->
+
 ## [0.14.8] - 2026-11-12
 
 ### Fixed
