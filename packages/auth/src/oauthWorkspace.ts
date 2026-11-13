@@ -93,17 +93,22 @@ export async function chooseOAuthWorkspace(
   // request; the table predates per-request choices, so 0.10.1 reuses the session_id column
   // rather than migrating the schema (the value is opaque to every reader below).
   //
-  // The workspace is known, so the write runs as the app role under RLS, never the owner pool. The
-  // key includes the workspace: re-picking another brand for the same request adds a row instead
-  // of needing to see and rewrite a row from a workspace this transaction cannot touch.
-  // `consentWorkspaceId` consumes the latest row and drops the rest; the scheduler removes
-  // abandoned rows.
+  // The workspace is known, so the write runs as the app role under RLS, never the owner pool. A
+  // re-pick can name another brand, whose previous row tenant isolation would hide; the policy
+  // therefore also admits the row whose session key this transaction names (#838). The statement
+  // keeps the 0.14.15 shape (`ON CONFLICT (session_id)`) so old pods and an app rollback keep
+  // working during the upgrade; `consentWorkspaceId` consumes the row and the scheduler removes
+  // abandoned ones.
   const sessionKey = selectionId(input.sessionId, key);
-  await db.withWorkspace(input.workspaceId, async (tx) => {
-    await tx.execute(sql`
-      INSERT INTO oauth_workspace_selections (session_id, workspace_id) VALUES (${sessionKey}, ${input.workspaceId})
-      ON CONFLICT (session_id, workspace_id) DO UPDATE SET updated_at = now()`);
-  });
+  await db.withWorkspace(
+    input.workspaceId,
+    async (tx) => {
+      await tx.execute(sql`
+        INSERT INTO oauth_workspace_selections (session_id, workspace_id) VALUES (${sessionKey}, ${input.workspaceId})
+        ON CONFLICT (session_id) DO UPDATE SET workspace_id = excluded.workspace_id, updated_at = now()`);
+    },
+    { sessionId: sessionKey },
+  );
   return m;
 }
 
@@ -149,19 +154,22 @@ export async function consentWorkspaceId(db: Db, userId: string, sessionId: stri
   const membership = (workspaceId: string) => memberships.rows.some((m) => m.workspace_id === workspaceId);
 
   if (key) {
-    // Read the latest choice and consume every row for this request in one statement: the most
-    // recent brand the person picked wins, and a replay cannot reuse an earlier pick.
-    const { rows } = await db.admin.query<{ workspace_id: string }>(
-      `WITH picked AS (
-         SELECT workspace_id, updated_at FROM oauth_workspace_selections
-          WHERE session_id = $1 ORDER BY updated_at DESC LIMIT 1
-       ), removed AS (
-         DELETE FROM oauth_workspace_selections WHERE session_id = $1
-       )
-       SELECT workspace_id FROM picked`,
-      [selectionId(sessionId, key)],
-    );
-    const chosen = rows[0]?.workspace_id;
+    // Read and consume in one transaction as the app role, scoped to this session key rather than
+    // a tenant: the row may name any brand the person just picked, and the policy admits exactly
+    // this session's row (#838). The membership check below is still the authority.
+    const chosen = await db.withSession(selectionId(sessionId, key), async (tx) => {
+      const { rows } = await tx.execute<{ workspace_id: string }>(sql`
+        WITH picked AS (
+          SELECT workspace_id FROM oauth_workspace_selections
+           WHERE session_id = ${selectionId(sessionId, key)}
+           ORDER BY updated_at DESC LIMIT 1
+        ), removed AS (
+          DELETE FROM oauth_workspace_selections
+           WHERE session_id = ${selectionId(sessionId, key)}
+        )
+        SELECT workspace_id FROM picked`);
+      return rows[0]?.workspace_id;
+    });
     if (chosen && membership(chosen)) return resolve(chosen);
   }
   if (memberships.rows.length === 1) return resolve(memberships.rows[0].workspace_id);

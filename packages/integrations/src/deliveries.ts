@@ -130,7 +130,14 @@ async function handle(db: Db, d: Row, deps: DeliveryDeps) {
   try {
     out = await attempt(db, d, deps);
   } catch (err) {
-    out = { ok: false, error: (err as Error).message, permanent: err instanceof AppError };
+    // `deliveries.list` shows this text to any member with artifacts:read, so keep an AppError's
+    // user-facing message and store a fixed failure for anything unexpected (a driver error can
+    // carry SQL or a secret).
+    out = {
+      ok: false,
+      error: err instanceof AppError ? err.message : 'The delivery failed with an unexpected error.',
+      permanent: err instanceof AppError,
+    };
   }
   const set = (values: Partial<Row>) =>
     db.withWorkspace(d.workspaceId, (tx) =>

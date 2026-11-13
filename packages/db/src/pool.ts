@@ -58,7 +58,27 @@ export interface Db {
    * its connection between attempts, so a holder can still open another `withWorkspace`, and gives
    * up with `conflict` (HTTP 409) after the timeout instead of deadlocking the pool.
    */
-  withWorkspace<T>(workspaceId: string, fn: (tx: Tx) => Promise<T>, opts?: { snapshot?: boolean; advisoryLockKey?: string }): Promise<T>;
+  withWorkspace<T>(
+    workspaceId: string,
+    fn: (tx: Tx) => Promise<T>,
+    opts?: {
+      snapshot?: boolean;
+      advisoryLockKey?: string;
+      /**
+       * A non-tenant capability key that stays visible across workspaces for the same session,
+       * e.g. the pending OAuth consent choice (#838). The table's policy must name the matching
+       * setting; it never widens access to tenant tables.
+       */
+      sessionId?: string;
+    },
+  ): Promise<T>;
+  /**
+   * Run `fn` in one transaction scoped to a non-tenant session key instead of a workspace. Only
+   * tables whose row-level-security policy names `app.oauth_selection_session` see anything:
+   * today that is the pending OAuth consent choice, which belongs to the session rather than to
+   * one tenant. Never use it for tenant rows.
+   */
+  withSession<T>(sessionId: string, fn: (tx: Tx) => Promise<T>): Promise<T>;
   ping(): Promise<void>;
   close(): Promise<void>;
 }
@@ -135,43 +155,62 @@ export function createDb(config: DbConfig): Db {
     }
   };
 
+  /** One transaction with the given `app.*` settings, which row-level-security policies read. */
+  const runScoped = async <T>(
+    settings: readonly [string, string][],
+    fn: (tx: Tx) => Promise<T>,
+    opts?: { snapshot?: boolean; advisoryLockKey?: string },
+  ): Promise<T> => {
+    const deadline = Date.now() + lockTimeout;
+    let client: pg.PoolClient | undefined;
+    let locked = false;
+    try {
+      if (opts?.advisoryLockKey) {
+        // Session-level and before BEGIN: the snapshot below cannot predate the winner's commit.
+        client = await acquireAdvisoryLock(opts.advisoryLockKey, deadline);
+        locked = true;
+      } else {
+        client = await app.connect();
+      }
+      await client.query(opts?.snapshot ? 'BEGIN ISOLATION LEVEL REPEATABLE READ' : 'BEGIN');
+      for (const [name, value] of settings) await client.query('SELECT set_config($1, $2, true)', [name, value]);
+      const result = await fn(drizzle(client, { schema }));
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      if (client) await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      if (client) {
+        // The lock is session-scoped: a rollback or a thrown handler does not release it.
+        let unlockFailed = false;
+        if (locked) {
+          await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [opts?.advisoryLockKey]).catch(() => {
+            unlockFailed = true;
+          });
+        }
+        // If the unlock could not run, destroy the connection so its backend exits and the lock
+        // dies with it; returning it to the pool could hand the next request a still-locked session.
+        client.release(unlockFailed ? true : undefined);
+      }
+    }
+  };
+
   return {
     admin,
     app,
-    async withWorkspace(workspaceId, fn, opts) {
-      const deadline = Date.now() + lockTimeout;
-      let client: pg.PoolClient | undefined;
-      let locked = false;
-      try {
-        if (opts?.advisoryLockKey) {
-          // Session-level and before BEGIN: the snapshot below cannot predate the winner's commit.
-          client = await acquireAdvisoryLock(opts.advisoryLockKey, deadline);
-          locked = true;
-        } else {
-          client = await app.connect();
-        }
-        await client.query(opts?.snapshot ? 'BEGIN ISOLATION LEVEL REPEATABLE READ' : 'BEGIN');
-        await client.query("SELECT set_config('app.workspace_id', $1, true)", [workspaceId]);
-        const result = await fn(drizzle(client, { schema }));
-        await client.query('COMMIT');
-        return result;
-      } catch (err) {
-        if (client) await client.query('ROLLBACK').catch(() => {});
-        throw err;
-      } finally {
-        if (client) {
-          // The lock is session-scoped: a rollback or a thrown handler does not release it.
-          let unlockFailed = false;
-          if (locked) {
-            await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [opts?.advisoryLockKey]).catch(() => {
-              unlockFailed = true;
-            });
-          }
-          // If the unlock could not run, destroy the connection so its backend exits and the lock
-          // dies with it; returning it to the pool could hand the next request a still-locked session.
-          client.release(unlockFailed ? true : undefined);
-        }
-      }
+    withWorkspace(workspaceId, fn, opts) {
+      return runScoped(
+        [
+          ['app.workspace_id', workspaceId],
+          ...(opts?.sessionId ? ([['app.oauth_selection_session', opts.sessionId]] as [string, string][]) : []),
+        ],
+        fn,
+        opts,
+      );
+    },
+    withSession(sessionId, fn) {
+      return runScoped([['app.oauth_selection_session', sessionId]], fn);
     },
     async ping() {
       await app.query('SELECT 1');
