@@ -10,6 +10,15 @@ import type { BusEvent } from './schema';
 
 const MIGRATIONS = new URL('../clickhouse/', import.meta.url);
 
+export interface ConversionEvent {
+  profileId: string;
+  anonymousId: string;
+  userId: string;
+  name: string;
+  timestamp: number;
+  properties: Record<string, unknown>;
+}
+
 export interface EventStore {
   insert(events: BusEvent[]): Promise<void>;
   /** Events of a person, by every anonymous id and user id they are known by. Newest first. */
@@ -39,11 +48,15 @@ export interface EventStore {
     q: { name: string; where?: Record<string, string | number | boolean>; sinceSeconds?: number },
     batchSize?: number,
   ): AsyncIterable<{ anonymousId: string; userId: string; count: number }[]>;
-  /** Per variant: visitors exposed to an experience, and how many did the goal event after their first exposure. */
+  /**
+   * Per variant: visitors exposed to an experience, and how many did the goal event after their
+   * first exposure. `unversioned` is the number of distinct visitors whose exposure carries no
+   * version, which the per-version counts exclude (#758).
+   */
   experimentCounts(
     workspaceId: string,
     q: { experienceId: string; version: number; goal?: string; since?: Date },
-  ): Promise<{ variant: string; exposed: number; converted: number }[]>;
+  ): Promise<{ variants: { variant: string; exposed: number; converted: number }[]; unversioned: number }>;
   insertMessageEvents(events: MessageEvent[]): Promise<void>;
   insertJourneyEvents(events: JourneyEvent[]): Promise<void>;
   /** Unique messages per event type since a time, optionally for one template or journey. */
@@ -71,9 +84,9 @@ export interface EventStore {
   ): Promise<{ participantId: number; profileId: string; arm: number; at: number }[]>;
   /**
    * Goal events by name in a time window, with the identifiers that tie them to a profile. Every
-   * matching event is returned: the query pages with a stable (timestamp, event_id) keyset instead
-   * of applying a workspace-wide limit (#366). Pass profileIds/identifiers to scope it to the
-   * people being measured.
+   * matching event is returned: the query pages with a stable keyset over the table's full
+   * replacing key (timestamp, name, anonymous_id, event_id) instead of applying a workspace-wide
+   * limit (#366, #786). Pass profileIds/identifiers to scope it to the people being measured.
    */
   conversionEvents(
     workspaceId: string,
@@ -83,17 +96,16 @@ export interface EventStore {
       to: Date;
       profileIds?: string[];
       identifiers?: { anonymousIds: string[]; userIds: string[] };
+      /**
+       * Consume each page as it is read instead of accumulating the whole window. The caller folds
+       * the page into its own totals, so a busy window never has to fit in memory and a caller
+       * that looks up per-visitor data can do so for one bounded page at a time (#786).
+       */
+      onPage?: (rows: ConversionEvent[]) => void | Promise<void>;
+      /** Rows per keyset page when `onPage` is used. Defaults to 10,000. */
+      pageSize?: number;
     },
-  ): Promise<
-    {
-      profileId: string;
-      anonymousId: string;
-      userId: string;
-      name: string;
-      timestamp: number;
-      properties: Record<string, unknown>;
-    }[]
-  >;
+  ): Promise<ConversionEvent[]>;
   /** People who unsubscribed from any message sent by these journeys or broadcasts, in a time window. */
   unsubscribedProfiles(workspaceId: string, q: { journeyIds: string[]; from?: Date; to?: Date }): Promise<string[]>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
@@ -456,11 +468,29 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
         format: 'JSONEachRow',
         clickhouse_settings: { join_use_nulls: 0 },
       });
-      return (await rs.json<{ variant: string; exposed: number; converted: number }>()).map((r) => ({
-        variant: r.variant,
-        exposed: Number(r.exposed),
-        converted: Number(r.converted),
-      }));
+      const since = (q.since ?? new Date(0)).toISOString().replace('Z', '');
+      // Count the exposures the version filter above drops because they carry no version at all,
+      // so results can say how many were excluded instead of leaving them unexplained (#758).
+      const unversionedRs = await query(workspaceId, {
+        query: `SELECT count() AS n FROM (
+                  SELECT anonymous_id FROM events FINAL
+                  WHERE workspace_id = {ws:UUID} AND name = 'Experience Viewed'
+                    AND toString(properties.experience_id) = {exp:String}
+                    AND coalesce(toString(properties.version), '') = ''
+                    AND anonymous_id != '' AND timestamp >= {since:DateTime64(3, 'UTC')}
+                  GROUP BY anonymous_id)`,
+        query_params: { ws: workspaceId, exp: q.experienceId, since },
+        format: 'JSONEachRow',
+      });
+      const [unversioned] = await unversionedRs.json<{ n: number | string }>();
+      return {
+        variants: (await rs.json<{ variant: string; exposed: number; converted: number }>()).map((r) => ({
+          variant: r.variant,
+          exposed: Number(r.exposed),
+          converted: Number(r.converted),
+        })),
+        unversioned: Number(unversioned?.n ?? 0),
+      };
     },
     async insertMessageEvents(events) {
       if (!events.length) return;
@@ -604,9 +634,11 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       )
         return [];
       // No workspace-wide row cap: the old LIMIT 100_000 silently dropped later conversions
-      // (#366). Walk the window with a bounded, stable (timestamp, event_id) keyset instead, so
-      // the caller sees every matching event. Scope by profile/identifier where the caller knows
-      // the measured people, which also keeps the scan small.
+      // (#366). Walk the window with a bounded keyset over the table's full replacing key, so
+      // events that tie on timestamp and event id are neither skipped nor repeated (#786).
+      // This is a keyset walk, not a snapshot: an event that arrives behind the cursor during a
+      // run is counted in the next run, not this one. Scope by profile/identifier where the
+      // caller knows the measured people, which also keeps the scan small.
       const scopes: string[] = [];
       const scopeParams: Record<string, unknown> = {};
       // Multipart still limits each form field (128 KiB by default). Keep arrays below
@@ -635,16 +667,9 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       addScope('anonymous_id', q.identifiers?.anonymousIds ?? []);
       addScope('user_id', q.identifiers?.userIds ?? []);
       const scope = scopes.length ? `AND (${scopes.join(' OR ')})` : '';
-      const pageSize = 10_000;
-      const events: {
-        profileId: string;
-        anonymousId: string;
-        userId: string;
-        name: string;
-        timestamp: number;
-        properties: Record<string, unknown>;
-      }[] = [];
-      let after: { timestamp: string; eventId: string } | undefined;
+      const pageSize = Math.max(1, Math.trunc(q.pageSize ?? 10_000));
+      const events: ConversionEvent[] = [];
+      let after: { timestamp: string; name: string; anonymousId: string; eventId: string } | undefined;
       for (;;) {
         const rs = await query(workspaceId, {
           query: `SELECT event_id, profile_id, anonymous_id, user_id, name, timestamp, properties FROM events FINAL
@@ -653,10 +678,10 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
                     ${scope}
                     ${
                       after
-                        ? "AND (timestamp > {after:DateTime64(3, 'UTC')} OR (timestamp = {after:DateTime64(3, 'UTC')} AND event_id > {afterId:String}))"
+                        ? "AND (timestamp, name, anonymous_id, event_id) > ({after:DateTime64(3, 'UTC')}, {afterName:String}, {afterAnonymousId:String}, {afterId:String})"
                         : ''
                     }
-                  ORDER BY timestamp ASC, event_id ASC LIMIT {pageSize:UInt32}`,
+                  ORDER BY timestamp ASC, name ASC, anonymous_id ASC, event_id ASC LIMIT {pageSize:UInt32}`,
           query_params: {
             ws: workspaceId,
             names: q.names,
@@ -664,23 +689,33 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
             to: q.to.toISOString().replace('Z', ''),
             pageSize,
             ...scopeParams,
-            ...(after ? { after: after.timestamp, afterId: after.eventId } : {}),
+            ...(after
+              ? { after: after.timestamp, afterName: after.name, afterAnonymousId: after.anonymousId, afterId: after.eventId }
+              : {}),
           },
           format: 'JSONEachRow',
         });
         const rows = await rs.json<Record<string, never>>();
-        for (const r of rows)
-          events.push({
-            profileId: r.profile_id,
-            anonymousId: r.anonymous_id,
-            userId: r.user_id,
-            name: r.name,
-            timestamp: Date.parse(`${String(r.timestamp).replace(' ', 'T')}Z`),
-            properties: typeof r.properties === 'string' ? JSON.parse(r.properties) : (r.properties as Record<string, unknown>),
-          });
+        const page: ConversionEvent[] = rows.map((r) => ({
+          profileId: r.profile_id,
+          anonymousId: r.anonymous_id,
+          userId: r.user_id,
+          name: r.name,
+          timestamp: Date.parse(`${String(r.timestamp).replace(' ', 'T')}Z`),
+          properties: typeof r.properties === 'string' ? JSON.parse(r.properties) : (r.properties as Record<string, unknown>),
+        }));
+        // A consumer that folds pages keeps memory bounded; without one, keep the historical
+        // whole-window return.
+        if (q.onPage) await q.onPage(page);
+        else events.push(...page);
         if (rows.length < pageSize) break;
         const last = rows[rows.length - 1]!;
-        after = { timestamp: String(last.timestamp), eventId: String(last.event_id) };
+        after = {
+          timestamp: String(last.timestamp),
+          name: String(last.name),
+          anonymousId: String(last.anonymous_id),
+          eventId: String(last.event_id),
+        };
       }
       return events;
     },

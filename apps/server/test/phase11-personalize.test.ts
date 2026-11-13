@@ -509,6 +509,17 @@ describe('preview and results', () => {
       context: yes,
       timestamp: at,
     });
+    // A hand-rolled client (or one from before the SDK sent a version) records the placement but
+    // no version. Results cannot guess a version for these, so they must be counted and called out
+    // in the note rather than dropped silently (#758).
+    const viewedWithoutVersion = (anonymousId: string) => ({
+      type: 'track',
+      event: 'Experience Viewed',
+      anonymousId,
+      properties: { experience_id: exp, variant_id: 'control', placement: 'versioned_hero' },
+      context: yes,
+      timestamp: '2026-11-10T09:00:00Z',
+    });
     // Three v1 "a" visitors and two v1 "b" visitors: ids the republished version no longer has.
     await send([...['a0', 'a1', 'a2'].map((v) => viewed(`ver-${v}`, 'a', 1)), ...['b0', 'b1'].map((v) => viewed(`ver-${v}`, 'b', 1))]);
 
@@ -526,10 +537,11 @@ describe('preview and results', () => {
       viewed('ver-t1', 'treatment', 2),
       order('ver-t0', '2026-11-10T10:00:00Z'),
     ]);
+    await send([viewedWithoutVersion('ver-u0'), viewedWithoutVersion('ver-u1')]);
     // ClickHouse is written asynchronously; wait for every exposure before comparing counts.
     await eventually(
       () => t.srv.events.countEvents(ws, { name: 'Experience Viewed' }),
-      (rows) => rows.reduce((n, r) => n + r.count, 0) >= 9,
+      (rows) => rows.reduce((n, r) => n + r.count, 0) >= 11,
       20_000,
     );
 
@@ -540,6 +552,8 @@ describe('preview and results', () => {
     expect(r.variants.find((v) => v.variant === 'treatment')).toMatchObject({ exposed: 2, converted: 1 });
     expect(r.control).toBe('control');
     expect(r.recommendation).not.toBe('Nothing to compare yet.');
+    // Unversioned exposures are excluded, but never silently: the note says how many and why.
+    expect(r.note).toContain('2 exposures recorded without a version were excluded');
     // The analysis the numbers were computed with, echoed so a draft cannot rewrite the caption.
     expect(r.analysis).toMatchObject({ method: 'sequential', alpha: 0.05, threshold: 0.95 });
 
@@ -555,5 +569,6 @@ describe('preview and results', () => {
     expect(newest.version).toBe(3);
     expect(newest.variants).toEqual([]);
     expect(newest.note).toContain('No data for version 3 yet');
+    expect(newest.note).toContain('2 exposures recorded without a version were excluded');
   }, 60_000);
 });

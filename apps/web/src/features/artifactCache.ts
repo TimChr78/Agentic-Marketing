@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, type Out } from '../app/api';
 
 // Names (and published versions) of referenced artifacts, e.g. the template and segment of a
@@ -55,14 +55,18 @@ export const forgetArtifact = (id: string) => {
 export function useArtifactRef(id: string | undefined | null) {
   const [a, setA] = useState<Got | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Every read this hook starts shares one sequence. A pending invalidation read must not commit
+  // after the selected reference moved or the hook unmounted (0.14.13 review).
+  const seq = useRef(0);
   useEffect(() => {
+    const n = ++seq.current;
     setA(null);
     setError(null);
     if (!id) return;
     let live = true;
     getArtifact(id)
-      .then((v) => live && setA(v))
-      .catch((e) => live && setError(e.message ?? 'Not found'));
+      .then((v) => live && n === seq.current && setA(v))
+      .catch((e) => live && n === seq.current && setError(e.message ?? 'Not found'));
     return () => {
       live = false;
     };
@@ -71,12 +75,18 @@ export function useArtifactRef(id: string | undefined | null) {
   // The change named the artifact, so an unrelated write never re-reads this one.
   useEffect(() => {
     if (!id) return;
-    return onArtifactsChanged((changed) => {
+    let live = true;
+    const unsubscribe = onArtifactsChanged((changed) => {
       if (changed && changed !== id) return;
+      const n = ++seq.current;
       getArtifact(id)
-        .then(setA)
-        .catch((e) => setError(e.message ?? 'Not found'));
+        .then((v) => live && n === seq.current && setA(v))
+        .catch((e) => live && n === seq.current && setError(e.message ?? 'Not found'));
     });
+    return () => {
+      live = false;
+      unsubscribe();
+    };
   }, [id]);
   return { artifact: a, error };
 }
@@ -85,11 +95,14 @@ export function useArtifactRef(id: string | undefined | null) {
 export function useArtifactNames(ids: string[]) {
   const key = [...new Set(ids.filter(Boolean))].sort().join(',');
   const [names, setNames] = useState<Record<string, string>>({});
+  // One sequence per hook instance: a stale lookup cannot overwrite a newer one or a new id set.
+  const seq = useRef(0);
   useEffect(() => {
     let live = true;
+    const n = ++seq.current;
     for (const id of key ? key.split(',') : [])
       getArtifact(id)
-        .then((a) => live && setNames((n) => (n[id] === a.name ? n : { ...n, [id]: a.name })))
+        .then((a) => live && n === seq.current && setNames((names) => (names[id] === a.name ? names : { ...names, [id]: a.name })))
         .catch(() => {});
     return () => {
       live = false;
@@ -97,18 +110,22 @@ export function useArtifactNames(ids: string[]) {
   }, [key]);
   // Same signal as `useArtifactRef`: only a change to one of the named artifacts re-reads (#770),
   // because an unrelated write cannot change a name in this lookup.
-  useEffect(
-    () =>
-      onArtifactsChanged((changed) => {
-        const wanted = key ? key.split(',') : [];
-        if (changed && !wanted.includes(changed)) return;
-        for (const id of wanted)
-          getArtifact(id)
-            .then((a) => setNames((n) => (n[id] === a.name ? n : { ...n, [id]: a.name })))
-            .catch(() => {});
-      }),
-    [key],
-  );
+  useEffect(() => {
+    let live = true;
+    const unsubscribe = onArtifactsChanged((changed) => {
+      const wanted = key ? key.split(',') : [];
+      if (changed && !wanted.includes(changed)) return;
+      const n = ++seq.current;
+      for (const id of wanted)
+        getArtifact(id)
+          .then((a) => live && n === seq.current && setNames((names) => (names[id] === a.name ? names : { ...names, [id]: a.name })))
+          .catch(() => {});
+    });
+    return () => {
+      live = false;
+      unsubscribe();
+    };
+  }, [key]);
   return useCallback((id: string) => names[id], [names]);
 }
 

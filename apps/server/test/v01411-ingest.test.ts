@@ -162,6 +162,42 @@ describe('inbound replay protection for every scheme (#787)', () => {
     expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
   });
 
+  it('keeps same-body deliveries from two client addresses a mapping looks up (0.14.11 round 3)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Address-keyed generic',
+      settings: { mapping: '$merge([body, {"anonymousId": $lookup(headers, "x-forwarded-for")}])' },
+      secrets: {},
+    });
+    const body = tracked('address-keyed', 'a-1');
+    const first = await post(connection.inboundPath!, body, { 'x-forwarded-for': '192.0.2.1' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    const second = await post(connection.inboundPath!, body, { 'x-forwarded-for': '192.0.2.2' });
+    expect(await second.json()).toMatchObject({ success: true, accepted: 1 });
+  });
+
+  it('keeps a Shopify order paid with the same body as its create (0.14.11 round 3)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'shopify',
+      name: 'Shopify topics',
+      settings: { shop: 'topics.myshopify.com' },
+      secrets: { webhookSecret: SHOPIFY_SECRET },
+    });
+    const body = shopper(7002);
+    const send = (topic: string, id: string) =>
+      post(connection.inboundPath!, body, {
+        'x-shopify-hmac-sha256': createHmac('sha256', SHOPIFY_SECRET).update(body).digest('base64'),
+        'x-shopify-topic': topic,
+        'x-shopify-webhook-id': id,
+      });
+    expect(await (await send('orders/create', 'wh-topic-1')).json()).toMatchObject({ success: true });
+    const paid = await (await send('orders/paid', 'wh-topic-2')).json();
+    expect(paid).not.toHaveProperty('duplicate');
+    expect(paid.accepted).toBeGreaterThan(0);
+    // A retry of the same topic is still a replay.
+    expect(await (await send('orders/paid', 'wh-topic-2')).json()).toMatchObject({ duplicate: true });
+  });
+
   it('still recognises a replay when the mapping generates a fresh messageId (0.14.11 round 2)', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'webhook',

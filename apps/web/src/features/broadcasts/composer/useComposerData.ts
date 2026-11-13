@@ -44,6 +44,17 @@ export function useSharedArtifact(id: string | undefined | null, refreshKey = 0)
   const [loaded, setLoaded] = useState<{ id: string; artifact: Got | null; error: string | null } | null>(null);
   const [loading, setLoading] = useState(!!id);
   const [attempt, setAttempt] = useState(0);
+  // One sequence for every read this hook starts: a focus re-check, the effect's read and an
+  // explicit refresh. Only the latest request may commit, so a delayed answer cannot restore an
+  // older pointer or overwrite a refresh that started after it (0.14.13 review).
+  const seq = useRef(0);
+  // An unmount invalidates a focus read that is still in flight, like any other new request.
+  useEffect(
+    () => () => {
+      seq.current++;
+    },
+    [],
+  );
 
   // Every create, save, publish or delete tells the cache to drop what it knew. Only the artifact
   // this hook reads is a reason to re-read.
@@ -57,6 +68,7 @@ export function useSharedArtifact(id: string | undefined | null, refreshKey = 0)
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` and `refreshKey` are explicit re-read triggers, not read by the effect body
   useEffect(() => {
+    const n = ++seq.current;
     if (!id) {
       setLoaded(null);
       setLoading(false);
@@ -67,13 +79,13 @@ export function useSharedArtifact(id: string | undefined | null, refreshKey = 0)
     forgetArtifact(id);
     getArtifact(id)
       .then((a) => {
-        if (live) {
+        if (live && n === seq.current) {
           setLoaded({ id, artifact: a, error: null });
           setLoading(false);
         }
       })
       .catch((e) => {
-        if (live) {
+        if (live && n === seq.current) {
           setLoaded({ id, artifact: null, error: e?.message ?? 'Not found' });
           setLoading(false);
         }
@@ -85,11 +97,14 @@ export function useSharedArtifact(id: string | undefined | null, refreshKey = 0)
 
   const recheck = useCallback(async () => {
     if (!id) return;
+    const n = ++seq.current;
     forgetArtifact(id);
     try {
       const artifact = await getArtifact(id);
+      if (n !== seq.current) return;
       setLoaded((prev) => (prev?.id === id && sameArtifact(prev.artifact, artifact) ? prev : { id, artifact, error: null }));
     } catch (e) {
+      if (n !== seq.current) return;
       setLoaded({ id, artifact: null, error: e instanceof Error ? e.message : 'Not found' });
     }
   }, [id]);

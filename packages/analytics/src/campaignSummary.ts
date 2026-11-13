@@ -143,17 +143,27 @@ const cell = (result: AnalyticsResult, name: string) => {
 const sendingMembers = (record: CampaignRecord): CampaignMember[] =>
   record.members.filter((m) => m.type === 'broadcast' || m.type === 'journey');
 
-async function hasSent(deps: Deps, memberIds: string[]): Promise<boolean> {
-  if (!memberIds.length) return false;
+/**
+ * When the campaign's members first sent or delivered, or null if they never have. Readiness and
+ * the default window follow real sends, not the informational `startsAt`: a journey can send before
+ * the planned start, and the start can be edited later (0.14.10 review).
+ */
+async function firstSendAt(deps: Deps, memberIds: string[]): Promise<string | null> {
+  if (!memberIds.length) return null;
+  // No FINAL: duplicate rows cannot change a minimum, and FINAL would merge the members' whole
+  // history before aggregating.
   const result = await deps.events.client.query({
-    query: `SELECT 1 FROM message_events FINAL
+    query: `SELECT formatDateTime(min(at), '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS first, count() AS n FROM message_events
             WHERE workspace_id = {ws:UUID} AND journey_id IN {members:Array(String)}
-              AND type IN ('sent', 'delivered') LIMIT 1`,
+              AND type IN ('sent', 'delivered')`,
     query_params: { ws: deps.workspaceId, members: memberIds },
     format: 'JSONEachRow',
-    clickhouse_settings: { ...(await deps.events.settingsFor(deps.workspaceId)), max_execution_time: 10, max_result_rows: 1 } as never,
+    clickhouse_settings: { ...(await deps.events.settingsFor(deps.workspaceId)), max_execution_time: 10 } as never,
   });
-  return (await result.json<unknown>()).length > 0;
+  const [row] = await result.json<{ first: string; n: string | number }>();
+  if (!row || Number(row.n) === 0) return null;
+  // formatDateTime %f gives microseconds; normalise to an ISO string with milliseconds.
+  return new Date(Date.parse(row.first.replace(/(\.\d{3})\d*Z$/, '$1Z'))).toISOString();
 }
 
 async function readiness(tx: Tx, record: CampaignRecord): Promise<z.infer<typeof readinessSchema>> {
@@ -352,12 +362,27 @@ interface SummaryWindow {
 /**
  * The explicit window is used as given. The documented default (campaign start → now) is clamped
  * to the metric layer's cap, because the query layer rejects a longer range before it measures
- * (#588); a campaign with no start date gets the last 400 days instead of the epoch.
+ * (#588); a campaign with no start date gets the last 400 days instead of the epoch. When that
+ * default `from` falls after `to`, the period holds no sends: return an empty window so the caller
+ * answers with readiness or zeros instead of a reversed-window error (#747).
  */
+/**
+ * Whether the summary answers with readiness for a period ending at `to`: unpublished, no sending
+ * member, or nothing sent on or before `to`. The planned `startsAt` plays no part, because it is
+ * informational: journeys can send before it and it can be edited later (0.14.10 review).
+ */
+export function campaignNotStarted(input: { published: boolean; sendingMembers: number; firstSendAt: string | null; to: string }): boolean {
+  return (
+    !input.published || input.sendingMembers === 0 || input.firstSendAt === null || Date.parse(input.firstSendAt) > Date.parse(input.to)
+  );
+}
+
 export function summaryWindow(
-  input: { from?: string; to?: string; startsAt: string | null },
+  input: { from?: string; to?: string; startsAt: string | null; firstSendAt?: string | null },
   now: string,
-  options: { allowFutureStart?: boolean } = {},
+  // Kept for callers that still pass it; a start after `to` now always yields an empty window
+  // (#747). Readiness is decided from the campaign, not from this hint.
+  _options: { allowFutureStart?: boolean } = {},
 ): SummaryWindow {
   const to = input.to ?? now;
   const reversed = () =>
@@ -368,15 +393,24 @@ export function summaryWindow(
     return { from: input.from, to, clamped: false };
   }
 
-  const start = input.startsAt ?? '2000-01-01T00:00:00.000Z';
+  // The default window starts at the earlier of the planned start and the first real send, so a
+  // campaign that sent before its informational startsAt is still counted (0.14.10 review).
+  // Without a planned start the documented default stays "everything, clamped to 400 days" (#588).
+  const start =
+    input.startsAt == null
+      ? '2000-01-01T00:00:00.000Z'
+      : input.firstSendAt != null && Date.parse(input.firstSendAt) < Date.parse(input.startsAt)
+        ? input.firstSendAt
+        : input.startsAt;
   const earliest = new Date(Date.parse(to) - MAX_RANGE_DAYS * 86_400_000).toISOString();
   const clamped = Date.parse(start) < Date.parse(earliest);
   const from = clamped ? earliest : start;
   if (Date.parse(from) > Date.parse(to)) {
-    // A campaign that has not started yet may have a start after now; readiness is the answer,
-    // not a window error (#588). The explicit from > to rejection above still applies.
-    if (options.allowFutureStart) return { from: to, to, clamped: false };
-    throw reversed();
+    // The campaign's start (or its clamped default) is after the requested `to`, so the period
+    // holds no sends even when the campaign has sent later. Return an empty window so the summary
+    // answers with readiness or zeros rather than a reversed-window error (#588, #747). This does
+    // not depend on hasSent, and the explicit from > to rejection above still applies.
+    return { from: to, to, clamped: false };
   }
   return { from, to, clamped };
 }
@@ -406,12 +440,19 @@ export const analyticsCampaignSummary = defineCommand({
 
     const sending = sendingMembers(record);
     const memberIds = sending.map((m) => m.artifactId);
-    // Readiness decides the response before the default window is built: a campaign that starts
-    // after now must return not_started, not a reversed-window error (#588).
-    const notStarted = !record.published || !sending.length || !(await hasSent(deps, memberIds));
-    const window = summaryWindow({ from: input.from, to: input.to, startsAt: record.startsAt }, now, {
-      allowFutureStart: notStarted,
+    const windowTo = input.to ?? now;
+    // Readiness decides the response before the default window is built. It follows real sends:
+    // a campaign is not started for this period only when nothing was sent on or before `to`. The
+    // planned startsAt is informational (journeys can send before it, and it can be edited), so it
+    // never hides real results (#588, #747, 0.14.10 review).
+    const firstSent = await firstSendAt(deps, memberIds);
+    const notStarted = campaignNotStarted({
+      published: record.published,
+      sendingMembers: sending.length,
+      firstSendAt: firstSent,
+      to: windowTo,
     });
+    const window = summaryWindow({ from: input.from, to: input.to, startsAt: record.startsAt, firstSendAt: firstSent }, now);
     const { from, to } = window;
     // The same campaign identity map the measure queries and the holdout card use (#590): sent
     // recipients union holdout assignments, with one bound decision for all of them.

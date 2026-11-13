@@ -105,3 +105,11 @@ describe('detector cost', () => {
     );
   });
 });
+
+describe('strict redaction (0.14.11 round 3)', () => {
+  it('redacts an 8-digit DK/NO phone only in strict mode and keeps dates', () => {
+    expect(redactText('Call 12345678 today')).toBe('Call 12345678 today');
+    expect(redactText('Call 12345678 today', { strict: true })).toBe('Call [phone] today');
+    expect(redactText('Sent 20261112', { strict: true })).toBe('Sent 20261112');
+  });
+});

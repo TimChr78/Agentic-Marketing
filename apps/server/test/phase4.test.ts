@@ -22,6 +22,11 @@ const person = (r: FakeRequest) => JSON.parse(r.user.match(/<person>\n([\s\S]*)\
 function answer(r: FakeRequest) {
   if (r.system.includes('You are the copilot')) {
     const last = r.messages.at(-1)!;
+    // The person asks the copilot to publish a note it was given; the policy engine decides.
+    if (last.role === 'user' && /publish/i.test(r.user)) {
+      const artifactId = r.user.match(/not_[0-9a-f]{32}/)?.[0];
+      return { toolCalls: [{ name: 'artifacts__requestPublish', input: { artifactId, note: 'Ship it' } }] };
+    }
     if (last.role === 'user' && r.user.includes('note'))
       return {
         toolCalls: [
@@ -30,6 +35,7 @@ function answer(r: FakeRequest) {
       };
     if (last.role === 'user') return { toolCalls: [{ name: 'artifacts__list', input: { type: 'prompt' } }] };
     const result = JSON.parse(r.toolResults.at(-1)!);
+    if (result.error) return { text: `That was refused: ${result.message}` };
     return { text: result.artifacts ? `You have ${result.artifacts.length} prompts.` : `Drafted ${result.artifactId}.` };
   }
   const p = person(r);
@@ -413,9 +419,11 @@ describe('copilot', () => {
     expect(await api.call('artifacts.get', { artifactId: noteId })).toMatchObject({ publishedVersion: null });
 
     const audit = await api.call('audit.list', { limit: 20 });
+    // The plain Copilot writes as the workspace's built-in agent (#811), under its `copilot`
+    // credential; before that it was a principal with no agent row and no policy decision.
     expect(audit.entries.find((e) => e.command === 'artifacts.create')).toMatchObject({
       principalType: 'agent',
-      clientId: 'copilot',
+      clientId: expect.stringMatching(/^copilot:agt_[0-9a-f]{32}$/),
       surface: 'mcp',
     });
     expect((await api.call('ai.calls', { kind: 'copilot' })).calls.map((c) => c.input.tools)).toEqual([
@@ -447,7 +455,7 @@ describe('copilot', () => {
     const { actions } = await api.call('agents.activity', { agentId, limit: 5 });
     expect(actions.find((a) => a.command === 'artifacts.create')).toBeTruthy();
     const audit = await api.call('audit.list', { limit: 10 });
-    expect(audit.entries.find((e) => e.command === 'artifacts.create' && e.clientId?.startsWith('copilot:'))).toMatchObject({
+    expect(audit.entries.find((e) => e.command === 'artifacts.create' && e.clientId === `copilot:${agentId}`)).toMatchObject({
       clientId: `copilot:${agentId}`,
     });
     const conversationId = r.events.at(-1)!.conversationId;
@@ -468,5 +476,62 @@ describe('copilot', () => {
     const paused = await copilot(owner, 'hi', undefined, agentId);
     expect(paused.status).toBe(403);
     expect(paused.body.message).toContain('paused');
+  });
+
+  it('is a real agent in the workspace: its writes go through the policy and the ledger (#811)', async () => {
+    const api = t.api(owner);
+    const first = await copilot(owner, 'Make a note about the copilot policy');
+    expect(first.status).toBe(200);
+    const noteId = first.events.find((e) => e.type === 'toolResult')!.output.artifactId as string;
+    expect(noteId).toMatch(/^not_/);
+
+    // The plain Copilot acts as the workspace's built-in agent, through the `copilot` credential.
+    // One agent row per workspace: the next plain conversation reuses the same record.
+    const { agents } = await api.call('agents.list', {});
+    const builtIn = agents.find((a) => a.name === 'Copilot' && a.credentials.some((c) => c.kind === 'copilot' && c.id === a.id));
+    expect(builtIn).toBeTruthy();
+    const agentId = builtIn!.id;
+    const entries = async () =>
+      (await api.call('audit.list', { limit: 100 })).entries.filter(
+        (e) => e.command === 'artifacts.create' && e.clientId === `copilot:${agentId}`,
+      );
+    const before = (await entries()).length;
+
+    const second = await copilot(owner, 'Make another note about the reused agent');
+    expect(second.status).toBe(200);
+    expect(await entries()).toHaveLength(before + 1);
+
+    // Its writes are in the agent ledger, with the policy decision.
+    const { actions } = await api.call('agents.activity', { agentId, limit: 50 });
+    expect(actions.filter((a) => a.command === 'artifacts.create' && a.decision === 'allow' && a.ok).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('cannot publish while the workspace has agents switched off (#811)', async () => {
+    const api = t.api(owner);
+    const { artifactId } = await api.call('artifacts.create', {
+      type: 'note',
+      name: 'Agents off',
+      content: { title: 'Agents off', body: 'This must not go live.' },
+    });
+    await api.call('workspace.setAutonomy', { switch: 'off' });
+    try {
+      const r = await copilot(owner, `Publish the note ${artifactId}`);
+      expect(r.status).toBe(200);
+      const result = r.events.find((e) => e.type === 'toolResult')!;
+      expect(result).toMatchObject({ name: 'artifacts.requestPublish', ok: false });
+      expect(result.output).toMatchObject({ error: 'forbidden' });
+      expect(JSON.stringify(result.output)).toContain('switched off');
+
+      // It never went live, and the refusal is the built-in Copilot agent's ledger entry.
+      expect((await api.call('artifacts.get', { artifactId })).publishedVersion).toBeNull();
+      const audit = await api.call('audit.list', { limit: 100 });
+      const refusal = audit.entries.find((e) => e.command === 'artifacts.requestPublish' && e.clientId?.startsWith('copilot:'));
+      expect(refusal).toMatchObject({ ok: false, clientId: expect.stringMatching(/^copilot:agt_[0-9a-f]{32}$/) });
+      const agentId = refusal!.clientId!.slice('copilot:'.length);
+      const { actions } = await api.call('agents.activity', { agentId, decision: 'deny', limit: 50 });
+      expect(actions.find((a) => a.command === 'artifacts.requestPublish')).toMatchObject({ actionClass: 'content.publish' });
+    } finally {
+      await api.call('workspace.setAutonomy', { switch: 'on' });
+    }
   });
 });
