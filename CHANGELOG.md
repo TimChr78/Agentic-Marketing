@@ -2,6 +2,31 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.19] - 2026-11-13
+
+### Fixed
+
+- **Breaking:** `experiences.results` now applies the k=5 floor per variant. A variant with fewer than five exposed visitors reports null counts and rates, `suppressed: true`, and no comparison, P(best) or expected loss that needs it; the result carries `k` and a top-level `suppressed`, and an unversioned-exposure count below k is no longer printed. API clients must handle the null fields.
+- Dialog focus stays in the field being typed into when a dialog re-renders with an inline `onEscape`, and the Insert palette reads its inline `onClose` from a ref the same way (#820).
+- `profiles.events` pages newest-first on the full replacing key `(timestamp, name, anonymous_id, event_id)` and carries the name and anonymous id in `nextCursor`, so events that tie on timestamp and event id are no longer skipped. A cursor from before this change (no name or anonymous id) uses the old `(timestamp, event_id)` order and always advances, so it can no longer return the same page forever when several events share a timestamp; it may skip a row that ties on both, exactly as before #840 (#840).
+- The concurrent-migrator readiness probe excludes its own backend and matches migrator A's client backend, and fails with a clear message when the index build is never observed, so the ordering test no longer races (#830).
+- The staged-send canary test waits for the canary's delivery state before deciding its outcome instead of relying on scheduler timing (#831).
+
+### Security
+
+- **Breaking:** small-group suppression is complementary per total, not per flat row list. Every total an analytics result exposes beside its rows — the people total, each measure and each per-currency revenue total — hides its smallest visible contributor with a non-zero value when exactly one contributor is hidden. Rows are grouped by their independent population (the campaign or member), so one campaign spread over several currency rows is one contributor, and revenue hidden by its own converter floor is protected too. When a total has one hidden contributor and no visible contributor with a value, hiding a second would reveal nothing: that total is withheld instead, returned as null and named in the notes, which is the only fallback where a total is not visible. `meta.suppressed` counts hidden rows and cells. The same rule applies to the member rows of `analytics.campaignSummary`, where its headline totals (recipients, e-mail counts, converters) are withheld when a single hidden member cannot be balanced by a visible one. API clients must handle one more nullable row and a nullable campaign headline total. It does not stop differencing across different queries or time windows, and the two-arm holdout and split views already withhold both arms and every comparison when an arm is below k.
+- A hidden member with no e-mail activity in the window (nothing sent, delivered, clicked or unsubscribed, such as an SMS-only member) does not count as protecting the e-mail totals, because its share is zero by construction; a member whose sends fell before `from` but whose deliveries or clicks fall inside the window still counts, and so does an observed zero (a member that e-mailed people who did not click or convert). Where that leaves a single hidden contributor, the usual complement or withheld total applies.
+
+### Upgrading from 0.14.18
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `experiences.results` returns null counts and rates and `suppressed: true` for a variant below k=5 exposed visitors. Analytics results can hide one more row (the complement) and return a null total named in the notes; `analytics.campaignSummary` can return null headline totals. API clients must handle these nullable fields.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.19.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.19 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.19` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.19). Run `docker compose exec app am doctor`.
+
+<!-- issues: 692, 820, 828, 830, 831, 840 -->
+
 ## [0.14.18] - 2026-11-13
 
 ### Security
