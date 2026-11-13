@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, safeErrorText } from '@agentic-marketing/core';
 import { z } from 'zod';
 import { defineConnector, type InboundItem } from '../sdk';
 import { verifyHmac } from '../signing';
@@ -52,7 +52,9 @@ async function api(s: Settings, token: string | undefined, request: Request, met
   } catch {}
   if (res.status < 200 || res.status >= 300) {
     const errors = Array.isArray(out) ? (out as { errorCode?: string; message?: string }[]) : [];
-    throw new Error(`Salesforce ${res.status}: ${errors.map((e) => `${e.errorCode}: ${e.message}`).join('; ') || res.body.slice(0, 200)}`);
+    throw new Error(
+      `Salesforce ${res.status}: ${safeErrorText(errors.map((e) => `${e.errorCode}: ${e.message}`).join('; ') || res.body, 200)}`,
+    );
   }
   return out as Record<string, unknown> | null;
 }

@@ -1,6 +1,6 @@
 import { decisionQuestions } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
+import { AppError, isoDateTime, newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -130,7 +130,7 @@ export const score = defineCommand({
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
         status: 'failed',
-        error: err instanceof Error ? err.message.slice(0, 1000) : String(err),
+        error: safeErrorText(err instanceof Error ? err.message : String(err), 1000),
       });
       return appError(err);
     }
@@ -163,7 +163,7 @@ export const score = defineCommand({
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
         status: 'failed',
-        error: err instanceof Error ? err.message.slice(0, 1000) : String(err),
+        error: safeErrorText(err instanceof Error ? err.message : String(err), 1000),
       });
       return appError(err);
     }

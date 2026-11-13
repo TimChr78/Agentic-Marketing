@@ -1,4 +1,4 @@
-import { AppError } from '@agentic-marketing/core';
+import { AppError, safeErrorText } from '@agentic-marketing/core';
 import jsonata from 'jsonata';
 import { z } from 'zod';
 import { defineConnector, type InboundItem } from '../sdk';
@@ -76,7 +76,7 @@ export const slackConnector = defineConnector({
           body: JSON.stringify({ text: input.text }),
           headers: { 'content-type': 'application/json' },
         });
-        if (res.status >= 300) throw new Error(`Slack answered ${res.status}: ${res.body.slice(0, 200)}`);
+        if (res.status >= 300) throw new Error(`Slack answered ${res.status}: ${safeErrorText(res.body, 200)}`);
         return { posted: true };
       },
     },
@@ -115,7 +115,7 @@ export const httpConnector = defineConnector({
         try {
           body = JSON.parse(res.body);
         } catch {}
-        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${res.body.slice(0, 200)}`);
+        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${safeErrorText(res.body, 200)}`);
         return { status: res.status, body };
       },
     },
@@ -169,7 +169,7 @@ export const oauthHttpConnector = defineConnector({
         try {
           body = JSON.parse(res.body);
         } catch {}
-        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${res.body.slice(0, 200)}`);
+        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${safeErrorText(res.body, 200)}`);
         return { status: res.status, body };
       },
     },

@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { artifactTypes, DEFAULT_PURPOSES, publishedSingleton, publishListeners } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, sha256 } from '@agentic-marketing/core';
+import { AppError, safeErrorText, sha256 } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { HotState, ProfileSnapshot } from '@agentic-marketing/hotstate';
 import { type EgressPolicy, egressFetch } from '@agentic-marketing/integrations';
@@ -796,7 +796,7 @@ export async function pushEdgeBundleNow(deps: EdgeDeps, tx: Tx, ws: string, opts
       .where(and(eq(schema.edgeTargets.workspaceId, ws), eq(schema.edgeTargets.generation, t.generation)));
     return { pushed: true, reason: null };
   } catch (err) {
-    const reason = (err instanceof Error ? err.message : String(err)).split('\n')[0].slice(0, 500);
+    const reason = safeErrorText(err instanceof Error ? err.message : String(err), 500);
     await tx
       .update(schema.edgeTargets)
       .set({ lastError: reason, lastSyncAt: new Date() })

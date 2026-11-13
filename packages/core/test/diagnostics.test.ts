@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { providerDiagnostic, redactCredentials } from '../src/diagnostics';
+import { providerDiagnostic, redactCredentials, safeErrorText } from '../src/diagnostics';
 
 // #885: a provider's error body is copied into an AppError whose message reaches the caller, the
 // audit log and the agent ledger. Only its own code and message fields may survive, and a token
@@ -149,5 +149,24 @@ describe('redactCredentials', () => {
     expect(redactCredentials('Mandate mnd_0123456789abcdef0123456789abcdef has no published version to renew.')).toBe(
       'Mandate mnd_0123456789abcdef0123456789abcdef has no published version to renew.',
     );
+  });
+});
+
+describe('safeErrorText (#885 round 5)', () => {
+  const token = 'abcdef0123456789'.repeat(3);
+
+  it('redacts the whole text before cutting it to a length', () => {
+    const out = safeErrorText(`invalid: ${' '.repeat(51)}${token}`, 80);
+    expect(out).not.toContain('abcdef0123456789a');
+    expect(out.length).toBeLessThanOrEqual(80);
+  });
+
+  it('redacts the whole text before keeping its first line', () => {
+    expect(safeErrorText('HTTP 500: password="probe-secret\nrest"', 300)).not.toContain('probe-secret');
+  });
+
+  it('keeps an ordinary message, cut to its first line and length', () => {
+    expect(safeErrorText('the endpoint timed out\nstack…', 300)).toBe('the endpoint timed out');
+    expect(safeErrorText('word '.repeat(100), 9)).toBe('word word');
   });
 });

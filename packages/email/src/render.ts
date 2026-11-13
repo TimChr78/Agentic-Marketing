@@ -1,6 +1,6 @@
 /// <reference path="./mjml.d.ts" />
 import type { EmailBlockParam, EmailTemplate } from '@agentic-marketing/artifacts';
-import { AppError, redactCredentials } from '@agentic-marketing/core';
+import { AppError, redactCredentials, safeErrorText } from '@agentic-marketing/core';
 import { convert } from 'html-to-text';
 import {
   AssertionError,
@@ -119,7 +119,7 @@ function blockScope(block: BlockDefinition, passed: Record<string, unknown>): Re
     if (p.maxLength && value.length > p.maxLength)
       throw new TemplateError(`Block ${block.id}: "${p.key}" is longer than ${p.maxLength} characters.`);
     if ((p.type === 'url' || p.type === 'image') && !isAllowedBlockUrl(value))
-      throw new TemplateError(`Block ${block.id}: "${p.key}" must be an http(s) or asset URL, not "${value.slice(0, 80)}".`);
+      throw new TemplateError(`Block ${block.id}: "${p.key}" must be an http(s) or asset URL, not "${safeErrorText(value, 80)}".`);
     out[p.key] = p.type === 'html' ? new RawHtml(value) : value;
   }
   return out;

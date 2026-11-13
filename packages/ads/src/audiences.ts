@@ -1,6 +1,6 @@
 import { type AudienceSync, DEFAULT_PURPOSES, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
 import { defineCommand, type Impact } from '@agentic-marketing/commands';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { accessTokenOf, connectionSecrets, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import { consentStatusSql, profileForMessage } from '@agentic-marketing/profiles';
@@ -204,9 +204,9 @@ const messageOf = (err: unknown) => (err instanceof Error ? err.message : String
 const errorOf = (status: number, body: string) => {
   try {
     const b = JSON.parse(body) as { error?: { message?: string; error_user_msg?: string } };
-    return `HTTP ${status}: ${b.error?.error_user_msg ?? b.error?.message ?? body.slice(0, 300)}`;
+    return `HTTP ${status}: ${safeErrorText(String(b.error?.error_user_msg ?? b.error?.message ?? body), 300)}`;
   } catch {
-    return `HTTP ${status}: ${body.slice(0, 300)}`;
+    return `HTTP ${status}: ${safeErrorText(body, 300)}`;
   }
 };
 

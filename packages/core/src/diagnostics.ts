@@ -57,6 +57,15 @@ export function redactCredentials(text: string): string {
   return out;
 }
 
+/**
+ * One line of error text that may be stored or shown: redacted while it is complete, then cut to
+ * its first line and `max` characters. The order matters: cutting first can split a quoted
+ * credential from its closing quote, or leave a token prefix too short to recognise (#885).
+ */
+export function safeErrorText(text: string, max: number): string {
+  return redactCredentials(String(text)).split('\n')[0]!.trim().slice(0, max);
+}
+
 const CODE_FIELDS = ['code', 'status', 'type'] as const;
 const TEXT_FIELDS = ['message', 'error_description', 'detail', 'description'] as const;
 /** The keys a provider nests its error object under. */

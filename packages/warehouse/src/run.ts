@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { newId } from '@agentic-marketing/core';
+import { newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type WarehouseDataset } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
@@ -148,7 +148,7 @@ async function exportOnce(deps: WarehouseDeps, ws: string, id: string): Promise<
     logger.info({ workspace: ws, export: id, counts }, 'warehouse export done');
     return { status: 'ok', counts };
   } catch (err) {
-    const message = (err as Error).message.slice(0, 1000);
+    const message = safeErrorText((err as Error).message, 1000);
     await finish(deps.db, ws, id, { lastStatus: 'failed', lastError: message, lastCounts: counts });
     logger.warn({ workspace: ws, export: id, err }, 'warehouse export failed');
     return { status: 'failed', counts, error: message };

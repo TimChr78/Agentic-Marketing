@@ -1,4 +1,5 @@
 import { createHash, createPrivateKey } from 'node:crypto';
+import { safeErrorText } from '@agentic-marketing/core';
 import { z } from 'zod';
 import type { AdapterDeps } from '../adapters/types';
 import { encryptPayload, es256Jwt, MAX_PAYLOAD, rs256Jwt, vapidAuthorization } from './crypto';
@@ -247,7 +248,7 @@ export const apnsAdapter = definePushAdapter({
         })();
         if (res.status === 410 || reason === 'BadDeviceToken' || reason === 'Unregistered')
           return { ok: false, gone: `APNs: ${reason ?? 'the device token is no longer active'}` };
-        if (res.status !== 200) throw new Error(`APNs answered ${res.status}: ${reason ?? res.body.slice(0, 200)}`);
+        if (res.status !== 200) throw new Error(`APNs answered ${res.status}: ${safeErrorText(String(reason ?? res.body), 200)}`);
         return { ok: true, providerMessageId: res.headers['apns-id'] ?? null };
       },
     };

@@ -1,5 +1,5 @@
 import type { MandateView, PolicyOutcome, Principal } from '@agentic-marketing/commands';
-import { newId } from '@agentic-marketing/core';
+import { newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { generateText } from 'ai';
@@ -223,7 +223,7 @@ export async function independentCheck(
   } catch (err) {
     // No usage is known: the provider refused the request or it never completed. Log it and let the
     // hold go, like decisionCall does before the provider has billed anything.
-    await logged({ status: 'failed', error: (err as Error).message.slice(0, 1000) }).catch(() => undefined);
+    await logged({ status: 'failed', error: safeErrorText((err as Error).message, 1000) }).catch(() => undefined);
     await releaseTokens(deps.db, workspaceId, reservation);
     throw err;
   }
@@ -238,7 +238,7 @@ export async function independentCheck(
       deps.db,
       workspaceId,
       reservation,
-      (logTx) => record(logTx, { status: 'failed', error: (err as Error).message.slice(0, 1000), ...usage }),
+      (logTx) => record(logTx, { status: 'failed', error: safeErrorText((err as Error).message, 1000), ...usage }),
       { label: 'independent check' },
     );
     throw err;
