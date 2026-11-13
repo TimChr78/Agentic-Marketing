@@ -167,9 +167,12 @@ export function demoDestinationReads(): Record<string, DemoRead<any>> {
     'experiences.results': () => ({
       goal: 'Newsletter Signup',
       control: 'control',
+      k: 5,
+      suppressed: false,
       variants: [
         {
           variant: 'control',
+          suppressed: false,
           exposed: 1240,
           converted: 62,
           rate: 0.05,
@@ -183,6 +186,7 @@ export function demoDestinationReads(): Record<string, DemoRead<any>> {
         },
         {
           variant: 'test',
+          suppressed: false,
           exposed: 1228,
           converted: 88,
           rate: 0.0717,

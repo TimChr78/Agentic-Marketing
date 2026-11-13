@@ -262,15 +262,27 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS am_nt_lock_slow_idx ON am_nt_lock (id) W
         const logB: string[] = [];
         const a = migrate(pools[0]!, { ...APP_ROLE, dir, log: (m) => logA.push(m) });
         // Wait until the concurrent build is actually on the server before starting the second.
+        // Exclude this connection's own statement: it contains the phrase too, and matching it
+        // would let the second migrator start before the first holds the index lock.
+        let observedBuild = false;
         for (let i = 0; i < 200; i++) {
           const { rows } = await pools[0]!.query<{ n: string }>(
             `SELECT count(*)::text AS n FROM pg_stat_activity
               WHERE datname = current_database() AND state = 'active'
+                AND backend_type = 'client backend'
+                AND pid <> pg_backend_pid()
                 AND query ILIKE '%CREATE INDEX CONCURRENTLY%'`,
           );
-          if (Number(rows[0]?.n) > 0) break;
+          if (Number(rows[0]?.n) > 0) {
+            observedBuild = true;
+            break;
+          }
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
+        if (!observedBuild)
+          throw new Error(
+            'the concurrent index build never appeared in pg_stat_activity within 10s, so the readiness probe never saw migrator A hold the index lock',
+          );
         const b = migrate(pools[1]!, { ...APP_ROLE, dir, log: (m) => logB.push(m) });
         const timeout = new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('the migrators did not finish; they are waiting on each other')), 30_000),

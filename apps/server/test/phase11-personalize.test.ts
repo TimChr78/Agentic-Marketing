@@ -532,28 +532,31 @@ describe('preview and results', () => {
       ],
     });
     await send([
-      ...['c0', 'c1'].map((v) => viewed(`ver-${v}`, 'control', 2)),
-      viewed('ver-t0', 'treatment', 2),
-      viewed('ver-t1', 'treatment', 2),
+      ...['c0', 'c1', 'c2', 'c3', 'c4'].map((v) => viewed(`ver-${v}`, 'control', 2)),
+      ...['t0', 't1', 't2', 't3', 't4'].map((v) => viewed(`ver-${v}`, 'treatment', 2)),
       order('ver-t0', '2026-11-10T10:00:00Z'),
     ]);
     await send([viewedWithoutVersion('ver-u0'), viewedWithoutVersion('ver-u1')]);
     // ClickHouse is written asynchronously; wait for every exposure before comparing counts.
     await eventually(
       () => t.srv.events.countEvents(ws, { name: 'Experience Viewed' }),
-      (rows) => rows.reduce((n, r) => n + r.count, 0) >= 11,
+      (rows) => rows.reduce((n, r) => n + r.count, 0) >= 17,
       20_000,
     );
 
     const r = await api.call('experiences.results', { artifactId: exp });
     expect(r.version).toBe(2);
+    expect(r.k).toBe(5);
+    expect(r.suppressed).toBe(false);
     expect(r.variants.map((v) => v.variant).sort()).toEqual(['control', 'treatment']);
-    expect(r.variants.find((v) => v.variant === 'control')).toMatchObject({ exposed: 2, converted: 0 });
-    expect(r.variants.find((v) => v.variant === 'treatment')).toMatchObject({ exposed: 2, converted: 1 });
+    expect(r.variants.find((v) => v.variant === 'control')).toMatchObject({ exposed: 5, converted: 0 });
+    expect(r.variants.find((v) => v.variant === 'treatment')).toMatchObject({ exposed: 5, converted: 1 });
     expect(r.control).toBe('control');
     expect(r.recommendation).not.toBe('Nothing to compare yet.');
-    // Unversioned exposures are excluded, but never silently: the note says how many and why.
-    expect(r.note).toContain('2 exposures recorded without a version were excluded');
+    // Unversioned exposures are excluded, but never silently. Two is below k=5, so the note must
+    // not spell the count out (#828).
+    expect(r.note).toContain('Exposures recorded without a version were excluded');
+    expect(r.note).not.toContain('2 exposures recorded without a version');
     // The analysis the numbers were computed with, echoed so a draft cannot rewrite the caption.
     expect(r.analysis).toMatchObject({ method: 'sequential', alpha: 0.05, threshold: 0.95 });
 
@@ -569,6 +572,82 @@ describe('preview and results', () => {
     expect(newest.version).toBe(3);
     expect(newest.variants).toEqual([]);
     expect(newest.note).toContain('No data for version 3 yet');
-    expect(newest.note).toContain('2 exposures recorded without a version were excluded');
+    expect(newest.note).toContain('Exposures recorded without a version were excluded');
+    expect(newest.note).not.toContain('2 exposures recorded without a version');
+  }, 60_000);
+
+  it('suppresses a variant below k and withholds every comparison that needs it (#828)', async () => {
+    const api = t.api(owner);
+    const content = {
+      placement: 'privacy_hero',
+      variants: [
+        { id: 'control', name: 'Plain', weight: 50, content: { html: '<h1>Plain</h1>' } },
+        { id: 'treatment', name: 'Offer', weight: 50, content: { html: '<h1>Offer</h1>' } },
+      ],
+      goal: { event: 'Order Completed' },
+      analysis: { method: 'bayesian', threshold: 0.9 },
+    };
+    const created = await api.call('artifacts.create', { type: 'experience', name: 'Privacy hero', content });
+    await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'privacy floor' });
+    const exp = created.artifactId;
+    const viewed = (anonymousId: string, variant: string) => ({
+      type: 'track',
+      event: 'Experience Viewed',
+      anonymousId,
+      properties: { experience_id: exp, variant_id: variant, version: 1, placement: 'privacy_hero' },
+      context: yes,
+      timestamp: '2026-11-11T09:00:00Z',
+    });
+    const order = (anonymousId: string, at: string) => ({
+      type: 'track',
+      event: 'Order Completed',
+      anonymousId,
+      context: yes,
+      timestamp: at,
+    });
+    await send([
+      ...Array.from({ length: 5 }, (_, i) => viewed(`priv-c${i}`, 'control')),
+      ...Array.from({ length: 2 }, (_, i) => viewed(`priv-t${i}`, 'treatment')),
+      order('priv-c0', '2026-11-11T10:00:00Z'),
+      order('priv-t0', '2026-11-11T10:00:00Z'),
+    ]);
+    await eventually(
+      async () => {
+        const { variants } = await t.srv.events.experimentCounts(ws, {
+          experienceId: exp,
+          version: 1,
+          goal: 'Order Completed',
+        });
+        return variants.reduce((n, v) => n + v.exposed, 0);
+      },
+      (n) => n >= 7,
+      20_000,
+    );
+
+    const r = await api.call('experiences.results', { artifactId: exp });
+    expect(r.k).toBe(5);
+    expect(r.suppressed).toBe(true);
+    const control = r.variants.find((v) => v.variant === 'control')!;
+    const treatment = r.variants.find((v) => v.variant === 'treatment')!;
+    // The control arm is large enough to describe; the two-person arm is not.
+    expect(control).toMatchObject({ suppressed: false, exposed: 5, converted: 1, rate: 0.2 });
+    expect(treatment).toMatchObject({
+      suppressed: true,
+      exposed: null,
+      converted: null,
+      rate: null,
+      lift: null,
+      pValue: null,
+      ci95: null,
+      sequentialP: null,
+      probBeatControl: null,
+      // P(best) and its loss compare every arm, so one suppressed arm withdraws them for all.
+      probBest: null,
+      expectedLoss: null,
+    });
+    expect(control.probBest).toBeNull();
+    expect(control.lift).toBeNull();
+    expect(r.recommendation).toContain('fewer than k=5');
+    expect(r.note).toContain('fewer than k=5');
   }, 60_000);
 });

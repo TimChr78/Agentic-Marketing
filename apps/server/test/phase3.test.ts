@@ -182,7 +182,7 @@ describe('experiment results', () => {
     expect((await post('/v1/batch', { batch })).status).toBe(200);
     const r = await eventually(
       () => api.call('experiences.results', { artifactId: ids.hero }),
-      (x) => x.variants.reduce((n, v) => n + v.exposed, 0) >= 20 && x.variants.reduce((n, v) => n + v.converted, 0) >= 7,
+      (x) => x.variants.reduce((n, v) => n + (v.exposed ?? 0), 0) >= 20 && x.variants.reduce((n, v) => n + (v.converted ?? 0), 0) >= 7,
     );
     expect(r.goal).toBe('Order Completed');
     expect(r.control).toBe('a');

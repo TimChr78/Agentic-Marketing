@@ -53,7 +53,7 @@ export function usePerson(profileId: string, enabled: boolean) {
 
 type TimelineState = {
   events: PersonEvent[];
-  eventsCursor: { timestamp: string; eventId: string } | null;
+  eventsCursor: { timestamp: string; eventId: string; name: string; anonymousId: string } | null;
   eventsError: string | null;
   eventsMoreError: string | null;
   messages: PersonMessage[];
@@ -179,6 +179,8 @@ export function useProfileTimeline(profileId: string | undefined, enabled: boole
         limit: 100,
         before: state.eventsCursor.timestamp,
         beforeId: state.eventsCursor.eventId,
+        beforeName: state.eventsCursor.name,
+        beforeAnonymousId: state.eventsCursor.anonymousId,
       });
       if (gen !== generation.current) return;
       setState((s) => ({

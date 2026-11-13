@@ -46,12 +46,13 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
   const method = r.method;
   const viewingOther = artifact.version.number !== r.version;
   const significance = method === 'bayesian' ? 'P(beats control)' : method === 'sequential' ? 'Always-valid p' : 'p-value';
-  const exposures = r.variants.reduce((sum, variant) => sum + variant.exposed, 0);
+  const exposures = r.variants.reduce((sum, variant) => sum + (variant.exposed ?? 0), 0);
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <Tag>{method === 'bayesian' ? 'Bayesian' : method === 'sequential' ? 'Sequential' : 'Fixed horizon'}</Tag>
+        {r.suppressed && <Tag>k={r.k} suppressed</Tag>}
         <span className="text-[12px] text-muted">
           Goal: {r.goal ?? 'none'} · Control: {r.control ?? 'none'} · results use v{r.version}
           {viewingOther && ` · you are viewing v${artifact.version.number}`}
@@ -63,9 +64,14 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
       <p className="text-[12px] leading-[18px] text-muted">
         Current totals for exposed visitors. Period and freshness unavailable: the results do not name a calendar period.
       </p>
+      {r.suppressed && (
+        <Alert tone="warn" title="Some results are suppressed">
+          Fewer than k={r.k} visitors were exposed to a variant, so its counts, rates and every comparison that needs it are hidden.
+        </Alert>
+      )}
       {!r.goal && <Alert tone="info">Set a goal to measure conversions.</Alert>}
       {!r.control && <Alert tone="info">No control group is configured. Comparison is unavailable.</Alert>}
-      {exposures === 0 && (
+      {exposures === 0 && !r.suppressed && (
         <Alert tone="info" title="No exposures for this version yet">
           No visitor has been exposed to v{r.version} in this view. Events arrive within a minute or two after a visitor sees it.
         </Alert>
@@ -97,19 +103,21 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
           <tbody>
             {r.variants.map((v) => {
               const isControl = v.variant === r.control;
+              const hidden = v.suppressed;
               return (
                 <Tr key={v.variant}>
                   <Td>
                     <span className="flex flex-wrap items-center gap-1.5">
                       {v.variant}
                       {isControl && <Tag>control</Tag>}
+                      {hidden && <Tag>suppressed</Tag>}
                     </span>
                   </Td>
-                  <Td align="right">{v.exposed.toLocaleString()}</Td>
-                  <Td align="right">{v.converted.toLocaleString()}</Td>
-                  <Td align="right">{pct(v.rate)}</Td>
+                  <Td align="right">{hidden ? 'Suppressed' : (v.exposed?.toLocaleString() ?? '—')}</Td>
+                  <Td align="right">{hidden ? 'Suppressed' : (v.converted?.toLocaleString() ?? '—')}</Td>
+                  <Td align="right">{hidden ? 'Suppressed' : pct(v.rate)}</Td>
                   <Td align="right">
-                    {isControl ? (
+                    {hidden || isControl ? (
                       <span className="text-muted">—</span>
                     ) : (
                       <span
@@ -119,9 +127,9 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
                       </span>
                     )}
                   </Td>
-                  <Td align="right">{isControl || !v.ci95 ? '—' : `${points(v.ci95[0])} to ${points(v.ci95[1])}`}</Td>
+                  <Td align="right">{hidden || isControl || !v.ci95 ? '—' : `${points(v.ci95[0])} to ${points(v.ci95[1])}`}</Td>
                   <Td align="right">
-                    {isControl
+                    {hidden || isControl
                       ? '—'
                       : method === 'bayesian'
                         ? pct(v.probBeatControl)
@@ -132,7 +140,11 @@ export function ExperienceResults({ artifact }: { artifact: Artifact }) {
                   <Td
                     align="right"
                     className="hidden lg:table-cell"
-                    title={`Expected loss from choosing this variant: ${points(v.expectedLoss)}`}
+                    title={
+                      v.expectedLoss === null
+                        ? 'Expected loss is unavailable while a variant is suppressed'
+                        : `Expected loss from choosing this variant: ${points(v.expectedLoss)}`
+                    }
                   >
                     {pct(v.probBest)}
                   </Td>

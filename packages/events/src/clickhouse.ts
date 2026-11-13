@@ -21,11 +21,22 @@ export interface ConversionEvent {
 
 export interface EventStore {
   insert(events: BusEvent[]): Promise<void>;
-  /** Events of a person, by every anonymous id and user id they are known by. Newest first. */
+  /**
+   * Events of a person, by every anonymous id and user id they are known by. Newest first.
+   * Pages with the full replacing key `(timestamp, name, anonymous_id, event_id)`. `beforeName`
+   * and `beforeAnonymousId` may be omitted for a cursor written before #840; the missing fields
+   * then act as the tuple maximum so a tied event is never skipped.
+   */
   eventsOf(
     workspaceId: string,
     ids: { anonymousIds: string[]; userIds: string[] },
-    opts?: { limit?: number; before?: string; beforeId?: string },
+    opts?: {
+      limit?: number;
+      before?: string;
+      beforeId?: string;
+      beforeName?: string;
+      beforeAnonymousId?: string;
+    },
   ): Promise<StoredEvent[]>;
   /** The newest `perId` events for each of several anonymous ids in one query (bounded retention scans). */
   eventsOfAnonymousIds(workspaceId: string, anonymousIds: string[], perId: number): Promise<StoredEvent[]>;
@@ -346,24 +357,32 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     },
     async eventsOf(workspaceId, ids, o = {}) {
       if (!ids.anonymousIds.length && !ids.userIds.length) return [];
-      // A composite (timestamp, event_id) cursor keeps tied events from being skipped at a page
-      // boundary. `before` alone is the legacy timestamp-only cursor and deliberately keeps its
-      // old strictly-before semantics (#397).
-      const after = o.before
-        ? o.beforeId
-          ? "AND (timestamp < {before:DateTime64(3, 'UTC')} OR (timestamp = {before:DateTime64(3, 'UTC')} AND event_id < {beforeId:String}))"
-          : "AND timestamp < {before:DateTime64(3, 'UTC')}"
-        : '';
+      // Page on the full replacing key (timestamp, name, anonymous_id, event_id) descending, as
+      // conversionEvents walks it ascending: two rows that tie on timestamp and event id but
+      // differ by name or anonymous id both survive FINAL and must not be dropped at a boundary
+      // (#840). A cursor written before #840 lacks the name and anonymous id; the missing fields
+      // act as the tuple maximum, so the tied rows are repeated rather than skipped.
+      const after = !o.before
+        ? ''
+        : o.beforeName === undefined
+          ? "AND timestamp <= {before:DateTime64(3, 'UTC')}"
+          : o.beforeAnonymousId === undefined
+            ? "AND (timestamp < {before:DateTime64(3, 'UTC')} OR (timestamp = {before:DateTime64(3, 'UTC')} AND name <= {beforeName:String}))"
+            : o.beforeId
+              ? "AND (timestamp, name, anonymous_id, event_id) < ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String}, {beforeId:String})"
+              : "AND (timestamp, name, anonymous_id) <= ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String})";
       const rs = await query(workspaceId, {
         query: `SELECT event_id, source_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
                 FROM events FINAL
                 WHERE ${idFilter} ${after}
-                ORDER BY timestamp DESC, event_id DESC LIMIT {limit:UInt32}`,
+                ORDER BY timestamp DESC, name DESC, anonymous_id DESC, event_id DESC LIMIT {limit:UInt32}`,
         query_params: {
           ...params(workspaceId, ids),
           limit: o.limit ?? 100,
           ...(o.before ? { before: o.before.replace('Z', '') } : {}),
           ...(o.before && o.beforeId ? { beforeId: o.beforeId } : {}),
+          ...(o.before && o.beforeName ? { beforeName: o.beforeName } : {}),
+          ...(o.before && o.beforeAnonymousId !== undefined ? { beforeAnonymousId: o.beforeAnonymousId } : {}),
         },
         format: 'JSONEachRow',
       });

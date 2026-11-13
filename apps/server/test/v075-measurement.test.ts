@@ -456,18 +456,21 @@ describe('profile pagination and export (#397)', () => {
     );
 
     // Walk profiles.events across several pages. Before #397 the next page used `timestamp <`
-    // alone, so the remaining 301 events at the boundary vanished.
+    // alone, so the remaining 301 events at the boundary vanished; the cursor now carries the
+    // whole replacing key so ties on name/anonymous id cannot be skipped either (#840).
     const eventIds: string[] = [];
-    let cursor: { timestamp: string; eventId: string } | null = null;
+    let cursor: { timestamp: string; eventId: string; name: string; anonymousId: string } | null = null;
     for (let page = 0; page < 10; page++) {
-      const r: { events: { eventId: string }[]; nextCursor: { timestamp: string; eventId: string } | null } = await pagesApi.call(
-        'profiles.events',
-        {
-          profileId: firstProfile,
-          limit: 200,
-          ...(cursor ? { before: cursor.timestamp, beforeId: cursor.eventId } : {}),
-        },
-      );
+      const r: {
+        events: { eventId: string }[];
+        nextCursor: { timestamp: string; eventId: string; name: string; anonymousId: string } | null;
+      } = await pagesApi.call('profiles.events', {
+        profileId: firstProfile,
+        limit: 200,
+        ...(cursor
+          ? { before: cursor.timestamp, beforeId: cursor.eventId, beforeName: cursor.name, beforeAnonymousId: cursor.anonymousId }
+          : {}),
+      });
       eventIds.push(...r.events.map((e) => e.eventId));
       if (!r.nextCursor) break;
       cursor = r.nextCursor;
