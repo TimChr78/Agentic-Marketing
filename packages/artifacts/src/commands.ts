@@ -215,6 +215,15 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
   for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
 }
 
+/**
+ * Serialises every writer that can create a singleton artifact for one workspace + type (#869).
+ * All such writers take this lock before checking whether the singleton exists, so two callers
+ * cannot both see none and race the partial unique index. The key must stay identical everywhere.
+ */
+export async function lockSingleton(tx: CommandContext['tx'], workspaceId: string, type: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('am.artifact-singleton'), hashtext(${`${workspaceId}:${type}`}))`);
+}
+
 /** Locks artifact rows (in id order) so their latest version cannot change until the transaction ends. */
 export async function lockArtifacts(ctx: CommandContext, ids: string[]) {
   await ctx.tx
@@ -399,7 +408,7 @@ export const createArtifact = defineCommand({
     if (isSingleton(input.type)) {
       // Serialise creations per workspace + type: two concurrent callers must not both pass the
       // read below, and the second must see a clear conflict rather than a unique violation (#869).
-      await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('am.artifact-singleton'), hashtext(${`${ws}:${input.type}`}))`);
+      await lockSingleton(ctx.tx, ws, input.type);
       const [existing] = await ctx.tx
         .select({ id: schema.artifacts.id })
         .from(schema.artifacts)
