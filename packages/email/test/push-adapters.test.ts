@@ -72,7 +72,7 @@ describe('push adapters: retry collapse keys (#753)', () => {
     const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const deps: AdapterDeps = {
       fetch: (async (url, init) => {
-        if (String(url).includes('token')) return Response.json({ access_token: 'ya29.test', expires_in: 3600 });
+        if (new URL(String(url)).host === 'token.test') return Response.json({ access_token: 'ya29.test', expires_in: 3600 });
         sent.push({ url: String(url), body: init?.body ? JSON.parse(String(init.body)) : null });
         return Response.json({ name: 'projects/shop-app/messages/1' });
       }) as typeof globalThis.fetch,
@@ -84,7 +84,7 @@ describe('push adapters: retry collapse keys (#753)', () => {
     );
 
     expect(await transport.send({ kind: 'fcm', token: 'fcm-token' }, message)).toMatchObject({ ok: true });
-    const send = sent.find((s) => s.url.startsWith('https://fcm.test'))!;
+    const send = sent.find((s) => new URL(s.url).host === 'fcm.test')!;
     // Firebase ignores collapse_key on a message with a notification payload; the Android tag is
     // what replaces the first notification when the same message is retried.
     expect((send.body as { message: { android: { notification: { tag: string } } } }).message.android.notification.tag).toBe(
