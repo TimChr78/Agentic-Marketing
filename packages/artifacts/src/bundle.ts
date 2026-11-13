@@ -440,11 +440,31 @@ export const importConfig = defineCommand({
           ...author(ctx),
         });
       } else {
-        if (restore)
+        if (restore) {
+          // Restore it unpublished: the version that was live before it was archived must not go live
+          // again on its own. Only this import's publish step, which follows the approval policy, can
+          // put a version live (0.14.17 review round 2). The old version is superseded rather than
+          // turned back into a draft, so the next edit starts a new version instead of rewriting it.
+          const [row] = await ctx.tx
+            .select({ publishedVersion: schema.artifacts.publishedVersion })
+            .from(schema.artifacts)
+            .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, id)));
+          if (row?.publishedVersion != null)
+            await ctx.tx
+              .update(schema.artifactVersions)
+              .set({ state: 'superseded', updatedAt: new Date() })
+              .where(
+                and(
+                  eq(schema.artifactVersions.workspaceId, ws),
+                  eq(schema.artifactVersions.artifactId, id),
+                  eq(schema.artifactVersions.number, row.publishedVersion),
+                ),
+              );
           await ctx.tx
             .update(schema.artifacts)
-            .set({ archived: false, updatedAt: new Date() })
+            .set({ archived: false, publishedVersion: null, updatedAt: new Date() })
             .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, id)));
+        }
         // A restored row with identical content still needs a draft when publishing: its latest
         // version may be the published one, and requestPublish only accepts a draft.
         if (differs || (restore && input.publish))
