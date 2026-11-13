@@ -2,6 +2,31 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.16] - 2026-11-13
+
+### Security
+
+- **Breaking:** a write authenticated by the session cookie now has to send `Content-Type: application/json` from the app's own origin (`PUBLIC_URL`, or a `TRUSTED_ORIGINS` entry; `Sec-Fetch-Site: same-origin` is the fallback when `Origin` is absent). A form-encoded or `text/plain` post from another site is refused with 413/415 or 403 instead of running the command. The invitation and OAuth consent-workspace form endpoints accept urlencoded forms but run the same origin check; bearer and API tokens are unaffected. Better Auth's own `/api/auth/*` routes already validate Origin against the same trusted list.
+- **Breaking:** a workspace autonomy draft ceiling of 0 now makes every agent observe-only: drafts are refused with a reason, with or without a mandate, while reads still work.
+- `am reset-password` deletes every existing session of that person in the same operation (and nobody else's), so a cookie stolen before the reset stops working.
+- Agent auto-creation on first credential use and the OAuth consent workspace choice now write as the app role under row-level security; the global cleanup of abandoned consent choices moved to the scheduler.
+- The consent-selection migration is expand-only: the `session_id` key from 0.8.0 stays, so 0.14.15 API pods keep working during a Helm pre-upgrade migration and an app rollback still chooses a brand. A re-pick for the same request replaces the row under a session-scoped policy; removing the old key is deferred to 0.14.17+.
+- The agent activity ledger stores the same fixed sanitized failure as the audit log for an unexpected exception, so `agent_actions.error` and `agents.activity` no longer expose driver text or secrets. Hosted-run failures, webhook/action delivery errors and unexpected MCP tool errors use the same rule; an `AppError` message written for people is kept.
+- The Postgres admin and application pools handle a failure of an idle pooled connection instead of exiting the process, so a database restart or failover no longer takes the server down.
+- The egress guard refuses the IPv4-translated (SIIT) and local-use NAT64 forms, fails closed on anything that is not an IP address, filters resolved addresses by the requested family, and keeps internal names reachable only when the name itself is allow-listed.
+- An unexpected exception in the command executor is audited as a sanitized internal failure before it is rethrown, so a failed write leaves a trace without recording SQL, secrets or stack details.
+- `ads.importSpend` no longer turns an unexpected failure (the database, a secret, a bug) into a user-facing error with its raw text; provider answers and egress refusals still explain themselves. A rollout step that fails unexpectedly records a fixed reason on its status (the full error goes to the server log), and an unreadable guardrail says which measure could not be read.
+
+### Upgrading from 0.14.15
+
+- **Migrations:** `packages/db/migrations/0091_oauth_selection_rls.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** cookie-authenticated writes (REST `/v1`, workspace selection, invitations, Copilot) need `Content-Type: application/json` and an `Origin` matching `PUBLIC_URL` or `TRUSTED_ORIGINS`; scripts that call the API with a session cookie must send `Origin`, and bearer-token clients are unaffected. A workspace autonomy draft ceiling of 0 now refuses agent drafts. A CIDR in `EGRESS_ALLOWED_HOSTS` no longer covers internal names such as `localhost`; list the name itself.
+- **Manual steps:** if the admin UI is served on a custom domain other than `PUBLIC_URL`, add that origin to `TRUSTED_ORIGINS` before upgrading, or its writes are refused with 403.
+- **Upgrade:** download `agentic-marketing-compose-0.14.16.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.16 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.16` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.16). Run `docker compose exec app am doctor`.
+
+<!-- issues: 817, 818, 829, 838 -->
+
 ## [0.14.15] - 2026-11-13
 
 ### Fixed
