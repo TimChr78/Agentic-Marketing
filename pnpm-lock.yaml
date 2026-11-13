@@ -10,6 +10,7 @@ overrides:
   happy-dom: ^21.0.4
   minimatch: 11.0.1
   mjml-browser: 5.4.1
+  uuid@<11.1.1: 11.1.1
   smtp-server>nodemailer: 10.1.4
   '@better-auth/sso>fast-xml-parser': 5.12.0
 
@@ -4918,14 +4919,8 @@ packages:
   util-deprecate@1.0.2:
     resolution: {integrity: sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==}
 
-  uuid@8.3.2:
-    resolution: {integrity: sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg==}
-    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
-    hasBin: true
-
-  uuid@9.0.1:
-    resolution: {integrity: sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==}
-    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
+  uuid@11.1.1:
+    resolution: {integrity: sha512-vIYxrBCC/N/K+Js3qSN88go7kIfNPssr/hHCesKCQNAjmgvYS2oqr69kIufEG+O4+PfezOH4EbIeHCfFov8ZgQ==}
     hasBin: true
 
   uuidv7@1.2.1:
@@ -7026,7 +7021,7 @@ snapshots:
       lodash: 4.18.1
       react: 18.3.1
       react-dom: 18.3.1(react@18.3.1)
-      uuid: 8.3.2
+      uuid: 11.1.1
 
   easy-email-editor@4.17.1(easy-email-core@4.17.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(mjml-browser@5.4.1)(react-dom@18.3.1(react@18.3.1))(react-final-form@6.5.9(final-form@4.20.10)(react@18.3.1))(react@18.3.1):
     dependencies:
@@ -7065,7 +7060,7 @@ snapshots:
       react-final-form: 6.5.9(final-form@4.20.10)(react@18.3.1)
       react-final-form-arrays: 3.1.4(final-form-arrays@3.1.0(final-form@4.20.10))(final-form@4.20.10)(react-final-form@6.5.9(final-form@4.20.10)(react@18.3.1))(react@18.3.1)
       react-use: 17.6.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      uuid: 9.0.1
+      uuid: 11.1.1
     transitivePeerDependencies:
       - '@types/react'
 
@@ -8980,9 +8975,7 @@ snapshots:
 
   util-deprecate@1.0.2: {}
 
-  uuid@8.3.2: {}
-
-  uuid@9.0.1: {}
+  uuid@11.1.1: {}
 
   uuidv7@1.2.1: {}
 
