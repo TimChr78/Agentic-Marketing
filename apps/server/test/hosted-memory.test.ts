@@ -182,6 +182,23 @@ describe('hosted memory and skills (#340)', () => {
     expect(memory.notes.map((n) => n.id)).toContain(note.id);
   }, 60_000);
 
+  it('redacts a legacy note before the model sees it (0.14.11 round 4)', async () => {
+    const s = await setup('[recall] Use what you remember.');
+    // A note stored before strict checking: the listing redacts it, and the run prompt must too.
+    await t.srv.db.admin.query(
+      `INSERT INTO hosted_agent_memory (workspace_id, id, agent_id, text, created_by_user_id)
+       VALUES ($1, 'hmm_' || lpad('1', 32, '0'), $2, 'Call 87654321 next week.', $3)`,
+      [s.ws, s.agentId, s.owner.id],
+    );
+    await onlyDue(s.agentId);
+    const before = llm.requests.length;
+    const summary = await runAt(DUE());
+    expect(summary.ok).toBe(1);
+    const prompt = llm.requests.slice(before)[0]!.user;
+    expect(prompt).toContain('Call [phone] next week.');
+    expect(prompt).not.toContain('87654321');
+  }, 60_000);
+
   it('refuses a note with an e-mail address or a phone number', async () => {
     const s = await setup('Keep notes.');
     await expect(

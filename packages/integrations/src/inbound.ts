@@ -8,6 +8,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
+import jsonata from 'jsonata';
 import { connectionSecrets, connectorOf, inboundTokenHash } from './connections';
 
 // Inbound webhooks: POST /hooks/in/<connection>/<token>. The secret URL authenticates the
@@ -28,67 +29,79 @@ const PENDING_TTL_S = 60;
 const DONE_TTL_S = 10 * 60;
 const RETRY_AFTER_S = 30;
 
-/** One signed delivery's idempotency key: workspace + endpoint + signed id (#643). */
-
-/** Request headers that change per hop or per attempt, never per event. */
-const TRANSPORT_HEADERS = new Set([
-  'host',
-  'content-length',
-  'connection',
-  'accept-encoding',
-  'user-agent',
-  'via',
-  'date',
-  'cdn-loop',
-  'x-forwarded-for',
-  'x-forwarded-proto',
-  'x-forwarded-host',
-  'x-forwarded-port',
-  'x-real-ip',
-  'true-client-ip',
-  'x-request-id',
-  'x-amzn-trace-id',
-  'traceparent',
-  'tracestate',
-  'cf-ray',
-  'cf-connecting-ip',
-  'cf-ipcountry',
-  'cf-visitor',
-]);
+/** What a mapping read from the request headers while it ran (0.14.11 review round 7). */
+export interface HeaderReads {
+  /** Header names read individually (only names the request carries). */
+  names: Set<string>;
+  /** The headers object was enumerated or copied, so any header may have been read. */
+  all: boolean;
+}
 
 /**
- * The header values that belong to a delivery's replay identity: the headers a generic mapping
- * reads, plus the connector's own identity headers (`connectorHeaders`, e.g. the Shopify topic,
- * since one order body arrives as both `orders/create` and `orders/paid`). JSONata names a header as
- * `headers.name`, `headers."x-name"` or `headers.` + backquoted name; a mapping that uses the
- * `headers` object any other way (`$lookup(headers, …)`, `$keys(headers)`, `headers` alone) takes
- * every header except per-hop transport ones, and also every transport header whose name appears
- * as a string literal in the mapping (`$lookup(headers, "x-forwarded-for")`). A connector without a
- * mapping expression derives its events from the body and its identity headers alone.
+ * The request headers behind a proxy that records which of them a mapping reads. Reading a header
+ * (any property access, `in`, a descriptor) records its name; enumerating the object (`*`, `**`,
+ * `$keys`, `$each`, `$spread`, `$string()`, `$eval`, copying it into the output) records "all".
+ * Analysing the mapping's source cannot follow every JSONata construct; watching the evaluation can.
+ * Names the request does not carry are not recorded (JSONata probes internal properties), but a
+ * delivery that does carry a read header records it, so the identity still changes.
  */
-export function replayHeaderValues(settings: unknown, headers: Record<string, string>, connectorHeaders: readonly string[] = []): string {
-  const mapping = settings && typeof settings === 'object' ? (settings as { mapping?: unknown }).mapping : undefined;
-  const named = new Set<string>(connectorHeaders.map((h) => h.toLowerCase()));
-  let wholesale = false;
-  if (typeof mapping === 'string' && /\bheaders\b/.test(mapping)) {
-    const ref = /\bheaders\b(?:\s*\.\s*(?:"([^"]*)"|`([^`]*)`|([A-Za-z_$][\w$]*)))?/g;
-    for (const m of mapping.matchAll(ref)) {
-      const name = m[1] ?? m[2] ?? m[3];
-      if (name === undefined) wholesale = true;
-      else named.add(name.toLowerCase());
-    }
-    if (wholesale)
-      for (const m of mapping.matchAll(/"([^"]*)"|'([^']*)'/g)) {
-        const literal = (m[1] ?? m[2] ?? '').toLowerCase();
-        if (TRANSPORT_HEADERS.has(literal)) named.add(literal);
-      }
-  }
-  const keys = new Set(named);
-  if (wholesale) for (const k of Object.keys(headers)) if (!TRANSPORT_HEADERS.has(k)) keys.add(k);
-  return [...keys]
+export function trackHeaderReads(headers: Record<string, string>): { proxy: Record<string, string>; reads: HeaderReads } {
+  const reads: HeaderReads = { names: new Set(), all: false };
+  const note = (key: string | symbol) => {
+    if (typeof key === 'string' && Object.hasOwn(headers, key)) reads.names.add(key);
+  };
+  const proxy = new Proxy(headers, {
+    get(target, key, receiver) {
+      note(key);
+      return Reflect.get(target, key, receiver);
+    },
+    has(target, key) {
+      note(key);
+      return Reflect.has(target, key);
+    },
+    getOwnPropertyDescriptor(target, key) {
+      note(key);
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    ownKeys(target) {
+      reads.all = true;
+      return Reflect.ownKeys(target);
+    },
+  });
+  return { proxy, reads };
+}
+
+/**
+ * A delivery's replay identity from its headers (0.14.11 review round 10): the values of the headers
+ * the mapping read in its real run (every header if it enumerated or copied the object). A
+ * connector that declares its identity headers (Shopify's topic) uses exactly those instead.
+ *
+ * - No header-caused difference is folded away: two identities match only when both runs read the
+ *   same headers with the same values, and a header that made two outputs differ was read by at
+ *   least one of those runs. Differences caused only by the clock or randomness dedupe as replays.
+ * - A header the mapping never reads cannot make a replay look new: neither an extra header added
+ *   to a signed body nor a provider's per-attempt signature, timestamp or forwarding header.
+ * - Accepted residual: a mapping whose choice of which headers to read depends on the clock or on
+ *   randomness can give an identical retry another identity, so it may publish twice; it never
+ *   loses an event. Standard Webhooks avoids it: its signed `webhook-id` is the replay key.
+ */
+export function headerIdentity(headers: Record<string, string>, reads: HeaderReads, connectorHeaders?: readonly string[]): string {
+  const keys = connectorHeaders ? connectorHeaders.map((h) => h.toLowerCase()) : reads.all ? Object.keys(headers) : [...reads.names];
+  return [...new Set(keys)]
     .sort()
     .map((k) => `${k}:${headers[k] ?? ''}`)
     .join('\n');
+}
+
+/**
+ * The header identity a generic JSONata mapping gives one request, evaluated the way the generic
+ * connector maps it (one real run, output copied). Used by tests.
+ */
+export async function mappedReplayHeaders(mapping: string, body: unknown, headers: Record<string, string>): Promise<string> {
+  const { proxy, reads } = trackHeaderReads(headers);
+  const v = await jsonata(mapping).evaluate({ body, headers: proxy });
+  if (v !== undefined) JSON.stringify(v);
+  return headerIdentity(headers, reads);
 }
 
 export const inboundReplayKey = (workspaceId: string, connectionId: string, webhookId: string) =>
@@ -155,9 +168,11 @@ export function inboundApi(deps: {
       } catch {
         return c.json({ error: 'invalid_json', message: 'The body is not JSON.' }, 400);
       }
+      const tracked = trackHeaderReads(headers);
       let items: unknown[];
       try {
-        items = await connector.inbound.map(payload, ictx);
+        // The mapping runs against a proxy that records which headers it reads (round 7).
+        items = await connector.inbound.map(payload, { ...ictx, headers: tracked.proxy });
       } catch (err) {
         return c.json({ error: 'mapping_failed', message: `The mapping failed: ${(err as Error).message}` }, 422);
       }
@@ -179,7 +194,10 @@ export function inboundApi(deps: {
       // with one body can be two events; and it can call $millis() or $uuid(), so its output differs
       // on every replay. The key is the connection, the raw body and the values of the headers the
       // mapping or the connector reads (0.14.11 review, rounds 1 to 3).
-      const replayHeaders = replayHeaderValues(ictx.settings, headers, connector.inbound.replayHeaders);
+      // A connector that declares its identity headers (Shopify's topic) uses exactly those; any other
+      // uses the headers its mapping actually read.
+      // Identity from the headers the real run read (round 10).
+      const replayHeaders = headerIdentity(headers, tracked.reads, connector.inbound.replayHeaders);
       const replayId =
         webhookId ??
         (scheme === 'standard-webhooks'

@@ -176,6 +176,103 @@ describe('inbound replay protection for every scheme (#787)', () => {
     expect(await second.json()).toMatchObject({ success: true, accepted: 1 });
   });
 
+  it('keeps same-body deliveries a mapping names dynamically from two client addresses (0.14.11 round 4)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Dynamically address-keyed generic',
+      settings: { mapping: '$merge([body, {"anonymousId": $lookup(headers, "x-forwarded-" & "for")}])' },
+      secrets: {},
+    });
+    const body = tracked('dynamic-address-keyed', 'dyn-1');
+    const first = await post(connection.inboundPath!, body, { 'x-forwarded-for': 'alice' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    // The name is computed, so it is not a string literal the header detection can see; a
+    // wholesale mapping must still count the client address (0.14.11 round 4).
+    const second = await post(connection.inboundPath!, body, { 'x-forwarded-for': 'bob' });
+    const secondBody = await second.json();
+    expect(secondBody).toMatchObject({ success: true, accepted: 1 });
+    expect(secondBody).not.toHaveProperty('duplicate');
+    // A retry from the same address is still a replay.
+    const replay = await post(connection.inboundPath!, body, { 'x-forwarded-for': 'bob' });
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
+  it('keeps same-body deliveries whose x-request-id a mapping computes (0.14.11 round 5)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Computed request-id generic',
+      settings: { mapping: '$merge([body, {"anonymousId": $lookup(headers, "x-request-" & "id")}])' },
+      secrets: {},
+    });
+    const body = tracked('request-id-keyed', 'r-1');
+    const first = await post(connection.inboundPath!, body, { 'x-request-id': 'person-a' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    // The reviewer's reproducer: the name is computed, so every header is part of the identity and
+    // the differing per-attempt x-request-id makes this a new delivery.
+    const second = await post(connection.inboundPath!, body, { 'x-request-id': 'person-b' });
+    const secondBody = await second.json();
+    expect(secondBody).toMatchObject({ success: true, accepted: 1 });
+    expect(secondBody).not.toHaveProperty('duplicate');
+    // An exact retry (same body and headers) is still a duplicate.
+    const replay = await post(connection.inboundPath!, body, { 'x-request-id': 'person-b' });
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
+  it('keeps same-body deliveries whose header a mapping reads without naming it (0.14.11 round 7)', async () => {
+    for (const [name, expr] of [
+      ['Descendant generic', '**.x'],
+      ['Context string generic', '$match($string(), /person-[ab]/).match'],
+      ['Clock branch generic', '$millis() > 0 ? headers.x : "person-a"'],
+    ] as const) {
+      const connection = await api(plainWs).call('connections.create', {
+        connector: 'webhook',
+        name,
+        settings: { mapping: `$merge([body, {"anonymousId": $string((${expr}))}])` },
+        secrets: {},
+      });
+      const body = tracked(`unnamed-${name.replace(/\W/g, '-')}`, 'u-1');
+      const first = await post(connection.inboundPath!, body, { x: 'person-a', other: 'o' });
+      expect(await first.json(), expr).toMatchObject({ success: true, accepted: 1 });
+      const second = await (await post(connection.inboundPath!, body, { x: 'person-b', other: 'o' })).json();
+      expect(second, expr).toMatchObject({ success: true, accepted: 1 });
+      expect(second, expr).not.toHaveProperty('duplicate');
+    }
+  });
+
+  it('may publish a retry again when a clock branch changes which headers are read, never loses one (accepted residual)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Time-branch generic',
+      settings: { mapping: '$merge([body, {"anonymousId": $millis() < body.cutoff ? headers.x : "person-a"}])' },
+      secrets: {},
+    });
+    const body = JSON.stringify({ type: 'track', event: 'Order Completed', userId: 'time-branch', cutoff: Date.now() + 1_500 });
+    const first = await post(connection.inboundPath!, body, { x: 'person-a' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    // Past the cutoff the mapping no longer reads x, so the retry has another identity and is
+    // accepted. Its own exact retry then dedupes.
+    const retry = await post(connection.inboundPath!, body, { x: 'person-a' });
+    expect(await retry.json()).toMatchObject({ success: true, accepted: 1 });
+    const again = await post(connection.inboundPath!, body, { x: 'person-a' });
+    expect(await again.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
+  it('refuses a signed body replayed with an extra header the mapping never reads (0.14.11 round 10)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Signed body-only generic',
+      settings: { mapping: 'body', signature: { scheme: 'hmac-sha256', header: 'x-signature', encoding: 'hex', prefix: '' } },
+      secrets: { signingSecret: HMAC_SECRET },
+    });
+    const body = tracked('signed-extra-header', 's-1');
+    const signature = createHmac('sha256', HMAC_SECRET).update(body).digest('hex');
+    const first = await post(connection.inboundPath!, body, { 'x-signature': signature });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    const replay = await post(connection.inboundPath!, body, { 'x-signature': signature, 'x-unrelated': '1' });
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
   it('keeps a Shopify order paid with the same body as its create (0.14.11 round 3)', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'shopify',
