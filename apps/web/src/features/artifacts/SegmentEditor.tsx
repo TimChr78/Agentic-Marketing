@@ -10,6 +10,7 @@ import { CopyPurposeKey } from '../audience/phase26/CopyControl';
 import type { EditorProps } from './ArtifactDetailPage';
 import { ListAudiencePanel } from './ListAudiencePanel';
 import { usePickerIndex } from './pickerIndex';
+import { mergeReferenceSnapshots, newerSnapshot, type ReferenceSnapshot } from './referenceSnapshots';
 
 // Segment condition builder: the same tree agents read and write, edited as rows instead of JSON.
 // A condition is a group ({all}/{any}) or one leaf: trait, event, consent, segment or not.
@@ -667,29 +668,6 @@ export function referencedSegmentIds(condition: unknown): string[] {
 }
 
 /** A referenced segment as the estimate recorded it: its published version, plus a list's stamp. */
-interface ReferenceSnapshot {
-  version: number | null;
-  stamp: string | null;
-}
-
-/**
- * The newer of two observations of one reference. Versions are integers and stamps are increasing
- * microsecond timestamps (`YYYY-MM-DDTHH:MM:SS.ffffffZ`, so text order is time order); a missing
- * version or stamp is older than a present one. Equal states return the first, which is the live
- * one already held.
- */
-function newerSnapshot(a: ReferenceSnapshot, b: ReferenceSnapshot): ReferenceSnapshot {
-  if (a.version !== b.version) {
-    if (a.version === null) return b;
-    if (b.version === null) return a;
-    return a.version > b.version ? a : b;
-  }
-  if (a.stamp === b.stamp) return a;
-  if (a.stamp === null) return b;
-  if (b.stamp === null) return a;
-  return a.stamp > b.stamp ? a : b;
-}
-
 /**
  * The referenced segments' current published versions, and the membership stamp of any that is a
  * static or snapshot list. A publish in another tab is not a local change, so the reads are forced
@@ -719,11 +697,14 @@ function useReferencedSegmentVersions(ids: string[]) {
           }
           return [id, { version, stamp }] as const;
         } catch {
-          return [id, { version: null, stamp: null }] as const;
+          // A failed read says nothing new: keep the live snapshot (see mergeReferenceSnapshots).
+          return [id, undefined] as const;
         }
       }),
     );
-    if (n === seq.current) setVersions(Object.fromEntries(entries));
+    // Merge, never replace: an estimate may already have adopted a newer stamp than this read saw
+    // (0.14.13 review round 3). References the segment no longer uses are dropped.
+    if (n === seq.current) setVersions((prev) => mergeReferenceSnapshots(prev, Object.fromEntries(entries)));
   }, [key]);
 
   useEffect(() => {
