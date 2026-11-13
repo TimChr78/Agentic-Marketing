@@ -72,9 +72,13 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
     await next();
   });
   app.onError((err) => {
+    const expected = err instanceof ScimError || err instanceof AppError;
     const status = err instanceof ScimError ? err.status : err instanceof AppError ? err.status : 500;
     const scimType = err instanceof ScimError ? err.scimType : undefined;
-    return reply({ schemas: [ERROR], status: String(status), ...(scimType ? { scimType } : {}), detail: err.message }, status);
+    // A SCIM client is another role, so an unexpected exception keeps the fixed server message
+    // rather than its text (SQL, secrets or driver details); expected errors stay specific.
+    const detail = expected ? err.message : 'Something went wrong on our side.';
+    return reply({ schemas: [ERROR], status: String(status), ...(scimType ? { scimType } : {}), detail }, status);
   });
 
   const run = <C extends Parameters<Executor['execute']>[0]>(cmd: C, input: unknown, ws: string) =>

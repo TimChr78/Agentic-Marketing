@@ -14,7 +14,7 @@ import { sendMemberEmails } from '@agentic-marketing/alerts';
 import { artifactTypes, publishedSingleton } from '@agentic-marketing/artifacts';
 import { HOSTED_CLAIM_STALE_MINUTES, nextHostedRunAt } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Principal } from '@agentic-marketing/commands';
-import { newId } from '@agentic-marketing/core';
+import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, type Role, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
 import { Client } from '@modelcontextprotocol/client';
@@ -577,10 +577,12 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
   try {
     model = await deps.db.withWorkspace(workspaceId, (tx) => hostedModel(tx, deps, loaded));
   } catch (err) {
+    // A stored run error is shown to workspace members and e-mailed to the sponsor, so only an
+    // expected, user-facing message is kept; an unexpected exception's text may carry secrets.
     const error =
-      err instanceof AiUnavailable
-        ? `The AI provider could not be used: ${err.message}.`
-        : `The AI provider could not be used: ${(err as Error).message}`;
+      err instanceof AiUnavailable || err instanceof AppError
+        ? `The AI provider could not be used: ${err.message}${err instanceof AiUnavailable ? '.' : ''}`
+        : 'The AI provider could not be used: an unexpected error occurred.';
     const { disabled } = await finishRun(
       deps,
       loaded,
@@ -606,9 +608,9 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     reservation = await reserveTokens(deps.db, workspaceId, model.providerId, loaded.hosted.maxTokensPerRun, billingReservationTtlMs());
   } catch (err) {
     const error =
-      err instanceof AiUnavailable
-        ? `The AI budget could not be reserved: ${err.message}.`
-        : `The AI budget could not be reserved: ${(err as Error).message}`;
+      err instanceof AiUnavailable || err instanceof AppError
+        ? `The AI budget could not be reserved: ${err.message}${err instanceof AiUnavailable ? '.' : ''}`
+        : 'The AI budget could not be reserved: an unexpected error occurred.';
     const { disabled } = await finishRun(
       deps,
       loaded,
@@ -686,7 +688,9 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     );
     return disabled ? ('disabled' as const) : ('ok' as const);
   } catch (err) {
-    error = (err as Error).message.slice(0, 2000);
+    // Same rule as the two setup failures above: an AppError is written for people, everything
+    // else is stored as a fixed failure so no driver text or secret reaches the run history.
+    error = (err instanceof AppError ? err.message : 'The run failed with an unexpected error.').slice(0, 2000);
     const { disabled } = await finishRun(
       deps,
       loaded,

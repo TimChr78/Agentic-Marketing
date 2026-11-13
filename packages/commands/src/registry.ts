@@ -567,19 +567,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       } catch (err) {
         // The transaction rolled back: keep the agent's attempt (a refusal or a failed write) in the ledger.
         const outcome = policy;
+        // An AppError is written for a person; anything else is unexpected and its text may carry
+        // SQL, secrets or driver details, so the ledger stores the same fixed failure as the audit
+        // log. The original exception stays on the span for diagnostics (#838).
+        const failure = err instanceof AppError ? err.message : UNEXPECTED_FAILURE.message;
         if (agent && outcome)
           await db
             .withWorkspace(principal.workspaceId, (tx) =>
-              recordAgentAction(
-                tx,
-                agent.id,
-                cmd,
-                outcome,
-                opts.surface,
-                target,
-                err instanceof Error ? err.message : String(err),
-                intentOf(parsed.data),
-              ),
+              recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure, intentOf(parsed.data)),
             )
             .catch((e) => span.recordException(e as Error));
         if (err instanceof AppError) return fail(err);

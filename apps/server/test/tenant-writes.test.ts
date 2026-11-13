@@ -1,4 +1,10 @@
-import { agentForCredential, chooseOAuthWorkspace, cleanupExpiredOAuthWorkspaceSelections } from '@agentic-marketing/auth';
+import {
+  agentForCredential,
+  chooseOAuthWorkspace,
+  cleanupExpiredOAuthWorkspaceSelections,
+  consentWorkspaceId,
+  withConsentRequest,
+} from '@agentic-marketing/auth';
 import { newUuid } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { sql } from 'drizzle-orm';
@@ -41,7 +47,11 @@ function refusingOwnerWrites(db: Db): { db: Db; attempted: string[] } {
       if (prop === 'connect') return () => refuse('a connection');
       if (prop === 'query') {
         return (text: string, values?: unknown[]) => {
-          if (/^\s*(insert|update|delete)\b/i.test(String(text))) return refuse('a tenant write');
+          // A write may hide inside a CTE (`WITH picked AS (…) DELETE …`), as the old consent
+          // consumer's did, so look past the leading keyword as well.
+          const sql = String(text);
+          if (/^\s*(insert|update|delete)\b/i.test(sql) || /^\s*with\b[\s\S]*\b(insert|update|delete)\b/i.test(sql))
+            return refuse('a tenant write');
           return target.query(text as never, values as never);
         };
       }
@@ -88,6 +98,35 @@ describe('tenant writes on the auth path (#838)', () => {
       tx.execute<{ workspace_id: string }>(sql`SELECT workspace_id::text FROM oauth_workspace_selections`),
     );
     expect(elsewhere.rows).toEqual([]);
+  });
+
+  it('replaces a choice when the person picks another brand in the same request (#838)', async () => {
+    const wsB = await t.workspaceWith([[owner, 'owner']]);
+    const { db, attempted } = refusingOwnerWrites(t.srv.db);
+    const oauthQuery = 'client_id=repick-client&state=repick-state&response_type=code';
+
+    // A, then B in the same consent request. B's transaction cannot see A's row under tenant
+    // isolation, which is why the table also admits the session key it names.
+    await chooseOAuthWorkspace(db, { sessionId: 'session-repick', userId: owner.id, workspaceId: ws, oauthQuery });
+    await chooseOAuthWorkspace(db, { sessionId: 'session-repick', userId: owner.id, workspaceId: wsB, oauthQuery });
+    expect(attempted).toEqual([]);
+
+    // The replaced row moved to B: A cannot see it, B can.
+    const fromA = await t.srv.db.withWorkspace(ws, (tx) =>
+      tx.execute<{ workspace_id: string }>(sql`SELECT workspace_id::text FROM oauth_workspace_selections WHERE workspace_id = ${wsB}`),
+    );
+    expect(fromA.rows).toEqual([]);
+    const fromB = await t.srv.db.withWorkspace(wsB, (tx) =>
+      tx.execute<{ workspace_id: string }>(sql`SELECT workspace_id::text FROM oauth_workspace_selections WHERE workspace_id = ${wsB}`),
+    );
+    expect(fromB.rows).toEqual([{ workspace_id: wsB }]);
+
+    // Consuming runs as the app role too; the choice is the latest pick and is used once.
+    const resolve = () =>
+      withConsentRequest({ query: oauthQuery, mode: 'consent' }, () => consentWorkspaceId(db, owner.id, 'session-repick'));
+    expect(await resolve()).toBe(wsB);
+    expect(await resolve()).toBeUndefined();
+    expect(attempted).toEqual([]);
   });
 
   it('leaves abandoned choices to the scheduler and cleans up every workspace', async () => {
