@@ -198,6 +198,9 @@ export const publishHooks: ((
 ) => Promise<void>)[] = [];
 
 async function publishVersion(ctx: CommandContext, artifactId: string, number: number) {
+  // Lock before reading the live version: two approvals (or a re-publish and an approval) that
+  // both see `publishedVersion = null` would otherwise mark two versions published (#868).
+  await lockArtifacts(ctx, [artifactId]);
   const a = await loadArtifact(ctx, artifactId);
   await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content, artifactId);
   if (a.publishedVersion && a.publishedVersion !== number) await setVersionState(ctx, artifactId, a.publishedVersion, 'superseded');
@@ -1537,6 +1540,11 @@ export const approve = defineCommand({
     const r = await decide(ctx, input.approvalId);
     await refuseIfAgentStopped(ctx, r);
     const members = await bundleMembers(ctx, r);
+    // All bundle members are locked before any version is published (#868), in id order (#871).
+    await lockArtifacts(
+      ctx,
+      members.map((m) => m.artifactId),
+    );
     for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
     await ctx.tx
       .update(schema.approvalRequests)
@@ -1723,6 +1731,12 @@ export async function runHeldChange(
   const r = await lockApproval(ctx, approvalId);
   if (r?.status !== 'pending' || !r.holdUntil || r.holdUntil > new Date()) return { status: 'not_due' };
   const members = await bundleMembers(ctx, r);
+  // Lock every member before publishing, in id order, so a held run, an approval and a publish
+  // cannot interleave versions or deadlock with each other (#868, #871).
+  await lockArtifacts(
+    ctx,
+    members.map((m) => m.artifactId),
+  );
   const agent = await requestingAgent(ctx, r);
   const held = agent ? await heldActionFor(ctx, agent.id, r.artifactId) : null;
   let problem: string | null = null;
