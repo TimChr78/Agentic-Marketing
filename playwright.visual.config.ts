@@ -9,7 +9,7 @@ import { e2eBase, e2eFixturesBase } from './e2e/ports';
 //   E2E_BASE=http://localhost:5173 pnpm e2e:visual   # against a running dev UI and seeded server
 //
 // Baselines are Linux screenshots: record them in the official Playwright container
-// (mcr.microsoft.com/playwright:v1.64.1-noble, the same image CI uses) so they match CI.
+// (mcr.microsoft.com/playwright:v1.65.0-noble, the same image CI uses) so they match CI.
 const executablePath = process.env.CHROMIUM || undefined;
 
 export default defineConfig({

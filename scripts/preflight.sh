@@ -33,7 +33,7 @@ fail() {
 note() { printf '      %s\n' "$*"; }
 
 MIN_FREE_GB=${AM_TEST_MIN_FREE_GB:-10}
-PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.64.1-noble
+PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.65.0-noble
 IMAGES=(
   postgres:16-alpine
   clickhouse/clickhouse-server:26.8
