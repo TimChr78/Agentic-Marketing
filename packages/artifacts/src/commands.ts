@@ -212,7 +212,7 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
 }
 
 /** Locks artifact rows (in id order) so their latest version cannot change until the transaction ends. */
-async function lockArtifacts(ctx: CommandContext, ids: string[]) {
+export async function lockArtifacts(ctx: CommandContext, ids: string[]) {
   await ctx.tx
     .select({ id: schema.artifacts.id })
     .from(schema.artifacts)
@@ -909,6 +909,9 @@ export const requestPublish = defineCommand({
   ledgerImpact: (out) => (out.approvalId ? { approvalId: out.approvalId } : undefined),
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
+    // Every principal locks before reading the draft and its author: an agent's updateDraft
+    // committed between the read and publishVersion must not go live unreviewed (#867).
+    await lockArtifacts(ctx, [input.artifactId]);
     const a = await loadArtifact(ctx, input.artifactId);
     refuseAgentsFor(ctx, a.type);
     const v = await loadVersion(ctx, a.id, a.latestVersion);
@@ -1028,6 +1031,8 @@ export const requestPublishBundle = defineCommand({
     const ids = [...new Set(input.artifactIds)];
     if (ids.length < 2)
       throw new AppError('invalid_input', 'A bundle needs at least two different artifacts; use artifacts.requestPublish for one.');
+    // All members are locked before any version or author is read (#867), in id order (#871).
+    await lockArtifacts(ctx, ids);
     const members = [];
     for (const id of ids) {
       const a = await loadArtifact(ctx, id);
