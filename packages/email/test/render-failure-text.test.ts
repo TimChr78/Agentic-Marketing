@@ -3,8 +3,8 @@ import type { CommandContext } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { describe, expect, it } from 'vitest';
 import { emailPublishProblems } from '../src/checks';
-import { checkTemplate, previewTemplate } from '../src/templates';
 import { firstLine, TemplateError, templateRenderError } from '../src/render';
+import { checkTemplate, previewTemplate } from '../src/templates';
 
 // #885: templates.preview, templates.check and the publish gate wrapped *every* failure of a render
 // into an AppError. A block is resolved from the database while the template renders, so a database
