@@ -31,7 +31,8 @@ export function useFocusRecheck(recheck: () => void) {
         left();
         return;
       }
-      const now = Date.now();
+      // Monotonic: a wall-clock change cannot stretch the window (0.14.13 review round 4).
+      const now = performance.now();
       if (now - lastRun < RETURN_WINDOW_MS) return;
       lastRun = now;
       latest.current();

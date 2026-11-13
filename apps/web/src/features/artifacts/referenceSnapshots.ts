@@ -23,26 +23,51 @@ export function newerSnapshot(a: ReferenceSnapshot, b: ReferenceSnapshot): Refer
 }
 
 /**
- * A watcher read merged into the live state (0.14.13 review round 3). For each reference the read
- * says:
- * - `undefined` (the read failed): keep the live snapshot;
- * - no published version: the segment was unpublished, which is a change, so take the read;
- * - otherwise the newer of live and read, so a read that answers after an estimate adopted a newer
- *   stamp cannot pull the state backwards.
- * References missing from the read (no longer used by the segment) are dropped.
+ * The live state of one reference: the snapshot, the order number of the observation it came from
+ * (a counter shared by watcher reads and estimates, taken when each request starts), and whether
+ * the latest attempt to re-check it failed.
  */
-export function mergeReferenceSnapshots(
-  live: Record<string, ReferenceSnapshot>,
-  read: Record<string, ReferenceSnapshot | undefined>,
-): Record<string, ReferenceSnapshot> {
-  const next: Record<string, ReferenceSnapshot> = {};
-  for (const [id, snapshot] of Object.entries(read)) {
-    const current = live[id];
-    if (!snapshot) {
-      if (current) next[id] = current;
-      continue;
-    }
-    next[id] = !current || snapshot.version === null ? snapshot : newerSnapshot(current, snapshot);
+export interface LiveReference extends ReferenceSnapshot {
+  seq: number;
+  unverified: boolean;
+}
+
+/**
+ * One observation merged into a reference's live state (0.14.13 review rounds 3 and 4):
+ * - a failed read (`undefined`) keeps the snapshot but marks it unverified, if the read started
+ *   after the live observation; an older failure says nothing about it;
+ * - two published observations: the newer (version, stamp) wins whatever the order, so a slow
+ *   read cannot pull an adopted stamp backwards;
+ * - an unpublished observation (`version: null`) carries no version to compare, so it replaces the
+ *   live state only when it started after it: a stale "unpublished" cannot undo a later republish.
+ * A successful observation that started after the live one clears `unverified`.
+ */
+export function mergeObservation(live: LiveReference | undefined, observed: ReferenceSnapshot | undefined, seq: number): LiveReference {
+  if (!observed) {
+    if (!live) return { version: null, stamp: null, seq, unverified: true };
+    return seq > live.seq ? { ...live, seq, unverified: true } : live;
   }
+  if (!live) return { ...observed, seq, unverified: false };
+  const later = seq > live.seq;
+  if (observed.version !== null && live.version !== null) {
+    const newer = newerSnapshot(live, observed);
+    return {
+      version: newer.version,
+      stamp: newer.stamp,
+      seq: Math.max(seq, live.seq),
+      unverified: later ? false : live.unverified,
+    };
+  }
+  return later ? { ...observed, seq, unverified: false } : live;
+}
+
+/** A watcher read merged into the live state; references the segment no longer uses are dropped. */
+export function mergeReferenceSnapshots(
+  live: Record<string, LiveReference>,
+  read: Record<string, ReferenceSnapshot | undefined>,
+  seq: number,
+): Record<string, LiveReference> {
+  const next: Record<string, LiveReference> = {};
+  for (const [id, observed] of Object.entries(read)) next[id] = mergeObservation(live[id], observed, seq);
   return next;
 }
