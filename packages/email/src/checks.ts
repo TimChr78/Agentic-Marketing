@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
 import { Parser } from 'htmlparser2';
-import { type Rendered, type RenderOptions, type RenderVars, renderTemplate, unsubscribeUrlFor } from './render';
+import { type Rendered, type RenderOptions, type RenderVars, renderTemplate, templateRenderError, unsubscribeUrlFor } from './render';
 import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
 
 // Pre-send checks (#90): a template can be valid MJML/Liquid and still fail in an inbox, so this
@@ -560,7 +560,12 @@ export async function emailPublishProblems(
     const result = await checkEmailTemplate(t, { ...opts, checkLinks: false });
     return result.findings.filter((f) => f.severity === 'blocking').map((f) => f.message);
   } catch (e) {
-    return [`the template could not be rendered for its checks: ${(e as Error).message.split('\n')[0]}`];
+    // Only a render failure of the template itself becomes a finding the author can act on. A
+    // database error from the block resolver or an asset lookup is unexpected, so it propagates
+    // instead of being quoted into a publish refusal (#885).
+    const expected = templateRenderError(e, 'the template could not be rendered for its checks');
+    if (!expected) throw e;
+    return [expected.message];
   }
 }
 

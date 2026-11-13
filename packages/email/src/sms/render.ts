@@ -1,5 +1,6 @@
 import type { SmsTemplate } from '@agentic-marketing/artifacts';
 import { Liquid } from 'liquidjs';
+import { TemplateError } from '../render';
 import { smsSegments } from './adapters';
 
 // SMS text: Liquid without HTML escaping (it is plain text), sandboxed like e-mail templates.
@@ -7,10 +8,10 @@ const engine = new Liquid({
   strictFilters: true,
   fs: {
     readFileSync: () => {
-      throw new Error('includes are not available in templates');
+      throw new TemplateError('includes are not available in templates');
     },
     readFile: async () => {
-      throw new Error('includes are not available in templates');
+      throw new TemplateError('includes are not available in templates');
     },
     existsSync: () => false,
     exists: async () => false,

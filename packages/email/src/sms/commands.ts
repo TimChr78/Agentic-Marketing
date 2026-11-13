@@ -5,6 +5,7 @@ import { schema } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { isMarketing } from '../policy';
+import { templateRenderError } from '../render';
 import { directSendImpact, directSendLedger } from '../sendTouches';
 import { topicProblems } from '../topicValidation';
 import { requestSms } from './gateway';
@@ -85,7 +86,11 @@ export const previewSms = defineCommand({
     try {
       text = await renderSms(t, { ...(t.sampleData ?? {}), ...(input.data ?? {}) }, isMarketing(basis));
     } catch (e) {
-      throw new AppError('invalid_input', `The template could not be rendered with this data: ${(e as Error).message.split('\n')[0]}`);
+      // A Liquid or length failure is the template's own and keeps its message; anything else
+      // propagates for the executor to sanitise (#885).
+      const expected = templateRenderError(e, 'The template could not be rendered with this data');
+      if (!expected) throw e;
+      throw expected;
     }
     const stream = isMarketing(basis) ? 'marketing' : 'transactional';
     const provider = (await ctx.tx.select().from(schema.smsProviders).where(eq(schema.smsProviders.enabled, true))).find((p) =>

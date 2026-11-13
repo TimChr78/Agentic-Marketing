@@ -12,7 +12,7 @@ import { schema, type Tx } from '@agentic-marketing/db';
 import { and, desc, eq, inArray, isNotNull, or } from 'drizzle-orm';
 import { z } from 'zod';
 import { blockIdsIn, usesBlockTag, wrapMjmlFragment } from './blockTags';
-import { type BlockDefinition, type BlockResolver, compileMjml, type RenderVars, renderBlockFragment } from './render';
+import { type BlockDefinition, type BlockResolver, compileMjml, type RenderVars, renderBlockFragment, templateRenderError } from './render';
 
 // Reusable e-mail blocks (#73). A block is a versioned MJML fragment; a template inlines the
 // block's published version with {% block 'blk_…', key: value %}. Rendering resolves the block
@@ -144,7 +144,11 @@ export const previewBlock = defineCommand({
       const out = await compileMjml(wrapMjmlFragment(mjml));
       return { version: v.number, html: out.html, warnings: out.warnings };
     } catch (e) {
-      throw new AppError('invalid_input', `The block could not be rendered: ${(e as Error).message.split('\n')[0]}`);
+      // Both calls are pure (Liquid and MJML over the fragment), so a failure is the block's own
+      // and keeps its message; anything unexpected still propagates (#885).
+      const expected = templateRenderError(e, 'The block could not be rendered');
+      if (!expected) throw e;
+      throw expected;
     }
   },
 });

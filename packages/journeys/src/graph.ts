@@ -67,6 +67,17 @@ export interface Graph {
 
 export const RUNNABLE = new Set(Object.keys(journeyNodeConfigs));
 
+/**
+ * An expected compile failure (#885): the stored definition cannot run as written (a node kind that
+ * has not shipped, or no trigger). Anything else compile throws is a bug and propagates.
+ */
+export class JourneyCompileError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'JourneyCompileError';
+  }
+}
+
 export function compile(def: JourneyDefinition): Graph {
   const nodes = new Map<string, Node>();
   let trigger: Cfg<'trigger'> | undefined;
@@ -207,10 +218,10 @@ export function compile(def: JourneyDefinition): Graph {
         nodes.set(n.id, { ...base, kind: 'exit' });
         break;
       default:
-        throw new Error(`${n.kind} nodes cannot run yet`);
+        throw new JourneyCompileError(`${n.kind} nodes cannot run yet`);
     }
   });
-  if (!trigger) throw new Error('journey without trigger');
+  if (!trigger) throw new JourneyCompileError('journey without trigger');
   return { start, purpose: def.purpose, controlGroup: def.controlGroup, trigger, nodes };
 }
 

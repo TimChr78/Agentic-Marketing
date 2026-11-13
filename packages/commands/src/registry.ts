@@ -301,7 +301,11 @@ function auditTargetList(single: string | undefined, extra: readonly string[]): 
  * log (it can carry SQL, secrets or stack details); it stays on the span for diagnostics.
  */
 export type AuditedError = { code: string; message: string };
-const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
+/**
+ * The audited error of an unexpected exception. Exported so a command that writes its own audit
+ * entry (agents.renewMandates) stores the same fixed marker instead of the exception's text (#885).
+ */
+export const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
 
 /**
  * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for

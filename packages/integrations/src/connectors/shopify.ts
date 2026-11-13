@@ -1,3 +1,4 @@
+import { AppError, providerDiagnostic, redactCredentials } from '@agentic-marketing/core';
 import { CONSENT_EVENT } from '@agentic-marketing/events';
 import { z } from 'zod';
 import { defineConnector, type InboundItem } from '../sdk';
@@ -218,7 +219,7 @@ export async function shopifyGraphql(
   query: string,
   variables: Record<string, unknown> = {},
 ): Promise<Payload> {
-  if (!accessToken) throw new Error('not connected: install the app (connections.authorize)');
+  if (!accessToken) throw new AppError('conflict', 'Shopify is not connected: install the app (connections.authorize) first.');
   const res = await request(`${adminBase(s)}/admin/api/${s.apiVersion}/graphql.json`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-shopify-access-token': accessToken },
@@ -228,8 +229,14 @@ export async function shopifyGraphql(
   try {
     b = JSON.parse(res.body);
   } catch {}
-  if (res.status < 200 || res.status >= 300) throw new Error(`Shopify answered ${res.status}: ${res.body.slice(0, 200)}`);
-  if (b.errors?.length) throw new Error(`Shopify: ${b.errors.map((e: Payload) => e.message).join('; ')}`);
+  // A refusal is the caller's diagnostic, but only Shopify's own code and message are copied out
+  // (#885): the body can echo the access token this call was made with.
+  if (res.status < 200 || res.status >= 300) {
+    const detail = providerDiagnostic(res.body, 200);
+    throw new AppError('conflict', `Shopify answered ${res.status}${detail ? `: ${detail}` : ''}.`);
+  }
+  if (b.errors?.length)
+    throw new AppError('conflict', `Shopify: ${redactCredentials(b.errors.map((e: Payload) => e.message).join('; ')).slice(0, 300)}`);
   return b.data ?? {};
 }
 
@@ -314,7 +321,7 @@ export const shopifyAppConnector = defineConnector({
           );
           const errors = (data.webhookSubscriptionCreate?.userErrors ?? []) as { message: string }[];
           if (errors.some((e) => /already been taken|already exists/i.test(e.message))) existing.push(topic);
-          else if (errors.length) throw new Error(`${topic}: ${errors.map((e) => e.message).join('; ')}`);
+          else if (errors.length) throw new AppError('conflict', `${topic}: ${redactCredentials(errors.map((e) => e.message).join('; '))}`);
           else done.push(topic);
         }
         return { subscribed: done, alreadySubscribed: existing };

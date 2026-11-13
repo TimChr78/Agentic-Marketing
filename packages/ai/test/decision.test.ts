@@ -314,3 +314,40 @@ describe('systemOneUrl', () => {
     expect(Date.now() - started).toBeLessThan(500);
   });
 });
+
+describe('provider diagnostics (#885)', () => {
+  it('keeps a provider error to its own code and message, never its body', async () => {
+    // A decision provider (or a gateway) that echoes the Authorization header must not have that
+    // text copied into the DecisionError, which becomes an AppError the caller and audit log read.
+    const server = createServer((_req, res) => {
+      res.statusCode = 401;
+      res.setHeader('content-type', 'application/json');
+      res.end(
+        JSON.stringify({
+          error: { code: 'unauthorized', message: 'Bearer probe-secret is not valid' },
+          echo: { access_token: 'probe-secret' },
+        }),
+      );
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const provider: DecisionProvider = {
+      providerId: 'aip_0123456789abcdef0123456789abcdef',
+      model: 'typesafe/jev',
+      baseUrl: url,
+      apiKey: 'sk-test',
+      allowPersonalData: false,
+    };
+    try {
+      const err = (await callSystemOne(provider, 'x', [noul], { egress: local }).catch((e: unknown) => e)) as DecisionError;
+      expect(err).toBeInstanceOf(DecisionError);
+      expect(err.code).toBe('provider_error');
+      expect(err.message).toContain('answered 401');
+      expect(err.message).toContain('unauthorized');
+      expect(err.message).toContain('Bearer [redacted]');
+      expect(err.message).not.toContain('probe-secret');
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+    }
+  });
+});

@@ -1,6 +1,6 @@
 import { type ConversionMap, publishedSingleton } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, providerDiagnostic } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, EgressError, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
@@ -65,8 +65,18 @@ export interface SpendRow {
 type Conn = typeof schema.connections.$inferSelect;
 const day = (d: Date) => d.toISOString().slice(0, 10);
 
+/**
+ * A platform refusing a report is the caller's to fix (account, permissions, token scope), so it is
+ * an AppError, but only its own error code and message are copied into the message (#885): the raw
+ * body can echo the access token it was called with.
+ */
+function providerFailure(provider: string, res: { status: number; body: string }): AppError {
+  const detail = providerDiagnostic(res.body);
+  return new AppError('conflict', `${provider} answered ${res.status}${detail ? `: ${detail}` : ''}.`);
+}
+
 /** Meta Insights: GET act_<id>/insights, level=campaign, one row per campaign and day. */
-async function metaSpend(
+export async function metaSpend(
   conn: Conn,
   secrets: Record<string, unknown>,
   since: string,
@@ -89,7 +99,9 @@ async function metaSpend(
   const rows: SpendRow[] = [];
   for (let page = 0; url && page < 50; page++) {
     const res = await safeRequest(url, { method: 'GET', headers: { accept: 'application/json' } }, egress);
-    if (res.status !== 200) throw new AppError('conflict', `Meta Insights answered ${res.status}: ${res.body.slice(0, 300)}`);
+    // A provider refusal is expected and its documented code is the caller's diagnostic; the body
+    // itself is not (#885): it can echo the access token in this URL back.
+    if (res.status !== 200) throw providerFailure('Meta Insights', res);
     const body = JSON.parse(res.body) as {
       data: {
         campaign_id: string;
@@ -124,7 +136,7 @@ async function metaSpend(
 }
 
 /** Google Ads API (v25) GAQL report: campaign cost, impressions, clicks and conversions per day. */
-async function googleSpend(
+export async function googleSpend(
   conn: Conn,
   secrets: Record<string, unknown>,
   since: string,
@@ -154,7 +166,7 @@ async function googleSpend(
       },
       egress,
     );
-    if (res.status !== 200) throw new AppError('conflict', `Google Ads answered ${res.status}: ${res.body.slice(0, 300)}`);
+    if (res.status !== 200) throw providerFailure('Google Ads', res);
     const body = JSON.parse(res.body) as {
       results?: {
         campaign: { id: string; name: string };
