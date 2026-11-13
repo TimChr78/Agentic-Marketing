@@ -448,7 +448,7 @@ describe('broadcast report data states (#500)', () => {
     h.series = seriesResult([], 3);
     renderReport();
     await waitFor(() => expect(screen.getAllByText('Fewer than 5 people').length).toBeGreaterThanOrEqual(4));
-    expect(screen.getAllByText(/3 rows suppressed below 5 people/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/3 rows hidden by the k=5 floor/).length).toBeGreaterThan(0);
     expect(screen.queryByText('0%')).toBeNull();
   });
 

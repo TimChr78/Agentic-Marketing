@@ -301,7 +301,10 @@ describe('analytics.query', () => {
     // 3 clickers over 12 delivered, not the average of the two broadcasts' rates.
     expect(cell(byTemplate, 0, 'email.click_rate')).toBeCloseTo(0.25, 5);
     expect(cell(byTemplate, 0, 'email.bounce_rate')).toBeCloseTo(1 / 16, 5);
-    expect(byTemplate.meta.suppressed).toBe(1);
+    // T4 has three people, below k. T2 (six) is the smallest visible row, so it is hidden too and
+    // only the sum of the two hidden rows can be derived from the total (#692).
+    expect(byTemplate.meta.suppressed).toBe(2);
+    expect(cell(byTemplate, 1, 'email.sent')).toBeNull();
     expect(cell(byTemplate, 3, 'email.sent')).toBeNull();
     expect(byTemplate.meta.notes.join(' ')).toContain('aggregated base measures');
   });
@@ -346,8 +349,14 @@ describe('analytics.query', () => {
       to: TO,
     });
     expect(byTemplate.meta.k).toBe(5);
-    expect(byTemplate.meta.suppressed).toBe(1);
+    // One row is below k (T4, three people), so the smallest visible row (T2, six) is hidden too:
+    // total 31 minus the visible 16 and 6 is 9, the sum of the hidden 6 and 3 (#692).
+    expect(byTemplate.meta.suppressed).toBe(2);
+    expect(cell(byTemplate, 1, 'email.sent')).toBeNull();
     expect(cell(byTemplate, 3, 'email.sent')).toBeNull();
+    const visible = byTemplate.rows.reduce((sum, row) => sum + (typeof row[1] === 'number' ? row[1] : 0), 0);
+    expect(Number(totals.rows[0]![0]) - visible).toBe(9);
+    expect(byTemplate.meta.notes.join(' ')).toContain('One further group was suppressed');
   });
 
   it('never sees another workspace', async () => {
@@ -450,7 +459,7 @@ describe('named reports', () => {
     const result = await api().call('analytics.emailPerformance', { from: WIDE_FROM, to: TO, by: 'template' });
     expect(cell(result, 0, 'email.sent')).toBe(16);
     expect(cell(result, 0, 'email.click_rate')).toBeCloseTo(0.25, 5);
-    expect(result.meta.suppressed).toBe(1);
+    expect(result.meta.suppressed).toBe(2);
   });
 
   it('journeyFunnel reports each step, drop-off, the goal and the exits', async () => {
