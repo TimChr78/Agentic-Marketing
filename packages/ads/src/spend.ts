@@ -28,9 +28,21 @@ export const ATTRIBUTION_LIMITS = {
   pairsPerQuery: 10_000_000,
   /** Candidate pairs a whole report may compare across its pages and chunks. */
   pairsPerReport: 50_000_000,
-  /** ClickHouse execution limit for each attribution query, in seconds. */
-  queryTimeoutSeconds: 30,
+  /**
+   * ClickHouse execution limit for each attribution query, in seconds. Below the ClickHouse
+   * client's 30 s request timeout, so the server's own deadline answers first.
+   */
+  queryTimeoutSeconds: 25,
 };
+
+/**
+ * Whether an error is an attribution query running out of time: the server's deadline
+ * (`TIMEOUT_EXCEEDED`, code 159) or the client's request timeout ("Timeout error."), whichever
+ * fires first (0.14.12 review round 5).
+ */
+export function isAttributionTimeout(err: unknown): boolean {
+  return /TIMEOUT_EXCEEDED|Timeout exceeded|Timeout error/i.test(String((err as Error)?.message ?? err));
+}
 
 import { googleAdsConnector, metaAdsConnector } from './platforms';
 
@@ -421,7 +433,7 @@ export const adPerformance = defineCommand({
       try {
         return await run();
       } catch (err) {
-        if (/TIMEOUT_EXCEEDED|Timeout exceeded/i.test(String((err as Error)?.message ?? err)))
+        if (isAttributionTimeout(err))
           throw new AppError(
             'precondition_failed',
             `Attribution for this report took longer than ${ATTRIBUTION_LIMITS.queryTimeoutSeconds} seconds. Narrow the date range or the attribution window.`,
