@@ -317,7 +317,7 @@ describe('REST commands (#242)', () => {
   it('still answers a normal command', async () => {
     const res = await fetch(`${t.base}/v1/workspace.get`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: owner.cookie, 'x-workspace-id': workspaceId },
+      headers: { 'content-type': 'application/json', cookie: owner.cookie, origin: t.base, 'x-workspace-id': workspaceId },
       body: '{}',
     });
     expect(res.status).toBe(200);

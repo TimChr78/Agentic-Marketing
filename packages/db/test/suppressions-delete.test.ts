@@ -90,7 +90,8 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
     await d.db.admin.query(`GRANT CREATE ON SCHEMA public TO ${role}`);
     // The migration role owns the tables later migrations touch (suppressions for 0088, deliveries
     // for 0089's index); FORCE RLS applies to it as well, which is the small-install path this guards.
-    for (const table of ['suppressions', 'deliveries']) await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
+    for (const table of ['suppressions', 'deliveries', 'oauth_workspace_selections'])
+      await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
     await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
 
     const limitedUrl = new URL(d.url.toString());

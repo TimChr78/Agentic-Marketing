@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { PERMISSIONS, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { AppError, sha256 } from '@agentic-marketing/core';
 import type { Db, Role } from '@agentic-marketing/db';
+import { sql } from 'drizzle-orm';
 
 // One brand per OAuth connection (#187). The consent page writes the chosen workspace for the
 // pending authorization; the OAuth provider reads it as the grant's reference id, and the issued
@@ -91,14 +92,39 @@ export async function chooseOAuthWorkspace(
   // A choice is only valid for its own request, so the row is keyed by the session and that
   // request; the table predates per-request choices, so 0.10.1 reuses the session_id column
   // rather than migrating the schema (the value is opaque to every reader below).
-  await db.admin.query(
-    `INSERT INTO oauth_workspace_selections (session_id, workspace_id) VALUES ($1, $2)
-     ON CONFLICT (session_id) DO UPDATE SET workspace_id = excluded.workspace_id, updated_at = now()`,
-    [selectionId(input.sessionId, key), input.workspaceId],
+  //
+  // The workspace is known, so the write runs as the app role under RLS, never the owner pool. A
+  // re-pick can name another brand, whose previous row tenant isolation would hide; the policy
+  // therefore also admits the row whose session key this transaction names (#838). The statement
+  // keeps the 0.14.15 shape (`ON CONFLICT (session_id)`) so old pods and an app rollback keep
+  // working during the upgrade; `consentWorkspaceId` consumes the row and the scheduler removes
+  // abandoned ones.
+  const sessionKey = selectionId(input.sessionId, key);
+  await db.withWorkspace(
+    input.workspaceId,
+    async (tx) => {
+      await tx.execute(sql`
+        INSERT INTO oauth_workspace_selections (session_id, workspace_id) VALUES (${sessionKey}, ${input.workspaceId})
+        ON CONFLICT (session_id) DO UPDATE SET workspace_id = excluded.workspace_id, updated_at = now()`);
+    },
+    { sessionId: sessionKey },
   );
-  // Pending choices are short-lived (an abandoned tab). Drop ones nobody came back for.
-  await db.admin.query(`DELETE FROM oauth_workspace_selections WHERE updated_at < now() - interval '1 day'`);
   return m;
+}
+
+/** How long an abandoned consent choice stays; the flow itself takes minutes. */
+export const OAUTH_SELECTION_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Drops pending consent choices nobody came back for. Deliberately cross-tenant and deliberately
+ * outside a request: the scheduler runs it as the owner, while every request writes only the
+ * workspace it just chose under RLS.
+ */
+export async function cleanupExpiredOAuthWorkspaceSelections(db: Db, now: Date = new Date()): Promise<number> {
+  const { rowCount } = await db.admin.query('DELETE FROM oauth_workspace_selections WHERE updated_at < $1', [
+    new Date(now.getTime() - OAUTH_SELECTION_TTL_MS),
+  ]);
+  return rowCount ?? 0;
 }
 
 /** The row key: the session alone was the old, racy key; the request hash scopes it per tab. */
@@ -128,13 +154,22 @@ export async function consentWorkspaceId(db: Db, userId: string, sessionId: stri
   const membership = (workspaceId: string) => memberships.rows.some((m) => m.workspace_id === workspaceId);
 
   if (key) {
-    // Read the choice and consume it in one statement: a replay of the same consent cannot reuse
-    // a selection, and a second tab's choice is a different row.
-    const { rows } = await db.admin.query<{ workspace_id: string }>(
-      'DELETE FROM oauth_workspace_selections WHERE session_id = $1 RETURNING workspace_id',
-      [selectionId(sessionId, key)],
-    );
-    const chosen = rows[0]?.workspace_id;
+    // Read and consume in one transaction as the app role, scoped to this session key rather than
+    // a tenant: the row may name any brand the person just picked, and the policy admits exactly
+    // this session's row (#838). The membership check below is still the authority.
+    const chosen = await db.withSession(selectionId(sessionId, key), async (tx) => {
+      const { rows } = await tx.execute<{ workspace_id: string }>(sql`
+        WITH picked AS (
+          SELECT workspace_id FROM oauth_workspace_selections
+           WHERE session_id = ${selectionId(sessionId, key)}
+           ORDER BY updated_at DESC LIMIT 1
+        ), removed AS (
+          DELETE FROM oauth_workspace_selections
+           WHERE session_id = ${selectionId(sessionId, key)}
+        )
+        SELECT workspace_id FROM picked`);
+      return rows[0]?.workspace_id;
+    });
     if (chosen && membership(chosen)) return resolve(chosen);
   }
   if (memberships.rows.length === 1) return resolve(memberships.rows[0].workspace_id);

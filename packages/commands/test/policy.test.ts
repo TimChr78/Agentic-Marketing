@@ -65,6 +65,33 @@ describe('the policy engine', () => {
     expect(decide(base({ ...send, counters: { changes: 0, messages: 5 } })).decision).toBe('deny');
   });
 
+  it('a workspace draft ceiling of 0 makes agents observe-only, with or without a mandate', () => {
+    const settings = autonomySettings({ maxLevel: { draft: 0 } });
+    expect(decide(base({ settings, actionClass: 'draft' })).decision).toBe('deny');
+    expect(decide(base({ settings, actionClass: 'draft' })).reasons[0]).toContain('observe only');
+    const levels = { draft: 1, 'site.content': 3 } as MandateView['levels'];
+    const withMandate = decide(
+      base({
+        settings,
+        actionClass: 'draft',
+        mandate: {
+          id: 'mnd_draft',
+          version: 1,
+          levels,
+          scope: { segments: [], purposes: [], topics: [], channels: [], artifactTypes: [], artifacts: [] },
+          limits: {},
+          holdWindow: 'PT2H',
+          independentCheck: false,
+          guardrails: { window: 'P7D', minSent: 100 },
+          purpose: 'Draft ceiling',
+        },
+      }),
+    );
+    expect(withMandate.decision).toBe('deny');
+    // Reading is still allowed: a ceiling of 0 is observe-only, not switched off.
+    expect(decide(base({ settings, actionClass: 'read' })).decision).toBe('allow');
+  });
+
   it('propose-only lets agents draft but sends every other change to a person', () => {
     const settings = autonomySettings({ switch: 'propose_only' });
     expect(decide(base({ settings, actionClass: 'draft' })).decision).toBe('allow');

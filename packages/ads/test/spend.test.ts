@@ -96,3 +96,26 @@ describe('attribution timeouts (0.14.12 review round 5)', () => {
     expect(ATTRIBUTION_LIMITS.queryTimeoutSeconds).toBeLessThan(30);
   });
 });
+
+describe('spend import errors (0.14.16 review round 2)', () => {
+  it('never turns an unexpected failure into a user-facing message', async () => {
+    const { importSpendCommand } = await import('../src/spend');
+    const { AppError } = await import('@agentic-marketing/core');
+    const db = {
+      withWorkspace: async () => {
+        throw new Error('driver failure: password=probe-secret');
+      },
+      admin: {
+        query: async () => {
+          throw new Error('driver failure: password=probe-secret');
+        },
+      },
+    };
+    const ctx = { principal: { workspaceId: 'ws' }, services: { db, events: {}, keyProvider: {} } } as unknown as CommandContext;
+    const err = await importSpendCommand.handler({ connection: `con_${'0'.repeat(32)}`, days: 3 }, ctx).catch((e: unknown) => e);
+    // An unexpected error propagates as is, so the executor audits and answers it as a sanitised
+    // internal failure; it must not become an AppError, whose message reaches the caller verbatim.
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(AppError);
+  });
+});

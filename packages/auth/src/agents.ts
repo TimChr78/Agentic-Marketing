@@ -21,7 +21,29 @@ import { z } from 'zod';
 
 type AgentRef = NonNullable<Principal['agent']>;
 
+type AgentRow = {
+  id: string;
+  name: string;
+  status: AgentStatus;
+  status_reason: string | null;
+  sponsor_user_id: string;
+};
+
 const AGENT_ID = z.string().regex(/^agt_[0-9a-f]{32}$/, 'An agent id looks like agt_…');
+
+/** The agent a credential is attached to, read under RLS in the workspace transaction. */
+async function findAgentForCredential(
+  tx: Tx,
+  workspaceId: string,
+  kind: AgentCredentialKind,
+  credentialId: string,
+): Promise<AgentRow | undefined> {
+  const { rows } = await tx.execute<AgentRow>(sql`
+    SELECT a.id, a.name, a.status, a.status_reason, a.sponsor_user_id
+      FROM agent_credentials c JOIN agents a ON a.workspace_id = c.workspace_id AND a.id = c.agent_id
+     WHERE c.workspace_id = ${workspaceId} AND c.kind = ${kind} AND c.credential_id = ${credentialId}`);
+  return rows[0];
+}
 
 /**
  * What one agent's coordination looks like (#426): the artifacts it owns and the pending changes
@@ -100,8 +122,9 @@ async function contactPressureSkipped(tx: Tx, agentId: string, range?: { from: D
 }
 
 /**
- * The agent behind a credential, created on first use. Runs on the admin pool, like the token
- * lookup it follows: the workspace is not known before the credential is resolved.
+ * The agent behind a credential, created on first use. The credential has already resolved to a
+ * workspace by the time this runs, so every read and write happens under row-level security with
+ * that workspace: the owner pool is never used for tenant rows, even on the credential path.
  */
 export async function agentForCredential(
   db: Db,
@@ -111,59 +134,26 @@ export async function agentForCredential(
   sponsorUserId: string,
   defaultName: () => Promise<string>,
 ): Promise<AgentRef> {
-  const find = async () => {
-    const { rows } = await db.admin.query<{
-      id: string;
-      name: string;
-      status: AgentStatus;
-      status_reason: string | null;
-      sponsor_user_id: string;
-    }>(
-      `SELECT a.id, a.name, a.status, a.status_reason, a.sponsor_user_id
-       FROM agent_credentials c JOIN agents a ON a.workspace_id = c.workspace_id AND a.id = c.agent_id
-       WHERE c.workspace_id = $1 AND c.kind = $2 AND c.credential_id = $3`,
-      [workspaceId, kind, credentialId],
-    );
-    return rows[0];
-  };
-  let row = await find();
-  if (!row) {
+  const row = await db.withWorkspace(workspaceId, async (tx) => {
+    const found = await findAgentForCredential(tx, workspaceId, kind, credentialId);
+    if (found) return found;
+    // Two first requests at once: the advisory lock serialises them, and the credential's primary
+    // key still lets the second reuse the row the first attached.
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent:${workspaceId}:${kind}:${credentialId}`}, 0))`);
+    const again = await findAgentForCredential(tx, workspaceId, kind, credentialId);
+    if (again) return again;
     const id = newId('agt');
     const name = (await defaultName()).slice(0, 120);
-    const client = await db.admin.connect();
-    try {
-      await client.query('BEGIN');
-      // Two first requests at once: the credential's primary key lets one attach; the other reuses it.
-      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`agent:${workspaceId}:${kind}:${credentialId}`]);
-      const again = await client.query('SELECT 1 FROM agent_credentials WHERE workspace_id = $1 AND kind = $2 AND credential_id = $3', [
-        workspaceId,
-        kind,
-        credentialId,
-      ]);
-      if (!again.rowCount) {
-        await client.query('INSERT INTO agents (workspace_id, id, name, sponsor_user_id) VALUES ($1, $2, $3, $4)', [
-          workspaceId,
-          id,
-          name,
-          sponsorUserId,
-        ]);
-        await client.query('INSERT INTO agent_credentials (workspace_id, kind, credential_id, agent_id) VALUES ($1, $2, $3, $4)', [
-          workspaceId,
-          kind,
-          credentialId,
-          id,
-        ]);
-      }
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      client.release();
-    }
-    row = await find();
-    if (!row) throw new Error(`agent for ${kind} ${credentialId} was not created`);
-  }
+    await tx.execute(
+      sql`INSERT INTO agents (workspace_id, id, name, sponsor_user_id) VALUES (${workspaceId}, ${id}, ${name}, ${sponsorUserId})`,
+    );
+    await tx.execute(
+      sql`INSERT INTO agent_credentials (workspace_id, kind, credential_id, agent_id) VALUES (${workspaceId}, ${kind}, ${credentialId}, ${id})`,
+    );
+    const created = await findAgentForCredential(tx, workspaceId, kind, credentialId);
+    if (!created) throw new Error(`agent for ${kind} ${credentialId} was not created`);
+    return created;
+  });
   return { id: row.id, name: row.name, status: row.status, statusReason: row.status_reason };
 }
 

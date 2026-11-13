@@ -14,7 +14,10 @@ export async function signIn(page: Page, email: string) {
 
 /** Calls a command as the signed-in person. */
 export async function call<T = any>(request: APIRequestContext, name: string, input: unknown): Promise<T> {
-  const r = await request.post(`/v1/${name}`, { data: input, headers: { 'content-type': 'application/json' } });
+  const r = await request.post(`/v1/${name}`, {
+    data: input,
+    headers: { 'content-type': 'application/json', origin: BASE },
+  });
   const body = await r.json();
   expect(r.ok(), `${name}: ${JSON.stringify(body)}`).toBeTruthy();
   return body as T;

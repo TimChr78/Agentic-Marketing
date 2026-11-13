@@ -149,7 +149,7 @@ export function matrixNames() {
 
 /** One command as the signed-in person (the seeded server speaks the same API the UI uses). */
 export async function callCommand(request, base, name, input) {
-  const r = await request.post(`${base}/v1/${name}`, { data: input, headers: { 'content-type': 'application/json' } });
+  const r = await request.post(`${base}/v1/${name}`, { data: input, headers: { 'content-type': 'application/json', origin: base } });
   const body = await r.json().catch(() => ({}));
   if (!r.ok()) throw new Error(`${name}: ${r.status()} ${JSON.stringify(body)}`);
   return body;
