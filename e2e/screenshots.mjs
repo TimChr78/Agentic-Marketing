@@ -41,10 +41,12 @@ const signIn = await signedIn.request.post(`${base}/api/auth/sign-in/email`, {
 if (!signIn.ok()) throw new Error(`sign-in for ${email}: ${signIn.status()} ${await signIn.text()}`);
 
 const ids = await loadFixtureIds((name, input) => {
-  return signedIn.request.post(`${base}/v1/${name}`, { data: input, headers: { 'content-type': 'application/json' } }).then(async (r) => {
-    if (!r.ok()) throw new Error(`${name}: ${r.status()} ${await r.text()}`);
-    return r.json();
-  });
+  return signedIn.request
+    .post(`${base}/v1/${name}`, { data: input, headers: { 'content-type': 'application/json', origin: base } })
+    .then(async (r) => {
+      if (!r.ok()) throw new Error(`${name}: ${r.status()} ${await r.text()}`);
+      return r.json();
+    });
 });
 
 const routes = buildMatrix(ids).filter((r) => !only || only.includes(r.name));

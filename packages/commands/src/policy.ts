@@ -283,6 +283,9 @@ export function decide(input: PolicyInput): PolicyOutcome {
     return actionClass === 'draft' ? decide({ ...input, mandate: undefined }) : decideInShadow(input, mandate);
   if (mandate && (mandate.levels.draft ?? 1) === 0 && actionClass === 'draft')
     return out('deny', ['This agent’s mandate is observe-only (level 0): it may read but not draft.'], { level: 0 });
+  // The workspace ceiling applies to drafts too: a ceiling of 0 makes every agent observe-only.
+  if (actionClass === 'draft' && (settings.maxLevel.draft ?? 1) === 0)
+    return out('deny', ['This workspace allows agents to observe only (draft ceiling 0): they may read but not draft.'], { level: 0 });
   if (actionClass === 'draft') return out('allow', []);
   if (mandate) return decideWithMandate(input, mandate, out);
 

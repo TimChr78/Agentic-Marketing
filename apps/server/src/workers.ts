@@ -2,9 +2,9 @@ import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
-import { RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
+import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
-import { runSentAtBackfill } from '@agentic-marketing/db';
+import { type Db, runSentAtBackfill } from '@agentic-marketing/db';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
@@ -22,6 +22,45 @@ import { runAgentNotifications } from './agents/notifications';
 import { runExperienceRollouts } from './agents/rollouts';
 import type { createServer } from './app';
 import { runPasswordResetDeliveries } from './passwordReset';
+
+/** The cross-tenant sweep of abandoned OAuth consent choices (#838). */
+export const OAUTH_SELECTION_CLEANUP_TASK = 'oauth-workspace-selections.cleanup';
+/** Hourly is plenty: a choice lives for a day and is consumed by its own consent flow. */
+export const OAUTH_SELECTION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
+ * The scheduler's recurring sweep of pending OAuth workspace choices nobody came back for. It is
+ * deliberately cross-tenant, so it runs here (as the owner), never in a request.
+ */
+export function runOAuthSelectionCleanup(db: Db, signal: AbortSignal, opts: { tickMs?: number } = {}): Promise<void> {
+  const tickMs = opts.tickMs ?? OAUTH_SELECTION_CLEANUP_INTERVAL_MS;
+  return new Promise((resolve) => {
+    let stopped = false;
+    let running = false;
+    const sweep = async () => {
+      if (stopped || running) return;
+      running = true;
+      try {
+        const removed = await cleanupExpiredOAuthWorkspaceSelections(db);
+        if (removed) logger.info({ removed, task: OAUTH_SELECTION_CLEANUP_TASK }, 'dropped expired OAuth workspace choices');
+      } catch (err) {
+        logger.warn({ err }, 'the OAuth workspace choice cleanup failed');
+      } finally {
+        running = false;
+      }
+    };
+    void sweep();
+    const timer = setInterval(() => void sweep(), tickMs);
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      resolve();
+    };
+    if (signal.aborted) return stop();
+    signal.addEventListener('abort', stop, { once: true });
+  });
+}
 
 /** Periodic jobs of the scheduler role. */
 export function startScheduler(
@@ -45,9 +84,12 @@ export function startScheduler(
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill',
+    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices',
   );
   return [
+    // One pass at start: an abandoned consent choice is short-lived, and nothing in the request
+    // path may sweep across tenants (#838).
+    runOAuthSelectionCleanup(srv.db, signal),
     // One pass at start: the 0.10.1 migration only adds the column; this fills completed rows in
     // short batches while sends continue, and stops when every row has its send time (#453).
     runSentAtBackfill({ db: srv.db }, signal, {
