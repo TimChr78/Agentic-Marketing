@@ -305,9 +305,11 @@ describe('people through REST and the typed client', () => {
       srv.executor.execute(flaky, { value: 'v' }, principal, opts),
       srv.executor.execute(flaky, { value: 'v' }, principal, opts),
     ]);
-    // The failed transaction stored nothing, so the waiter must run the handler normally.
-    expect(first.status).toBe('rejected');
-    expect(second).toMatchObject({ status: 'fulfilled', value: { value: 'v' } });
+    // The failed transaction stored nothing, so the waiter must run the handler normally. Either
+    // request can take the key first (the lock is non-blocking with backoff), so assert the pair.
+    const outcomes = [first, second];
+    expect(outcomes.filter((o) => o.status === 'rejected')).toHaveLength(1);
+    expect(outcomes.find((o) => o.status === 'fulfilled')).toMatchObject({ status: 'fulfilled', value: { value: 'v' } });
     expect(runs).toBe(2);
   });
 
