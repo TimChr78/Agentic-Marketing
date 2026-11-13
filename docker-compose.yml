@@ -140,7 +140,11 @@ services:
     volumes:
       - backups:/backups
     ports:
-      - "${AM_PORT:-3000}:3000"
+      # Loopback only by default, like the public listener below: the admin UI, sign-in and REST API
+      # are reachable from this machine until AM_BIND widens it. Set AM_BIND=0.0.0.0 (or a LAN
+      # address) only when the network in front is trusted, or keep it loopback and put a tunnel or
+      # reverse proxy on this host.
+      - "${AM_BIND:-127.0.0.1}:${AM_PORT:-3000}:3000"
       # The public-only listener, published on PUBLIC_BIND (host:port, loopback-only by default; 3201
       # because 3001 is a common homelab port and 3210 is a natural admin port). With PUBLIC_PORT
       # unset nothing listens behind it. A tunnel on a Docker network reaches http://app:3001 and

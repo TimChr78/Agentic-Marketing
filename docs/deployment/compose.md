@@ -22,6 +22,8 @@ By hand, generate the two passwords as **hex** (`openssl rand -hex 32`) and the 
 
 `AM_VERSION` pins the released image `ghcr.io/timchr78/agentic-marketing`; `AM_PORT` is the published admin port (the app still listens on 3000 inside the container). The admin UI and REST API are then on `http://localhost:3000`; MCP needs an HTTPS `PUBLIC_URL`.
 
+`AM_BIND` is the host address the admin port is published on, `127.0.0.1` by default: the admin UI, sign-in, REST API and MCP answer from this machine only, exactly like the public listener's `PUBLIC_BIND`. Set `AM_BIND` to a LAN address, or to `0.0.0.0` for every interface, only when the network in front is trusted; otherwise keep it loopback and put the tunnel or reverse proxy on this host. Takes effect on `docker compose up -d` (the container is recreated when its published ports change).
+
 ## Environment variables
 
 Every variable the server reads is passed into the `app` container, including `METRICS_TOKEN`, the step-up limits, `ERASURE_GRACE_HOURS`, `KEY_PROVIDER` with the OpenBao/AWS KMS settings, and the isolation keys `APP_DB_ROLE`, `CLICKHOUSE_DATABASE`, `NATS_NAMESPACE` and `VALKEY_PREFIX`. Uncomment or append an entry in `.env` and run `docker compose up -d`; Compose recreates the container when the environment changes. `.env.example` documents every key with its default, so an unset (or empty) value still applies that default.

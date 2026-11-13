@@ -118,6 +118,16 @@ describe('am doctor offline checks', () => {
     expect(check({ ...good, AM_PORT: 'nope' }, 'ports')?.status).toBe('fail');
   });
 
+  it('reports the admin bind and warns when it is not loopback (#870)', () => {
+    expect(check(good, 'ports')?.message).toContain('AM_BIND');
+    expect(check({ ...good, AM_BIND: '127.0.0.1' }, 'ports')?.status).toBe('ok');
+    const widened = check({ ...good, AM_BIND: '0.0.0.0' }, 'ports');
+    expect(widened?.status).toBe('warn');
+    expect(widened?.message).toContain('0.0.0.0:3000');
+    expect(widened?.hint).toContain('TRUSTED_PROXY_CIDRS');
+    expect(check({ ...good, AM_BIND: '192.168.1.20' }, 'ports')?.message).toContain('192.168.1.20:3000');
+  });
+
   it('warns when the trusted proxy list is empty', () => {
     const empty = checkTrustedProxyCidrs({ ...good, TRUSTED_PROXY_CIDRS: '' });
     expect(empty.status).toBe('warn');
