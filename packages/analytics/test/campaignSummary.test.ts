@@ -108,6 +108,20 @@ describe('per-total member suppression (#692 round 2)', () => {
     expect(sentProtected).toBe(true);
   });
 
+  it('treats a member with in-window e-mail activity but no in-window sends as an e-mail contributor (round 4)', () => {
+    // A's sends happened before `from`, but its deliveries fall inside the window: sent 0,
+    // delivered 3. A (3) is below k; B (5, SMS only) is the people total's complement; C (10) stays
+    // visible. The delivered total 13 minus C's 10 would reveal A unless A still counts as hidden
+    // in the e-mail totals.
+    const plan = planMemberSuppression([
+      member(3, { sent: 0, delivered: 3 }),
+      member(5, { sent: 0, delivered: 0, clicked: 0, unsubscribed: 0, converters: 0 }),
+      member(10),
+    ]);
+    const deliveredProtected = plan.hidden[2] === true || plan.withheld.includes('email.delivered');
+    expect(deliveredProtected).toBe(true);
+  });
+
   it('withholds a total whose only visible member is a zero', () => {
     // The issue's probe: one member reaches four, the other never sent. Hiding the zero member
     // would change nothing and the total of four would still give the hidden member, so the
@@ -128,9 +142,10 @@ describe('per-total member suppression (#692 round 2)', () => {
   it('treats a member with a row but nobody reached as below k', () => {
     // A row exists (the member sent, but no profile survived), so it is hidden like any group of
     // zero; the visible 10 can be hidden to protect it.
-    const plan = planMemberSuppression([member(0), member(10)]);
+    // Nobody reached means no e-mail figure either (each counts reached people).
+    const plan = planMemberSuppression([member(0, { clicked: 0 }), member(10)]);
     expect(plan.hidden).toEqual([true, true]);
-    // The zero member sent no e-mail, so it cannot protect the e-mail totals: with the 10 hidden as
+    // The zero member has no e-mail activity, so it cannot protect the e-mail totals: with the 10 hidden as
     // the people total's complement, each e-mail total would equal the 10's own figure and is
     // withheld instead (round 3).
     expect(plan.withheld).toEqual(['email.sent', 'email.delivered', 'email.clicked', 'email.unsubscribed']);

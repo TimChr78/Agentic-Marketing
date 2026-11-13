@@ -461,16 +461,18 @@ export function planMemberSuppression(
     totals: totals.map(([name]) => name),
     contributors: (name) => {
       const field = totals.find(([entry]) => entry === name)![1];
-      // A member that sent no e-mail contributes zero to every e-mail total by construction (an
-      // SMS- or push-only member), so its hidden row does not protect those totals; the people and
-      // converter totals apply to every member.
+      // A member with no e-mail activity in the window contributes zero to every e-mail total (an
+      // SMS- or push-only member, for one), so its hidden row does not protect those totals; the
+      // people and converter totals apply to every member. Any in-window e-mail figure counts, not
+      // only sends: sends before `from` can still deliver, be clicked or unsubscribe inside the
+      // window (round 4). Excluding too many members only hides or withholds more.
       const emailTotal = name.startsWith('email.');
       return members.map((member, id) => ({
         id,
         group: member.reached,
         value: Number(member[field]),
         hidden: hidden[id]!,
-        applies: !emailTotal || member.sent > 0,
+        applies: !emailTotal || member.sent + member.delivered + member.clicked + member.unsubscribed > 0,
       }));
     },
     hide: (_total, id) => {
