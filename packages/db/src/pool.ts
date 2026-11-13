@@ -29,6 +29,13 @@ export interface DbConfig {
   /** Application role `am_app`: everything the command layer does, always under RLS. */
   appUrl: string;
   poolSize?: number;
+  /**
+   * Called when an idle pooled connection fails (the server restarted, a failover, an administrator
+   * terminated it). pg emits that failure on the pool itself; without a listener Node treats it as
+   * an unhandled 'error' event and exits the process, although the pool only replaces the client.
+   * The server wires this to its telemetry logger; the default only emits a process warning.
+   */
+  onIdleError?: (err: Error, pool: 'admin' | 'app') => void;
   /** Give up on a new connection after this many milliseconds (health checks must not hang). */
   connectionTimeoutMillis?: number;
   /** Abort a query that runs longer than this many milliseconds (health checks must not hang). */
@@ -63,6 +70,14 @@ export function createDb(config: DbConfig): Db {
   };
   const admin = new pg.Pool({ connectionString: config.adminUrl, max: 5, ...timeouts });
   const app = new pg.Pool({ connectionString: config.appUrl, max: config.poolSize ?? 20, ...timeouts });
+  const onIdleError =
+    config.onIdleError ??
+    ((err: Error, pool: 'admin' | 'app') => {
+      // The message can name the server and the role, but never the connection string or password.
+      process.emitWarning(`Postgres ${pool} pool: an idle connection failed (${err.message}); it was removed from the pool.`);
+    });
+  admin.on('error', (err) => onIdleError(err, 'admin'));
+  app.on('error', (err) => onIdleError(err, 'app'));
   const lockTimeout = config.advisoryLockTimeoutMillis ?? ADVISORY_LOCK_TIMEOUT_MS;
 
   const lockStillBusy = () =>

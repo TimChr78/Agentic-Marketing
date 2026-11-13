@@ -64,7 +64,13 @@ export interface ServerOverrides {
 }
 
 export function createServer(config: Config, overrides: ServerOverrides = {}) {
-  const db = createDb({ adminUrl: config.adminDatabaseUrl, appUrl: config.appDatabaseUrl });
+  const db = createDb({
+    adminUrl: config.adminDatabaseUrl,
+    appUrl: config.appDatabaseUrl,
+    // A Postgres restart or failover terminates idle pooled clients; without a listener Node exits.
+    // Report the reason through telemetry, never the connection string or password.
+    onIdleError: (err, pool) => logger.warn({ pool, reason: err.message }, 'a postgres connection failed while idle; it was removed'),
+  });
   // Brand hostnames, read across workspaces before the session is known (#186).
   const domains = createDomainService(db, config.linksUrl, config.publicUrl);
   const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
