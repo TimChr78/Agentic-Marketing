@@ -3,12 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { useFocusRecheck } from '../../app/useFocusRecheck';
 import { Button, Field, IconButton, Input, JsonView, Select, Skeleton, Textarea } from '../../ui';
 import { forgetArtifact, getArtifact, onArtifactsChanged } from '../artifactCache';
 import { CopyPurposeKey } from '../audience/phase26/CopyControl';
 import type { EditorProps } from './ArtifactDetailPage';
 import { ListAudiencePanel } from './ListAudiencePanel';
 import { usePickerIndex } from './pickerIndex';
+import { type LiveReference, mergeObservation, mergeReferenceSnapshots, type ReferenceSnapshot } from './referenceSnapshots';
 
 // Segment condition builder: the same tree agents read and write, edited as rows instead of JSON.
 // A condition is a group ({all}/{any}) or one leaf: trait, event, consent, segment or not.
@@ -638,8 +640,11 @@ interface Estimate {
   loading: boolean;
   count?: number;
   error?: string;
-  /** The published versions of the referenced segments the server resolved, when it reported them. */
-  resolved?: Record<string, number>;
+  /**
+   * The published versions of the referenced segments the server resolved, and the membership stamp
+   * of a referenced list (a list changes members without a new published version, #771).
+   */
+  resolved?: Record<string, { version: number; stamp: string | null }>;
   /** The request was abandoned by an edit or a newer request and will not be shown as current. */
   cancelled?: boolean;
 }
@@ -662,65 +667,81 @@ export function referencedSegmentIds(condition: unknown): string[] {
   return [...found].sort();
 }
 
+/** A referenced segment as the estimate recorded it: its published version, plus a list's stamp. */
 /**
- * The referenced segments' current published versions. A publish in another tab is not a local
- * change, so the reads are forced on the shared invalidation signal, on focus and when the tab
- * becomes visible again: an estimate must never outlive the definitions it was counted from.
+ * The referenced segments' current published versions, and the membership stamp of any that is a
+ * static or snapshot list. A publish in another tab is not a local change, so the reads are forced
+ * on the shared invalidation signal, on focus and when the tab becomes visible again: an estimate
+ * must never outlive the definitions (or list membership) it was counted from.
  */
 function useReferencedSegmentVersions(ids: string[]) {
   const key = [...new Set(ids)].sort().join(',');
-  const [versions, setVersions] = useState<Record<string, number | null>>({});
+  const [versions, setVersions] = useState<Record<string, LiveReference>>({});
   const seq = useRef(0);
+  // One counter for every observation, watcher reads and estimates alike, taken when the request
+  // starts: it orders an "unpublished" or failed read against an adopted estimate (round 4).
+  const observations = useRef(0);
+  const begin = useCallback(() => ++observations.current, []);
   const read = useCallback(async () => {
     const list = key ? key.split(',') : [];
     const n = ++seq.current;
+    const observed = begin();
     const entries = await Promise.all(
       list.map(async (id) => {
         forgetArtifact(id);
         try {
           const artifact = await getArtifact(id);
-          return [id, artifact.publishedVersion ?? null] as const;
+          const version = artifact.publishedVersion ?? null;
+          let stamp: string | null = null;
+          // A list's count changes on an import or `audiences.add`, not on a publish (#771).
+          // `segments.preview` reports the list's membership stamp, so read it the same way.
+          const mode = (artifact.version.content as { mode?: string } | undefined)?.mode;
+          if (version !== null && mode && mode !== 'dynamic') {
+            const preview = await api.call('segments.preview', { artifactId: id });
+            stamp = preview.segments?.find((s) => s.id === id)?.stamp ?? null;
+          }
+          return [id, { version, stamp }] as const;
         } catch {
-          return [id, null] as const;
+          // A failed read keeps the snapshot but marks it unverified (see mergeObservation).
+          return [id, undefined] as const;
         }
       }),
     );
-    if (n === seq.current) setVersions(Object.fromEntries(entries));
-  }, [key]);
+    // Merge, never replace: an estimate may already have adopted a newer stamp than this read saw
+    // (0.14.13 review round 3). References the segment no longer uses are dropped.
+    if (n === seq.current) setVersions((prev) => mergeReferenceSnapshots(prev, Object.fromEntries(entries), observed));
+  }, [key, begin]);
 
   useEffect(() => {
     void read();
   }, [read]);
-  useEffect(() => onArtifactsChanged(() => void read()), [read]);
-  useEffect(() => {
-    // Returning to a tab fires visibilitychange and focus, in either order, for one return. Re-check
-    // once per return (#735): the first signal reads, the other is the same return. The latch clears
-    // when the tab hides or the window loses focus, which is where every return starts. The shared
-    // cache invalidation signal still reads immediately through its own effect above.
-    let checked = false;
-    const recheck = () => {
-      if (document.visibilityState === 'hidden') {
-        checked = false;
-        return;
-      }
-      if (checked) return;
-      checked = true;
-      void read();
-    };
-    const left = () => {
-      checked = false;
-    };
-    window.addEventListener('focus', recheck);
-    window.addEventListener('blur', left);
-    document.addEventListener('visibilitychange', recheck);
-    return () => {
-      window.removeEventListener('focus', recheck);
-      window.removeEventListener('blur', left);
-      document.removeEventListener('visibilitychange', recheck);
-    };
-  }, [read]);
+  useEffect(
+    () =>
+      onArtifactsChanged((changed) => {
+        if (changed && !(key ? key.split(',') : []).includes(changed)) return;
+        void read();
+      }),
+    [key, read],
+  );
+  useFocusRecheck(() => void read());
 
-  return versions;
+  // A fresh estimate names the exact reference state it counted, so re-estimating with the same
+  // rules after an import elsewhere must not label its own fresh count as previous (#771 review).
+  //
+  // It is not always newer than the live state: an estimate queued before an import can answer
+  // after a focus re-check has read the newer state. Merge per reference and keep the newer of
+  // (version, stamp), so a stale answer can never pull the live state backwards. The watcher's
+  // sequence is left alone: a newer read still in flight must still commit.
+  const adopt = useCallback((resolved: Record<string, ReferenceSnapshot> | undefined, observed: number) => {
+    if (!resolved) return;
+    setVersions((prev) => {
+      const next = { ...prev };
+      for (const [id, snapshot] of Object.entries(resolved)) next[id] = mergeObservation(prev[id], snapshot, observed);
+      return next;
+    });
+  }, []);
+
+  return { versions, adopt, begin };
 }
 
 function EstimatedSize({ condition }: { condition: Condition }) {
@@ -744,7 +765,7 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     () => (hasEstimate ? [...new Set([...directReferences, ...resolvedIds])] : []),
     [hasEstimate, directReferences, resolvedIds],
   );
-  const liveVersions = useReferencedSegmentVersions(watched);
+  const { versions: liveVersions, adopt, begin } = useReferencedSegmentVersions(watched);
   const versionsKnown = watched.every((id) => id in liveVersions);
   const referencedChanged =
     !!estimate &&
@@ -752,7 +773,15 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     estimate.key === conditionKey &&
     !estimate.loading &&
     versionsKnown &&
-    watched.some((id) => (liveVersions[id] ?? null) !== (estimate.resolved?.[id] ?? null));
+    watched.some(
+      (id) =>
+        liveVersions[id]?.unverified === true ||
+        (liveVersions[id]?.version ?? null) !== (estimate.resolved?.[id]?.version ?? null) ||
+        (liveVersions[id]?.stamp ?? null) !== (estimate.resolved?.[id]?.stamp ?? null),
+    );
+  // A reference that could not be re-checked (a failed or forbidden read) makes the estimate
+  // previous too, with its own explanation: it is unverified, not known to be current.
+  const referenceUnverified = !!estimate && watched.some((id) => liveVersions[id]?.unverified === true);
   const current = estimate && estimate.key === conditionKey && !referencedChanged ? estimate : null;
   const previous = estimate && !current ? estimate : null;
 
@@ -774,14 +803,20 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     const request = requestRef.current + 1;
     requestRef.current = request;
     setEstimate({ key, request, loading: true });
+    const observed = begin();
     try {
       const r = await api.call('segments.preview', { condition });
       if (requestRef.current !== request || keyRef.current !== key) {
         settle(request);
         return;
       }
-      const resolved = r.segments ? Object.fromEntries(r.segments.map((s) => [s.id, s.version])) : undefined;
-      if (resolved) setResolvedIds(Object.keys(resolved));
+      const resolved = r.segments
+        ? Object.fromEntries(r.segments.map((s) => [s.id, { version: s.version, stamp: s.stamp ?? null }]))
+        : undefined;
+      if (resolved) {
+        setResolvedIds(Object.keys(resolved));
+        adopt(resolved, observed);
+      }
       setEstimate({ key, request, loading: false, count: r.count, resolved });
     } catch (e) {
       if (requestRef.current !== request || keyRef.current !== key) {
@@ -820,9 +855,11 @@ function EstimatedSize({ condition }: { condition: Condition }) {
                 ? 'The previous estimate is no longer current. Estimate the current rules.'
                 : previous.error
                   ? 'The previous estimate failed. Estimate the current rules.'
-                  : referencedChanged && previous.count !== undefined
-                    ? `The previous estimate was ${previous.count.toLocaleString()} people, before a referenced segment was republished.`
-                    : `The last estimate was ${(previous.count ?? 0).toLocaleString()} people, for the previous rules.`}
+                  : referenceUnverified && previous.count !== undefined
+                    ? `The previous estimate was ${previous.count.toLocaleString()} people. A referenced segment could not be re-checked, so it may be out of date.`
+                    : referencedChanged && previous.count !== undefined
+                      ? `The previous estimate was ${previous.count.toLocaleString()} people, before a referenced segment was republished.`
+                      : `The last estimate was ${(previous.count ?? 0).toLocaleString()} people, for the previous rules.`}
           </p>
         ) : (
           <p className="text-[13px] text-muted">Not estimated yet. Estimate the rules currently shown.</p>

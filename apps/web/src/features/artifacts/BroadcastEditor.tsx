@@ -78,6 +78,8 @@ export function BroadcastEditor({ artifact, content, onChange, readOnly, errors 
     dirty,
     template: broadcast.template,
     segment: broadcast.segment,
+    // The pointer the estimate was counted against: a republished segment re-runs it (#767).
+    segmentVersion: segment.loading ? undefined : (segment.artifact?.publishedVersion ?? null),
     enabled: canRead,
   });
 

@@ -320,7 +320,7 @@ function CreateDialog({ type, spec, onClose }: { type: string; spec: ContentCrea
     setError(null);
     try {
       const r = await api.call('artifacts.create', { type: type as never, name: name.trim(), content: spec.content(name.trim(), state) });
-      notifyArtifactsChanged();
+      notifyArtifactsChanged(r.artifactId);
       toast.success(`Created “${name.trim()}” as a draft.`);
       onClose();
       navigate(artifactPath(type, r.artifactId));

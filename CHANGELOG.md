@@ -2,6 +2,31 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.13] - 2026-11-13
+
+### Fixed
+
+- The broadcast composer re-reads its template and segment, and re-runs the evidence and audience estimate, when the window regains focus: a template or segment republished by another tab, person or agent no longer leaves "Live vN · Ready" evidence describing an older send.
+- An artifact change now names the artifact it changed, so saving a broadcast no longer forces the composer to re-read its template and segment or flips both evidence rows to "Checking"; the explicit "Refresh checks" still bypasses the cache.
+- Reference pills such as "Live vN" in a form or broadcast preview, and the shared artifact-name lookup, update after an in-tab publish or rename instead of staying on the pointer they first read.
+- Segment estimates track the membership of referenced static lists and snapshots: `segments.preview` reports a list's membership stamp and the editor turns a count into a previous estimate after an import, even though the list's published version did not move. If a referenced segment cannot be re-checked (for example after access to it is removed), the estimate is shown as possibly out of date instead of current. The referenced segments' versions and stamps are only returned to callers with `artifacts:read`; a caller with only `profiles:read` still gets the count.
+- **Breaking:** `segments.ofProfile` and `topics.preferences` no longer expose artifact ids and names to a token that has `profiles:read` without `artifacts:read`: both return no entries and set `withheld: true`. A caller with `artifacts:read` sees the same output as before.
+- A malformed percent escape in a route parameter (`/artifacts/%`) keeps the raw segment and shows the page's recoverable error, and a root error boundary replaces a blank page with a retryable error when a route throws.
+- Starter "Check prerequisites" and "Create drafts" results are sequenced like the detail read: a slower earlier starter can no longer show its prerequisites, draft list or created artifacts under the newly selected starter.
+- `templates.check` with `checkLinks: true` no longer fails with `invalid_input` on a template whose footer is a reusable block: the link-personalisation probe renders with the same block resolver as the main render, and a probe that still cannot render treats every link as personalised instead of failing the check (#782).
+- E-mail link rewriting decodes an href's character references once before it becomes a URL, so `&#38;`, `&#x26;` and `&amp;` all keep the query parameters after them instead of turning into a `#38;` fragment; tagging and click tracking write the value back with `&amp;` and sign the same decoded URL the unsubscribe check sees (#789).
+- A form's allowed origin drops the scheme's default port (`:443` for https, `:80` for http) on save and on comparison, so `https://MySite.com:443` accepts the `https://mysite.com` Origin a browser sends; a non-default port such as `:8443` is kept (#769). IDN hosts are not involved: the origin schema already rejects non-ASCII hosts.
+
+### Upgrading from 0.14.12
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** a token with `profiles:read` but without `artifacts:read` gets `{ segments: [], withheld: true }` from `segments.ofProfile` and `{ topics: [], withheld: true }` from `topics.preferences`, and `segments.preview` no longer lists the referenced segments' versions and stamps for it; grant `artifacts:read` to keep the details.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.13.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.13 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.13` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.13). Run `docker compose exec app am doctor`.
+
+<!-- issues: 767, 768, 769, 770, 771, 782, 789, 791, 792 -->
+
 ## [0.14.12] - 2026-11-13
 
 ### Fixed

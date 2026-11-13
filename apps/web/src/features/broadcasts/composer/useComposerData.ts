@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, errText, type Out } from '../../../app/api';
 import { useApi, useKeyedApi } from '../../../app/useApi';
+import { useFocusRecheck } from '../../../app/useFocusRecheck';
 import { forgetArtifact, getArtifact, onArtifactsChanged } from '../../artifactCache';
 import {
   type Channel,
@@ -17,26 +18,57 @@ import {
 type Got = Out<'artifacts.get'>;
 export type ComposerEstimate = Out<'broadcasts.preview'>;
 
+/** The fields that make a re-read news: a moved pointer, a new name, or new content. */
+const sameArtifact = (a: Got | null, b: Got) =>
+  a?.id === b.id &&
+  a.name === b.name &&
+  a.publishedVersion === b.publishedVersion &&
+  a.latestVersion === b.latestVersion &&
+  a.version.contentHash === b.version.contentHash;
+
 /**
  * The template artifact through the shared cache, with its own loading/error so the checklist can
  * offer a local retry.
  *
- * It re-reads whenever an artifact changes (#582): the cache's own invalidation signal is the
- * trigger, as in `names.ts`, and `refreshKey` is the explicit "Refresh checks" read. A forced
- * read drops this one entry first, so a refresh never answers from a cached pointer. Each result
- * is tagged with the id it belongs to, so a template switch never exposes the previous template
- * while the new one loads (0.14.6 review).
+ * It re-reads whenever this artifact changes (#582): the cache's invalidation signal names the
+ * changed artifact, so an unrelated write never flips these rows to "Checking" (#768). `refreshKey`
+ * is the explicit "Refresh checks" read. A forced read drops this one entry first, so a refresh
+ * never answers from a cached pointer. Each result is tagged with the id it belongs to, so a
+ * template switch never exposes the previous template while the new one loads (0.14.6 review).
+ *
+ * A publish by another tab, person or agent emits no in-tab signal, so a focus return forces the
+ * same read — silently: an unchanged pointer updates nothing, and a moved one re-runs the evidence
+ * through the keyed exact-version read (#767).
  */
 export function useSharedArtifact(id: string | undefined | null, refreshKey = 0) {
   const [loaded, setLoaded] = useState<{ id: string; artifact: Got | null; error: string | null } | null>(null);
   const [loading, setLoading] = useState(!!id);
   const [attempt, setAttempt] = useState(0);
+  // One sequence for every read this hook starts: a focus re-check, the effect's read and an
+  // explicit refresh. Only the latest request may commit, so a delayed answer cannot restore an
+  // older pointer or overwrite a refresh that started after it (0.14.13 review).
+  const seq = useRef(0);
+  // An unmount invalidates a focus read that is still in flight, like any other new request.
+  useEffect(
+    () => () => {
+      seq.current++;
+    },
+    [],
+  );
 
-  // Every create, save, publish or delete tells the cache to drop what it knew.
-  useEffect(() => onArtifactsChanged(() => setAttempt((n) => n + 1)), []);
+  // Every create, save, publish or delete tells the cache to drop what it knew. Only the artifact
+  // this hook reads is a reason to re-read.
+  useEffect(() => {
+    if (!id) return;
+    return onArtifactsChanged((changed) => {
+      if (changed && changed !== id) return;
+      setAttempt((n) => n + 1);
+    });
+  }, [id]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: `attempt` and `refreshKey` are explicit re-read triggers, not read by the effect body
   useEffect(() => {
+    const n = ++seq.current;
     if (!id) {
       setLoaded(null);
       setLoading(false);
@@ -47,13 +79,13 @@ export function useSharedArtifact(id: string | undefined | null, refreshKey = 0)
     forgetArtifact(id);
     getArtifact(id)
       .then((a) => {
-        if (live) {
+        if (live && n === seq.current) {
           setLoaded({ id, artifact: a, error: null });
           setLoading(false);
         }
       })
       .catch((e) => {
-        if (live) {
+        if (live && n === seq.current) {
           setLoaded({ id, artifact: null, error: e?.message ?? 'Not found' });
           setLoading(false);
         }
@@ -62,6 +94,25 @@ export function useSharedArtifact(id: string | undefined | null, refreshKey = 0)
       live = false;
     };
   }, [id, attempt, refreshKey]);
+
+  const recheck = useCallback(async () => {
+    if (!id) return;
+    const n = ++seq.current;
+    forgetArtifact(id);
+    try {
+      const artifact = await getArtifact(id);
+      if (n !== seq.current) return;
+      setLoaded((prev) => (prev?.id === id && sameArtifact(prev.artifact, artifact) ? prev : { id, artifact, error: null }));
+      // This read is now the latest, whatever the effect or an explicit refresh still has in
+      // flight: it owns the loading state and clears it (0.14.13 review).
+      setLoading(false);
+    } catch (e) {
+      if (n !== seq.current) return;
+      setLoaded({ id, artifact: null, error: e instanceof Error ? e.message : 'Not found' });
+      setLoading(false);
+    }
+  }, [id]);
+  useFocusRecheck(() => void recheck());
 
   const current = id && loaded?.id === id ? loaded : null;
   return {
@@ -232,8 +283,9 @@ export interface AudienceEstimateView {
 
 /**
  * The one expensive `broadcasts.preview` read. It runs once on a clean composer and after a save
- * (a new saved version) or an explicit refresh; an unsaved draft never reads. Completions are
- * sequenced, so a slower response cannot replace a newer one.
+ * (a new saved version), an explicit refresh, or a moved segment pointer (a republish, including
+ * one made by another tab and noticed on focus, #767); an unsaved draft never reads. Completions
+ * are sequenced, so a slower response cannot replace a newer one.
  */
 export function useAudienceEstimate({
   artifactId,
@@ -242,6 +294,7 @@ export function useAudienceEstimate({
   dirty,
   template,
   segment,
+  segmentVersion,
   enabled,
 }: {
   artifactId: string;
@@ -251,6 +304,8 @@ export function useAudienceEstimate({
   dirty: boolean;
   template: string | undefined;
   segment: string | undefined;
+  /** The selected segment's published pointer; undefined while it loads, null when it has none. */
+  segmentVersion: number | null | undefined;
   enabled: boolean;
 }): AudienceEstimateView {
   const [data, setData] = useState<{ result: ComposerEstimate; asOf: string; version: number; revision: string }>();
@@ -261,7 +316,7 @@ export function useAudienceEstimate({
   const lastKey = useRef<string | null>(null);
 
   const run = useCallback(async () => {
-    if (!enabled || dirty || !template || !segment) return;
+    if (!enabled || dirty || !template || !segment || segmentVersion === undefined) return;
     const n = ++seq.current;
     setLoading(true);
     setError(null);
@@ -275,17 +330,17 @@ export function useAudienceEstimate({
     } finally {
       if (n === seq.current) setLoading(false);
     }
-  }, [artifactId, version, savedRevision, dirty, template, segment, enabled]);
+  }, [artifactId, version, savedRevision, dirty, template, segment, segmentVersion, enabled]);
 
   // One read per saved version, per mount and per explicit refresh. Returning to a clean draft
   // after unsaved edits does not re-run the expensive command: nothing was saved in between.
   useEffect(() => {
-    if (!enabled || dirty || !template || !segment) return;
-    const key = `${artifactId}:${version}:${savedRevision}:${request}`;
+    if (!enabled || dirty || !template || !segment || segmentVersion === undefined) return;
+    const key = `${artifactId}:${version}:${savedRevision}:${segmentVersion ?? 'none'}:${request}`;
     if (lastKey.current === key) return;
     lastKey.current = key;
     void run();
-  }, [artifactId, version, savedRevision, dirty, template, segment, enabled, request, run]);
+  }, [artifactId, version, savedRevision, segmentVersion, dirty, template, segment, enabled, request, run]);
 
   return {
     data: data?.result,

@@ -250,8 +250,20 @@ function markerVars(vars: RenderVars): RenderVars {
 }
 
 /** Hrefs that change when the data changes carry someone's details: never fetch those. */
-async function personalisedHrefs(t: EmailTemplate, vars: RenderVars, hrefs: string[]): Promise<Set<string>> {
-  const probe = scanHtml((await renderTemplate(t, markerVars(vars))).html).links.map((l) => l.href.trim());
+async function personalisedHrefs(
+  t: EmailTemplate,
+  vars: RenderVars,
+  hrefs: string[],
+  render: RenderOptions | undefined,
+): Promise<Set<string>> {
+  let probe: string[];
+  try {
+    probe = scanHtml((await renderTemplate(t, markerVars(vars), render)).html).links.map((l) => l.href.trim());
+  } catch {
+    // The probe is a heuristic; it must never fail the whole check. A template the resolver still
+    // cannot render is treated as fully personalised, because nothing proves a link is static.
+    return new Set(hrefs);
+  }
   if (probe.length !== hrefs.length) return new Set(hrefs);
   return new Set(hrefs.filter((h, i) => h !== probe[i]));
 }
@@ -505,6 +517,7 @@ export async function checkEmailTemplate(t: EmailTemplate, opts: EmailCheckOptio
       t,
       vars,
       links.map((l) => l.href.trim()),
+      opts.render,
     );
     const fetchable = candidates.filter((h) => !personalised.has(h)).slice(0, MAX_LINK_CHECKS);
     if (candidates.filter((h) => !personalised.has(h)).length > MAX_LINK_CHECKS)
