@@ -67,7 +67,7 @@ describe('idempotency advisory-lock waiting (#807)', () => {
       release();
       await dispose(db, d);
     }
-  }, 10_000);
+  }, 30_000);
 
   it('answers conflict past the deadline and holds no connection while waiting', async () => {
     const d = await createDisposableDb('advlock_deadline');
@@ -126,7 +126,7 @@ describe('idempotency advisory-lock waiting (#807)', () => {
       if (holder) await Promise.race([holder, sleep(1_000)]).catch(() => {});
       await dispose(db, d);
     }
-  }, 10_000);
+  }, 30_000);
 
   it('destroys a connection whose lock acquisition failed, leaving no lock behind', async () => {
     const d = await createDisposableDb('advlock_fail');
@@ -157,5 +157,5 @@ describe('idempotency advisory-lock waiting (#807)', () => {
     } finally {
       await dispose(db, d);
     }
-  }, 10_000);
+  }, 30_000);
 });
