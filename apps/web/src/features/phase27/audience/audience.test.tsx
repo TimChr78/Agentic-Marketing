@@ -325,6 +325,24 @@ const formContent = {
   turnstile: false,
 };
 
+/** The editor keeps its own draft, so this harness owns the content state the page would hold. */
+function BrandOverrideHarness() {
+  const [content, setContent] = useState<Record<string, unknown>>({
+    consentText: 'Send me the newsletter.',
+    traits: ['firstName'],
+  });
+  return (
+    <FormEditor
+      artifact={artifact(formId, 'form', 'Weekly journal', content) as never}
+      content={content as never}
+      onChange={(next) => setContent(next as unknown as Record<string, unknown>)}
+      readOnly={false}
+      errors={{}}
+      warnings={[]}
+    />
+  );
+}
+
 describe('forms family (#525)', () => {
   it('keeps every list field and action in the v2 list template, including the phone summary', async () => {
     h.rows.form = [row(formId, 'form', 'Weekly journal')];
@@ -387,24 +405,8 @@ describe('forms family (#525)', () => {
   });
 
   it('preserves a form brand override while the override switch is turned off and on again', async () => {
-    function Harness() {
-      const [content, setContent] = useState<Record<string, unknown>>({
-        consentText: 'Send me the newsletter.',
-        traits: ['firstName'],
-      });
-      return (
-        <FormEditor
-          artifact={artifact(formId, 'form', 'Weekly journal', content) as never}
-          content={content as never}
-          onChange={(next) => setContent(next as unknown as Record<string, unknown>)}
-          readOnly={false}
-          errors={{}}
-          warnings={[]}
-        />
-      );
-    }
     h.artifacts[formId] = artifact(formId, 'form', 'Weekly journal', formContent);
-    renderWithToast(<Harness />);
+    renderWithToast(<BrandOverrideHarness />);
 
     const override = screen.getByRole('switch', { name: /different look/ });
     fireEvent.click(override);

@@ -413,10 +413,12 @@ describe('coordination decides under the artifact lock (#471)', () => {
       content: { title: 'Locked', body: 'Coordination lock test' },
     });
     const artifactId = created.body.artifactId as string;
-    const principal = {
-      ...agentPrincipal(owner.id, 'token:locked-action', lockWs, 'owner', ['artifacts:read', 'artifacts:write']),
-      agent: { id: agent.agentId, name: 'Locked action agent', status: 'active' as const, statusReason: null },
-    };
+    const principal = agentPrincipal(owner.id, 'token:locked-action', lockWs, 'owner', ['artifacts:read', 'artifacts:write'], {
+      id: agent.agentId,
+      name: 'Locked action agent',
+      status: 'active',
+      statusReason: null,
+    });
 
     const lock = await t.srv.db.admin.connect();
     try {

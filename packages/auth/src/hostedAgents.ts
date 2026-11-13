@@ -1,4 +1,4 @@
-import { personalDataInText } from '@agentic-marketing/ai';
+import { personalDataInText, redactText } from '@agentic-marketing/ai';
 import { type CommandContext, defineCommand, PERMISSIONS, type Permission, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
 import { AppError, decodeTimestampCursor, encodeTimestampCursor, newId } from '@agentic-marketing/core';
 import { type Role, schema } from '@agentic-marketing/db';
@@ -569,7 +569,8 @@ type MemoryNote = z.infer<typeof MemoryNote>;
 const toMemoryNote = (row: typeof schema.hostedAgentMemory.$inferSelect): MemoryNote => ({
   id: row.id,
   agentId: row.agentId,
-  text: row.text,
+  // A note saved before strict checking could hold an 8-digit DK/NO phone; never hand it out.
+  text: redactText(row.text, { strict: true }),
   createdBy: row.createdByRunId ? { type: 'run', id: row.createdByRunId } : { type: 'person', id: row.createdByUserId ?? '' },
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
@@ -591,7 +592,8 @@ function assertMemoryScope(ctx: CommandContext, agentId: string) {
 }
 
 function assertNoPersonalData(text: string) {
-  const found = personalDataInText(text);
+  // Strict: a note is never the place for an 8-digit DK/NO phone number (0.14.11 round 3).
+  const found = personalDataInText(text, { strict: true });
   if (found.length)
     throw new AppError(
       'invalid_input',

@@ -555,6 +555,108 @@ describe('workspace proposal consequences (#498)', () => {
   });
 });
 
+describe('approval consequence review follow-ups (0.14.10)', () => {
+  const capabilities = { canReadArtifacts: true, canReadProfiles: true };
+
+  it('warns when a bundle rolls the purposes singleton back (#735)', () => {
+    const pur = id('pur', 'f');
+    const model = deriveConsequences(
+      base({
+        type: 'form',
+        content: { purposes: ['marketing_email'], confirmationTemplate: eml },
+        bundleVersions: { [pur]: 3, [eml]: 2 },
+        dependencies: {
+          [pur]: { id: pur, name: 'Purposes', type: 'purposes', publishedVersion: 4 },
+          [eml]: { id: eml, name: 'Confirm subscription', type: 'email_template', publishedVersion: 2 },
+        },
+      }),
+    );
+    // The summary repeats the rollback, not only the member row.
+    expect(model.notes.join(' ')).toContain('moves the live purposes back from v4 to v3');
+    const purposes = row(model.rows, 'dependencies')?.items?.find((item) => item.key === pur);
+    expect(purposes?.note).toContain('Saved v3');
+    expect(purposes?.note).toContain('back from v4 to v3');
+    expect(purposes?.tone).toBe('warn');
+  });
+
+  it('reads the bundled purposes singleton a purpose-keyed artifact references (#735)', () => {
+    const pur = id('pur', 'f');
+    const plan = buildReadPlan({
+      artifactId: eml,
+      type: 'email_template',
+      version: 4,
+      content: { subject: 'Hello', purpose: 'marketing_email' },
+      bundleVersions: { [pur]: 3 },
+      capabilities,
+    });
+    expect(plan.artifacts).toContain(pur);
+  });
+
+  it('does not add a purposes read when the artifact names no purpose (#735)', () => {
+    const pur = id('pur', 'f');
+    const plan = buildReadPlan({
+      artifactId: eml,
+      type: 'email_template',
+      version: 4,
+      content: { subject: 'Hello' },
+      bundleVersions: { [pur]: 3 },
+      capabilities,
+    });
+    expect(plan.artifacts).not.toContain(pur);
+  });
+
+  it('does not treat a free-text purpose field as a purpose reference (0.14.10 review)', () => {
+    const pur = id('pur', 'f');
+    const plan = buildReadPlan({
+      artifactId: eml,
+      type: 'email_template',
+      version: 4,
+      content: { subject: 'Hello', mandate: { purpose: 'Grow the newsletter list by 20% this quarter.' } },
+      bundleVersions: { [pur]: 3 },
+      capabilities,
+    });
+    expect(plan.artifacts).not.toContain(pur);
+  });
+
+  it('finds purpose keys nested in the artifact content (#735)', () => {
+    const pur = id('pur', 'f');
+    const plan = buildReadPlan({
+      artifactId: id('dlp', '2'),
+      type: 'delivery_policy',
+      version: 2,
+      content: { frequencyCaps: [{ channel: 'email', purposes: ['marketing_email'], max: 2, days: 7 }] },
+      bundleVersions: { [pur]: 3 },
+      capabilities,
+    });
+    expect(plan.artifacts).toContain(pur);
+    const journey = buildReadPlan({
+      artifactId: jrn,
+      type: 'journey',
+      version: 2,
+      content: { purpose: 'marketing_email', nodes: [] },
+      bundleVersions: { [pur]: 3 },
+      capabilities,
+    });
+    expect(journey.artifacts).toContain(pur);
+    // A dynamic segment's consent condition names a purpose key too.
+    const segment = buildReadPlan({
+      artifactId: seg,
+      type: 'segment',
+      version: 2,
+      content: { mode: 'dynamic', condition: { all: [{ consent: 'marketing_email' }] } },
+      bundleVersions: { [pur]: 3 },
+      capabilities,
+    });
+    expect(segment.artifacts).toContain(pur);
+  });
+
+  it('does not make the purposes singleton its own dependency (#735)', () => {
+    const pur = id('pur', 'f');
+    const refs = dependencyRefs('purposes', { purposes: [{ key: 'marketing_email', name: 'Marketing' }] }, { [pur]: 3 });
+    expect(refs.map((ref) => ref.id)).not.toContain(pur);
+  });
+});
+
 describe('consequence wording helpers (#498)', () => {
   it('humanises the durations used by schedules and tests', () => {
     expect(humanDuration('P1D')).toBe('1 day');

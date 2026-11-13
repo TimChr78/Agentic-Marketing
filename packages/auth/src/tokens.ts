@@ -427,5 +427,5 @@ export async function principalFromApiToken(db: Db, token: string): Promise<Prin
   if (!t.last_used_at || Date.now() - t.last_used_at.getTime() > 60_000)
     await db.admin.query('UPDATE api_tokens SET last_used_at = now() WHERE workspace_id = $1 AND id = $2', [t.workspace_id, t.id]);
   const agent = await agentForCredential(db, t.workspace_id, 'api_token', t.id, t.user_id, async () => t.name);
-  return { ...agentPrincipal(t.user_id, `token:${t.id}`, t.workspace_id, t.role, t.scopes), agent };
+  return agentPrincipal(t.user_id, `token:${t.id}`, t.workspace_id, t.role, t.scopes, agent);
 }
