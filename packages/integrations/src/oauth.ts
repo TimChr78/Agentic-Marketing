@@ -65,7 +65,9 @@ function oauthOf(row: Row) {
  * `oauthError` that `connections.list` exposes, so it must never carry a raw exception or body. */
 const MAX_OAUTH_TEXT = 300;
 function safeOAuthText(text: string): string {
-  const first = redactCredentials(String(text).split('\n')[0].trim());
+  // Redact the whole text first: cutting at the first line can split a quoted credential from its
+  // closing quote, and the redaction rule would no longer recognise it (#885 round 3).
+  const first = redactCredentials(String(text)).split('\n')[0].trim();
   return first.length > MAX_OAUTH_TEXT ? `${first.slice(0, MAX_OAUTH_TEXT - 1)}…` : first;
 }
 

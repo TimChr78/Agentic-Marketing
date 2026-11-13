@@ -252,6 +252,24 @@ describe.skipIf(!hasTestDatabase())('OAuth callback (#375)', () => {
     expect((await connectionOf(id)).oauth_error).not.toContain('probe-secret');
   });
 
+  it('redacts a multi-line provider description before keeping its first line (#885 round 3)', async () => {
+    const state = randomBytes(12).toString('base64url');
+    const id = await addConnection({ pending: { state } });
+    const http: OAuthRequest = async () => response({ error: 'invalid_grant', error_description: 'password="probe-secret\nrest"' }, 400);
+    const res = await callback(oauthRoutes({ db: t.db, kp, egress: EGRESS, http }), state);
+    expect(await res.text()).not.toContain('probe-secret');
+    expect((await connectionOf(id)).oauth_error).not.toContain('probe-secret');
+  });
+
+  it('redacts an OAuth description whose credential starts with a scheme word (#885 round 3)', async () => {
+    const state = randomBytes(12).toString('base64url');
+    const id = await addConnection({ pending: { state } });
+    const http: OAuthRequest = async () => response({ error: 'invalid_grant', error_description: 'token=Bearer-probe-secret' }, 400);
+    const res = await callback(oauthRoutes({ db: t.db, kp, egress: EGRESS, http }), state);
+    expect(await res.text()).not.toContain('probe-secret');
+    expect((await connectionOf(id)).oauth_error).not.toContain('probe-secret');
+  });
+
   it('does not quote a transport failure from the token endpoint (#885 round 2)', async () => {
     const state = randomBytes(12).toString('base64url');
     const id = await addConnection({ pending: { state } });

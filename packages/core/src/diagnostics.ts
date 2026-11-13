@@ -26,9 +26,11 @@ const ID_LIKE = '(?:[a-z]{2,5})_[0-9a-f]{32}';
  */
 const REDACTIONS: readonly (readonly [RegExp, string])[] = [
   [
-    // A quoted or bare value, unless it is only an auth scheme word (the `Bearer` rule covers that).
+    // A quoted or bare value, unless it is an Authorization value (`Bearer <token>`, which the scheme
+    // rule below redacts while keeping the scheme word). Only a scheme word followed by whitespace
+    // counts: `Bearer-probe-secret` is a credential value, not a scheme (#885 round 3).
     new RegExp(
-      `(${CREDENTIAL_KEY})(["']?)(\\s*[:=]\\s*)(?!Bearer\\b|Basic\\b|\\[redacted\\]|(?:${COMPOUND_CREDENTIAL_KEY})\\s*[:=])("(?:[^"\\\\]|\\\\.)*"|'[^']*'|[^\\s,;&}\\]"']+)`,
+      `(${CREDENTIAL_KEY})(["']?)(\\s*[:=]\\s*)(?!(?:Bearer|Basic)\\s|\\[redacted\\]|(?:${COMPOUND_CREDENTIAL_KEY})\\s*[:=])("(?:[^"\\\\]|\\\\.)*"|'[^']*'|[^\\s,;&}\\]"']+)`,
       'gi',
     ),
     '$1$2$3[redacted]',
@@ -39,8 +41,10 @@ const REDACTIONS: readonly (readonly [RegExp, string])[] = [
   [/\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{4,}){0,2}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/gi, '$1 [redacted]'],
   // 24+ characters with no separators: a token, not a word, an id or a number. Our own external
-  // ids are the one exception, so a message may still name the artifact it is about.
-  [new RegExp(`(?<![A-Za-z0-9_])(?!(?:${ID_LIKE})(?![A-Za-z0-9]))[A-Za-z0-9+/_-]{24,}={0,2}`, 'g'), '[redacted]'],
+  // ids are one exception, so a message may still name the artifact it is about; a provider's error
+  // code in capitals and underscores (`INVALID_AUTHENTICATION_CREDENTIALS`) is the other: letters
+  // only, in two or more words, which no generated token looks like (#885 round 3).
+  [new RegExp(`(?<![A-Za-z0-9_])(?!(?:${ID_LIKE}|[A-Z]+(?:_[A-Z]+)+)(?![A-Za-z0-9+/=_-]))[A-Za-z0-9+/_-]{24,}={0,2}`, 'g'), '[redacted]'],
 ];
 
 /**

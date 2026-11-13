@@ -207,7 +207,11 @@ function linkFailureReason(err: unknown): string {
     return 'the request timed out';
   // The e-mail package must not depend on integrations, so recognise its typed error by name.
   if (e?.constructor?.name === 'EgressError' || e?.name === 'EgressError')
-    return redactCredentials(String(e.message ?? '').split('\n')[0]).slice(0, 200) || 'the egress policy refused the request';
+    return (
+      redactCredentials(String(e.message ?? ''))
+        .split('\n')[0]
+        .slice(0, 200) || 'the egress policy refused the request'
+    );
   return 'the request failed';
 }
 

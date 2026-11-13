@@ -63,6 +63,18 @@ describe('providerDiagnostic', () => {
 });
 
 describe('redactCredentials', () => {
+  it('redacts a credential value that merely starts with an auth scheme word (#885 round 3)', () => {
+    expect(redactCredentials('token=Bearer-probe-secret')).not.toContain('probe-secret');
+    expect(redactCredentials('password=Basicprobe-secret')).not.toContain('probe-secret');
+    // A real scheme value is still left to the Authorization rule, which keeps the scheme word.
+    expect(redactCredentials('authorization: Bearer abcdef1234567890')).toBe('authorization: Bearer [redacted]');
+  });
+
+  it('keeps a provider error code written in capitals and underscores (#885 round 3)', () => {
+    expect(redactCredentials('INVALID_AUTHENTICATION_CREDENTIALS')).toBe('INVALID_AUTHENTICATION_CREDENTIALS');
+    expect(redactCredentials('code PERMISSION_DENIED_FOR_RESOURCE_TYPE here')).toBe('code PERMISSION_DENIED_FOR_RESOURCE_TYPE here');
+  });
+
   it('removes a named credential, an Authorization value and a bare token', () => {
     expect(redactCredentials(`access_token=${SECRET}`)).toBe('access_token=[redacted]');
     expect(redactCredentials('"developer-token": "probe-secret"')).toBe('"developer-token": [redacted]');

@@ -191,7 +191,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
         // block resolver's database error or a bug gets a fixed reason, never its text (#885).
         const expected = templateRenderError(e, 'the template could not be rendered');
         const reason = expected
-          ? `render_error: ${redactCredentials(firstLine(expected.message)).slice(0, 300)}`
+          ? `render_error: ${firstLine(redactCredentials(expected.message)).slice(0, 300)}`
           : 'render_error: the template could not be rendered';
         await ctx.tx
           .update(schema.messages)
@@ -227,7 +227,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
         // socket or driver error is not, so it becomes a fixed reason (#885 round 2).
         const reason =
           e instanceof ProviderSendError
-            ? `provider_error: ${redactCredentials(firstLine(e.message)).slice(0, 300)}`
+            ? `provider_error: ${firstLine(redactCredentials(e.message)).slice(0, 300)}`
             : 'provider_error: the provider did not accept the message';
         logger.warn({ messageId: message.id, provider: provider.adapter, err: (e as Error).message }, 'test e-mail send failed');
         await ctx.tx

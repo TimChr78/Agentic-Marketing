@@ -164,6 +164,14 @@ describe('test-send failures (#885 round 2)', () => {
     expect(err.message).not.toContain('probe-secret');
   });
 
+  it('redacts a multi-line provider refusal before keeping its first line (#885 round 3)', async () => {
+    state.sendError = new ProviderSendError('Postmark refused the message: password="probe-secret\nrest"');
+    const err = (await rejection(sendTestMessages(context(), opts(['owner@example.com'])))) as AppError;
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.message).toContain('Postmark refused the message');
+    expect(err.message).not.toContain('probe-secret');
+  });
+
   it('uses a fixed render reason when rendering fails unexpectedly', async () => {
     state.renderError = new Error(SECRET);
     const err = (await rejection(sendTestMessages(context(), opts(['owner@example.com'])))) as AppError;
