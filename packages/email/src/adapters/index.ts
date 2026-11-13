@@ -9,7 +9,7 @@ import type { EmailAdapter } from './types';
 export { parseBrevoWebhook } from './brevo';
 export { outbox } from './log';
 export { parsePostmarkWebhook } from './postmark';
-export { sesEvents, verifySnsMessage } from './ses';
+export { SNS_CERT_FETCHES_PER_MINUTE, sesEvents, verifySnsMessage } from './ses';
 export * from './types';
 
 export const adapters: Record<EmailAdapter['id'], EmailAdapter> = {
