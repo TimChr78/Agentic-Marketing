@@ -152,6 +152,7 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       // The migration role owns the tables the migration files alter. It is deliberately not a
       // superuser and has no BYPASSRLS, so FORCE RLS applies to it.
       for (const table of [
+        'artifacts',
         'messages',
         'experience_rollouts',
         'hosted_agent_runs',

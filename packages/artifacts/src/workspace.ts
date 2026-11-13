@@ -3,7 +3,7 @@ import { AppError, canonicalJson, hashValue, newId, newUuid, sha256 } from '@age
 import { normalizeDomainInput, schema } from '@agentic-marketing/db';
 import { and, asc, desc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { author, Requester, resolveActors, validateContent } from './commands';
+import { author, lockSingleton, Requester, resolveActors, validateContent } from './commands';
 import {
   assertDomainAvailable,
   DomainViewSchema,
@@ -246,6 +246,9 @@ export const createWorkspace = defineCommand({
         await ctx.tx.insert(schema.workspaceMembers).values({ workspaceId, userId: ctx.principal.userId, role: 'owner' });
 
         const brandId = newId(artifactTypes.brand.prefix);
+        // Same writer lock as artifacts.create and config.import, even though this workspace is
+        // new: every path that inserts a singleton brand uses one key (#867).
+        await lockSingleton(ctx.tx, workspaceId, 'brand');
         await ctx.tx.insert(schema.artifacts).values({
           workspaceId,
           id: brandId,

@@ -2,6 +2,26 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.17] - 2026-11-13
+
+### Fixed
+
+- A person's publish now locks the artifact (all members of a bundle, in id order) before it reads the draft and its author, so an agent's concurrent edit cannot go live without review under the `agent_changes` policy; approvals and held changes lock the same rows before publishing, so exactly one version is `published` and it matches `published_version`.
+- Singleton artifact types are unique per workspace in the database, not only in the application: `config.import` refuses a bundle with two entries of one singleton type and keeps its map current as it inserts, concurrent `artifacts.create` calls serialise on a workspace + type advisory lock and answer `conflict` instead of a raw unique violation, and a new migration resolves existing duplicates before it creates the partial unique index. Per workspace and type it keeps the published row, or the oldest if none is published; the others are archived (not deleted), renamed with ` (archived duplicate <id>)`, and excluded from the index.
+- `config.import` resolves a singleton to the active, non-archived row and never picks the duplicate rows migration 0092 archived. An entry whose explicit id names an archived singleton restores that row, unpublished, when no active singleton exists (the version that was live before it was archived never goes live again on its own; only the import's publish step, under the approval policy, can publish); when one does, the import refuses with `conflict` naming both ids rather than creating a second active row. Non-singleton imports keep updating an archived row in place. `artifacts.create`, `config.import` and `workspace.create` now share the same workspace + type advisory lock before their existence check, and a remaining `23505` on `artifacts_singleton_type` maps to `conflict` instead of HTTP 500.
+- Concurrent publishes of two mandates for one agent serialise on a workspace + agent advisory lock, so exactly one is active. `config.import` locks every affected artifact in id order before writing, which removes the A,B vs B,A deadlock, and any remaining Postgres deadlock (`40P01`) surfaces as a retryable `conflict` instead of an internal error.
+- **Upgrading:** the migration archives duplicate singleton rows deterministically (keeping the published one, or the oldest), so review archived rows named ` (archived duplicate …)` if a workspace used more than one brand, tracking plan, purposes, conversion map, delivery policy or business context. Nothing is deleted. No configuration or command changes are needed.
+
+### Upgrading from 0.14.16
+
+- **Migrations:** `packages/db/migrations/0092_singleton_artifacts.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** migration 0092 archives duplicate singleton artifacts (brand, tracking plan, purposes, conversion map, delivery policy, business context) per workspace, keeping the published or oldest row; `config.import` refuses a bundle with two entries of one singleton type and answers `conflict` when an explicit id names an archived singleton while another is active; a Postgres deadlock now returns a retryable `conflict` instead of an internal error, so clients should retry it.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.17.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.17 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.17` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.17). Run `docker compose exec app am doctor`.
+
+<!-- issues: 867, 868, 869, 871 -->
+
 ## [0.14.16] - 2026-11-13
 
 ### Security
