@@ -1,4 +1,4 @@
-import { publishedSingleton, suppressHoldout } from '@agentic-marketing/artifacts';
+import { complementarySuppression, publishedSingleton, suppressHoldout } from '@agentic-marketing/artifacts';
 import { campaignIdentityMap, type IdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
@@ -75,7 +75,11 @@ const memberRow = z.object({
   clickRate: z.number().nullable(),
   unsubscribeRate: z.number().nullable(),
   converters: z.number().int().nullable().describe('Distinct campaign converters; null when the row is suppressed'),
-  suppressed: z.boolean().describe('True when the member reached fewer than k people, so its counts are hidden'),
+  suppressed: z
+    .boolean()
+    .describe(
+      'True when the member reached fewer than k people, or is the complementary row hidden so a single small member cannot be derived, so its counts are hidden',
+    ),
 });
 
 const holdoutArm = z.object({
@@ -552,8 +556,17 @@ export const analyticsCampaignSummary = defineCommand({
     // The same k rule the query layer applies to a dimension group: a member row whose group of
     // people reached is below k has every count and derived rate suppressed (null), and is
     // counted in meta.suppressed. The headline is a total and is never suppressed.
+    // The headline is the visible total above these rows, so a single hidden member row would be
+    // recoverable as recipients minus the visible rows. Hide the smallest visible member row as
+    // well (#692); the member order is deterministic, so a tie is too.
+    const complementaryMember = complementarySuppression(
+      sending.map((m) => {
+        const row = breakdown.get(m.artifactId);
+        return { group: row?.reached ?? 0, hidden: !!row && row.reached < K };
+      }),
+    );
     let memberSuppressed = 0;
-    const members = sending.map((m) => {
+    const members = sending.map((m, index) => {
       const row = breakdown.get(m.artifactId);
       if (!row) {
         return {
@@ -569,7 +582,7 @@ export const analyticsCampaignSummary = defineCommand({
           suppressed: false,
         };
       }
-      if (row.reached < K) {
+      if (row.reached < K || index === complementaryMember) {
         memberSuppressed++;
         return {
           artifactId: m.artifactId,
@@ -627,6 +640,8 @@ export const analyticsCampaignSummary = defineCommand({
     const suppressedHoldouts = holdouts.filter((h) => h.suppressed).length;
     const notes = [...new Set([...totals.meta.notes, ...email.meta.notes, ...revenue.meta.notes, ...baseMeta.notes])];
     if (memberSuppressed) notes.push(`Member rows with fewer than k=${K} people reached have their counts suppressed.`);
+    if (complementaryMember !== null)
+      notes.push('One further member row was suppressed so a member below k cannot be derived from the campaign total.');
     if (suppressedHoldouts)
       notes.push(`Journey holdouts with fewer than k=${K} people in an arm or in a suppressed member row have their counts suppressed.`);
 

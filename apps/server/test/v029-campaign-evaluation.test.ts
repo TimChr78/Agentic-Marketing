@@ -445,9 +445,11 @@ describe('campaign dimension and filter', () => {
     });
     const rowOf = new Map(byCampaign.rows.map((r, i) => [String(r[columnIndex(byCampaign, 'campaign')]), i]));
     expect(new Set(rowOf.keys())).toEqual(new Set([campaignA, campaignSmall]));
-    expect(cell(byCampaign, rowOf.get(campaignA)!, 'email.sent')).toBe(10);
+    // campaignSmall has three people, below k, so the other (and smallest visible) campaign row is
+    // hidden too: the visible total of 13 would otherwise give campaignSmall as 13 − 10 (#692).
+    expect(cell(byCampaign, rowOf.get(campaignA)!, 'email.sent')).toBeNull();
     expect(cell(byCampaign, rowOf.get(campaignSmall)!, 'email.sent')).toBeNull();
-    expect(byCampaign.meta.suppressed).toBe(1);
+    expect(byCampaign.meta.suppressed).toBe(2);
 
     const filtered = await api().call('analytics.query', {
       measures: ['email.sent'],
@@ -468,11 +470,14 @@ describe('campaign dimension and filter', () => {
   });
 
   it('exposes campaign measures with the campaign dimension and filter', async () => {
+    // One campaign, so no small sibling forces complementary suppression and the measures are
+    // readable. The campaign dimension and the campaign filter are exercised together.
     const byCampaign = await api().call('analytics.query', {
       measures: ['campaign.recipients', 'campaign.converters', 'campaign.conversion_rate'],
       dimensions: ['campaign'],
       from: WIDE_FROM,
       to: WIDE_TO,
+      filters: { campaign: [campaignA] },
     });
     const rows = Object.fromEntries(byCampaign.rows.map((r) => [r[columnIndex(byCampaign, 'campaign')], r]));
     expect(rows[campaignA]).toBeDefined();
@@ -480,7 +485,7 @@ describe('campaign dimension and filter', () => {
     expect(rows[campaignA]![columnIndex(byCampaign, 'campaign.converters')]).toBe(3);
     expect(rows[campaignA]![columnIndex(byCampaign, 'campaign.conversion_rate')]).toBeCloseTo(0.3, 5);
     expect(rows[campaignA]![columnIndex(byCampaign, 'campaign.recipients')]).not.toBeNull();
-    expect(byCampaign.meta.suppressed).toBe(1);
+    expect(byCampaign.meta.suppressed).toBe(0);
 
     const revenue = await api().call('analytics.query', {
       measures: ['campaign.revenue', 'campaign.revenue_per_recipient'],
@@ -555,11 +560,14 @@ describe('campaign dimension and filter', () => {
   });
 
   it('keeps converters and the conversion rate independent of a revenue measure (#779)', async () => {
+    // One campaign keeps campaignSmall's three recipients (below k) from forcing complementary
+    // suppression on campaignA, so this test compares the measures, not suppression (#692).
     const withoutRevenue = await api().call('analytics.query', {
       measures: ['campaign.recipients', 'campaign.converters', 'campaign.conversion_rate'],
       dimensions: ['campaign'],
       from: FROM,
       to: TO,
+      filters: { campaign: [campaignA] },
       order: { by: 'campaign', dir: 'asc' },
     });
     const withRevenue = await api().call('analytics.query', {
@@ -567,6 +575,7 @@ describe('campaign dimension and filter', () => {
       dimensions: ['campaign'],
       from: FROM,
       to: TO,
+      filters: { campaign: [campaignA] },
       order: { by: 'campaign', dir: 'asc' },
     });
 
@@ -636,15 +645,17 @@ describe('analytics.campaignSummary', () => {
 
     const members = Object.fromEntries(summary.members.map((m) => [m.type, m]));
     expect(summary.members).toHaveLength(2);
+    // The journey reached four people, below k=5, and the broadcast reached six. With the
+    // recipients total visible, leaving the broadcast readable would give the journey as 10−6=4,
+    // so the smallest visible row is hidden with it (#692).
     expect(members.broadcast).toMatchObject({
-      sent: 6,
-      delivered: 5,
-      clickRate: 2 / 5,
-      unsubscribeRate: 1 / 5,
-      converters: 2,
-      suppressed: false,
+      sent: null,
+      delivered: null,
+      clickRate: null,
+      unsubscribeRate: null,
+      converters: null,
+      suppressed: true,
     });
-    // The journey reached four people, below k=5: every count and rate in its row is hidden.
     expect(members.journey).toMatchObject({
       sent: null,
       delivered: null,
@@ -683,11 +694,30 @@ describe('analytics.campaignSummary', () => {
     expect(summary.meta.timeZone).toBe(TZ);
     expect(summary.meta.k).toBe(5);
     expect(summary.meta.currency).toBeNull();
-    expect(summary.meta.suppressed).toBe(4);
+    // Two member rows (4 and its complementary 6), one holdout card and two currency revenue rows.
+    expect(summary.meta.suppressed).toBe(5);
     expect(summary.meta.notes.join(' ')).toContain('fewer than k');
+    expect(summary.meta.notes.join(' ')).toContain('One further member row was suppressed');
     expect(summary.meta.notes.join(' ')).toContain(
       'got a campaign message and converted within 7 days of their first campaign message (first touch)',
     );
+  });
+
+  it('hides the smallest member row beside the total when one member is below k (#692)', async () => {
+    // The issue's example: 10 recipients, member rows of 6 and 4. Leaving the 6 visible would
+    // give the hidden member as 10 − 6 = 4, so both rows are hidden and the total stays visible.
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignA, from: FROM, to: TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+
+    expect(summary.headline.recipients).toBe(10);
+    expect(summary.members).toHaveLength(2);
+    expect(summary.members.every((m) => m.suppressed)).toBe(true);
+    expect(summary.members.map((m) => m.sent)).toEqual([null, null]);
+    // Only the sum of the hidden rows can be derived from the total.
+    expect(summary.headline.recipients - summary.members.reduce((sum, m) => sum + (m.sent ?? 0), 0)).toBe(10);
+    expect(summary.meta.suppressed).toBeGreaterThanOrEqual(2);
+    expect(summary.meta.notes.join(' ')).toContain('One further member row was suppressed');
   });
 
   it('suppresses a member row below k and counts it in meta.suppressed (#586)', async () => {

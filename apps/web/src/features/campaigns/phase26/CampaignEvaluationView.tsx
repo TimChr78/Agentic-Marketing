@@ -359,8 +359,9 @@ function JourneyHoldouts({
 function SuppressionNotice({ summary }: { summary: MeasuredSummary }) {
   return (
     <Alert tone="warn" title="Some member rows are suppressed">
-      Member rows with fewer than k={int(summary.meta.k)} people reached have their counts and rates hidden. Campaign totals stay visible,
-      and no identities or inferred values are shown.
+      Member rows with fewer than k={int(summary.meta.k)} people reached have their counts and rates hidden, and when only one row would be
+      hidden the smallest visible row is hidden with it, so the hidden numbers cannot be derived from the campaign total. Campaign totals
+      stay visible, and no identities or inferred values are shown.
     </Alert>
   );
 }

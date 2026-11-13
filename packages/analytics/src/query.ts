@@ -1,4 +1,4 @@
-import { K, publishedSingleton } from '@agentic-marketing/artifacts';
+import { complementarySuppression, K, publishedSingleton } from '@agentic-marketing/artifacts';
 import { campaignIdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
@@ -85,7 +85,12 @@ export const analyticsMeta = z.object({
   from: z.string(),
   to: z.string(),
   freshness: z.string().nullable().describe('Newest event in the range, as an ISO date-time'),
-  suppressed: z.number().int().describe('Rows whose measures were hidden by the minimum group size'),
+  suppressed: z
+    .number()
+    .int()
+    .describe(
+      'Rows whose measures were hidden by the minimum group size, plus at most one complementary row when only one would be hidden',
+    ),
   k: z.number().int(),
   notes: z.array(z.string()),
 });
@@ -298,6 +303,61 @@ export async function freshness(deps: Deps, input: FreshnessInput): Promise<stri
   return value ? `${value.replace(' ', 'T')}Z` : null;
 }
 
+export interface SuppressedRows {
+  rows: (string | number | null)[][];
+  /** Rows whose measures were hidden: those below k plus at most one complementary row. */
+  suppressed: number;
+  /** True when one visible row was hidden too, so a single small group cannot be derived. */
+  complementary: boolean;
+  /** Rows whose revenue figures were hidden below k while their counts stayed visible. */
+  revenueSuppressed: number;
+}
+
+/**
+ * Shapes the compiled rows and applies the k floor. When exactly one row is below k, the smallest
+ * visible row is hidden as well (#692), so total minus visible rows is only the sum of the hidden
+ * ones. The rows are in the query's deterministic sort order, which decides a tie.
+ */
+export function suppressRows(
+  raw: readonly Record<string, unknown>[],
+  compiled: Pick<CompiledQuery, 'outputs' | 'kAlias' | 'revenueKAlias' | 'hasNonTimeDimension'>,
+): SuppressedRows {
+  const kOf = (row: Record<string, unknown>) => Number(row[compiled.kAlias]);
+  const hidden = raw.map((row) => compiled.hasNonTimeDimension && (!Number.isFinite(kOf(row)) || kOf(row) < K));
+  const complementary = complementarySuppression(raw.map((row, i) => ({ group: kOf(row), hidden: hidden[i]! })));
+  if (complementary !== null) hidden[complementary] = true;
+
+  let suppressed = 0;
+  let revenueSuppressed = 0;
+  const rows = raw.map((row, i) => {
+    const hide = hidden[i]!;
+    // A per-currency revenue row is about its converters, even when the caller asked for no other
+    // dimension. Below k its revenue figures are null, while the row's recipient and converter
+    // counts stay readable (#756). Zero converters have no people to protect and stay a real 0
+    // (#630), which is why only a non-empty group below k is hidden.
+    const revenueK = compiled.revenueKAlias === undefined ? Number.NaN : Number(row[compiled.revenueKAlias]);
+    const hideRevenue = !hide && compiled.revenueKAlias !== undefined && Number.isFinite(revenueK) && revenueK > 0 && revenueK < K;
+    if (hide) suppressed += 1;
+    else if (hideRevenue) {
+      suppressed += 1;
+      revenueSuppressed += 1;
+    }
+    return compiled.outputs.map((out) => {
+      const value = row[out.alias];
+      if (out.kind === 'dimension') {
+        if (value === '' || value === null || value === undefined) return null;
+        return typeof value === 'number' ? value : String(value);
+      }
+      if (hide) return null;
+      if (hideRevenue && isRevenueMeasure(out.measure)) return null;
+      if (value === null || value === undefined) return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    });
+  });
+  return { rows, suppressed, complementary: complementary !== null, revenueSuppressed };
+}
+
 async function segmentQuery(deps: Deps, input: QueryInput, filters: NormalizedFilters): Promise<AnalyticsResult> {
   const timeZone = await workspaceTimeZone(deps.tx, deps.workspaceId);
   const dimensions = input.dimensions as DimensionId[];
@@ -311,6 +371,7 @@ async function segmentQuery(deps: Deps, input: QueryInput, filters: NormalizedFi
 
   let rowsOut: (string | number | null)[][] = [];
   let suppressed = 0;
+  let complementary = false;
   if (bySegment) {
     const rows = await deps.tx
       .select({ segment: schema.segmentMemberships.segmentId, n: sql<number>`count(*)::int` })
@@ -323,11 +384,12 @@ async function segmentQuery(deps: Deps, input: QueryInput, filters: NormalizedFi
     else if (input.order?.by === 'segment.members') shaped.sort((a, b) => (input.order?.dir === 'desc' ? b.n - a.n : a.n - b.n));
     else shaped.sort((a, b) => a.segment.localeCompare(b.segment));
     shaped = shaped.slice(0, input.limit);
-    rowsOut = shaped.map((r) => {
-      const hide = r.n < K;
-      if (hide) suppressed++;
-      return [r.segment, hide ? null : r.n];
-    });
+    const hidden = shaped.map((r) => r.n < K);
+    const extra = complementarySuppression(shaped.map((r, i) => ({ group: r.n, hidden: hidden[i]! })));
+    if (extra !== null) hidden[extra] = true;
+    complementary = extra !== null;
+    suppressed = hidden.filter(Boolean).length;
+    rowsOut = shaped.map((r, i) => [r.segment, hidden[i] ? null : r.n]);
   } else {
     const [row] = await deps.tx.select({ n: sql<number>`count(*)::int` }).from(schema.segmentMemberships).where(where);
     rowsOut = [[Number(row?.n ?? 0)]];
@@ -347,7 +409,10 @@ async function segmentQuery(deps: Deps, input: QueryInput, filters: NormalizedFi
       freshness: new Date().toISOString(),
       suppressed,
       k: K,
-      notes: ['segment.members is the current membership size; from and to do not change it.'],
+      notes: [
+        'segment.members is the current membership size; from and to do not change it.',
+        ...(complementary ? ['One further segment row was suppressed so a single group below k cannot be derived from the total.'] : []),
+      ],
     },
   };
 }
@@ -452,35 +517,9 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
     'analytics query',
   );
 
-  let suppressed = 0;
-  let revenueSuppressed = 0;
-  const rows = raw.map((row) => {
-    const k = Number(row[compiled.kAlias]);
-    const hide = compiled.hasNonTimeDimension && (!Number.isFinite(k) || k < K);
-    // A per-currency revenue row is about its converters, even when the caller asked for no other
-    // dimension. Below k its revenue figures are null, while the row's recipient and converter
-    // counts stay readable (#756). Zero converters have no people to protect and stay a real 0
-    // (#630), which is why only a non-empty group below k is hidden.
-    const revenueK = compiled.revenueKAlias === undefined ? Number.NaN : Number(row[compiled.revenueKAlias]);
-    const hideRevenue = compiled.revenueKAlias !== undefined && Number.isFinite(revenueK) && revenueK > 0 && revenueK < K;
-    if (hide) suppressed++;
-    else if (hideRevenue) {
-      suppressed++;
-      revenueSuppressed++;
-    }
-    return compiled.outputs.map((out) => {
-      const value = row[out.alias];
-      if (out.kind === 'dimension') {
-        if (value === '' || value === null || value === undefined) return null;
-        return typeof value === 'number' ? value : String(value);
-      }
-      if (hide) return null;
-      if (hideRevenue && isRevenueMeasure(out.measure)) return null;
-      if (value === null || value === undefined) return null;
-      const n = Number(value);
-      return Number.isFinite(n) ? n : null;
-    });
-  });
+  const shaped = suppressRows(raw, compiled);
+  const rows = shaped.rows;
+  const { suppressed, revenueSuppressed } = shaped;
 
   const currencyIndex = compiled.outputs.findIndex((o) => o.kind === 'dimension' && o.dimension === 'currency');
   const currencies = new Set(
@@ -507,6 +546,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
     );
   if (campaignSource && identity?.overLimit) notes.push(identityUnresolvedNote(identity.limit));
   if (suppressed) notes.push(`Groups smaller than k=${K} have their measures suppressed.`);
+  if (shaped.complementary) notes.push('One further group was suppressed so a single group below k cannot be derived from the total.');
 
   return {
     columns: compiled.columns,

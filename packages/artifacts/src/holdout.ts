@@ -195,6 +195,40 @@ export function anyArmBelowK(arms: readonly { entered: number }[], k = K): boole
   return arms.some((arm) => arm.entered < k);
 }
 
+/** How one row of a dimensioned result stands against the k floor. */
+export interface SuppressionCandidate {
+  /** The row's group size: the same measure the k test uses (distinct people, or members). */
+  group: number;
+  /** True when the row is already hidden because its group is below k. */
+  hidden: boolean;
+}
+
+/**
+ * Complementary suppression (#692). When exactly one row is hidden below k, a reader recovers it
+ * as the total minus the visible rows. Also hide the visible row with the lowest group size, so
+ * only the sum of the two hidden rows is derivable. Totals stay visible.
+ *
+ * Returns the index of the row to hide as well, or null when nothing more is needed: no row is
+ * hidden, two or more already are, or no visible row has people behind it (hiding an empty row
+ * would reveal nothing and would leave the single hidden row recoverable). Ties go to the first
+ * row in the array, which is the result's deterministic sort order.
+ *
+ * The rule applies when the array is one dimensioned result with a visible total above it. A view
+ * with only two arms already withholds both arms and every comparison instead (#590).
+ */
+export function complementarySuppression(rows: readonly SuppressionCandidate[]): number | null {
+  let hidden = 0;
+  for (const row of rows) if (row.hidden) hidden += 1;
+  if (hidden !== 1) return null;
+  let index = -1;
+  for (let i = 0; i < rows.length; i += 1) {
+    const row = rows[i]!;
+    if (row.hidden || !(row.group > 0)) continue;
+    if (index < 0 || row.group < rows[index]!.group) index = i;
+  }
+  return index < 0 ? null : index;
+}
+
 export interface SuppressedArmResult {
   entered: null;
   converted: null;
