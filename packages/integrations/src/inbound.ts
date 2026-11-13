@@ -30,30 +30,28 @@ const RETRY_AFTER_S = 30;
 
 /** One signed delivery's idempotency key: workspace + endpoint + signed id (#643). */
 
-/** Request headers that change per hop or per attempt, never per event. */
-const TRANSPORT_HEADERS = new Set([
+/**
+ * Request headers that change per delivery attempt and carry no event meaning (0.14.11 round 4).
+ * Everything else, including the client-identity headers a CDN or proxy adds — `x-forwarded-*`,
+ * `x-real-ip`, `true-client-ip`, `cf-connecting-ip`, `cf-ipcountry`, `cf-visitor`, `user-agent` —
+ * belongs to a wholesale mapping's replay identity. Standard Webhooks rotates the timestamp and
+ * signature on every attempt; its id is the key itself, never a header value in the identity.
+ */
+const PER_ATTEMPT_HEADERS = new Set([
   'host',
   'content-length',
   'connection',
   'accept-encoding',
-  'user-agent',
   'via',
-  'date',
   'cdn-loop',
-  'x-forwarded-for',
-  'x-forwarded-proto',
-  'x-forwarded-host',
-  'x-forwarded-port',
-  'x-real-ip',
-  'true-client-ip',
+  'date',
   'x-request-id',
   'x-amzn-trace-id',
   'traceparent',
   'tracestate',
   'cf-ray',
-  'cf-connecting-ip',
-  'cf-ipcountry',
-  'cf-visitor',
+  'webhook-timestamp',
+  'webhook-signature',
 ]);
 
 /**
@@ -62,9 +60,13 @@ const TRANSPORT_HEADERS = new Set([
  * since one order body arrives as both `orders/create` and `orders/paid`). JSONata names a header as
  * `headers.name`, `headers."x-name"` or `headers.` + backquoted name; a mapping that uses the
  * `headers` object any other way (`$lookup(headers, …)`, `$keys(headers)`, `headers` alone) takes
- * every header except per-hop transport ones, and also every transport header whose name appears
- * as a string literal in the mapping (`$lookup(headers, "x-forwarded-for")`). A connector without a
- * mapping expression derives its events from the body and its identity headers alone.
+ * every header except the per-attempt ones above, and also every per-attempt header whose name
+ * appears as a string literal in the mapping (`$lookup(headers, "traceparent")`). The wholesale
+ * direction is deliberate: a name a mapping computes (`$lookup(headers, "x-forwarded-" & "for")`)
+ * cannot be detected, and dropping a header the mapping reads loses an event, while keeping one
+ * that differs per attempt only turns a retry through a different client IP into a new event
+ * rather than risking a lost one. A connector without a mapping expression derives its events
+ * from the body and its identity headers alone.
  */
 export function replayHeaderValues(settings: unknown, headers: Record<string, string>, connectorHeaders: readonly string[] = []): string {
   const mapping = settings && typeof settings === 'object' ? (settings as { mapping?: unknown }).mapping : undefined;
@@ -80,11 +82,11 @@ export function replayHeaderValues(settings: unknown, headers: Record<string, st
     if (wholesale)
       for (const m of mapping.matchAll(/"([^"]*)"|'([^']*)'/g)) {
         const literal = (m[1] ?? m[2] ?? '').toLowerCase();
-        if (TRANSPORT_HEADERS.has(literal)) named.add(literal);
+        if (PER_ATTEMPT_HEADERS.has(literal)) named.add(literal);
       }
   }
   const keys = new Set(named);
-  if (wholesale) for (const k of Object.keys(headers)) if (!TRANSPORT_HEADERS.has(k)) keys.add(k);
+  if (wholesale) for (const k of Object.keys(headers)) if (!PER_ATTEMPT_HEADERS.has(k)) keys.add(k);
   return [...keys]
     .sort()
     .map((k) => `${k}:${headers[k] ?? ''}`)

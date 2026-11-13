@@ -28,6 +28,22 @@ export function endpointOrigin(endpoint: string): string {
 }
 
 /**
+ * A URL as it may go into a log: the origin and the path, without userinfo, query string or
+ * fragment (0.14.11 round 4). A configured public URL can carry credentials or a token in its
+ * query, and neither may reach the startup logs. The trailing slash of the root path is dropped so
+ * `https://app.example.com/` reads as its origin. Anything that is not a URL is reported as such.
+ */
+export function endpointLocation(endpoint: string): string {
+  try {
+    const url = new URL(endpoint);
+    if (url.origin === 'null') return '(invalid URL)';
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return '(invalid URL)';
+  }
+}
+
+/**
  * Start OpenTelemetry tracing when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise the API stays a no-op.
  * Works with any OTLP backend (Grafana Tempo, SigNoz, Jaeger, …).
  */

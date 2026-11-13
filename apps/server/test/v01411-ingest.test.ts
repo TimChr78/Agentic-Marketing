@@ -176,6 +176,27 @@ describe('inbound replay protection for every scheme (#787)', () => {
     expect(await second.json()).toMatchObject({ success: true, accepted: 1 });
   });
 
+  it('keeps same-body deliveries a mapping names dynamically from two client addresses (0.14.11 round 4)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Dynamically address-keyed generic',
+      settings: { mapping: '$merge([body, {"anonymousId": $lookup(headers, "x-forwarded-" & "for")}])' },
+      secrets: {},
+    });
+    const body = tracked('dynamic-address-keyed', 'dyn-1');
+    const first = await post(connection.inboundPath!, body, { 'x-forwarded-for': 'alice' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    // The name is computed, so it is not a string literal the header detection can see; a
+    // wholesale mapping must still count the client address (0.14.11 round 4).
+    const second = await post(connection.inboundPath!, body, { 'x-forwarded-for': 'bob' });
+    const secondBody = await second.json();
+    expect(secondBody).toMatchObject({ success: true, accepted: 1 });
+    expect(secondBody).not.toHaveProperty('duplicate');
+    // A retry from the same address is still a replay.
+    const replay = await post(connection.inboundPath!, body, { 'x-forwarded-for': 'bob' });
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
   it('keeps a Shopify order paid with the same body as its create (0.14.11 round 3)', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'shopify',
