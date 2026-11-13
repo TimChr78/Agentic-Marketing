@@ -144,6 +144,13 @@ export const experienceResults = defineCommand({
       }),
     ),
     method: z.enum(['sequential', 'bayesian', 'fixed']),
+    analysis: z
+      .object({
+        method: z.enum(['sequential', 'bayesian', 'fixed']),
+        alpha: z.number(),
+        threshold: z.number(),
+      })
+      .describe('The analysis settings of the version these results describe; an open draft may configure different ones'),
     recommendation: z.string(),
     note: z.string(),
   }),
@@ -171,8 +178,11 @@ export const experienceResults = defineCommand({
       );
     if (!row) throw new AppError('not_found', `No experience ${input.artifactId} version ${version}.`);
     const def = artifactTypes.experience.content.parse(row.content);
-    const counts = await ctx.services.events.experimentCounts(ctx.principal.workspaceId, {
+    const { variants: counts, unversioned } = await ctx.services.events.experimentCounts(ctx.principal.workspaceId, {
       experienceId: input.artifactId,
+      // Variant ids are editable per version, so counting every exposure of the experience would
+      // mix ids the published version no longer has into its results (#758).
+      version,
       goal: def.goal?.event,
       since: input.days ? new Date(Date.now() - input.days * 86_400_000) : undefined,
     });
@@ -208,16 +218,25 @@ export const experienceResults = defineCommand({
       else if (challengers.every((v) => (v.probBeatControl ?? 1) <= 1 - threshold))
         recommendation = `${controlRow.variant} is better than every variant with at least ${pct(threshold)} probability.`;
     } else recommendation = 'Fixed horizon: read the p-values once the planned sample size is reached, not before.';
+    const note = counts.length
+      ? def.goal
+        ? 'Sequential p-values may be checked at any time; the fixed-horizon p-value only at the planned sample size; Bayesian figures assume a uniform prior.'
+        : 'Set a goal event on the experience to measure conversions.'
+      : `No data for version ${version} yet: counts include only exposures of version ${version}${input.days ? ` in the last ${input.days} days` : ''}, and no visitor has been exposed to it. Exposures of other versions, and exposures recorded without a version, do not count toward this version.`;
+    // Do not drop them silently: when the window holds exposures with no version, say how many
+    // were excluded and why, whether or not the version has data of its own (#758).
+    const excluded = unversioned
+      ? ` ${unversioned} exposure${unversioned === 1 ? '' : 's'} recorded without a version ${unversioned === 1 ? 'was' : 'were'} excluded, because results count only exposures of version ${version}.`
+      : '';
     return {
       version,
       goal: def.goal?.event ?? null,
       control: controlRow?.variant ?? null,
       variants,
       method,
+      analysis: { method, alpha, threshold },
       recommendation,
-      note: def.goal
-        ? 'Sequential p-values may be checked at any time; the fixed-horizon p-value only at the planned sample size; Bayesian figures assume a uniform prior.'
-        : 'Set a goal event on the experience to measure conversions.',
+      note: `${note}${excluded}`,
     };
   },
 });

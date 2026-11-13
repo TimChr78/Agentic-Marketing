@@ -475,4 +475,100 @@ describe('preview and results', () => {
     expect(after.goal).toBe('Order Completed');
     expect(after.recommendation).not.toContain('Set a goal event');
   });
+
+  it('counts only exposures of the version the results describe, after a republish (#758)', async () => {
+    const api = t.api(owner);
+    const publishVersion = async (artifactId: string, content: Record<string, unknown>) => {
+      await api.call('artifacts.updateDraft', { artifactId, content });
+      await api.call('artifacts.requestPublish', { artifactId, note: 'republish for #758' });
+    };
+    const v1 = {
+      placement: 'versioned_hero',
+      variants: [
+        { id: 'a', name: 'Plain', weight: 50, content: { html: '<h1>Plain</h1>' } },
+        { id: 'b', name: 'Offer', weight: 50, content: { html: '<h1>Offer</h1>' } },
+      ],
+      goal: { event: 'Order Completed' },
+      analysis: { method: 'sequential', alpha: 0.05 },
+    };
+    const created = await api.call('artifacts.create', { type: 'experience', name: 'Versioned hero', content: v1 });
+    await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'first version' });
+    const exp = created.artifactId;
+    const viewed = (anonymousId: string, variant: string, version: number) => ({
+      type: 'track',
+      event: 'Experience Viewed',
+      anonymousId,
+      properties: { experience_id: exp, variant_id: variant, version, placement: 'versioned_hero' },
+      context: yes,
+      timestamp: '2026-11-10T09:00:00Z',
+    });
+    const order = (anonymousId: string, at: string) => ({
+      type: 'track',
+      event: 'Order Completed',
+      anonymousId,
+      context: yes,
+      timestamp: at,
+    });
+    // A hand-rolled client (or one from before the SDK sent a version) records the placement but
+    // no version. Results cannot guess a version for these, so they must be counted and called out
+    // in the note rather than dropped silently (#758).
+    const viewedWithoutVersion = (anonymousId: string) => ({
+      type: 'track',
+      event: 'Experience Viewed',
+      anonymousId,
+      properties: { experience_id: exp, variant_id: 'control', placement: 'versioned_hero' },
+      context: yes,
+      timestamp: '2026-11-10T09:00:00Z',
+    });
+    // Three v1 "a" visitors and two v1 "b" visitors: ids the republished version no longer has.
+    await send([...['a0', 'a1', 'a2'].map((v) => viewed(`ver-${v}`, 'a', 1)), ...['b0', 'b1'].map((v) => viewed(`ver-${v}`, 'b', 1))]);
+
+    // Republished with the variants renamed: v2 serves control/treatment, not a/b.
+    await publishVersion(exp, {
+      ...v1,
+      variants: [
+        { id: 'control', name: 'Plain', weight: 50, content: { html: '<h1>Plain</h1>' } },
+        { id: 'treatment', name: 'Offer', weight: 50, content: { html: '<h1>Offer</h1>' } },
+      ],
+    });
+    await send([
+      ...['c0', 'c1'].map((v) => viewed(`ver-${v}`, 'control', 2)),
+      viewed('ver-t0', 'treatment', 2),
+      viewed('ver-t1', 'treatment', 2),
+      order('ver-t0', '2026-11-10T10:00:00Z'),
+    ]);
+    await send([viewedWithoutVersion('ver-u0'), viewedWithoutVersion('ver-u1')]);
+    // ClickHouse is written asynchronously; wait for every exposure before comparing counts.
+    await eventually(
+      () => t.srv.events.countEvents(ws, { name: 'Experience Viewed' }),
+      (rows) => rows.reduce((n, r) => n + r.count, 0) >= 11,
+      20_000,
+    );
+
+    const r = await api.call('experiences.results', { artifactId: exp });
+    expect(r.version).toBe(2);
+    expect(r.variants.map((v) => v.variant).sort()).toEqual(['control', 'treatment']);
+    expect(r.variants.find((v) => v.variant === 'control')).toMatchObject({ exposed: 2, converted: 0 });
+    expect(r.variants.find((v) => v.variant === 'treatment')).toMatchObject({ exposed: 2, converted: 1 });
+    expect(r.control).toBe('control');
+    expect(r.recommendation).not.toBe('Nothing to compare yet.');
+    // Unversioned exposures are excluded, but never silently: the note says how many and why.
+    expect(r.note).toContain('2 exposures recorded without a version were excluded');
+    // The analysis the numbers were computed with, echoed so a draft cannot rewrite the caption.
+    expect(r.analysis).toMatchObject({ method: 'sequential', alpha: 0.05, threshold: 0.95 });
+
+    // A version published a moment ago has no exposures of its own: say so instead of showing v1/v2.
+    await publishVersion(exp, {
+      ...v1,
+      variants: [
+        { id: 'control', name: 'Plain v3', weight: 50, content: { html: '<h1>Plain v3</h1>' } },
+        { id: 'treatment', name: 'Offer v3', weight: 50, content: { html: '<h1>Offer v3</h1>' } },
+      ],
+    });
+    const newest = await api.call('experiences.results', { artifactId: exp });
+    expect(newest.version).toBe(3);
+    expect(newest.variants).toEqual([]);
+    expect(newest.note).toContain('No data for version 3 yet');
+    expect(newest.note).toContain('2 exposures recorded without a version were excluded');
+  }, 60_000);
 });

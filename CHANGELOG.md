@@ -2,6 +2,32 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.12] - 2026-11-13
+
+### Fixed
+
+- Experiment results count exposure and conversion only for the version they describe. A republished experience whose variants were renamed no longer returns rows for the old variant ids, loses its control fallback or claims "Nothing to compare yet" under the new version's number (#758).
+- The results screen prints the version the server measured and the analysis settings of that version, so an open draft with a different `alpha`, `threshold` or method no longer rewrites the caption of a result computed from the published version; a version too new to have exposures says "No data for version N yet" (#758, #759).
+- Experiment results no longer leave exposures recorded without a version silently out of the counts: when the window holds any, the note says how many were excluded and that results count only the version they describe (#758).
+- The journey holdout card labels the absolute lift and its 95% interval in percentage points ("+5.0 pp"), like the campaign and broadcast holdout panels, instead of printing a rate-style percent (#794).
+- The Messages list loads the workspace's purposes and names a message's custom purpose; it no longer shows "Unavailable purpose" for every purpose an operator defined themselves (#793).
+- `campaign.converters` and `campaign.conversion_rate` are a campaign total again: currency partitions only the revenue roll, so requesting `campaign.revenue` (or `campaign.revenue_per_recipient`) no longer splits converters per conversion currency or divides a per-currency count by the all-channel recipients. The same campaign now reports the same converter count and rate with and without a revenue measure.
+- `ads.performance` reads conversion events through the paged reader keyed by the table's full replacing key, so a report window with more than 100,000 conversions counts every event instead of an arbitrary 100,000-row slice, and two conversions that tie on timestamp and event id are both counted. Each page is folded into the totals before the next is read, and the last `utm_campaign` touch is now chosen in ClickHouse per conversion within its window (the conversion chunk is the join's build side and touches stream past it), so the response is at most one row per conversion and neither the server nor ClickHouse holds a visitor's touch history, however long; a report counts its touch and conversion pairs before joining them and fails with a clear message, never partial totals, past 10 million pairs per batch, 50 million per report or 25 seconds per query (a ClickHouse or client timeout reports the same clear error); conversion tuples are chunked below ClickHouse's HTTP form-field limit, so a window whose conversions have more than 100,000 distinct anonymous ids succeeds instead of failing with “Field value too long”. A same-time touch tie is resolved deterministically by event id.
+- Campaign-source freshness is scoped to `sent` and `delivered`, the events the recipient count reads, so a later `failed`, `queued` or `skipped` send decision cannot become the “latest event in period”; an empty match now returns null rather than 1970-01-01.
+- `analytics.campaignSummary` includes an archived campaign when it is requested by id, so its headline, funnel and revenue describe the same members as its member rows instead of a zero headline beside populated rows.
+
+- After upgrading, expect these numbers to change: `campaign.converters` and `campaign.conversion_rate` rise to the campaign total on every per-currency row (for example DKK/EUR rows that reported 2 and 1 converters and rates 0.2/0.1 for a 10-recipient campaign now both report 3 converters and 0.3); `ads.performance` conversions, revenue, CPA and ROAS can rise for windows above 100,000 conversion events; campaign freshness moves back to the last `sent`/`delivered` event for SMS- or push-only campaigns; and an archived campaign’s summary headline becomes non-zero and matches its member rows.
+
+### Upgrading from 0.14.11
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `ads.performance` refuses, with `precondition_failed` and no partial totals, a report whose last-touch attribution would compare more than 10 million campaign touches with conversions in one batch (50 million per report) or take longer than 25 seconds; narrow the date range or the attribution window. `campaign.converters` and `campaign.conversion_rate` change to campaign totals (see the note above), and experiment results count only the version they describe.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.12.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.12 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.12` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.12). Run `docker compose exec app am doctor`.
+
+<!-- issues: 758, 759, 760, 779, 780, 786, 793, 794 -->
+
 ## [0.14.11] - 2026-11-13
 
 ### Fixed

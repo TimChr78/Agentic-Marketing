@@ -48,11 +48,11 @@ export interface PublishedCampaign {
 }
 
 /**
- * Every published, non-archived campaign with the content of its published version. RLS scopes it
- * to the workspace of the transaction. Archived campaigns are not live, so they are left out of
- * lookups; their members stay untouched.
+ * Every published campaign with the content of its published version. RLS scopes it to the
+ * workspace of the transaction. Archived campaigns are not live, so they are left out by default;
+ * a historical report that names one by id can ask for them (#780). Their members stay untouched.
  */
-export async function publishedCampaigns(tx: Tx): Promise<PublishedCampaign[]> {
+export async function publishedCampaigns(tx: Tx, options: { includeArchived?: boolean } = {}): Promise<PublishedCampaign[]> {
   const rows = await tx
     .select({
       id: schema.artifacts.id,
@@ -69,7 +69,13 @@ export async function publishedCampaigns(tx: Tx): Promise<PublishedCampaign[]> {
         eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
       ),
     )
-    .where(and(eq(schema.artifacts.type, 'campaign'), isNotNull(schema.artifacts.publishedVersion), eq(schema.artifacts.archived, false)));
+    .where(
+      and(
+        eq(schema.artifacts.type, 'campaign'),
+        isNotNull(schema.artifacts.publishedVersion),
+        options.includeArchived ? undefined : eq(schema.artifacts.archived, false),
+      ),
+    );
   return rows.map((r) => ({
     id: r.id,
     name: r.name,
