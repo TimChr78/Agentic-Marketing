@@ -217,6 +217,13 @@ export interface TotalContributor {
   value: number;
   /** True when this contributor's value in this total is already suppressed. */
   hidden: boolean;
+  /**
+   * False when the contributor cannot contribute to this total at all (its value is zero by
+   * construction, e.g. an SMS-only member in an e-mail total). Such a hidden contributor does not
+   * protect the total, because everyone knows its share is zero. An observed zero still applies:
+   * "none of these people converted" is itself a small-group disclosure. Defaults to true.
+   */
+  applies?: boolean;
 }
 
 /** What one total needs so a single hidden contributor cannot be recovered by subtraction. */
@@ -238,8 +245,9 @@ export interface ComplementaryTotalDecision {
  * fallback, used only when no visible non-zero contributor exists.
  */
 export function complementaryTotal(contributors: readonly TotalContributor[]): ComplementaryTotalDecision {
+  // Only a hidden contributor that can contribute to this total protects it (0.14.19 review round 2).
   let hidden = 0;
-  for (const contributor of contributors) if (contributor.hidden) hidden += 1;
+  for (const contributor of contributors) if (contributor.hidden && contributor.applies !== false) hidden += 1;
   if (hidden !== 1) return { hide: [], withheld: false };
   let pick: TotalContributor | undefined;
   for (const contributor of contributors) {
