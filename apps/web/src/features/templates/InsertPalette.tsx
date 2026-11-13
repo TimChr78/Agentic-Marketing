@@ -38,16 +38,20 @@ export function InsertPalette({
   const needle = query.trim().toLowerCase();
   const elements = ELEMENTS.filter((e) => !needle || e.label.toLowerCase().includes(needle));
 
+  // The caller passes `onClose` inline, so a keystroke elsewhere in the palette re-renders it with
+  // a new identity. Keep it in a ref so the listener is mounted once and focus is not reset (#820).
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
   useEffect(() => {
     search.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        closeRef.current();
       }
     };
     const onPointer = (e: PointerEvent) => {
-      if (root.current && !root.current.contains(e.target as Node)) onClose();
+      if (root.current && !root.current.contains(e.target as Node)) closeRef.current();
     };
     document.addEventListener('keydown', onKey);
     document.addEventListener('pointerdown', onPointer);
@@ -55,7 +59,7 @@ export function InsertPalette({
       document.removeEventListener('keydown', onKey);
       document.removeEventListener('pointerdown', onPointer);
     };
-  }, [onClose]);
+  }, []);
 
   return (
     <div

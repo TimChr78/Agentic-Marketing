@@ -1,4 +1,4 @@
-import { artifactTypes } from '@agentic-marketing/artifacts';
+import { anyArmBelowK, artifactTypes, K } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
@@ -119,7 +119,7 @@ export const experienceResults = defineCommand({
   name: 'experiences.results',
   title: 'Experiment results',
   description:
-    'Exposures, conversions (the goal event after first exposure) and conversion rates per variant of a web experience, compared with the control (holdout, or else the first variant): lift, fixed-horizon p-value and 95% interval, an always-valid sequential p-value, and Bayesian probabilities to beat the control and to be best. `recommendation` follows the experience’s analysis method.',
+    'Exposures, conversions (the goal event after first exposure) and conversion rates per variant of a web experience, compared with the control (holdout, or else the first variant): lift, fixed-horizon p-value and 95% interval, an always-valid sequential p-value, and Bayesian probabilities to beat the control and to be best. `recommendation` follows the experience’s analysis method. A variant with fewer than k=5 exposed visitors has every count, rate and comparison null and `suppressed` true; `k` and the top-level `suppressed` say which floor applied, and a comparison or verdict that needs a suppressed variant is withheld.',
   input: z.object({ artifactId: z.string().regex(/^exp_[0-9a-f]{32}$/), days: z.number().int().min(1).max(400).optional() }),
   output: z.object({
     version: z
@@ -128,19 +128,29 @@ export const experienceResults = defineCommand({
       .describe('The experience version these results describe: the published one, or the latest while it has never been published'),
     goal: z.string().nullable(),
     control: z.string().nullable(),
+    k: z.number().int().describe('The k-anonymity floor; a variant below it is suppressed'),
+    suppressed: z
+      .boolean()
+      .describe('True when a variant held fewer than k exposed visitors, so its counts and every comparison that needs it are hidden'),
     variants: z.array(
       z.object({
         variant: z.string(),
-        exposed: z.number(),
-        converted: z.number(),
-        rate: z.number(),
+        suppressed: z
+          .boolean()
+          .describe('True when this variant held fewer than k exposed visitors, so its counts, rates and comparisons are hidden'),
+        exposed: z.number().int().nullable().describe('Visitors exposed to this variant; null when the variant is suppressed'),
+        converted: z.number().int().nullable().describe('Visitors who converted after exposure; null when the variant is suppressed'),
+        rate: z.number().nullable().describe('Converted divided by exposed; null when the variant is suppressed'),
         lift: z.number().nullable(),
         pValue: z.number().nullable(),
         ci95: z.tuple([z.number(), z.number()]).nullable(),
         sequentialP: z.number().nullable().describe('Always-valid p-value: may be checked at any time'),
         probBeatControl: z.number().nullable(),
-        probBest: z.number(),
-        expectedLoss: z.number().describe('Expected conversion-rate points lost by choosing this variant'),
+        probBest: z.number().nullable().describe('Null when any variant is suppressed, because the best needs every arm'),
+        expectedLoss: z
+          .number()
+          .nullable()
+          .describe('Expected conversion-rate points lost by choosing this variant; null when any variant is suppressed'),
       }),
     ),
     method: z.enum(['sequential', 'bayesian', 'fixed']),
@@ -187,34 +197,66 @@ export const experienceResults = defineCommand({
       since: input.days ? new Date(Date.now() - input.days * 86_400_000) : undefined,
     });
     const controlRow = counts.find((c) => c.variant === 'holdout') ?? counts.find((c) => c.variant === def.variants[0]?.id) ?? null;
+    // The same k floor the holdout and split reads apply (#828): a variant with fewer than k
+    // exposed visitors never reports a count, rate or comparison. The floor is on the exposed
+    // group (the people the numbers describe); a suppressed variant's conversions are hidden with
+    // it. A comparison that needs a suppressed arm is withheld, and so is any winner verdict.
+    const hidden = new Set(counts.filter((c) => c.exposed < K).map((c) => c.variant));
+    const belowK = anyArmBelowK(counts.map((c) => ({ entered: c.exposed })));
     const bayes = bayesian(counts, controlRow?.variant ?? null);
     const variants = counts.map((c) => {
-      const vs = controlRow && c.variant !== controlRow.variant;
+      if (hidden.has(c.variant))
+        return {
+          variant: c.variant,
+          suppressed: true,
+          exposed: null,
+          converted: null,
+          rate: null,
+          lift: null,
+          pValue: null,
+          ci95: null,
+          sequentialP: null,
+          probBeatControl: null,
+          probBest: null,
+          expectedLoss: null,
+        };
+      const vs = controlRow && c.variant !== controlRow.variant && !hidden.has(controlRow.variant);
+      const stats = bayes.get(c.variant);
       return {
-        ...c,
+        variant: c.variant,
+        suppressed: false,
+        exposed: c.exposed,
+        converted: c.converted,
         rate: c.exposed ? c.converted / c.exposed : 0,
         ...(vs ? compare(controlRow, c) : { lift: null, pValue: null, ci95: null }),
         sequentialP: vs ? sequentialP(controlRow, c) : null,
-        ...(bayes.get(c.variant) ?? { probBeatControl: null, probBest: 0, expectedLoss: 0 }),
+        probBeatControl: vs ? (stats?.probBeatControl ?? null) : null,
+        // "Best" and its expected loss compare every arm, so one hidden arm withdraws both.
+        probBest: belowK ? null : (stats?.probBest ?? 0),
+        expectedLoss: belowK ? null : (stats?.expectedLoss ?? 0),
       };
     });
     const { method, alpha, threshold } = def.analysis;
-    const challengers = variants.filter((v) => controlRow && v.variant !== controlRow.variant);
+    const challengers = variants.filter((v) => controlRow && v.variant !== controlRow.variant && !v.suppressed);
     const pct = (x: number) => `${Math.round(x * 1000) / 10}%`;
     let recommendation = 'Keep the experiment running.';
     if (!def.goal) recommendation = 'Set a goal event to measure conversions.';
+    else if (belowK)
+      recommendation = `Not enough data to compare: a variant has fewer than k=${K} exposed visitors, so its counts and every comparison that needs it are withheld.`;
     else if (!controlRow || !challengers.length) recommendation = 'Nothing to compare yet.';
     else if (method === 'sequential') {
-      const win = challengers.filter((v) => v.sequentialP !== null && v.sequentialP < alpha).sort((a, b) => b.rate - a.rate)[0];
+      const win = challengers
+        .filter((v) => v.sequentialP !== null && v.sequentialP < alpha)
+        .sort((a, b) => (b.rate ?? 0) - (a.rate ?? 0))[0];
       if (win)
         recommendation =
-          win.rate > controlRow.converted / Math.max(controlRow.exposed, 1)
+          (win.rate ?? 0) > controlRow.converted / Math.max(controlRow.exposed, 1)
             ? `${win.variant} beats ${controlRow.variant} (always-valid p = ${win.sequentialP!.toFixed(4)}); you can stop and ship it.`
             : `${win.variant} does worse than ${controlRow.variant} (always-valid p = ${win.sequentialP!.toFixed(4)}); you can stop it.`;
     } else if (method === 'bayesian') {
       const win = [...challengers].sort((a, b) => (b.probBeatControl ?? 0) - (a.probBeatControl ?? 0))[0];
       if ((win.probBeatControl ?? 0) >= threshold)
-        recommendation = `${win.variant} beats ${controlRow.variant} with ${pct(win.probBeatControl ?? 0)} probability (expected loss ${pct(win.expectedLoss)}).`;
+        recommendation = `${win.variant} beats ${controlRow.variant} with ${pct(win.probBeatControl ?? 0)} probability (expected loss ${pct(win.expectedLoss ?? 0)}).`;
       else if (challengers.every((v) => (v.probBeatControl ?? 1) <= 1 - threshold))
         recommendation = `${controlRow.variant} is better than every variant with at least ${pct(threshold)} probability.`;
     } else recommendation = 'Fixed horizon: read the p-values once the planned sample size is reached, not before.';
@@ -223,20 +265,27 @@ export const experienceResults = defineCommand({
         ? 'Sequential p-values may be checked at any time; the fixed-horizon p-value only at the planned sample size; Bayesian figures assume a uniform prior.'
         : 'Set a goal event on the experience to measure conversions.'
       : `No data for version ${version} yet: counts include only exposures of version ${version}${input.days ? ` in the last ${input.days} days` : ''}, and no visitor has been exposed to it. Exposures of other versions, and exposures recorded without a version, do not count toward this version.`;
-    // Do not drop them silently: when the window holds exposures with no version, say how many
-    // were excluded and why, whether or not the version has data of its own (#758).
+    const suppressedNote = belowK
+      ? ` A variant has fewer than k=${K} exposed visitors, so its counts, rates and every comparison that needs it are withheld.`
+      : '';
+    // Do not drop them silently: when the window holds exposures with no version, say why they
+    // were excluded (#758). A count below k is itself a small group, so it is never spelled out.
     const excluded = unversioned
-      ? ` ${unversioned} exposure${unversioned === 1 ? '' : 's'} recorded without a version ${unversioned === 1 ? 'was' : 'were'} excluded, because results count only exposures of version ${version}.`
+      ? unversioned < K
+        ? ` Exposures recorded without a version were excluded, because results count only exposures of version ${version}.`
+        : ` ${unversioned} exposure${unversioned === 1 ? '' : 's'} recorded without a version ${unversioned === 1 ? 'was' : 'were'} excluded, because results count only exposures of version ${version}.`
       : '';
     return {
       version,
       goal: def.goal?.event ?? null,
       control: controlRow?.variant ?? null,
+      k: K,
+      suppressed: belowK,
       variants,
       method,
       analysis: { method, alpha, threshold },
       recommendation,
-      note: `${note}${excluded}`,
+      note: `${note}${suppressedNote}${excluded}`,
     };
   },
 });
