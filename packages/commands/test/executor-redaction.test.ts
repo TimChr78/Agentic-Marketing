@@ -3,7 +3,7 @@ import { createDb } from '@agentic-marketing/db';
 import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
-import { agentPrincipal, createExecutor, defineCommand, PolicyDeniedError, ROLE_PERMISSIONS, sanitizeAppError } from '../src';
+import { agentPrincipal, applyVerdict, createExecutor, defineCommand, PolicyDeniedError, ROLE_PERMISSIONS, sanitizeAppError } from '../src';
 
 // #885 round 6: the executor is the last line of defence. A handler may build its AppError message
 // from a provider's answer or an exception, so every message is redacted before it is returned to
@@ -94,4 +94,17 @@ describe('a policy denial’s reasons (#885)', () => {
     const plain = new AppError('invalid_input', 'The input does not match the command schema.');
     expect(sanitizeAppError(plain)).toBe(plain);
   });
+});
+
+describe('the independent check verdict in policy reasons (#885 round 7)', () => {
+  const policy = { decision: 'allow', level: 0, autonomous: true, reasons: [] } as unknown as Parameters<typeof applyVerdict>[0];
+  const long = 'x '.repeat(235) + 'password="probe-secret' + ' '.repeat(60) + '"';
+
+  for (const ok of [true, false])
+    for (const reason of ['password=probe-secret', long])
+      it(`redacts a ${ok ? 'passing' : 'failing'} verdict's reason (${reason.length} chars)`, () => {
+        const out = applyVerdict(policy, { ok, reason }, { approvable: true, command: 'artifacts.publish' });
+        expect(JSON.stringify(out.reasons)).not.toContain('probe-secret');
+        expect(out.reasons.some((r) => r.startsWith('Independent check: '))).toBe(true);
+      });
 });

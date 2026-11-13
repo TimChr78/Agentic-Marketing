@@ -58,6 +58,15 @@ export function redactCredentials(text: string): string {
 }
 
 /**
+ * Text that may span lines (a model's reason, a provider's raw answer), redacted while complete and
+ * then cut to `max` characters. Cutting first could drop a closing quote or leave a token prefix the
+ * redaction no longer recognises (#885).
+ */
+export function redactedText(text: string, max: number): string {
+  return redactCredentials(String(text)).slice(0, max);
+}
+
+/**
  * One line of error text that may be stored or shown: redacted while it is complete, then cut to
  * its first line and `max` characters. The order matters: cutting first can split a quoted
  * credential from its closing quote, or leave a token prefix too short to recognise (#885).

@@ -1,5 +1,5 @@
 import type { MandateView, PolicyOutcome, Principal } from '@agentic-marketing/commands';
-import { newId, safeErrorText } from '@agentic-marketing/core';
+import { newId, redactedText, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { generateText } from 'ai';
@@ -243,7 +243,9 @@ export async function independentCheck(
     });
     throw new Error(message, { cause: err });
   }
-  const reason = verdict.reason.slice(0, 500);
+  // A model's reason is stored, shown to the reviewer and put into policy reasons: redact it whole,
+  // then cut it (#885 round 7).
+  const reason = redactedText(verdict.reason, 500);
   const outcome = await settleReservation(
     deps.db,
     workspaceId,

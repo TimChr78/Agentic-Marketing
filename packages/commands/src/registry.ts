@@ -1,4 +1,4 @@
-import { AppError, canonicalJson, hashValue, redactCredentials, safeErrorText, sha256 } from '@agentic-marketing/core';
+import { AppError, canonicalJson, hashValue, redactCredentials, redactedText, safeErrorText, sha256 } from '@agentic-marketing/core';
 import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
@@ -838,8 +838,23 @@ async function withIndependentCheck(
     verdict = await services
       .independentCheck(tx, { ...req, policy })
       .catch((err: Error) => ({ ok: false, reason: `The independent check failed: ${safeErrorText(err.message, 500)}` }));
-  if (verdict.ok) return { ...policy, reasons: [...policy.reasons, `Independent check: ${verdict.reason}`] };
-  const reasons = [...policy.reasons, `Independent check: ${verdict.reason}`];
+  return applyVerdict(policy, verdict, req);
+}
+
+/**
+ * The policy after an independent check's verdict. The verdict's reason is the model's own text (or
+ * an exception's): it reaches a successful response (`heldBecause`), the agent ledger and an
+ * idempotent replay as well as a denial, none of which pass through the executor's AppError
+ * sanitising, so it is redacted here, whole and before its length cut (#885 round 7).
+ */
+export function applyVerdict(
+  policy: PolicyOutcome,
+  verdict: { ok: boolean; reason: string },
+  req: { approvable: boolean; command: string },
+): PolicyOutcome {
+  const reason = `Independent check: ${redactedText(verdict.reason, 500)}`;
+  if (verdict.ok) return { ...policy, reasons: [...policy.reasons, reason] };
+  const reasons = [...policy.reasons, reason];
   return req.approvable
     ? { ...policy, decision: 'ask', level: 1, autonomous: false, reasons }
     : { ...policy, decision: 'deny', level: 1, autonomous: false, reasons: [...reasons, `${req.command} cannot wait for an approval.`] };
