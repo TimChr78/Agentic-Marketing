@@ -28,65 +28,126 @@ const PENDING_TTL_S = 60;
 const DONE_TTL_S = 10 * 60;
 const RETRY_AFTER_S = 30;
 
-/** One signed delivery's idempotency key: workspace + endpoint + signed id (#643). */
+const isWordChar = (ch: string | undefined) => ch !== undefined && /[\w$]/.test(ch);
+const skipWhitespace = (text: string, from: number) => {
+  let i = from;
+  while (i < text.length && /\s/.test(text[i] as string)) i++;
+  return i;
+};
+
+/** The index just past the string literal that starts at `start`, or the text's end if it is open. */
+function skipString(text: string, start: number): number {
+  const quote = text[start];
+  let i = start + 1;
+  while (i < text.length) {
+    if (text[i] === '\\') {
+      i += 2;
+      continue;
+    }
+    if (text[i] === quote) return i + 1;
+    i++;
+  }
+  return i;
+}
+
+/** A field name after `headers.`: a quoted string, a backquoted name or a bare identifier. */
+function readFieldName(text: string, start: number): { value: string; end: number } | null {
+  const ch = text[start];
+  if (ch === '"') {
+    const end = skipString(text, start);
+    return text[end - 1] === '"' ? { value: text.slice(start + 1, end - 1), end } : null;
+  }
+  if (ch === '`') {
+    const end = text.indexOf('`', start + 1);
+    return end < 0 ? null : { value: text.slice(start + 1, end), end: end + 1 };
+  }
+  const ident = /^[A-Za-z_$][\w$]*/.exec(text.slice(start));
+  return ident ? { value: ident[0], end: start + ident[0].length } : null;
+}
 
 /**
- * Request headers that change per delivery attempt and carry no event meaning (0.14.11 round 4).
- * Everything else, including the client-identity headers a CDN or proxy adds — `x-forwarded-*`,
- * `x-real-ip`, `true-client-ip`, `cf-connecting-ip`, `cf-ipcountry`, `cf-visitor`, `user-agent` —
- * belongs to a wholesale mapping's replay identity. Standard Webhooks rotates the timestamp and
- * signature on every attempt; its id is the key itself, never a header value in the identity.
+ * The headers a mapping names statically, or null when it uses the `headers` object in any other
+ * way. Strings are skipped, so a `headers` in a literal is not a reference.
+ *
+ * Static: `headers.x`, `headers."x-name"`, `headers.` + backquoted name, and
+ * `$lookup(headers, "<one string literal>")` with either quote.
+ * Dynamic: `headers` alone, `$keys(headers)`, `$each(headers, …)`, `headers[…]`, a computed
+ * `$lookup(headers, …)`, `headers` passed into an object, and every other shape.
  */
-const PER_ATTEMPT_HEADERS = new Set([
-  'host',
-  'content-length',
-  'connection',
-  'accept-encoding',
-  'via',
-  'cdn-loop',
-  'date',
-  'x-request-id',
-  'x-amzn-trace-id',
-  'traceparent',
-  'tracestate',
-  'cf-ray',
-  'webhook-timestamp',
-  'webhook-signature',
-]);
+function staticHeaderNames(mapping: string): Set<string> | null {
+  const names = new Set<string>();
+  let i = 0;
+  while (i < mapping.length) {
+    const ch = mapping[i];
+    if (ch === '"' || ch === "'") {
+      i = skipString(mapping, i);
+      continue;
+    }
+    if (
+      mapping.startsWith('headers', i) &&
+      !isWordChar(mapping[i - 1]) &&
+      mapping[i - 1] !== '$' &&
+      mapping[i - 1] !== '.' &&
+      !isWordChar(mapping[i + 7])
+    ) {
+      const end = i + 7;
+      const dot = skipWhitespace(mapping, end);
+      if (mapping[dot] === '.') {
+        const field = readFieldName(mapping, skipWhitespace(mapping, dot + 1));
+        if (!field) return null;
+        names.add(field.value.toLowerCase());
+        i = field.end;
+        continue;
+      }
+      // `$lookup(headers, "one literal")` is static; anything else about the call is not.
+      if (/\$lookup\s*\(\s*$/.test(mapping.slice(0, i))) {
+        const comma = skipWhitespace(mapping, end);
+        const literal = skipWhitespace(mapping, comma + 1);
+        if (mapping[comma] === ',' && (mapping[literal] === '"' || mapping[literal] === "'")) {
+          const literalEnd = skipString(mapping, literal);
+          const close = skipWhitespace(mapping, literalEnd);
+          if (mapping[literalEnd - 1] === mapping[literal] && mapping[close] === ')') {
+            names.add(mapping.slice(literal + 1, literalEnd - 1).toLowerCase());
+            i = close + 1;
+            continue;
+          }
+        }
+      }
+      return null;
+    }
+    i++;
+  }
+  return names;
+}
 
 /**
- * The header values that belong to a delivery's replay identity: the headers a generic mapping
- * reads, plus the connector's own identity headers (`connectorHeaders`, e.g. the Shopify topic,
- * since one order body arrives as both `orders/create` and `orders/paid`). JSONata names a header as
- * `headers.name`, `headers."x-name"` or `headers.` + backquoted name; a mapping that uses the
- * `headers` object any other way (`$lookup(headers, …)`, `$keys(headers)`, `headers` alone) takes
- * every header except the per-attempt ones above, and also every per-attempt header whose name
- * appears as a string literal in the mapping (`$lookup(headers, "traceparent")`). The wholesale
- * direction is deliberate: a name a mapping computes (`$lookup(headers, "x-forwarded-" & "for")`)
- * cannot be detected, and dropping a header the mapping reads loses an event, while keeping one
- * that differs per attempt only turns a retry through a different client IP into a new event
- * rather than risking a lost one. A connector without a mapping expression derives its events
- * from the body and its identity headers alone.
+ * The header values that belong to a delivery's replay identity: the headers the mapping names
+ * statically, plus the connector's own identity headers (`connectorHeaders`, e.g. the Shopify
+ * topic, since one order body arrives as both `orders/create` and `orders/paid`).
+ *
+ * A mapping names a header statically as `headers.name`, `headers."x-name"`, `headers.` + a
+ * backquoted name, or `$lookup(headers, "<one string literal>")`. Any other use of the `headers`
+ * object — `headers` alone, `$keys(headers)`, `$each(headers, …)`, `$sift`, `headers[…]`, a
+ * computed `$lookup(headers, "x-request-" & "id")`, or `headers` passed into an object — takes
+ * **every** header, because the mapping's output can then depend on any of them. That includes the
+ * headers that change per delivery attempt (`x-request-id`, `date`, trace ids, `cf-ray`, the
+ * Standard Webhooks timestamp and signature), and a mapping that copies `headers` wholesale even
+ * puts those values into the event.
+ *
+ * The trade-off is deliberate: with a dynamic mapping a sender's retry that changes a per-attempt
+ * header counts as a new event, while dropping a header the mapping reads would lose an event.
+ * Name the headers you read statically, or use Standard Webhooks, whose signed `webhook-id` is the
+ * replay key regardless of the mapping. A connector without a mapping expression derives its
+ * events from the body and its identity headers alone (0.14.11 round 5).
  */
 export function replayHeaderValues(settings: unknown, headers: Record<string, string>, connectorHeaders: readonly string[] = []): string {
   const mapping = settings && typeof settings === 'object' ? (settings as { mapping?: unknown }).mapping : undefined;
-  const named = new Set<string>(connectorHeaders.map((h) => h.toLowerCase()));
-  let wholesale = false;
-  if (typeof mapping === 'string' && /\bheaders\b/.test(mapping)) {
-    const ref = /\bheaders\b(?:\s*\.\s*(?:"([^"]*)"|`([^`]*)`|([A-Za-z_$][\w$]*)))?/g;
-    for (const m of mapping.matchAll(ref)) {
-      const name = m[1] ?? m[2] ?? m[3];
-      if (name === undefined) wholesale = true;
-      else named.add(name.toLowerCase());
-    }
-    if (wholesale)
-      for (const m of mapping.matchAll(/"([^"]*)"|'([^']*)'/g)) {
-        const literal = (m[1] ?? m[2] ?? '').toLowerCase();
-        if (PER_ATTEMPT_HEADERS.has(literal)) named.add(literal);
-      }
+  const keys = new Set<string>(connectorHeaders.map((h) => h.toLowerCase()));
+  if (typeof mapping === 'string') {
+    const named = staticHeaderNames(mapping);
+    if (named) for (const name of named) keys.add(name);
+    else for (const k of Object.keys(headers)) keys.add(k);
   }
-  const keys = new Set(named);
-  if (wholesale) for (const k of Object.keys(headers)) if (!PER_ATTEMPT_HEADERS.has(k)) keys.add(k);
   return [...keys]
     .sort()
     .map((k) => `${k}:${headers[k] ?? ''}`)

@@ -197,6 +197,27 @@ describe('inbound replay protection for every scheme (#787)', () => {
     expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
   });
 
+  it('keeps same-body deliveries whose x-request-id a mapping computes (0.14.11 round 5)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Computed request-id generic',
+      settings: { mapping: '$merge([body, {"anonymousId": $lookup(headers, "x-request-" & "id")}])' },
+      secrets: {},
+    });
+    const body = tracked('request-id-keyed', 'r-1');
+    const first = await post(connection.inboundPath!, body, { 'x-request-id': 'person-a' });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    // The reviewer's reproducer: the name is computed, so every header is part of the identity and
+    // the differing per-attempt x-request-id makes this a new delivery.
+    const second = await post(connection.inboundPath!, body, { 'x-request-id': 'person-b' });
+    const secondBody = await second.json();
+    expect(secondBody).toMatchObject({ success: true, accepted: 1 });
+    expect(secondBody).not.toHaveProperty('duplicate');
+    // An exact retry (same body and headers) is still a duplicate.
+    const replay = await post(connection.inboundPath!, body, { 'x-request-id': 'person-b' });
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
   it('keeps a Shopify order paid with the same body as its create (0.14.11 round 3)', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'shopify',

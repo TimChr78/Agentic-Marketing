@@ -76,8 +76,8 @@ describe.skipIf(!hasTestDatabase())('the app role has no SUPERUSER or BYPASSRLS 
       await admin.query(`CREATE ROLE ${app} LOGIN PASSWORD 'chain-password' NOSUPERUSER NOBYPASSRLS NOINHERIT`);
       await admin.query(`CREATE ROLE ${middle} NOSUPERUSER NOBYPASSRLS NOINHERIT`);
       await admin.query(`CREATE ROLE ${privileged} NOSUPERUSER BYPASSRLS NOINHERIT`);
-      await admin.query(`GRANT ${middle} TO ${app}`);
-      await admin.query(`GRANT ${privileged} TO ${middle}`);
+      await admin.query(`GRANT ${middle} TO ${app} WITH SET TRUE`);
+      await admin.query(`GRANT ${privileged} TO ${middle} WITH SET TRUE`);
 
       const attempt = ensureAppRole(admin, { appRole: app, appRolePassword: 'chain-password' });
       await expect(attempt).rejects.toThrow(new RegExp(app));
@@ -88,6 +88,68 @@ describe.skipIf(!hasTestDatabase())('the app role has no SUPERUSER or BYPASSRLS 
       await expect(ensureAppRole(admin, { appRole: app, appRolePassword: 'chain-password' })).rejects.toThrow(
         new RegExp(`${app} → ${middle} → ${privileged}`),
       );
+    } finally {
+      await admin.query(`DROP ROLE IF EXISTS ${app}`).catch(() => {});
+      await admin.query(`DROP ROLE IF EXISTS ${middle}`).catch(() => {});
+      await admin.query(`DROP ROLE IF EXISTS ${privileged}`).catch(() => {});
+      await admin.end();
+    }
+  }, 60_000);
+
+  it('accepts a membership granted WITH SET FALSE and INHERIT TRUE (0.14.11 round 5)', async () => {
+    const suffix = randomBytes(4).toString('hex');
+    const app = runScoped(`setfalse_app_${suffix}`);
+    const privileged = runScoped(`setfalse_priv_${suffix}`);
+    const admin = new pg.Client({ connectionString: maintenanceUrl() });
+    await admin.connect();
+    try {
+      // The reviewer's reproducer: INHERIT TRUE still shares the role's privileges, but SET FALSE
+      // means the member cannot become it, so the app role never gets BYPASSRLS.
+      await admin.query(`DROP ROLE IF EXISTS ${app}`);
+      await admin.query(`DROP ROLE IF EXISTS ${privileged}`);
+      await admin.query(`CREATE ROLE ${app} LOGIN PASSWORD 'setfalse-password' NOSUPERUSER NOBYPASSRLS`);
+      await admin.query(`CREATE ROLE ${privileged} NOSUPERUSER BYPASSRLS`);
+      await admin.query(`GRANT ${privileged} TO ${app} WITH SET FALSE, INHERIT TRUE`);
+
+      const { rows } = await admin.query<{ can_set: boolean }>("SELECT pg_has_role($1::name, $2::name, 'SET') AS can_set", [
+        app,
+        privileged,
+      ]);
+      expect(rows[0]).toEqual({ can_set: false });
+
+      await expect(ensureAppRole(admin, { appRole: app, appRolePassword: 'setfalse-password' })).resolves.toBe(app);
+    } finally {
+      await admin.query(`DROP ROLE IF EXISTS ${app}`).catch(() => {});
+      await admin.query(`DROP ROLE IF EXISTS ${privileged}`).catch(() => {});
+      await admin.end();
+    }
+  }, 60_000);
+
+  it('accepts a two-step chain when one edge is SET FALSE (0.14.11 round 5)', async () => {
+    const suffix = randomBytes(4).toString('hex');
+    const app = runScoped(`setfalse_chain_app_${suffix}`);
+    const middle = runScoped(`setfalse_chain_mid_${suffix}`);
+    const privileged = runScoped(`setfalse_chain_priv_${suffix}`);
+    const admin = new pg.Client({ connectionString: maintenanceUrl() });
+    await admin.connect();
+    try {
+      await admin.query(`DROP ROLE IF EXISTS ${app}`);
+      await admin.query(`DROP ROLE IF EXISTS ${middle}`);
+      await admin.query(`DROP ROLE IF EXISTS ${privileged}`);
+      await admin.query(`CREATE ROLE ${app} LOGIN PASSWORD 'setfalse-chain-password' NOSUPERUSER NOBYPASSRLS`);
+      await admin.query(`CREATE ROLE ${middle} NOSUPERUSER NOBYPASSRLS`);
+      await admin.query(`CREATE ROLE ${privileged} NOSUPERUSER BYPASSRLS`);
+      await admin.query(`GRANT ${middle} TO ${app} WITH SET TRUE`);
+      await admin.query(`GRANT ${privileged} TO ${middle} WITH SET FALSE, INHERIT TRUE`);
+      await expect(ensureAppRole(admin, { appRole: app, appRolePassword: 'setfalse-chain-password' })).resolves.toBe(app);
+
+      // The other direction: the edge that cannot SET ROLE is the first one. SET on every edge is
+      // what makes the chain reachable, so this must not count either.
+      await admin.query(`REVOKE ${middle} FROM ${app}`);
+      await admin.query(`REVOKE ${privileged} FROM ${middle}`);
+      await admin.query(`GRANT ${middle} TO ${app} WITH SET FALSE, INHERIT TRUE`);
+      await admin.query(`GRANT ${privileged} TO ${middle} WITH SET TRUE`);
+      await expect(ensureAppRole(admin, { appRole: app, appRolePassword: 'setfalse-chain-password' })).resolves.toBe(app);
     } finally {
       await admin.query(`DROP ROLE IF EXISTS ${app}`).catch(() => {});
       await admin.query(`DROP ROLE IF EXISTS ${middle}`).catch(() => {});
