@@ -29,128 +29,77 @@ const PENDING_TTL_S = 60;
 const DONE_TTL_S = 10 * 60;
 const RETRY_AFTER_S = 30;
 
-/** A JSONata parse tree node (only the fields read here). */
-type AstNode = {
-  type?: string;
-  value?: unknown;
-  steps?: AstNode[];
-  procedure?: AstNode;
-  arguments?: AstNode[];
-  [key: string]: unknown;
-};
-
-const isHeadersName = (n: AstNode | undefined) => !!n && (n.type === 'name' || n.type === 'string') && n.value === 'headers';
+/** What a mapping read from the request headers while it ran (0.14.11 review round 7). */
+export interface HeaderReads {
+  /** Header names read individually (only names the request carries). */
+  names: Set<string>;
+  /** The headers object was enumerated or copied, so any header may have been read. */
+  all: boolean;
+}
 
 /**
- * The headers a mapping names statically, or null when it may read any header (0.14.11 round 6).
- * The mapping is read through JSONata's own parser, so comments, quoting and escapes are decoded
- * exactly as evaluation decodes them. Static means every mention of `headers` is either:
- * - a path that starts with `headers` followed by a field name (`headers.x`, `headers."x"`,
- *   `` headers.`x` ``, `"headers".x`), which records `x`; or
- * - `$lookup(headers, "<string literal>")`, which records the literal.
- * Anything else may read a header the scan cannot name, so the mapping is dynamic: `headers` in any
- * other position (alone, as an argument, an object key or a string), a context reference (`$` or
- * `$$`, through which `$.headers` or an alias reaches the input), `$eval`, or a mapping that does not
- * parse. Ambiguity costs only replay dedupe for retries; a missed header would lose an event.
+ * The request headers behind a proxy that records which of them a mapping reads. Reading a header
+ * (any property access, `in`, a descriptor) records its name; enumerating the object (`*`, `**`,
+ * `$keys`, `$each`, `$spread`, `$string()`, `$eval`, copying it into the output) records "all".
+ * Analysing the mapping's source cannot follow every JSONata construct; watching the evaluation can.
+ * Names the request does not carry are not recorded (JSONata probes internal properties), but a
+ * delivery that does carry a read header records it, so the identity still changes.
  */
-function staticHeaderNames(mapping: string): Set<string> | null {
-  let ast: AstNode;
-  try {
-    ast = jsonata(mapping).ast() as AstNode;
-  } catch {
-    return null;
-  }
-  const names = new Set<string>();
-  let dynamic = false;
-  const walk = (node: unknown): void => {
-    if (dynamic || node === null || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      for (const child of node) walk(child);
-      return;
-    }
-    const n = node as AstNode;
-    if (n.type === 'variable' && (n.value === '' || n.value === '$')) {
-      dynamic = true;
-      return;
-    }
-    if (n.type === 'function' && n.procedure?.type === 'variable') {
-      if (n.procedure.value === 'eval') {
-        dynamic = true;
-        return;
-      }
-      const [target, key, ...rest] = n.arguments ?? [];
-      const targetIsHeaders =
-        target?.type === 'path' && target.steps?.length === 1 && isHeadersName(target.steps[0]) && !hasExtras(target.steps[0]!);
-      if (
-        n.procedure.value === 'lookup' &&
-        targetIsHeaders &&
-        key?.type === 'string' &&
-        typeof key.value === 'string' &&
-        rest.length === 0
-      ) {
-        names.add(key.value.toLowerCase());
-        return;
-      }
-    }
-    if (n.type === 'path' && n.steps && isHeadersName(n.steps[0]) && n.steps[1]?.type === 'name' && typeof n.steps[1].value === 'string') {
-      if (hasExtras(n.steps[0]!)) {
-        dynamic = true;
-        return;
-      }
-      names.add(n.steps[1].value.toLowerCase());
-      // The field step's own predicates and the steps after it are ordinary expressions.
-      for (const [key, child] of Object.entries(n.steps[1])) if (key !== 'value' && key !== 'type') walk(child);
-      walk(n.steps.slice(2));
-      return;
-    }
-    if (isHeadersName(n)) {
-      dynamic = true;
-      return;
-    }
-    for (const [key, child] of Object.entries(n)) if (key !== 'position') walk(child);
+export function trackHeaderReads(headers: Record<string, string>): { proxy: Record<string, string>; reads: HeaderReads } {
+  const reads: HeaderReads = { names: new Set(), all: false };
+  const note = (key: string | symbol) => {
+    if (typeof key === 'string' && Object.hasOwn(headers, key)) reads.names.add(key);
   };
-  walk(ast);
-  return dynamic ? null : names;
-}
-
-/** A `headers` step with a predicate, a group or a focus binding is not a plain field read. */
-function hasExtras(step: AstNode): boolean {
-  return ['stages', 'predicate', 'group', 'focus', 'index', 'tuple', 'ancestor'].some((k) => step[k] !== undefined);
+  const proxy = new Proxy(headers, {
+    get(target, key, receiver) {
+      note(key);
+      return Reflect.get(target, key, receiver);
+    },
+    has(target, key) {
+      note(key);
+      return Reflect.has(target, key);
+    },
+    getOwnPropertyDescriptor(target, key) {
+      note(key);
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    ownKeys(target) {
+      reads.all = true;
+      return Reflect.ownKeys(target);
+    },
+  });
+  return { proxy, reads };
 }
 
 /**
- * The header values that belong to a delivery's replay identity: the headers the mapping names
- * statically, plus the connector's own identity headers (`connectorHeaders`, e.g. the Shopify
- * topic, since one order body arrives as both `orders/create` and `orders/paid`).
- *
- * A mapping names a header statically as `headers.name`, `headers."x-name"`, `headers.` + a
- * backquoted name, or `$lookup(headers, "<one string literal>")`. Any other use of the `headers`
- * object — `headers` alone, `$keys(headers)`, `$each(headers, …)`, `$sift`, `headers[…]`, a
- * computed `$lookup(headers, "x-request-" & "id")`, or `headers` passed into an object — takes
- * **every** header, because the mapping's output can then depend on any of them. That includes the
- * headers that change per delivery attempt (`x-request-id`, `date`, trace ids, `cf-ray`, the
- * Standard Webhooks timestamp and signature), and a mapping that copies `headers` wholesale even
- * puts those values into the event.
- *
- * The trade-off is deliberate: with a dynamic mapping a sender's retry that changes a per-attempt
- * header counts as a new event, while dropping a header the mapping reads would lose an event.
- * Name the headers you read statically, or use Standard Webhooks, whose signed `webhook-id` is the
- * replay key regardless of the mapping. A connector without a mapping expression derives its
- * events from the body and its identity headers alone (0.14.11 round 5). The mapping is read through
- * JSONata's parser, so comments and escapes cannot hide a header read (round 6).
+ * A delivery's replay identity from the headers: the values of the headers the mapping read (all
+ * of them if it enumerated the object), plus the connector's own identity headers. Two deliveries
+ * with one body and the same values for every header the mapping read take the same path through
+ * the mapping and produce the same events, so this is exactly the part of the request that can make
+ * them two events. A mapping that reads a per-attempt header (`x-request-id`, `date`, a trace id)
+ * therefore treats a sender's retry that changes it as a new event; name only the headers you need,
+ * or use Standard Webhooks, whose signed `webhook-id` is the replay key regardless of the mapping.
  */
-export function replayHeaderValues(settings: unknown, headers: Record<string, string>, connectorHeaders: readonly string[] = []): string {
-  const mapping = settings && typeof settings === 'object' ? (settings as { mapping?: unknown }).mapping : undefined;
+export function headerIdentity(
+  headers: Record<string, string>,
+  reads: HeaderReads | null,
+  connectorHeaders: readonly string[] = [],
+): string {
   const keys = new Set<string>(connectorHeaders.map((h) => h.toLowerCase()));
-  if (typeof mapping === 'string') {
-    const named = staticHeaderNames(mapping);
-    if (named) for (const name of named) keys.add(name);
-    else for (const k of Object.keys(headers)) keys.add(k);
-  }
+  if (reads) for (const k of reads.all ? Object.keys(headers) : reads.names) keys.add(k);
   return [...keys]
     .sort()
     .map((k) => `${k}:${headers[k] ?? ''}`)
     .join('\n');
+}
+
+/** The header identity a generic JSONata mapping produces for one request (used by tests). */
+export async function mappedReplayHeaders(mapping: string, body: unknown, headers: Record<string, string>): Promise<string> {
+  const { proxy, reads } = trackHeaderReads(headers);
+  const v = await jsonata(mapping).evaluate({ body, headers: proxy });
+  // The generic connector copies its output the same way, which reads any header put into it.
+  if (v !== undefined) JSON.stringify(v);
+  return headerIdentity(headers, reads);
 }
 
 export const inboundReplayKey = (workspaceId: string, connectionId: string, webhookId: string) =>
@@ -217,9 +166,11 @@ export function inboundApi(deps: {
       } catch {
         return c.json({ error: 'invalid_json', message: 'The body is not JSON.' }, 400);
       }
+      const tracked = trackHeaderReads(headers);
       let items: unknown[];
       try {
-        items = await connector.inbound.map(payload, ictx);
+        // The mapping runs against a proxy that records which headers it reads (round 7).
+        items = await connector.inbound.map(payload, { ...ictx, headers: tracked.proxy });
       } catch (err) {
         return c.json({ error: 'mapping_failed', message: `The mapping failed: ${(err as Error).message}` }, 422);
       }
@@ -241,7 +192,11 @@ export function inboundApi(deps: {
       // with one body can be two events; and it can call $millis() or $uuid(), so its output differs
       // on every replay. The key is the connection, the raw body and the values of the headers the
       // mapping or the connector reads (0.14.11 review, rounds 1 to 3).
-      const replayHeaders = replayHeaderValues(ictx.settings, headers, connector.inbound.replayHeaders);
+      // A connector that declares its identity headers (Shopify's topic) uses exactly those; any other
+      // uses the headers its mapping actually read.
+      const replayHeaders = connector.inbound.replayHeaders
+        ? headerIdentity(headers, null, connector.inbound.replayHeaders)
+        : headerIdentity(headers, tracked.reads);
       const replayId =
         webhookId ??
         (scheme === 'standard-webhooks'

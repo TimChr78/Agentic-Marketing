@@ -218,6 +218,26 @@ describe('inbound replay protection for every scheme (#787)', () => {
     expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
   });
 
+  it('keeps same-body deliveries whose header a mapping reads without naming it (0.14.11 round 7)', async () => {
+    for (const [name, expr] of [
+      ['Descendant generic', '**.x'],
+      ['Context string generic', '$match($string(), /person-[ab]/).match'],
+    ] as const) {
+      const connection = await api(plainWs).call('connections.create', {
+        connector: 'webhook',
+        name,
+        settings: { mapping: `$merge([body, {"anonymousId": $string((${expr}))}])` },
+        secrets: {},
+      });
+      const body = tracked(`unnamed-${name.length}`, 'u-1');
+      const first = await post(connection.inboundPath!, body, { x: 'person-a', other: 'o' });
+      expect(await first.json(), expr).toMatchObject({ success: true, accepted: 1 });
+      const second = await (await post(connection.inboundPath!, body, { x: 'person-b', other: 'o' })).json();
+      expect(second, expr).toMatchObject({ success: true, accepted: 1 });
+      expect(second, expr).not.toHaveProperty('duplicate');
+    }
+  });
+
   it('keeps a Shopify order paid with the same body as its create (0.14.11 round 3)', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'shopify',
