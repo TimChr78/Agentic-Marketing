@@ -61,7 +61,7 @@ The app sets baseline headers on every response: `X-Content-Type-Options: nosnif
 
 Every service has `restart: unless-stopped`, so the stack comes back after a host reboot or a Docker daemon restart. NATS is health-checked through its monitoring endpoint on 8222 (the Alpine image, which has `wget`), Valkey through `valkey-cli ping`; the app waits for Postgres, ClickHouse, NATS and Valkey to be healthy before it starts.
 
-The app image's healthcheck probes `/readyz` every 15 s and ignores the first 120 s (`--start-period=120s`): the pre-upgrade backup and migrations run before the server listens, so they must not count as failed probes. An upgrade on a large install can take longer than two minutes; start it with `docker compose up -d` rather than `docker compose up --wait` when you expect slow migrations, then follow `docker compose ps` and `docker compose logs -f app` until the container is healthy.
+The app image's healthcheck runs every 15 s and ignores the first 120 s (`--start-period=120s`): the pre-upgrade backup and migrations run before the server listens, so they must not count as failed probes. It checks `/readyz` for the roles that serve HTTP (`api`, `ingest`, or `all`) and passes without a probe for a worker-only or scheduler-only container, which starts no listener — the same rule as the Helm chart's probes. An upgrade on a large install can take longer than two minutes; start it with `docker compose up -d` rather than `docker compose up --wait` when you expect slow migrations, then follow `docker compose ps` and `docker compose logs -f app` until the container is healthy.
 
 ## Upgrading
 

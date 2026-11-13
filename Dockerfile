@@ -54,5 +54,9 @@ RUN apt-get update \
 RUN mkdir -p /backups && chown node:node /backups
 USER node
 EXPOSE 3000
-HEALTHCHECK --interval=15s --timeout=3s --start-period=120s CMD node -e "fetch('http://localhost:3000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+# Only the api and ingest roles listen on HTTP (apps/server/src/main.ts), so a worker-only or
+# scheduler-only container has nothing to probe. The script reads ROLE and passes those roles, like
+# the Helm chart's probe guard (#645); a listener role still probes /readyz.
+COPY scripts/healthcheck.mjs /usr/local/bin/healthcheck.mjs
+HEALTHCHECK --interval=15s --timeout=3s --start-period=120s CMD ["node", "/usr/local/bin/healthcheck.mjs"]
 CMD ["pnpm", "--filter", "@agentic-marketing/server", "start"]
