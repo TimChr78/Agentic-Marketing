@@ -39,7 +39,8 @@ _Last updated: 2026-11-12_
   - **0.14.15** (delivery and data edge cases) is released and verified: Sol approved after four rounds (retryable SNS refusals, a non-blocking idempotency lock). This completes the 2026-11-12 audit plan.
   - **0.14.16** (security and availability: #838, #829, #817, #818) is released and verified. Sol confirmed every finding on these issues closed over three rounds; its last round still said BLOCK, on pre-existing error-text sites elsewhere in the codebase, which are released separately as the #885 sweep (0.14.20). Plan: https://claude.ai/artifact/BpmvEUAQFvWKJfDEJmMMR9 (previous plan: https://claude.ai/artifact/BDXuwrEBa6hevSKU4s9vAL)
   - **0.14.17** (artifact integrity: #867, #868, #869, #871) is released and verified: Sol approved after three rounds (singleton uniqueness enforced in the database, archived duplicates restored unpublished, deadlocks answered as a retryable `conflict`).
-  - **0.14.18** (packaging hardening: #870) is released: Sol approved (admin port on loopback by default via `AM_BIND`, empty template database passwords, role-aware healthcheck, per-run smoke ports, digest-pinned images).
+  - **0.14.18** (packaging hardening: #870) is released and verified: Sol approved (admin port on loopback by default via `AM_BIND`, empty template database passwords, role-aware healthcheck, per-run smoke ports, digest-pinned images).
+  - **0.14.19** (privacy and test reliability: #692, #820, #828, #830, #831, #840) is released: Sol approved after four rounds (complementary suppression per total, e-mail totals protected by any member with in-window e-mail activity, per-variant k floor in experiment results). Next: 0.14.20, the error-text sweep (#885), the smoke port race (#877) and the transitive uuid alert.
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
@@ -85,4 +86,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.18, released from `main`; v0.14.17 is verified.
+- The last release is v0.14.19, released from `main`; v0.14.18 is verified.

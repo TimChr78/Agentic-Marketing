@@ -130,6 +130,79 @@ describe('conversion paging', () => {
   });
 });
 
+describe('event paging', () => {
+  it('pages eventsOf on the full replacing key, so tied events are not skipped (#840)', async () => {
+    const tieWs = newUuid();
+    const at = '2026-10-04T12:00:00.000Z';
+    const tied = (anonymousId: string, name: string) =>
+      ev(400, { workspaceId: tieWs, messageId: 'tie-event', name, timestamp: at, receivedAt: at, anonymousId });
+    // Same timestamp and event id throughout; the name and anonymous id are what tell them apart.
+    await store.insert([tied('page-a', 'Tie Event'), tied('page-b', 'Tie Event'), tied('page-a', 'Tie Other')]);
+    const ids = { anonymousIds: ['page-a', 'page-b'], userIds: [] };
+    const key = (e: { name: string; anonymousId: string }) => `${e.name}:${e.anonymousId}`;
+    const all = ['Tie Event:page-a', 'Tie Event:page-b', 'Tie Other:page-a'];
+
+    const seen: string[] = [];
+    let cursor: { before: string; beforeId: string; beforeName: string; beforeAnonymousId: string } | undefined;
+    for (let i = 0; i < 5; i++) {
+      const page = await store.eventsOf(tieWs, ids, { limit: 1, ...(cursor ?? {}) });
+      if (!page.length) break;
+      const last = page[0]!;
+      seen.push(key(last));
+      cursor = { before: last.timestamp, beforeId: last.eventId, beforeName: last.name, beforeAnonymousId: last.anonymousId };
+    }
+    expect(seen.sort()).toEqual(all);
+
+    // A cursor written before #840 has no name or anonymous id. It falls back to the old
+    // (timestamp, event_id) tuple, which always makes progress: here it starts strictly before the
+    // boundary row, so the tied rows at that key are skipped exactly as they were before #840
+    // rather than returned forever.
+    const [first] = await store.eventsOf(tieWs, ids, { limit: 1 });
+    expect(first).toBeDefined();
+    const oldCursor = await store.eventsOf(tieWs, ids, {
+      limit: 10,
+      before: first!.timestamp,
+      beforeId: first!.eventId,
+    });
+    expect(oldCursor).toEqual([]);
+  });
+
+  it('advances an old-format cursor through tied timestamps instead of repeating the page (#840 follow-up)', async () => {
+    const legacyWs = newUuid();
+    const at = '2026-10-06T12:00:00.000Z';
+    const legacy = (eventId: string) =>
+      ev(600, { workspaceId: legacyWs, messageId: eventId, name: 'Legacy Event', timestamp: at, receivedAt: at, anonymousId: 'legacy-a' });
+    await store.insert([legacy('event-c'), legacy('event-b'), legacy('event-a')]);
+    const ids = { anonymousIds: ['legacy-a'], userIds: [] };
+
+    // A client that forwards only the timestamp and event id, as pre-#840 nextCursor did. The old
+    // reader ignored beforeId and used `timestamp <= before`, so with two events per page it
+    // returned [c, b] on every call and never reached a.
+    const seen: string[] = [];
+    let cursor: { before: string; beforeId: string } | undefined;
+    for (let i = 0; i < 5; i += 1) {
+      const page = await store.eventsOf(legacyWs, ids, { limit: 2, ...(cursor ?? {}) });
+      if (!page.length) break;
+      seen.push(...page.map((event) => event.eventId));
+      const last = page[page.length - 1]!;
+      cursor = { before: last.timestamp, beforeId: last.eventId };
+    }
+    expect(seen).toEqual(['event-c', 'event-b', 'event-a']);
+
+    // A client that forwards the full cursor still sees every event, once.
+    const full: string[] = [];
+    let next: { before: string; beforeId: string; beforeName: string; beforeAnonymousId: string } | undefined;
+    for (let i = 0; i < 5; i += 1) {
+      const page = await store.eventsOf(legacyWs, ids, { limit: 2, ...(next ?? {}) });
+      if (!page.length) break;
+      full.push(...page.map((event) => event.eventId));
+      const last = page[page.length - 1]!;
+      next = { before: last.timestamp, beforeId: last.eventId, beforeName: last.name, beforeAnonymousId: last.anonymousId };
+    }
+    expect(full).toEqual(['event-c', 'event-b', 'event-a']);
+  });
+});
+
 describe('row policies', () => {
   it('shows a query only the rows of the workspace it names, and none without one', async () => {
     const other = newUuid();

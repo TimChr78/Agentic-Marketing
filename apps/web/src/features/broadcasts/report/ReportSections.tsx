@@ -38,7 +38,7 @@ function SectionMeta({ meta, period, scope }: { meta: AnalyticsMetaView; period:
     <p className="text-[12px] leading-[18px] text-muted">
       {scope} read: {bounds ?? 'Returned period unavailable'} · {zone} · Latest event in period:{' '}
       {meta.freshness ? formatDateTime(meta.freshness, { zone: true }) : 'Unavailable'}
-      {meta.suppressed > 0 ? ` · ${meta.suppressed} ${meta.suppressed === 1 ? 'row' : 'rows'} suppressed below ${meta.k ?? 5} people` : ''}
+      {meta.suppressed > 0 ? ` · ${meta.suppressed} ${meta.suppressed === 1 ? 'row' : 'rows'} hidden by the k=${meta.k ?? 5} floor` : ''}
     </p>
   );
 }

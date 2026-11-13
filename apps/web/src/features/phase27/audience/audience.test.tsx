@@ -258,11 +258,14 @@ beforeEach(() => {
     analysis: { method: 'sequential', alpha: 0.05, threshold: 0.95 },
     goal: 'Purchase',
     control: 'a',
+    k: 5,
+    suppressed: false,
     recommendation: 'Variant B is ahead.',
     note: 'Check again after more exposures.',
     variants: [
       {
         variant: 'a',
+        suppressed: false,
         exposed: 100,
         converted: 10,
         rate: 0.1,
@@ -276,6 +279,7 @@ beforeEach(() => {
       },
       {
         variant: 'b',
+        suppressed: false,
         exposed: 100,
         converted: 12,
         rate: 0.12,
