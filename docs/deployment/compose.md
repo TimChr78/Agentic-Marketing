@@ -28,6 +28,8 @@ Every variable the server reads is passed into the `app` container, including `M
 
 Compose supplies the service URLs (`DATABASE_URL`, `CLICKHOUSE_URL`, `NATS_URL`, `VALKEY_URL`), `ROLE=all`, `PORT=3000` and `BACKUP_DIR=/backups` itself. They are documented in `.env.example` for other deployments; changing them in the Compose `.env` does not move the Compose stack to another service.
 
+`DATABASE_URL` must reach PostgreSQL directly or through a pooler in **session** pooling mode. Idempotency uses session advisory locks, which belong to the PostgreSQL backend; PgBouncer's **transaction** pooling mode can move that backend between clients and is not supported. The Compose stack has no pooler.
+
 ## Never edit docker-compose.yml
 
 Treat `docker-compose.yml` as read-only. Compose reads `compose.override.yaml` from the same directory automatically, so site-specific changes go there:

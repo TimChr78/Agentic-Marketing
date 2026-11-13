@@ -44,6 +44,8 @@ The `api` and `ingest` roles get a `containerPort` and HTTP probes — `/healthz
 
 Postgres, ClickHouse, NATS JetStream and Valkey are not in the chart. Use managed services or the operators you already run (CloudNativePG, the Altinity ClickHouse operator, the NATS Helm chart with JetStream, Valkey or Redis).
 
+Point `DATABASE_URL` at PostgreSQL directly, or through a pooler in **session** pooling mode. Idempotency uses session advisory locks (`pg_try_advisory_lock`), whose lock belongs to the PostgreSQL backend: PgBouncer's **transaction** pooling mode can hand that backend to another client between statements and is not supported. There is no pooler in the shipped Compose or Helm deployment.
+
 ## Install
 
 ```bash

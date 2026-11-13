@@ -18,7 +18,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
-import type { DeliveryEvent } from './adapters';
+import type { DeliveryEvent, WebhookVerification } from './adapters';
 import { applyDeliveryEvents, type Msg, messageEvent, withdraw } from './deliveryEvents';
 import type { EmailServices } from './gateway';
 import type { ClickLink, TopicLink, UnsubscribeLink } from './links';
@@ -39,6 +39,17 @@ const PREFERENCES_TOO_LARGE = (c: Context) => c.json({ error: 'payload_too_large
 const WEBHOOK_MAX_BODY = 1024 * 1024;
 
 const WEBHOOK_TOO_LARGE = (c: Context) => c.json({ error: 'payload_too_large' }, 413);
+
+// SNS retries a 429 or 5xx with backoff and treats 401 as a permanent failure. A verification
+// that could not complete right now therefore answers 503 with a Retry-After, so the delivery
+// event is not lost; only a genuinely bad signature or certificate host answers 401.
+const WEBHOOK_RETRY_AFTER_SECONDS = '60';
+
+/** The HTTP refusal for a signed-webhook verdict, or null when the message may be trusted. */
+export function webhookVerdict(verdict: WebhookVerification): { status: 401 | 503; retryAfter?: string } | null {
+  if (verdict === 'retry') return { status: 503, retryAfter: WEBHOOK_RETRY_AFTER_SECONDS };
+  return verdict === 'valid' ? null : { status: 401 };
+}
 
 export interface EmailRouteDeps {
   db: Db;
@@ -83,15 +94,22 @@ export function emailRoutes(deps: EmailRouteDeps) {
       const [provider] = await tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.id, id));
       const transport = await transportFor(tx, provider, deps.kp, deps.email.adapterDeps);
       try {
-        if (!transport.parseWebhook) return { status: 400 as const, events: [] };
-        if (transport.verifyWebhook && !(await transport.verifyWebhook(req))) return { status: 401 as const, events: [] };
+        if (!transport.parseWebhook) return { status: 400 as const, events: [], retryAfter: undefined };
+        if (transport.verifyWebhook) {
+          const refusal = webhookVerdict(await transport.verifyWebhook(req));
+          if (refusal) return { status: refusal.status, events: [], retryAfter: refusal.retryAfter };
+        }
         let parsed: DeliveryEvent[];
         try {
           parsed = await transport.parseWebhook(req);
         } catch {
-          return { status: 400 as const, events: [] };
+          return { status: 400 as const, events: [], retryAfter: undefined };
         }
-        return { status: 200 as const, events: await applyDeliveryEvents(tx, parsed, provider.adapter, deps.kp) };
+        return {
+          status: 200 as const,
+          events: await applyDeliveryEvents(tx, parsed, provider.adapter, deps.kp),
+          retryAfter: undefined,
+        };
       } finally {
         await transport.close?.();
       }
@@ -100,6 +118,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
     for (const e of result.events)
       if ((e.type === 'unsubscribed' || e.type === 'complained') && e.profileId)
         await consentChanged(ws, [e.profileId], `unsubscribe:${e.messageId}`);
+    if (result.retryAfter) c.header('retry-after', result.retryAfter);
     return c.json({ ok: result.status === 200, events: result.events.length }, result.status);
   });
 

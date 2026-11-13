@@ -183,7 +183,7 @@ sequenceDiagram
 
 - **Tenancy:** every table has `workspace_id` (plus `organization_id` reserved for SaaS); every bus subject and ClickHouse row carries it. Postgres Row Level Security is enabled from day one so a missed `WHERE` cannot leak data across workspaces.
 - **IDs:** UUIDv7 (time ordered, index friendly) everywhere; external-facing IDs prefixed (`jrn_`, `tpl_`, `prf_`).
-- **Idempotency:** every command and every side effect accepts an idempotency key; the send gateway deduplicates on `(participant, node, attempt-group)`.
+- **Idempotency:** every command and every side effect accepts an idempotency key; the send gateway deduplicates on `(participant, node, attempt-group)`. Two requests with the same key are serialised: the second returns the first one's response, or, if the first is still running after ten seconds, `409 conflict` so the caller retries instead of deadlocking the connection pool.
 - **Outbox:** state changes that must emit bus events write to an outbox table in the same transaction; a relay publishes to NATS. No dual writes.
 - **Time:** all timestamps UTC; per-profile timezone trait used for send-time and quiet hours.
 - **Observability:** OpenTelemetry traces/metrics/logs from every role; trace context propagated through bus messages and queue jobs. `GET /metrics` exposes Prometheus metrics when `METRICS_TOKEN` is set (0.5.0), and `am doctor` checks the queue and delivery health — see [deployment-and-scaling.md](deployment-and-scaling.md#5-operations--health).
