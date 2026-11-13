@@ -984,11 +984,12 @@ describe('archive sanitising: a timed-out parse is cached briefly (#777)', () =>
 
   it('keeps a deterministic fail-closed result cached normally', () => {
     clearEmailPartsCache();
-    // A deep end-tag run trips a deterministic bound (not the wall clock), so the escaped answer is
-    // a function of this HTML and is safe to keep.
-    const hostile = `${'<b>'.repeat(250)}${'</div>'.repeat(10_000)}`;
+    // Nesting past the depth cap trips a deterministic bound (not the wall clock), so the escaped
+    // answer is a function of this HTML and is safe to keep. (A deep end-tag run no longer fails
+    // closed since parse5 8.1 indexes the open-element stack.)
+    const hostile = '<div>'.repeat(5_000);
     const first = emailParts(hostile);
-    expect(first.body.startsWith('&lt;b&gt;')).toBe(true);
+    expect(first.body.startsWith('&lt;div&gt;')).toBe(true);
     expect(emailPartsCacheStats().entries).toBe(1);
     expect(emailParts(hostile).body).toBe(first.body);
     expect(emailPartsCacheStats().entries).toBe(1);
