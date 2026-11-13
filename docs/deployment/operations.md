@@ -6,7 +6,7 @@ The admin CLI ships in the image as `am`. Two commands cover the first install a
 
 ## `am init`
 
-`am init` writes a `.env` from the image's `.env.example`. It generates fresh values for `POSTGRES_PASSWORD`, `APP_DB_PASSWORD`, `AUTH_SECRET` and `MASTER_KEY`, and asks for the two public addresses. It never prints a secret.
+`am init` writes a `.env` from the image's `.env.example`. It generates fresh values for `POSTGRES_PASSWORD`, `APP_DB_PASSWORD`, `AUTH_SECRET` and `MASTER_KEY`, and asks for the two public addresses. It never prints a secret. The template leaves the two database passwords empty, so Compose refuses to start with a copied one; `am init` is what fills them.
 
 ```bash
 am init [--out PATH] [--force] [--public-url URL] [--links-url URL]
