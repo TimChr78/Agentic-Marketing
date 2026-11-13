@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { AppError } from '@agentic-marketing/core';
 import { z } from 'zod';
 import { defineConnector, type InboundItem } from '../sdk';
 import { verifyHmac } from '../signing';
@@ -35,7 +36,7 @@ type Request = (
 ) => Promise<{ status: number; body: string; headers: Record<string, string> }>;
 
 async function api(s: Settings, token: string | undefined, request: Request, method: string, path: string, body?: unknown) {
-  if (!token) throw new Error('not connected: authorize the Salesforce connection');
+  if (!token) throw new AppError('conflict', 'not connected: authorize the Salesforce connection (connections.authorize).');
   const res = await request(`${s.instanceUrl.replace(/\/$/, '')}/services/data/${s.apiVersion}${path}`, {
     method,
     headers: {

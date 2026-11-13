@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { parseBrevoWebhook } from './brevo';
 import { parsePostmarkWebhook } from './postmark';
 import { sesWebhook } from './ses';
-import { defineAdapter } from './types';
+import { defineAdapter, ProviderSendError } from './types';
 
 // SMTP through Nodemailer: any relay, Postfix, or Mailpit in development. SMTP itself reports
 // no delivery events, so `events` names the relay whose webhooks report them (ADR-0011).
@@ -60,7 +60,7 @@ export const smtpAdapter = defineAdapter({
             'X-PM-Metadata-am_message_id': m.messageId,
           },
         });
-        if (info.rejected.length) throw new Error(`The SMTP relay rejected the recipient: ${String(info.response)}`);
+        if (info.rejected.length) throw new ProviderSendError(`The SMTP relay rejected the recipient: ${String(info.response)}`);
         return { providerMessageId: info.messageId ?? null };
       },
       ...events,

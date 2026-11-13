@@ -239,6 +239,31 @@ describe.skipIf(!hasTestDatabase())('OAuth callback (#375)', () => {
     expect(await connectionOf(id)).toMatchObject({ oauth_status: 'error', oauth_pending: null });
   });
 
+  it('keeps the provider’s OAuth error code but never its description’s credential (#885 round 2)', async () => {
+    const state = randomBytes(12).toString('base64url');
+    const id = await addConnection({ pending: { state } });
+    const http: OAuthRequest = async () => response({ error: 'invalid_grant', error_description: 'password=probe-secret' }, 400);
+    const res = await callback(oauthRoutes({ db: t.db, kp, egress: EGRESS, http }), state);
+    expect(res.status).toBe(400);
+    const page = await res.text();
+    expect(page).toContain('invalid_grant');
+    expect(page).not.toContain('probe-secret');
+    expect((await connectionOf(id)).oauth_error).toContain('invalid_grant');
+    expect((await connectionOf(id)).oauth_error).not.toContain('probe-secret');
+  });
+
+  it('does not quote a transport failure from the token endpoint (#885 round 2)', async () => {
+    const state = randomBytes(12).toString('base64url');
+    const id = await addConnection({ pending: { state } });
+    const http: OAuthRequest = async () => {
+      throw new Error('driver failure: password=probe-secret');
+    };
+    const res = await callback(oauthRoutes({ db: t.db, kp, egress: EGRESS, http }), state);
+    expect(res.status).toBe(400);
+    expect(await res.text()).not.toContain('probe-secret');
+    expect((await connectionOf(id)).oauth_error).not.toContain('probe-secret');
+  });
+
   it('keeps unrelated workspace transactions available while many exchanges wait', async () => {
     const connections = await Promise.all(
       Array.from({ length: 6 }, () => {
@@ -345,6 +370,28 @@ describe.skipIf(!hasTestDatabase())('OAuth refresh serialization (#376)', () => 
     const row = await connectionOf(id);
     expect(row).toMatchObject({ oauth_status: 'error', oauth_refresh_lease_until: null, oauth_refresh_lease_token: null });
     expect(row.oauth_error).toContain('connect again');
+  });
+
+  it('keeps invalid_grant but redacts the provider description on a refused refresh (#885 round 2)', async () => {
+    const id = await addConnection({ access: 'AT1', refresh: 'RT1', expiresAt: new Date(Date.now() - 1_000) });
+    const http: OAuthRequest = async () => response({ error: 'invalid_grant', error_description: 'password=probe-secret' }, 400);
+    await refreshConnection(t.db, t.workspace, id, { db: t.db, kp, egress: EGRESS, http });
+    const row = await connectionOf(id);
+    expect(row).toMatchObject({ oauth_status: 'error' });
+    expect(row.oauth_error).toContain('invalid_grant');
+    expect(row.oauth_error).not.toContain('probe-secret');
+  });
+
+  it('writes a fixed text when a refresh fails unexpectedly (#885 round 2)', async () => {
+    const id = await addConnection({ access: 'AT1', refresh: 'RT1', expiresAt: new Date(Date.now() - 1_000) });
+    const http: OAuthRequest = async () => {
+      throw Object.assign(new Error('driver failure: password=probe-secret'), { code: 'invalid_grant' });
+    };
+    await refreshConnection(t.db, t.workspace, id, { db: t.db, kp, egress: EGRESS, http });
+    const row = await connectionOf(id);
+    expect(row).toMatchObject({ oauth_status: 'error' });
+    expect(row.oauth_error).not.toContain('probe-secret');
+    expect(row.oauth_error).not.toContain('driver failure');
   });
 
   it('retries after a transient refresh failure instead of marking the connection broken', async () => {

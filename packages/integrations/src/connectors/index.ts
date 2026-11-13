@@ -1,3 +1,4 @@
+import { AppError } from '@agentic-marketing/core';
 import jsonata from 'jsonata';
 import { z } from 'zod';
 import { defineConnector, type InboundItem } from '../sdk';
@@ -151,7 +152,9 @@ export const oauthHttpConnector = defineConnector({
         body: z.unknown().optional(),
       }),
       async run(input: { method: string; path: string; body?: unknown }, { settings, accessToken, request }) {
-        if (!accessToken) throw new Error('not connected: authorize the connection first');
+        // An expected connection-state failure: the person can fix it by authorizing, so it stays
+        // an AppError whose message reaches the caller instead of the executor's fixed failure (#885).
+        if (!accessToken) throw new AppError('conflict', 'not connected: authorize the connection first (connections.authorize).');
         const url = `${settings.baseUrl.replace(/\/+$/, '')}/${input.path.replace(/^\/+/, '')}`;
         const res = await request(url, {
           method: input.method,

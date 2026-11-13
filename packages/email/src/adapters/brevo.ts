@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { type DeliveryEvent, type DeliveryEventType, defineAdapter, type WebhookRequest } from './types';
+import { type DeliveryEvent, type DeliveryEventType, defineAdapter, ProviderSendError, type WebhookRequest } from './types';
 
 // Brevo (Sendinblue): https://developers.brevo.com/reference/sendtransacemail and transactional
 // webhooks. Our message id travels in X-Mailin-custom, which Brevo echoes in every webhook.
@@ -45,7 +45,7 @@ export const brevoAdapter = defineAdapter({
         }),
       });
       const body = (await res.json().catch(() => ({}))) as { messageId?: string; message?: string };
-      if (!res.ok) throw new Error(`Brevo refused the message: ${body.message ?? res.status}`);
+      if (!res.ok) throw new ProviderSendError(`Brevo refused the message: ${body.message ?? res.status}`);
       return { providerMessageId: body.messageId ?? null };
     },
     parseWebhook: parseBrevoWebhook,

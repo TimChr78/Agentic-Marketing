@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
+import { redactCredentials } from '@agentic-marketing/core';
 import { Parser } from 'htmlparser2';
 import { type Rendered, type RenderOptions, type RenderVars, renderTemplate, templateRenderError, unsubscribeUrlFor } from './render';
 import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
@@ -191,6 +192,25 @@ interface LinkOutcome {
   error?: string;
 }
 
+/**
+ * A safe classification of a failed link fetch (#885 round 2). A driver, proxy or the egress guard
+ * can put a credential in its message, so only a fixed phrase survives, except for our own
+ * `EgressError` (a typed diagnostic naming the blocked host or address).
+ */
+function linkFailureReason(err: unknown): string {
+  const e = err as { name?: string; code?: string; message?: string; constructor?: { name?: string } };
+  const code = typeof e?.code === 'string' ? e.code : '';
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return 'the domain name could not be resolved';
+  if (code === 'ECONNREFUSED') return 'the connection was refused';
+  if (code === 'ECONNRESET' || code === 'EPIPE' || code === 'EHOSTUNREACH' || code === 'ENETUNREACH') return 'the connection failed';
+  if (code === 'ETIMEDOUT' || e?.name === 'AbortError' || e?.name === 'TimeoutError' || /timed out|timeout/i.test(e?.message ?? ''))
+    return 'the request timed out';
+  // The e-mail package must not depend on integrations, so recognise its typed error by name.
+  if (e?.constructor?.name === 'EgressError' || e?.name === 'EgressError')
+    return redactCredentials(String(e.message ?? '').split('\n')[0]).slice(0, 200) || 'the egress policy refused the request';
+  return 'the request failed';
+}
+
 async function linkOutcome(
   url: string,
   deps: { request: NonNullable<EmailCheckOptions['request']>; cache: LinkCache },
@@ -211,7 +231,7 @@ async function linkOutcome(
     if (res.status === 403 || res.status === 405 || res.status === 501) res = await deps.request(url, 'GET');
     outcome = { status: res.status };
   } catch (e) {
-    outcome = { error: (e as Error).message.split('\n')[0].slice(0, 200) };
+    outcome = { error: linkFailureReason(e) };
   }
   await deps.cache.set(key, JSON.stringify(outcome), CACHE_TTL_S);
   return outcome;

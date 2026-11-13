@@ -2,7 +2,18 @@
 import type { EmailBlockParam, EmailTemplate } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
 import { convert } from 'html-to-text';
-import { type Context, Hash, Liquid, LiquidError, RenderError, Tag, type TagToken, type TopLevelToken, toPromise } from 'liquidjs';
+import {
+  AssertionError,
+  type Context,
+  Hash,
+  Liquid,
+  LiquidError,
+  RenderError,
+  Tag,
+  type TagToken,
+  type TopLevelToken,
+  toPromise,
+} from 'liquidjs';
 import mjml2html from 'mjml';
 import { isAllowedBlockUrl, parseBlockTagArgs } from './blockTags';
 import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
@@ -159,10 +170,23 @@ export async function compileMjml(mjml: string): Promise<{ html: string; warning
 }
 
 /**
- * The expected cause inside a Liquid error chain: Liquid's own parse complaint, a render complaint
- * it raised itself, or our TemplateError for a block's parameters. Liquid wraps whatever a tag
- * throws, so the chain is followed: a block resolver's database error is wrapped just the same and
- * is *not* expected (#885).
+ * Whether an error was raised by Liquid itself rather than by something Liquid called. Liquid
+ * treats filters and tags alike: a bad filter argument (its own `AssertionError`) and a missing
+ * include/render target (its loader's plain `ENOENT` Error) are wrapped in a `RenderError` exactly
+ * like an error our block resolver throws (#885 round 2).
+ */
+function raisedByLiquid(err: unknown): err is Error {
+  if (!(err instanceof Error)) return false;
+  if (err instanceof LiquidError || err instanceof AssertionError) return true;
+  const code = (err as { code?: unknown }).code;
+  return code === 'ENOENT' && /failed to lookup/i.test(err.message);
+}
+
+/**
+ * The expected cause inside a Liquid error chain: Liquid's own parse/render complaint (including
+ * its filter argument and include/render lookup failures), or our TemplateError for a block's
+ * parameters. Liquid wraps whatever a tag throws, so the chain is followed: a block resolver's
+ * database error is wrapped just the same and is *not* expected (#885).
  */
 function expectedCause(err: unknown, depth = 0): Error | null {
   if (depth > 6) return null;
@@ -175,14 +199,17 @@ function expectedCause(err: unknown, depth = 0): Error | null {
       return causes.every((cause) => cause) ? (causes[0] ?? null) : null;
     }
     if (err instanceof RenderError) {
-      // RenderError wraps whatever the template threw. No cause of its own means Liquid raised it
-      // (an undefined filter, a bad operand), which is the template's; with a cause, judge the cause.
+      // RenderError wraps whatever the template or a tag threw. No cause of its own means Liquid
+      // raised it; with a cause, only a cause from Liquid or our block-parameter check is expected.
       const inner = (err as { originalError?: unknown }).originalError;
-      return inner ? expectedCause(inner, depth + 1) : err;
+      if (!inner) return err;
+      return expectedCause(inner, depth + 1);
     }
     // TokenizationError, ParseError, UndefinedVariableError: the template's syntax, not the platform.
     return err;
   }
+  // A filter's AssertionError, or the loader's own lookup failure: both are Liquid's.
+  if (raisedByLiquid(err)) return err;
   return null;
 }
 

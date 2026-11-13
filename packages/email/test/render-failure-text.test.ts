@@ -89,6 +89,33 @@ describe('templates.check render failures (#885)', () => {
   });
 });
 
+describe('Liquid’s own errors are the template’s, not the platform’s (#885 round 2)', () => {
+  const cases: [string, string, RegExp][] = [
+    ['a filter argument error (base64)', '{{ "!" | base64_decode }}', /base64/i],
+    ['a missing filter argument (append)', '{{ "x" | append }}', /append/i],
+    ['an include, which is disabled', '{% include "x" %}', /include|lookup/i],
+    ['a render, which is disabled', '{% render "x" %}', /render|lookup/i],
+  ];
+
+  for (const [name, source, message] of cases) {
+    it(`keeps ${name} as an AppError`, async () => {
+      const ctx = context(fakeTx(template(`<mj-text>${source}</mj-text>`), 2, new Error(SECRET)));
+      const err = (await previewTemplate.handler({ artifactId: TEMPLATE }, ctx).catch((e: unknown) => e)) as AppError;
+      expect(err).toBeInstanceOf(AppError);
+      expect(err.message).toContain('The template could not be rendered with this data');
+      expect(err.message).toMatch(message);
+      expect(err.message).not.toContain('probe-secret');
+    });
+  }
+
+  it('still lets our block resolver’s own error through Liquid as an unexpected failure', async () => {
+    const ctx = context(fakeTx(template(`<mj-text>Hi</mj-text>{% block '${BLOCK}' %}`), 2, new Error(SECRET)));
+    const err = (await previewTemplate.handler({ artifactId: TEMPLATE }, ctx).catch((e: unknown) => e)) as Error;
+    expect(err).not.toBeInstanceOf(AppError);
+    expect(err.message).toContain('probe-secret');
+  });
+});
+
 describe('the publish gate’s render check (#885)', () => {
   const opts = (blocks: (id: string) => Promise<never>) => ({
     marketing: true,

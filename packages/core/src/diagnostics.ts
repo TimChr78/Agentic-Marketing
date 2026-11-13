@@ -3,25 +3,44 @@
 // driver or an exception must be reduced to a safe diagnostic before it is put there: a provider's
 // own error code and message, never its body, and never a token the body or an exception echoes.
 
-/** Anything whose value is a credential: the key is kept (it says what failed), the value is not. */
+/**
+ * Anything whose value is a credential: the key is kept (it says what failed), the value is not.
+ * The key may be a word on its own (`token`, `key`, `session`) or end in one after a separator
+ * (`access_token`, `x-api-key`, `client-secret`); an alphanumeric neighbour (`monkey`) is not a key.
+ */
+const COMPOUND_CREDENTIAL_KEY =
+  'access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|developer[_-]?token|' +
+  'client[_-]?secret|app[_-]?secret|private[_-]?key|api[_-]?key';
 const CREDENTIAL_KEY =
-  '(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|developer[_-]?token|api[_-]?key|' +
-  'client[_-]?secret|app[_-]?secret|private[_-]?key|secret|password|passwd|authorization)';
+  `(?<![A-Za-z0-9])(?:${COMPOUND_CREDENTIAL_KEY}|` +
+  'token|secret|password|passwd|key|authorization|auth|credential|signature|session)(?![A-Za-z0-9])';
+
+/** Our own external ids (`mnd_…`, `eml_…`): identifiers, never credentials. */
+const ID_LIKE = '(?:[a-z]{2,5})_[0-9a-f]{32}';
 
 /**
  * Token-shaped values, in the order they must be applied: a named credential (`access_token=…`,
- * `"developer-token": "…"`), an Authorization value (`Bearer …`), then a bare long token
- * (base64, base64url or hex), which is what a gateway echoing a header leaves behind.
+ * `"developer-token": "…"`), a provider's own prefix (`shpat_…`, `sk_live_…`, a JWT), an
+ * Authorization value (`Bearer …`), then a bare long token (base64, base64url or hex), which is
+ * what a gateway echoing a header leaves behind.
  */
 const REDACTIONS: readonly (readonly [RegExp, string])[] = [
   [
     // A quoted or bare value, unless it is only an auth scheme word (the `Bearer` rule covers that).
-    new RegExp(`\\b(${CREDENTIAL_KEY})\\b(["']?)\\s*[:=]\\s*(?!Bearer\\b|Basic\\b)("(?:[^"\\\\]|\\\\.)*"|'[^']*'|[^\\s,;&}\\]"']+)`, 'gi'),
-    '$1$2=[redacted]',
+    new RegExp(
+      `(${CREDENTIAL_KEY})(["']?)(\\s*[:=]\\s*)(?!Bearer\\b|Basic\\b|\\[redacted\\]|(?:${COMPOUND_CREDENTIAL_KEY})\\s*[:=])("(?:[^"\\\\]|\\\\.)*"|'[^']*'|[^\\s,;&}\\]"']+)`,
+      'gi',
+    ),
+    '$1$2$3[redacted]',
   ],
+  // The prefixes Shopify, Stripe, Slack, GitHub, AWS, Google and JWT issuers use.
+  [/\b(?:shpat_|shpss_|shpca_|sk_live_|sk_test_|rk_|xox[abposr]-|ghp_|gho_|github_pat_|ya29\.)[A-Za-z0-9._-]{4,}/gi, '[redacted]'],
+  [/\bAKIA[A-Z0-9]{16}\b/g, '[redacted]'],
+  [/\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{4,}){0,2}/g, '[redacted]'],
   [/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/gi, '$1 [redacted]'],
-  // 40+ characters with no separators: a token, not a word, an id or a number.
-  [/[A-Za-z0-9+/_-]{40,}={0,2}/g, '[redacted]'],
+  // 24+ characters with no separators: a token, not a word, an id or a number. Our own external
+  // ids are the one exception, so a message may still name the artifact it is about.
+  [new RegExp(`(?<![A-Za-z0-9_])(?!(?:${ID_LIKE})(?![A-Za-z0-9]))[A-Za-z0-9+/_-]{24,}={0,2}`, 'g'), '[redacted]'],
 ];
 
 /**
@@ -43,7 +62,9 @@ const MAX_PARTS = 4;
 const MAX_PART_CHARS = 200;
 
 function addPart(out: string[], value: string) {
-  const text = value.trim();
+  // Redact while the value is complete: truncating first can leave a short token prefix that no
+  // rule recognises any more (#885 round 2).
+  const text = redactCredentials(value.trim());
   if (!text || out.length >= MAX_PARTS) return;
   if (out.some((part) => part.toLowerCase() === text.toLowerCase())) return;
   out.push(text.length > MAX_PART_CHARS ? `${text.slice(0, MAX_PART_CHARS - 1)}…` : text);

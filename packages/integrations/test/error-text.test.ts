@@ -1,7 +1,7 @@
 import { AppError } from '@agentic-marketing/core';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { describe, expect, it } from 'vitest';
-import { runConnectionAction } from '../src/connections';
+import { runAction, runConnectionAction } from '../src/connections';
 import { shopifyGraphql } from '../src/connectors/shopify';
 
 // #885: a provider's error body, or a secret provider's failure, used to be wrapped into an
@@ -63,6 +63,27 @@ describe('connections.runAction (#885)', () => {
     const err = (await handler({ id: `con_${'0'.repeat(32)}`, action: 'request', input: {} }, ctx).catch((e: unknown) => e)) as AppError;
     expect(err).toBeInstanceOf(AppError);
     expect(err.message).toContain('Unknown connector');
+  });
+
+  it('keeps a not-connected OAuth connection, which the person can fix', async () => {
+    const err = (await runAction(
+      connection({
+        connector: 'oauth_http',
+        settings: {
+          baseUrl: 'https://api.example.com',
+          authorizeUrl: 'https://provider.example.com/authorize',
+          tokenUrl: 'https://provider.example.com/token',
+          scopes: [],
+        },
+        oauthStatus: null,
+      }) as never,
+      { clientId: 'client', clientSecret: 'secret' },
+      'request',
+      { path: '' },
+      { allowedHosts: [] },
+    ).catch((e: unknown) => e)) as AppError;
+    expect(err).toBeInstanceOf(AppError);
+    expect(err.message).toContain('not connected');
   });
 
   it('keeps an egress refusal, which is the caller’s diagnostic', async () => {
