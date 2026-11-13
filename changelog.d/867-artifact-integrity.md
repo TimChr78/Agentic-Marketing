@@ -1,0 +1,8 @@
+---
+section: Fixed
+issues: [867, 868, 869, 871]
+---
+- A person's publish now locks the artifact (all members of a bundle, in id order) before it reads the draft and its author, so an agent's concurrent edit cannot go live without review under the `agent_changes` policy; approvals and held changes lock the same rows before publishing, so exactly one version is `published` and it matches `published_version`.
+- Singleton artifact types are unique per workspace in the database, not only in the application: `config.import` refuses a bundle with two entries of one singleton type and keeps its map current as it inserts, concurrent `artifacts.create` calls serialise on a workspace + type advisory lock and answer `conflict` instead of a raw unique violation, and a new migration resolves existing duplicates before it creates the partial unique index. Per workspace and type it keeps the published row, or the oldest if none is published; the others are archived (not deleted), renamed with ` (archived duplicate <id>)`, and excluded from the index.
+- Concurrent publishes of two mandates for one agent serialise on a workspace + agent advisory lock, so exactly one is active. `config.import` locks every affected artifact in id order before writing, which removes the A,B vs B,A deadlock, and any remaining Postgres deadlock (`40P01`) surfaces as a retryable `conflict` instead of an internal error.
+- **Upgrading:** the migration archives duplicate singleton rows deterministically (keeping the published one, or the oldest), so review archived rows named ` (archived duplicate …)` if a workspace used more than one brand, tracking plan, purposes, conversion map, delivery policy or business context. Nothing is deleted. No configuration or command changes are needed.

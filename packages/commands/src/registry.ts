@@ -575,6 +575,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             )
             .catch((e) => span.recordException(e as Error));
         if (err instanceof AppError) return fail(err);
+        // A deadlock is a scheduling conflict, not a server fault (#871): the work rolled back and
+        // the same request can safely run again. Keep the failure audit above unchanged.
+        if (isDeadlock(err))
+          return fail(
+            new AppError('conflict', 'Another change locked the same artifacts at the same time. Retry this action; nothing was written.', {
+              retryable: true,
+            }),
+          );
         report('error');
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR });
@@ -863,5 +871,12 @@ async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>)
 export function isSerializationFailure(err: unknown): boolean {
   for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
     if (e.code === '40001') return true;
+  return false;
+}
+
+/** Postgres SQLSTATE 40P01, directly or as the cause of a Drizzle query error. */
+export function isDeadlock(err: unknown): boolean {
+  for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
+    if (e.code === '40P01') return true;
   return false;
 }
