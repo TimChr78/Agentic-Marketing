@@ -362,10 +362,13 @@ describe('smoke test', () => {
     // Temp files belong to the run: an env file, a cookie jar, and nothing shared under /tmp.
     expect(smoke).not.toContain('/tmp/am_smoke_cookies');
     expect(smoke.match(/mktemp/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
-    // A free port for this run, never a fixed 3000 that an installed stack may hold.
+    // Its own port, never a fixed 3000 that an installed stack may hold: Docker assigns it when the
+    // container starts (port 0) and the script reads it back, so no other run can take it between
+    // selection and `up` (#877). SMOKE_PORT still pins one.
     expect(smoke).not.toMatch(/AM_PORT=3000\b/);
-    expect(smoke).toMatch(/SMOKE_PORT/);
-    expect(smoke).toMatch(/AM_PORT=\$PORT\b/);
+    expect(smoke).toMatch(/SMOKE_PORT:-0/);
+    expect(smoke).toMatch(/AM_PORT=\$admin_host_port\b/);
+    expect(smoke).toMatch(/dc port app/);
   });
 });
 
