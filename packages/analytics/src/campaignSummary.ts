@@ -1,4 +1,4 @@
-import { complementarySuppression, publishedSingleton, suppressHoldout } from '@agentic-marketing/artifacts';
+import { planComplementarySuppression, publishedSingleton, suppressHoldout } from '@agentic-marketing/artifacts';
 import { campaignIdentityMap, type IdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
@@ -38,30 +38,34 @@ const readinessSchema = z.object({
   sendingMembersScheduled: z.boolean(),
 });
 
-const currencyAmount = z.object({ currency: z.string(), amount: z.number() });
+const currencyAmount = z.object({ currency: z.string(), amount: z.number().nullable() });
 
 const headlineSchema = z.object({
-  recipients: z.number().int().describe('Distinct people reached by the campaign, on any channel'),
-  emailSent: z.number().int().describe('Distinct people the campaign reached by e-mail'),
-  delivered: z.number().int().describe('Distinct people whose campaign e-mail was delivered'),
-  clickers: z.number().int(),
-  unsubscribers: z.number().int(),
+  recipients: z
+    .number()
+    .int()
+    .nullable()
+    .describe('Distinct people reached by the campaign, on any channel; null when the total was withheld'),
+  emailSent: z.number().int().nullable().describe('Distinct people the campaign reached by e-mail; null when the total was withheld'),
+  delivered: z.number().int().nullable().describe('Distinct people whose campaign e-mail was delivered; null when the total was withheld'),
+  clickers: z.number().int().nullable().describe('Distinct people who clicked; null when the total was withheld'),
+  unsubscribers: z.number().int().nullable().describe('Distinct people who unsubscribed; null when the total was withheld'),
   complaintRate: z.number().nullable(),
   unsubscribeRate: z.number().nullable(),
-  converters: z.number().int(),
+  converters: z.number().int().nullable().describe('Distinct campaign converters; null when the total was withheld'),
   conversionRate: z.number().nullable(),
   revenue: z.array(currencyAmount),
   revenuePerRecipient: z.array(currencyAmount),
   targetProgress: z
     .number()
     .nullable()
-    .describe('Progress against goal.target; null when there is no target or currencies cannot be compared'),
+    .describe('Progress against goal.target; null when there is no target, a needed total was withheld, or currencies cannot be compared'),
 });
 
 const funnelStep = z.object({
   step: z.enum(['recipients', 'delivered', 'clicked', 'converted']),
-  count: z.number().int(),
-  stepRate: z.number().nullable().describe('Count divided by the previous step'),
+  count: z.number().int().nullable().describe('People at this step; null when the step total was withheld'),
+  stepRate: z.number().nullable().describe('Count divided by the previous step, or null when a needed count was withheld'),
   shareOfRecipients: z.number().nullable(),
 });
 
@@ -419,11 +423,66 @@ export function summaryWindow(
   return { from, to, clamped };
 }
 
+/** One sending member's contribution to the headline totals, before suppression. */
+export interface MemberTotalInput {
+  /** False when the member has no breakdown row because it never sent; a visible zero. */
+  hasRow: boolean;
+  /** Distinct people the member reached: the row's group size and the k test. */
+  reached: number;
+  sent: number;
+  delivered: number;
+  clicked: number;
+  unsubscribed: number;
+  converters: number;
+}
+
+/**
+ * Which sending member rows the campaign summary must hide (#692). Every headline total beside the
+ * rows is protected per total, grouped by member rather than by physical row: one hidden member
+ * makes exactly one hidden contributor in each total, so the smallest visible member with a value
+ * in that total is hidden too. When a total has one hidden member and only zero-valued visible
+ * members, hiding one would reveal nothing and the total is withheld instead (the narrow fallback).
+ * Hiding a member row hides every figure, so the pass repeats until no total has one hidden member.
+ */
+export function planMemberSuppression(
+  members: readonly MemberTotalInput[],
+  k = K,
+): { hidden: boolean[]; withheld: string[]; complementary: boolean } {
+  const hidden = members.map((member) => member.hasRow && member.reached < k);
+  const totals = [
+    ['recipients', 'reached'],
+    ['email.sent', 'sent'],
+    ['email.delivered', 'delivered'],
+    ['email.clicked', 'clicked'],
+    ['email.unsubscribed', 'unsubscribed'],
+    ['campaign.converters', 'converters'],
+  ] as const satisfies readonly (readonly [string, keyof MemberTotalInput])[];
+  const plan = planComplementarySuppression({
+    totals: totals.map(([name]) => name),
+    contributors: (name) => {
+      const field = totals.find(([entry]) => entry === name)![1];
+      return members.map((member, id) => ({
+        id,
+        group: member.reached,
+        value: Number(member[field]),
+        hidden: hidden[id]!,
+      }));
+    },
+    hide: (_total, id) => {
+      const index = Number(id);
+      if (hidden[index]) return false;
+      hidden[index] = true;
+      return true;
+    },
+  });
+  return { hidden, withheld: plan.withheld, complementary: plan.hidden > 0 };
+}
+
 export const analyticsCampaignSummary = defineCommand({
   name: 'analytics.campaignSummary',
   title: 'Campaign evaluation',
   description:
-    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed; a currency revenue row below k=5 converters has its revenue suppressed while the rest of the campaign headline stays. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
+    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed; a currency revenue row below k=5 converters has its revenue suppressed while the rest of the campaign headline stays. Each headline total beside the member rows is protected per total: when exactly one member is hidden, the smallest visible member with a value in that total is hidden too, and a total with no visible member to hide is withheld (null) and named in the notes. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
   input: z.object({
     campaignId: CampaignId,
     from: isoDateTime('from')
@@ -520,14 +579,13 @@ export const analyticsCampaignSummary = defineCommand({
       limit: 5000,
     });
 
-    const recipients = cell(totals, 'campaign.recipients');
-    const converters = cell(totals, 'campaign.converters');
-    const emailSent = cell(email, 'email.sent');
-    const delivered = cell(email, 'email.delivered');
-    const clickers = cell(email, 'email.clicked');
-    const unsubscribers = cell(email, 'email.unsubscribed');
+    const recipientsValue = cell(totals, 'campaign.recipients');
+    const convertersValue = cell(totals, 'campaign.converters');
+    const emailSentValue = cell(email, 'email.sent');
+    const deliveredValue = cell(email, 'email.delivered');
+    const clickersValue = cell(email, 'email.clicked');
+    const unsubscribersValue = cell(email, 'email.unsubscribed');
     const complained = cell(email, 'email.complained');
-    const conversionRate = recipients ? converters / recipients : null;
     const currencyIndex = columnIndex(revenue, 'currency');
     const revenueIndex = columnIndex(revenue, 'campaign.revenue');
     const revenueRows =
@@ -538,13 +596,6 @@ export const analyticsCampaignSummary = defineCommand({
             return typeof currency === 'string' && typeof amount === 'number' ? [{ currency, amount }] : [];
           })
         : [];
-    const revenuePerRecipient = revenueRows.map((r) => ({ currency: r.currency, amount: recipients ? r.amount / recipients : 0 }));
-
-    let targetProgress: number | null = null;
-    if (record.goal.target && record.goal.target > 0) {
-      if (record.goal.kind === 'revenue' && revenueRows.length === 1) targetProgress = revenueRows[0].amount / record.goal.target;
-      else if (record.goal.kind !== 'revenue') targetProgress = converters / record.goal.target;
-    }
 
     // Revenue goals follow the conversion map, exactly like campaign.converters does.
     const conversionMap = await publishedSingleton(ctx.tx, 'conversion_map');
@@ -555,16 +606,45 @@ export const analyticsCampaignSummary = defineCommand({
     const breakdown = await memberBreakdown(deps, memberIds, from, to, goalEvents, record.goal.attributionDays, identity);
     // The same k rule the query layer applies to a dimension group: a member row whose group of
     // people reached is below k has every count and derived rate suppressed (null), and is
-    // counted in meta.suppressed. The headline is a total and is never suppressed.
-    // The headline is the visible total above these rows, so a single hidden member row would be
-    // recoverable as recipients minus the visible rows. Hide the smallest visible member row as
-    // well (#692); the member order is deterministic, so a tie is too.
-    const complementaryMember = complementarySuppression(
-      sending.map((m) => {
-        const row = breakdown.get(m.artifactId);
-        return { group: row?.reached ?? 0, hidden: !!row && row.reached < K };
-      }),
-    );
+    // counted in meta.suppressed. Every headline total beside the rows is protected per total
+    // (#692): the people total and each summed headline measure. One hidden member is one hidden
+    // contributor in each; hide the smallest visible member with a value in that total, or withhold
+    // the total when every visible member is zero. The member order is deterministic, so a tie is.
+    const memberTotals = sending.map((m) => {
+      const row = breakdown.get(m.artifactId);
+      return row
+        ? {
+            hasRow: true,
+            reached: row.reached,
+            sent: row.sent,
+            delivered: row.delivered,
+            clicked: row.clicked,
+            unsubscribed: row.unsubscribed,
+            converters: row.converters,
+          }
+        : { hasRow: false, reached: 0, sent: 0, delivered: 0, clicked: 0, unsubscribed: 0, converters: 0 };
+    });
+    const memberPlan = planMemberSuppression(memberTotals);
+    const withheld = new Set(memberPlan.withheld);
+    const visible = (name: string, value: number) => (withheld.has(name) ? null : value);
+    const recipients = visible('recipients', recipientsValue);
+    const converters = visible('campaign.converters', convertersValue);
+    const emailSent = visible('email.sent', emailSentValue);
+    const delivered = visible('email.delivered', deliveredValue);
+    const clickers = visible('email.clicked', clickersValue);
+    const unsubscribers = visible('email.unsubscribed', unsubscribersValue);
+    const conversionRate = recipients !== null && recipients > 0 && converters !== null ? converters / recipients : null;
+    const revenuePerRecipient = revenueRows.map((r) => ({
+      currency: r.currency,
+      amount: recipients === null ? null : recipients === 0 ? 0 : r.amount / recipients,
+    }));
+
+    let targetProgress: number | null = null;
+    if (record.goal.target && record.goal.target > 0) {
+      if (record.goal.kind === 'revenue' && revenueRows.length === 1) targetProgress = revenueRows[0].amount / record.goal.target;
+      else if (record.goal.kind !== 'revenue' && converters !== null) targetProgress = converters / record.goal.target;
+    }
+
     let memberSuppressed = 0;
     const members = sending.map((m, index) => {
       const row = breakdown.get(m.artifactId);
@@ -582,7 +662,7 @@ export const analyticsCampaignSummary = defineCommand({
           suppressed: false,
         };
       }
-      if (row.reached < K || index === complementaryMember) {
+      if (memberPlan.hidden[index]) {
         memberSuppressed++;
         return {
           artifactId: m.artifactId,
@@ -614,24 +694,29 @@ export const analyticsCampaignSummary = defineCommand({
     // E-mail figures divide by the e-mail base, never by the all-channel recipient total. The
     // recipients and converted steps stay campaign-wide (#682).
     const funnel = [
-      { step: 'recipients' as const, count: recipients, stepRate: null, shareOfRecipients: recipients ? 1 : null },
+      {
+        step: 'recipients' as const,
+        count: recipients,
+        stepRate: null,
+        shareOfRecipients: recipients !== null && recipients > 0 ? 1 : null,
+      },
       {
         step: 'delivered' as const,
         count: delivered,
-        stepRate: emailSent ? delivered / emailSent : null,
-        shareOfRecipients: emailSent ? delivered / emailSent : null,
+        stepRate: emailSent !== null && emailSent > 0 && delivered !== null ? delivered / emailSent : null,
+        shareOfRecipients: emailSent !== null && emailSent > 0 && delivered !== null ? delivered / emailSent : null,
       },
       {
         step: 'clicked' as const,
         count: clickers,
-        stepRate: delivered ? clickers / delivered : null,
-        shareOfRecipients: emailSent ? clickers / emailSent : null,
+        stepRate: delivered !== null && delivered > 0 && clickers !== null ? clickers / delivered : null,
+        shareOfRecipients: emailSent !== null && emailSent > 0 && clickers !== null ? clickers / emailSent : null,
       },
       {
         step: 'converted' as const,
         count: converters,
-        stepRate: clickers ? converters / clickers : null,
-        shareOfRecipients: recipients ? converters / recipients : null,
+        stepRate: clickers !== null && clickers > 0 && converters !== null ? converters / clickers : null,
+        shareOfRecipients: recipients !== null && recipients > 0 && converters !== null ? converters / recipients : null,
       },
     ];
 
@@ -640,8 +725,12 @@ export const analyticsCampaignSummary = defineCommand({
     const suppressedHoldouts = holdouts.filter((h) => h.suppressed).length;
     const notes = [...new Set([...totals.meta.notes, ...email.meta.notes, ...revenue.meta.notes, ...baseMeta.notes])];
     if (memberSuppressed) notes.push(`Member rows with fewer than k=${K} people reached have their counts suppressed.`);
-    if (complementaryMember !== null)
+    if (memberPlan.complementary)
       notes.push('One further member row was suppressed so a member below k cannot be derived from the campaign total.');
+    if (withheld.size)
+      notes.push(
+        `Totals withheld because they had one hidden member and no visible member with a value to hide in its place: ${[...withheld].join(', ')}.`,
+      );
     if (suppressedHoldouts)
       notes.push(`Journey holdouts with fewer than k=${K} people in an arm or in a suppressed member row have their counts suppressed.`);
 
@@ -656,8 +745,8 @@ export const analyticsCampaignSummary = defineCommand({
         delivered,
         clickers,
         unsubscribers,
-        complaintRate: delivered ? complained / delivered : null,
-        unsubscribeRate: delivered ? unsubscribers / delivered : null,
+        complaintRate: delivered !== null && delivered > 0 ? complained / delivered : null,
+        unsubscribeRate: delivered !== null && delivered > 0 && unsubscribers !== null ? unsubscribers / delivered : null,
         converters,
         conversionRate,
         revenue: revenueRows,

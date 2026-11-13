@@ -1,4 +1,4 @@
-import { complementarySuppression, K, publishedSingleton } from '@agentic-marketing/artifacts';
+import { complementarySuppression, K, planComplementarySuppression, publishedSingleton } from '@agentic-marketing/artifacts';
 import { campaignIdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
@@ -16,6 +16,7 @@ import {
   type MeasureScope,
   measureScope,
   type NormalizedFilters,
+  type Output,
   SOURCE_FILTERS,
 } from './compile';
 import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef, measureIds, type SourceId } from './registry';
@@ -25,11 +26,6 @@ import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef
 // principal, and ClickHouse's row policy checks it again.
 
 const CACHE_TTL_MS = 60_000;
-
-/** True for a measure whose value is money: campaign.revenue and the ratios built on it. */
-function isRevenueMeasure(measure: MeasureDef): boolean {
-  return measure.id === 'campaign.revenue' || (measure.kind === 'ratio' && measure.numerator === 'campaign.revenue');
-}
 
 export { K };
 export const MAX_RANGE_DAYS = 400;
@@ -89,7 +85,7 @@ export const analyticsMeta = z.object({
     .number()
     .int()
     .describe(
-      'Rows whose measures were hidden by the minimum group size, plus at most one complementary row when only one would be hidden',
+      'Rows and cells whose measures were hidden by the minimum group size, plus any complementary contributors hidden per total; totals that could not be protected are withheld instead and named in notes',
     ),
   k: z.number().int(),
   notes: z.array(z.string()),
@@ -305,57 +301,236 @@ export async function freshness(deps: Deps, input: FreshnessInput): Promise<stri
 
 export interface SuppressedRows {
   rows: (string | number | null)[][];
-  /** Rows whose measures were hidden: those below k plus at most one complementary row. */
+  /** Rows and cells whose measures were hidden: those below k, their complements, and revenue cells. */
   suppressed: number;
-  /** True when one visible row was hidden too, so a single small group cannot be derived. */
+  /** True when at least one further row or cell was hidden so a single hidden value cannot be derived. */
   complementary: boolean;
   /** Rows whose revenue figures were hidden below k while their counts stayed visible. */
   revenueSuppressed: number;
+  /**
+   * Totals withheld because exactly one contributor was hidden and no visible contributor with a
+   * value was left to hide instead. Named by measure and, for revenue, currency.
+   */
+  withheld: string[];
 }
 
 /**
- * Shapes the compiled rows and applies the k floor. When exactly one row is below k, the smallest
- * visible row is hidden as well (#692), so total minus visible rows is only the sum of the hidden
- * ones. The rows are in the query's deterministic sort order, which decides a tie.
+ * Shapes the compiled rows and applies the k floor. When exactly one contributor to a total is
+ * hidden, the smallest visible non-zero contributor in that total is hidden as well (#692), so
+ * total minus visible contributors is only the sum of the hidden ones. Contributors are rows
+ * grouped by their independent population (the dimension key without currency), so one campaign
+ * spread over several currency rows is one contributor, not several.
+ *
+ * Every total the result exposes beside the rows is protected separately: the people total, each
+ * measure, and each per-currency revenue total. When a total has one hidden contributor and no
+ * visible non-zero contributor, hiding a complement is impossible and the total is withheld
+ * instead; that is the narrow option-A fallback. A hide in one total can make a contributor hidden
+ * in another, so the plan repeats until stable. The rows are in the query's deterministic sort
+ * order, which decides a tie.
  */
 export function suppressRows(
   raw: readonly Record<string, unknown>[],
   compiled: Pick<CompiledQuery, 'outputs' | 'kAlias' | 'revenueKAlias' | 'hasNonTimeDimension'>,
 ): SuppressedRows {
-  const kOf = (row: Record<string, unknown>) => Number(row[compiled.kAlias]);
-  const hidden = raw.map((row) => compiled.hasNonTimeDimension && (!Number.isFinite(kOf(row)) || kOf(row) < K));
-  const complementary = complementarySuppression(raw.map((row, i) => ({ group: kOf(row), hidden: hidden[i]! })));
-  if (complementary !== null) hidden[complementary] = true;
+  const dimensions = compiled.outputs.filter((out): out is Extract<Output, { kind: 'dimension' }> => out.kind === 'dimension');
+  const measures = compiled.outputs.filter((out): out is Extract<Output, { kind: 'measure' }> => out.kind === 'measure');
+  const currencyAlias = dimensions.find((out) => out.dimension === 'currency')?.alias;
+  // The independent population is everything except currency: currency partitions revenue, not people.
+  const keyOutputs = dimensions.filter((out) => out.dimension !== 'currency');
+  const groupOf = (row: Record<string, unknown>) => Number(row[compiled.kAlias]);
+  const numberAt = (row: Record<string, unknown>, alias: string) => {
+    const value = row[alias];
+    const n = Number(value);
+    return value === null || value === undefined || !Number.isFinite(n) ? 0 : n;
+  };
+  const isMoney = (measure: MeasureDef) => measure.unit === 'currency';
 
-  let suppressed = 0;
-  let revenueSuppressed = 0;
-  const rows = raw.map((row, i) => {
-    const hide = hidden[i]!;
-    // A per-currency revenue row is about its converters, even when the caller asked for no other
-    // dimension. Below k its revenue figures are null, while the row's recipient and converter
-    // counts stay readable (#756). Zero converters have no people to protect and stay a real 0
-    // (#630), which is why only a non-empty group below k is hidden.
-    const revenueK = compiled.revenueKAlias === undefined ? Number.NaN : Number(row[compiled.revenueKAlias]);
-    const hideRevenue = !hide && compiled.revenueKAlias !== undefined && Number.isFinite(revenueK) && revenueK > 0 && revenueK < K;
-    if (hide) suppressed += 1;
-    else if (hideRevenue) {
-      suppressed += 1;
-      revenueSuppressed += 1;
+  // Every additive measure, including the bases a requested ratio names but does not list as an
+  // output. A ratio is derived from them, never a total of its own.
+  const bases = new Map<string, { measure: MeasureDef; alias: string }>();
+  for (const out of measures) {
+    if (out.measure.kind === 'base') bases.set(out.measure.id, { measure: out.measure, alias: out.alias });
+    else
+      for (const [id, alias] of [
+        [out.measure.numerator, out.numeratorAlias],
+        [out.measure.denominator, out.denominatorAlias],
+      ] as const) {
+        const measure = MEASURES[id];
+        if (measure?.kind === 'base' && alias) bases.set(id, { measure, alias });
+      }
+  }
+  const aliasToMeasure = new Map([...bases.values()].map((base) => [base.alias, base.measure.id]));
+
+  interface Contributor {
+    id: number;
+    rows: number[];
+    group: number;
+  }
+  const contributors: Contributor[] = [];
+  const byKey = new Map<string, Contributor>();
+  raw.forEach((row, index) => {
+    const key = keyOutputs.map((out) => String(row[out.alias] ?? '')).join('\u0000');
+    let contributor = byKey.get(key);
+    if (!contributor) {
+      contributor = { id: contributors.length, rows: [], group: 0 };
+      byKey.set(key, contributor);
+      contributors.push(contributor);
     }
-    return compiled.outputs.map((out) => {
+    contributor.rows.push(index);
+    contributor.group = Math.max(contributor.group, groupOf(row));
+  });
+
+  const rowHidden = raw.map((row) => {
+    if (!compiled.hasNonTimeDimension) return false;
+    const group = groupOf(row);
+    return !Number.isFinite(group) || group < K;
+  });
+  // A measure-specific hidden cell. Revenue below its converter floor is a cell, not a row: the
+  // recipient and converter counts stay readable (#756).
+  const hiddenCells = new Map<number, Set<string>>();
+  const hideCell = (index: number, measure: string) => {
+    let set = hiddenCells.get(index);
+    if (!set) {
+      set = new Set();
+      hiddenCells.set(index, set);
+    }
+    set.add(measure);
+  };
+  const cellIsHidden = (index: number, measure: string) => rowHidden[index] === true || hiddenCells.get(index)?.has(measure) === true;
+  // Rows whose revenue is null because their own converters are below k, for the note. A
+  // complementary revenue cell is counted in `suppressed` but not here.
+  const revenueFloor = new Set<number>();
+  if (compiled.revenueKAlias !== undefined)
+    raw.forEach((row, index) => {
+      if (rowHidden[index]) return;
+      const revenueGroup = Number(row[compiled.revenueKAlias!]);
+      if (!Number.isFinite(revenueGroup) || revenueGroup <= 0 || revenueGroup >= K) return;
+      revenueFloor.add(index);
+      for (const base of bases.values()) if (isMoney(base.measure)) hideCell(index, base.measure.id);
+    });
+
+  interface TotalDef {
+    name: string;
+    /** The contributor's rows in this total (one currency partition, or all of them). */
+    rows: (contributor: Contributor) => number[];
+    /** The contributor's unsuppressed value in this total. */
+    value: (contributor: Contributor) => number;
+    /** The measure to hide for a cell complement, or null when the people total is at risk. */
+    measureId: string | null;
+  }
+  const totals: TotalDef[] = [
+    {
+      name: 'group size',
+      rows: (contributor) => contributor.rows,
+      value: (contributor) => contributor.group,
+      measureId: null,
+    },
+  ];
+  for (const base of bases.values()) {
+    if (isMoney(base.measure) && currencyAlias) {
+      for (const currency of new Set(raw.map((row) => String(row[currencyAlias] ?? '')))) {
+        const inCurrency = (contributor: Contributor) =>
+          contributor.rows.filter((index) => String(raw[index]![currencyAlias] ?? '') === currency);
+        totals.push({
+          name: `${base.measure.id}:${currency}`,
+          rows: inCurrency,
+          value: (contributor) => inCurrency(contributor).reduce((sum, index) => sum + numberAt(raw[index]!, base.alias), 0),
+          measureId: base.measure.id,
+        });
+      }
+      continue;
+    }
+    // A campaign count repeats on every currency row; another source partitions a measure by
+    // currency, where the currency rows add up to the measure's total.
+    const repeated = base.measure.source === 'campaign';
+    totals.push({
+      name: base.measure.id,
+      rows: (contributor) => contributor.rows,
+      value: (contributor) =>
+        repeated
+          ? Math.max(...contributor.rows.map((index) => numberAt(raw[index]!, base.alias)))
+          : contributor.rows.reduce((sum, index) => sum + numberAt(raw[index]!, base.alias), 0),
+      measureId: base.measure.id,
+    });
+  }
+
+  const contributorsFor = (def: TotalDef) =>
+    contributors
+      .map((contributor) => {
+        const rows = def.rows(contributor);
+        return {
+          id: contributor.id,
+          group: contributor.group,
+          value: def.value(contributor),
+          hidden: rows.some((index) => (def.measureId === null ? rowHidden[index] === true : cellIsHidden(index, def.measureId))),
+          present: rows.length > 0,
+        };
+      })
+      .filter((contributor) => contributor.present);
+
+  // Withholding only makes sense when the result is a breakdown under a total; a time series has no
+  // total to withhold, and the k floor does not apply to it.
+  const plan = compiled.hasNonTimeDimension
+    ? planComplementarySuppression({
+        totals: totals.map((def) => def.name),
+        contributors: (name) => contributorsFor(totals.find((def) => def.name === name)!),
+        hide: (name, id) => {
+          const def = totals.find((entry) => entry.name === name);
+          const contributor = contributors[Number(id)];
+          if (!def || !contributor) return false;
+          let hid = false;
+          for (const index of def.rows(contributor)) {
+            if (def.measureId === null) {
+              if (rowHidden[index]) continue;
+              rowHidden[index] = true;
+              hid = true;
+              continue;
+            }
+            if (cellIsHidden(index, def.measureId)) continue;
+            hideCell(index, def.measureId);
+            hid = true;
+          }
+          return hid;
+        },
+      })
+    : { withheld: [] as string[], hidden: 0 };
+
+  const ratioHidden = (index: number, out: Extract<Output, { kind: 'measure' }>) => {
+    if (out.measure.kind !== 'ratio') return false;
+    for (const alias of [out.numeratorAlias, out.denominatorAlias]) {
+      if (!alias) continue;
+      const measure = aliasToMeasure.get(alias);
+      if (measure && cellIsHidden(index, measure)) return true;
+    }
+    return false;
+  };
+
+  const rows = raw.map((row, index) =>
+    compiled.outputs.map((out) => {
       const value = row[out.alias];
       if (out.kind === 'dimension') {
         if (value === '' || value === null || value === undefined) return null;
         return typeof value === 'number' ? value : String(value);
       }
-      if (hide) return null;
-      if (hideRevenue && isRevenueMeasure(out.measure)) return null;
+      if (rowHidden[index] || cellIsHidden(index, out.measure.id) || ratioHidden(index, out)) return null;
       if (value === null || value === undefined) return null;
       const n = Number(value);
       return Number.isFinite(n) ? n : null;
-    });
-  });
-  return { rows, suppressed, complementary: complementary !== null, revenueSuppressed };
+    }),
+  );
+
+  let cellSuppressed = 0;
+  for (const [index] of hiddenCells) {
+    if (rowHidden[index]) continue;
+    cellSuppressed += 1;
+  }
+  return {
+    rows,
+    suppressed: rowHidden.filter(Boolean).length + cellSuppressed,
+    complementary: plan.hidden > 0,
+    revenueSuppressed: [...revenueFloor].filter((index) => !rowHidden[index]).length,
+    withheld: plan.withheld,
+  };
 }
 
 async function segmentQuery(deps: Deps, input: QueryInput, filters: NormalizedFilters): Promise<AnalyticsResult> {
@@ -547,6 +722,10 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
   if (campaignSource && identity?.overLimit) notes.push(identityUnresolvedNote(identity.limit));
   if (suppressed) notes.push(`Groups smaller than k=${K} have their measures suppressed.`);
   if (shaped.complementary) notes.push('One further group was suppressed so a single group below k cannot be derived from the total.');
+  if (shaped.withheld.length)
+    notes.push(
+      `A total was withheld because it had one hidden contributor and no visible group with a value to hide in its place: ${shaped.withheld.join(', ')}.`,
+    );
 
   return {
     columns: compiled.columns,
@@ -594,7 +773,7 @@ export const analyticsQuery = defineCommand({
   name: 'analytics.query',
   title: 'Query marketing metrics',
   description:
-    'Read a fixed catalogue of marketing measures, broken down by up to three dimensions. Measures have stable ids (email.sent, email.delivered, email.click_rate, journey.entered, conversions, revenue, segment.members, …); ratios are computed from their base measures after aggregation, never averaged. The workspace time zone decides day, week and month boundaries. Breakdowns by anything other than a time dimension hide rows with fewer than k=5 people behind their counts and report how many were suppressed in meta.suppressed; totals are never suppressed. A campaign revenue row is keyed on the people who converted in its currency, so its revenue and revenue per recipient are null below k=5 even when the campaign reached enough people, and it is counted in meta.suppressed. There is no SQL, table or expression input, and the workspace always comes from the caller. Results are cached for 60 seconds; each query is limited to 10 seconds and at most 5000 rows.',
+    'Read a fixed catalogue of marketing measures, broken down by up to three dimensions. Measures have stable ids (email.sent, email.delivered, email.click_rate, journey.entered, conversions, revenue, segment.members, …); ratios are computed from their base measures after aggregation, never averaged. The workspace time zone decides day, week and month boundaries. Breakdowns by anything other than a time dimension hide rows with fewer than k=5 people behind their counts and report how many were suppressed in meta.suppressed. Every total the result exposes beside its rows is protected per total: the people total, each measure and each per-currency revenue total hide their smallest visible non-zero contributor when exactly one contributor is hidden. A total with one hidden contributor and no visible non-zero contributor to hide instead is withheld and named in the notes. A campaign revenue row is keyed on the people who converted in its currency, so its revenue and revenue per recipient are null below k=5 even when the campaign reached enough people, and it is counted in meta.suppressed. There is no SQL, table or expression input, and the workspace always comes from the caller. Results are cached for 60 seconds; each query is limited to 10 seconds and at most 5000 rows.',
   input: queryInput,
   output: analyticsResult,
   permission: 'artifacts:read',

@@ -715,7 +715,7 @@ describe('analytics.campaignSummary', () => {
     expect(summary.members.every((m) => m.suppressed)).toBe(true);
     expect(summary.members.map((m) => m.sent)).toEqual([null, null]);
     // Only the sum of the hidden rows can be derived from the total.
-    expect(summary.headline.recipients - summary.members.reduce((sum, m) => sum + (m.sent ?? 0), 0)).toBe(10);
+    expect((summary.headline.recipients ?? 0) - summary.members.reduce((sum, m) => sum + (m.sent ?? 0), 0)).toBe(10);
     expect(summary.meta.suppressed).toBeGreaterThanOrEqual(2);
     expect(summary.meta.notes.join(' ')).toContain('One further member row was suppressed');
   });
@@ -725,8 +725,12 @@ describe('analytics.campaignSummary', () => {
     expect(summary.state).toBe('measured');
     if (summary.state !== 'measured') return;
 
-    // The headline is a total, so it is never suppressed by k.
-    expect(summary.headline.recipients).toBe(3);
+    // The only sending member reaches three people. There is no visible member row with a value to
+    // hide beside it, so the headline totals it would give away are withheld, not printed (#692).
+    expect(summary.headline.recipients).toBeNull();
+    expect(summary.headline.emailSent).toBeNull();
+    expect(summary.headline.converters).toBeNull();
+    expect(summary.headline.conversionRate).toBeNull();
     expect(summary.members).toHaveLength(1);
     expect(summary.members[0]).toMatchObject({
       sent: null,
@@ -736,8 +740,10 @@ describe('analytics.campaignSummary', () => {
       converters: null,
       suppressed: true,
     });
+    expect(summary.funnel.map((step) => step.count)).toEqual([null, null, null, null]);
     expect(summary.meta.suppressed).toBe(1);
     expect(summary.meta.notes.join(' ')).toContain('fewer than k=5');
+    expect(summary.meta.notes.join(' ')).toContain('Totals withheld');
   });
 
   it('suppresses a holdout whose member row is below k (#586)', async () => {

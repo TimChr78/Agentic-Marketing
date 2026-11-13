@@ -23,9 +23,10 @@ export interface EventStore {
   insert(events: BusEvent[]): Promise<void>;
   /**
    * Events of a person, by every anonymous id and user id they are known by. Newest first.
-   * Pages with the full replacing key `(timestamp, name, anonymous_id, event_id)`. `beforeName`
-   * and `beforeAnonymousId` may be omitted for a cursor written before #840; the missing fields
-   * then act as the tuple maximum so a tied event is never skipped.
+   * Pages with the full replacing key `(timestamp, name, anonymous_id, event_id)`. A cursor
+   * without `beforeName` or `beforeAnonymousId` is a pre-#840 cursor: it falls back to the old
+   * `(timestamp, event_id)` tuple, which always makes progress and may skip rows that tie on both
+   * (exactly as before #840) rather than returning the same page forever.
    */
   eventsOf(
     workspaceId: string,
@@ -360,17 +361,19 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       // Page on the full replacing key (timestamp, name, anonymous_id, event_id) descending, as
       // conversionEvents walks it ascending: two rows that tie on timestamp and event id but
       // differ by name or anonymous id both survive FINAL and must not be dropped at a boundary
-      // (#840). A cursor written before #840 lacks the name and anonymous id; the missing fields
-      // act as the tuple maximum, so the tied rows are repeated rather than skipped.
+      // (#840). A cursor written before #840 lacks the name and anonymous id; it falls back to the
+      // old (timestamp, event_id) tuple, which always makes progress and may skip the rare rows
+      // that tie on both exactly as before #840. A cursor without an event id keeps the
+      // strictly-before timestamp comparison for the same reason.
       const after = !o.before
         ? ''
-        : o.beforeName === undefined
-          ? "AND timestamp <= {before:DateTime64(3, 'UTC')}"
-          : o.beforeAnonymousId === undefined
-            ? "AND (timestamp < {before:DateTime64(3, 'UTC')} OR (timestamp = {before:DateTime64(3, 'UTC')} AND name <= {beforeName:String}))"
-            : o.beforeId
-              ? "AND (timestamp, name, anonymous_id, event_id) < ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String}, {beforeId:String})"
-              : "AND (timestamp, name, anonymous_id) <= ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String})";
+        : o.beforeName === undefined || o.beforeAnonymousId === undefined
+          ? o.beforeId
+            ? "AND (timestamp, event_id) < ({before:DateTime64(3, 'UTC')}, {beforeId:String})"
+            : "AND timestamp < {before:DateTime64(3, 'UTC')}"
+          : o.beforeId
+            ? "AND (timestamp, name, anonymous_id, event_id) < ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String}, {beforeId:String})"
+            : "AND (timestamp, name, anonymous_id) <= ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String})";
       const rs = await query(workspaceId, {
         query: `SELECT event_id, source_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
                 FROM events FINAL
