@@ -1,6 +1,6 @@
 import type { PushTemplate } from '@agentic-marketing/artifacts';
 import { Liquid } from 'liquidjs';
-import { TemplateError } from '../render';
+import { firstLine, TemplateError } from '../render';
 
 // Push text: Liquid without HTML escaping (notifications are plain text), sandboxed like e-mail
 // and SMS templates.
@@ -31,7 +31,7 @@ export function validatePushTemplate(t: PushTemplate): string[] {
     try {
       engine.parse(v);
     } catch (e) {
-      problems.push(`${field}: Liquid error: ${(e as Error).message.split('\n')[0]}`);
+      problems.push(`${field}: Liquid error: ${firstLine((e as Error).message)}`);
     }
   }
   return problems;

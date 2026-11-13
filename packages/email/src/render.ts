@@ -1,6 +1,6 @@
 /// <reference path="./mjml.d.ts" />
 import type { EmailBlockParam, EmailTemplate } from '@agentic-marketing/artifacts';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, redactCredentials } from '@agentic-marketing/core';
 import { convert } from 'html-to-text';
 import {
   AssertionError,
@@ -41,7 +41,12 @@ export class TemplateError extends Error {
 }
 
 /** The first line of a message: library errors append a stack or an excerpt after it. */
-export const firstLine = (message: string) => message.split('\n')[0];
+/**
+ * The first line of an error message, credential-redacted. Redaction runs on the whole message
+ * first: cutting at a newline can separate a quoted credential from its closing quote, and the
+ * rule would no longer recognise what is left (#885 round 4).
+ */
+export const firstLine = (message: string) => redactCredentials(message).split('\n')[0]!;
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeOutput(value: unknown): string {
@@ -316,7 +321,7 @@ export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
     try {
       engine.parse(src);
     } catch (e) {
-      problems.push(`${field}: Liquid error: ${(e as Error).message.split('\n')[0]}`);
+      problems.push(`${field}: Liquid error: ${firstLine((e as Error).message)}`);
     }
   }
   if (!problems.length) {
@@ -329,7 +334,7 @@ export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
       });
       for (const e of r.errors.slice(0, 10)) problems.push(`mjml line ${e.line}: ${e.message}`);
     } catch (e) {
-      problems.push(`mjml: ${(e as Error).message.split('\n')[0]}`);
+      problems.push(`mjml: ${firstLine((e as Error).message)}`);
     }
   }
   if (t.purpose !== 'onboarding' && t.purpose !== 'necessary') {
@@ -359,7 +364,7 @@ export function validateSubject(subject: string): string | null {
     engine.parse(subject);
     return null;
   } catch (e) {
-    return `Liquid error: ${(e as Error).message.split('\n')[0]}`;
+    return `Liquid error: ${firstLine((e as Error).message)}`;
   }
 }
 

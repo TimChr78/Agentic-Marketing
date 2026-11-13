@@ -4,6 +4,7 @@ import { AppError } from '@agentic-marketing/core';
 import { describe, expect, it } from 'vitest';
 import { emailPublishProblems } from '../src/checks';
 import { checkTemplate, previewTemplate } from '../src/templates';
+import { firstLine, TemplateError, templateRenderError } from '../src/render';
 
 // #885: templates.preview, templates.check and the publish gate wrapped *every* failure of a render
 // into an AppError. A block is resolved from the database while the template renders, so a database
@@ -146,5 +147,19 @@ describe('the publish gate’s render check (#885)', () => {
     );
     expect(problems.join(' ')).toContain('the template could not be rendered for its checks');
     expect(problems.join(' ')).not.toContain('probe-secret');
+  });
+});
+
+describe('render failure text redaction order (#885 round 4)', () => {
+  it('redacts a multi-line credential before keeping the first line', () => {
+    const err = templateRenderError(new TemplateError('Block URL invalid: password="probe-secret\nrest"'), 'Render failed');
+    expect(err).not.toBeNull();
+    expect(err!.message).toContain('Block URL invalid');
+    expect(err!.message).not.toContain('probe-secret');
+  });
+
+  it('firstLine never returns a credential split from its closing quote', () => {
+    expect(firstLine('token="probe-secret\nrest"')).not.toContain('probe-secret');
+    expect(firstLine('plain first line\nsecond')).toBe('plain first line');
   });
 });

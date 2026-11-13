@@ -1,6 +1,6 @@
 import type { SmsTemplate } from '@agentic-marketing/artifacts';
 import { Liquid } from 'liquidjs';
-import { TemplateError } from '../render';
+import { firstLine, TemplateError } from '../render';
 import { smsSegments } from './adapters';
 
 // SMS text: Liquid without HTML escaping (it is plain text), sandboxed like e-mail templates.
@@ -110,7 +110,7 @@ export function validateSmsTemplate(t: SmsTemplate): string[] {
     engine.parse(t.body);
     return [];
   } catch (e) {
-    return [`body: Liquid error: ${(e as Error).message.split('\n')[0]}`];
+    return [`body: Liquid error: ${firstLine((e as Error).message)}`];
   }
 }
 
