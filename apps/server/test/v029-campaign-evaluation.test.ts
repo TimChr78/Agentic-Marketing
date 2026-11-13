@@ -762,6 +762,19 @@ describe('analytics.campaignSummary', () => {
     expect(Date.parse(summary.meta.from)).toBeLessThanOrEqual(Date.parse(summary.meta.to));
   });
 
+  it('returns readiness when to is before a campaign that sent later (#747)', async () => {
+    // campaignA starts on 25 February and sent from 28 February; this window ends before both.
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignA, to: '2026-02-01T00:00:00.000Z' });
+    expect(summary.state).toBe('not_started');
+    if (summary.state !== 'not_started') return;
+
+    expect(summary.meta.from).toBe('2026-02-01T00:00:00.000Z');
+    expect(summary.meta.to).toBe('2026-02-01T00:00:00.000Z');
+    expect(Date.parse(summary.meta.from)).toBeLessThanOrEqual(Date.parse(summary.meta.to));
+    expect(summary.readiness.published).toBe(true);
+    expect(summary.readiness.sendingMembers).toBeGreaterThan(0);
+  });
+
   it('does not let a send without a profile id change member counts or rates (#587)', async () => {
     const load = () => api().call('analytics.campaignSummary', { campaignId: campaignGuard, from: LATE_FROM, to: LATE_TO });
     const before = await load();

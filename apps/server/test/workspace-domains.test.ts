@@ -582,7 +582,12 @@ describe('brand domains', () => {
   });
 
   it('keeps the commands people-only for an agent token', async () => {
-    const agent = agentPrincipal(owner.id, 'test-client', wsA, 'owner', ['workspace:admin', 'artifacts:read']);
+    const agent = agentPrincipal(owner.id, 'test-client', wsA, 'owner', ['workspace:admin', 'artifacts:read'], {
+      id: 'agt_00000000000000000000000000000003',
+      name: 'test-client',
+      status: 'active',
+      statusReason: null,
+    });
     const err = await rejects(t.srv.executor.execute(addWorkspaceDomain, { host: 'agent.example' }, agent, { surface: 'mcp' }));
     expect(err.status).toBe(403);
     expect(err.message).toContain('can only be run by a person');
