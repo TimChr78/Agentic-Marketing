@@ -1,11 +1,12 @@
 import type { LookupAddress } from 'node:dns';
 import { once } from 'node:events';
+import { createServer as createHttpServer } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { createServer } from 'node:net';
 import type pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import type { Erasure } from '../src/datasets';
-import { postgresConfig, postgresDestination, postgresSecrets } from '../src/destinations';
+import { postgresConfig, postgresDestination, postgresSecrets, s3Destination } from '../src/destinations';
 
 // #237: the destination used to check the host with one DNS lookup and then let pg resolve it
 // again when connecting, so an answer that changed in between reached a private address.
@@ -207,5 +208,35 @@ describe('postgres destination erasure', () => {
 
     const recorded = client.calls.find((c) => c.sql.includes('INSERT INTO "agentic_marketing".am_erasures'));
     expect(recorded?.params.slice(4)).toEqual([false, ['events']]);
+  });
+});
+
+describe('s3 destination failures (#885 round 6)', () => {
+  it('redacts a credential before cutting the bucket’s answer', async () => {
+    // The answer starts with filler, so a token that straddles the 200-character cut would survive
+    // as an unrecognisable fragment if the text were cut before it was redacted.
+    const token = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718';
+    const srv = createHttpServer((_req, res) => {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end(`${' '.repeat(183)}${token}`);
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as AddressInfo).port;
+    try {
+      const dest = s3Destination(
+        ws,
+        { bucket: 'probe-bucket', region: 'us-east-1', endpoint: `http://127.0.0.1:${port}`, prefix: '' },
+        { accessKeyId: 'key', secretAccessKey: 'secret' },
+        { allowedHosts: ['127.0.0.1'] },
+        'run1',
+      );
+      const failure = await dest.write('profiles', []).catch((e: Error) => e);
+      expect(failure).toBeInstanceOf(Error);
+      const text = (failure as Error).message;
+      expect(text).toContain('HTTP 500');
+      expect(text).not.toContain('a1b2c3d4e5f60718');
+    } finally {
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
   });
 });

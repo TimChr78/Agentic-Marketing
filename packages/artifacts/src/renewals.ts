@@ -1,4 +1,4 @@
-import { type AuditedError, appendAuditEntry, defineCommand, UNEXPECTED_FAILURE } from '@agentic-marketing/commands';
+import { type AuditedError, appendAuditEntry, defineCommand, sanitizeAppError, UNEXPECTED_FAILURE } from '@agentic-marketing/commands';
 import { AppError, hashValue, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
@@ -223,7 +223,7 @@ export const renewMandates = defineCommand({
         // (#885): an AppError's message is written for a person and goes out as is, while an
         // unexpected failure (the database, a secret provider, a bug) becomes the fixed internal
         // marker. Its text may carry SQL, a credential or a driver detail.
-        const failure: AuditedError = err instanceof AppError ? err : UNEXPECTED_FAILURE;
+        const failure: AuditedError = err instanceof AppError ? sanitizeAppError(err) : UNEXPECTED_FAILURE;
         renewed.push({
           mandateId,
           ok: false,

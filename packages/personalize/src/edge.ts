@@ -464,6 +464,14 @@ async function deleteWorkspaceCopies(kv: KvClient, ws: string, keys: string[]) {
 }
 
 /** One sync of one workspace: remote cleanup, the bundle if it changed, queued snapshots, and a slice of backfill. */
+/**
+ * An exception's text for `edge_targets.last_error` and the experience's status: redacted while it
+ * is complete, then cut (#885). A driver or a Cloudflare answer can echo a token.
+ */
+export function edgeErrorText(err: unknown): string {
+  return safeErrorText(err instanceof Error ? err.message : String(err), 500);
+}
+
 export async function syncEdge(deps: EdgeDeps, ws: string, opts: { bundleOnly?: boolean } = {}) {
   // A session lock serializes replicas without holding a transaction open during HTTP. A fresh
   // configuration can still commit; generation fences below stop the old tick before it acks
@@ -589,7 +597,7 @@ async function syncEdgeLocked(
           );
           await deleteWorkspaceCopies(oldKv, ws, old.keys);
         } catch (err) {
-          const message = (err as Error).message.slice(0, 500);
+          const message = edgeErrorText(err);
           logger.warn({ err, workspace: ws }, 'edge cleanup of an earlier target failed');
           keep.push({ ...old, lastError: message, nextAttemptAt: new Date(Date.now() + 15 * 60_000).toISOString() });
         }
@@ -687,7 +695,7 @@ async function syncEdgeLocked(
     }
     if (!opts.bundleOnly) await update({ lastSyncAt: new Date(), lastError: staleError });
   } catch (err) {
-    const message = (err as Error).message.slice(0, 500);
+    const message = edgeErrorText(err);
     logger.warn({ err, workspace: ws }, 'edge sync failed');
     await update({ lastError: message, lastSyncAt: new Date() });
   }

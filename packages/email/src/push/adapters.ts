@@ -90,7 +90,7 @@ export const webPushAdapter = definePushAdapter({
         body: new Uint8Array(encryptPayload(plain, to)),
       });
       if (res.status === 404 || res.status === 410) return { ok: false, gone: `the push service answered ${res.status}` };
-      if (!res.ok) throw new Error(`push service answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      if (!res.ok) throw new Error(`push service answered ${res.status}: ${safeErrorText(await res.text(), 200)}`);
       return { ok: true, providerMessageId: res.headers.get('location') };
     },
   }),

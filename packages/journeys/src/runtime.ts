@@ -1,6 +1,6 @@
 import { artifactTypes, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
-import { newId } from '@agentic-marketing/core';
+import { newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { requestEmail, requestPush, requestSms } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
@@ -271,10 +271,34 @@ async function scopeOf(tx: Tx, p: Participant) {
   };
 }
 
-/** JSONata returns objects without a prototype; plain JSON is what the database and receivers get. */
-const evalJsonata = async (expression: string, scope: unknown): Promise<unknown> => {
-  const v = await jsonata(expression).evaluate(scope);
-  return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+/**
+ * An exception's text for a participant error or a stored journey detail (#885). The expression and
+ * the condition are the workspace's own, so the message stays useful; a credential a person put in
+ * an expression, or one a service echoed, is redacted while the text is complete.
+ */
+export function journeyErrorText(err: unknown): string {
+  // JSONata throws a plain object with a `message`, not an Error, so read the field first.
+  const message =
+    err instanceof Error
+      ? err.message
+      : typeof (err as { message?: unknown } | null)?.message === 'string'
+        ? String((err as { message: string }).message)
+        : String(err);
+  return safeErrorText(message, 500);
+}
+
+/**
+ * JSONata returns objects without a prototype; plain JSON is what the database and receivers get.
+ * A failure is rethrown with sanitized text: `$error("password=…")` ends up in a participant's
+ * `error` and in the context a person reads (#885).
+ */
+export const evalJsonata = async (expression: string, scope: unknown): Promise<unknown> => {
+  try {
+    const v = await jsonata(expression).evaluate(scope);
+    return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+  } catch (err) {
+    throw new Error(journeyErrorText(err), { cause: err });
+  }
 };
 
 async function saveContext(tx: Tx, workspaceId: string, p: Participant) {
@@ -316,7 +340,7 @@ async function applyEffect(
       await saveContext(tx, workspaceId, p);
       return `vars.${eff.set} = ${JSON.stringify(value ?? null).slice(0, 200)}`;
     } catch (err) {
-      return `transform failed: ${(err as Error).message}`;
+      return `transform failed: ${journeyErrorText(err)}`;
     }
   }
   if (eff.kind === 'webhook') {
@@ -328,7 +352,7 @@ async function applyEffect(
       try {
         data = await evalJsonata(eff.data, scope);
       } catch (err) {
-        return `not sent: the data expression failed: ${(err as Error).message}`;
+        return `not sent: the data expression failed: ${journeyErrorText(err)}`;
       }
     await tx
       .insert(schema.deliveries)
@@ -358,7 +382,7 @@ async function applyEffect(
       const results = (p.context.results as Record<string, unknown>) ?? {};
       p.context = {
         ...p.context,
-        results: { ...results, [eff.node]: { seq: eff.seq, ok: false, error: `input: ${(err as Error).message}` } },
+        results: { ...results, [eff.node]: { seq: eff.seq, ok: false, error: `input: ${journeyErrorText(err)}` } },
       };
       await saveContext(tx, workspaceId, p);
       flags.wakeNow = true;
@@ -563,7 +587,7 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
             condition: async (n) => matchesCondition(tx, ws, deps.events, segments, p.profileId, n.condition),
           });
         } catch (err) {
-          const error = (err as Error).message;
+          const error = journeyErrorText(err);
           await tx
             .update(schema.journeyParticipants)
             .set({ status: 'failed', error, dueAt: null, waitingUntil: null, updatedAt: t })

@@ -82,7 +82,7 @@ export function chunkFailureOutcome(
     status: job.status === 'failed' || job.status === 'done' || job.status === 'cancelled' ? 'running' : job.status,
     attempts,
     nextAttemptAt: new Date(now.getTime() + delay),
-    error: `chunk attempt ${attempts} of ${policy.maxAttempts} failed; retrying: ${message}`.slice(0, 1000),
+    error: safeErrorText(`chunk attempt ${attempts} of ${policy.maxAttempts} failed; retrying: ${message}`, 1000),
     finishedAt: null,
   };
 }

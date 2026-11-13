@@ -1,4 +1,4 @@
-import { AppError, canonicalJson, hashValue, sha256 } from '@agentic-marketing/core';
+import { AppError, canonicalJson, hashValue, redactCredentials, safeErrorText, sha256 } from '@agentic-marketing/core';
 import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
@@ -348,6 +348,23 @@ export async function appendAuditEntry(
   await tx.insert(schema.auditLog).values({ ...entry, hash: sha256(canonicalJson(entry)) });
 }
 
+/**
+ * The sanitised copy of an AppError (#885): its message redacted while it is still complete, so a
+ * command that built it from a provider's answer or an exception cannot leak a credential to the
+ * caller, the audit log or the agent ledger. The executor is the last line of defence: it sanitises
+ * once, here, rather than trusting every message a handler writes. An error with nothing to redact
+ * is returned untouched, so its identity (and a PolicyDeniedError's outcome) survives.
+ */
+export function sanitizeAppError(err: AppError): AppError {
+  const message = redactCredentials(err.message);
+  if (err instanceof PolicyDeniedError) {
+    const reasons = err.outcome.reasons.map(redactCredentials);
+    const changed = message !== err.message || reasons.some((r, i) => r !== err.outcome.reasons[i]);
+    return changed ? new PolicyDeniedError({ ...err.outcome, reasons }) : err;
+  }
+  return message === err.message ? err : new AppError(err.code, message, err.details);
+}
+
 export function createExecutor(db: Db, services: Services, options: ExecutorOptions = {}) {
   const appendAudit = (
     tx: Tx,
@@ -391,12 +408,16 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const unknownMessages = unknownKeyMessages(cmd.name, unknown);
 
       const fail = async (err: AppError): Promise<never> => {
+        // Every AppError leaving the executor is redacted first (#885): the message may have been
+        // assembled from a provider body or an exception, and it is about to be returned to the
+        // caller and written to the audit log.
+        const safe = sanitizeAppError(err);
         // The main transaction rolled back; record the failed attempt in its own.
-        await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, err));
+        await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, safe));
         report('error');
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err.code });
+        span.setStatus({ code: SpanStatusCode.ERROR, message: safe.code });
         span.end();
-        throw err;
+        throw safe;
       };
 
       // #811: an agent principal always names its agent record. A surface that builds one without
@@ -576,15 +597,17 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         const outcome = policy;
         // An AppError is written for a person; anything else is unexpected and its text may carry
         // SQL, secrets or driver details, so the ledger stores the same fixed failure as the audit
-        // log. The original exception stays on the span for diagnostics (#838).
-        const failure = err instanceof AppError ? err.message : UNEXPECTED_FAILURE.message;
+        // log. The original exception stays on the span for diagnostics (#838). An AppError's own
+        // message is redacted before it is stored (#885): it may name a credential a provider echoed.
+        const safe = err instanceof AppError ? sanitizeAppError(err) : null;
+        const failure = safe ? safe.message : UNEXPECTED_FAILURE.message;
         if (agent && outcome)
           await db
             .withWorkspace(principal.workspaceId, (tx) =>
               recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure, intentOf(parsed.data)),
             )
             .catch((e) => span.recordException(e as Error));
-        if (err instanceof AppError) return fail(err);
+        if (safe) return fail(safe);
         // An unexpected exception is audited too (as a sanitized internal failure): a write that
         // failed must leave a trace whatever the cause. Its own transaction; the original text stays
         // on the span only.
@@ -779,10 +802,14 @@ export async function recordAgentAction(
     command: cmd.name,
     actionClass: policy.actionClass,
     decision: policy.decision,
-    reasons: policy.reasons,
+    // Reasons may quote an exception (the independent check's failure does), so they are redacted
+    // before they are stored (#885), exactly like the error text beside them.
+    reasons: policy.reasons.map(redactCredentials),
     impact: policy.impact as Record<string, unknown>,
     ok: error === null,
-    error: error?.slice(0, 1000) ?? null,
+    // Redacted before it is cut (#885): a caller may pass raw text (a policy reason quoting an
+    // exception, an AppError built from a provider's answer), and this column is exposed to readers.
+    error: error === null ? null : safeErrorText(error, 1000),
     target: target ?? null,
     surface,
     mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
@@ -810,7 +837,7 @@ async function withIndependentCheck(
   else
     verdict = await services
       .independentCheck(tx, { ...req, policy })
-      .catch((err: Error) => ({ ok: false, reason: `The independent check failed: ${err.message}` }));
+      .catch((err: Error) => ({ ok: false, reason: `The independent check failed: ${safeErrorText(err.message, 500)}` }));
   if (verdict.ok) return { ...policy, reasons: [...policy.reasons, `Independent check: ${verdict.reason}`] };
   const reasons = [...policy.reasons, `Independent check: ${verdict.reason}`];
   return req.approvable

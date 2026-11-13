@@ -199,7 +199,9 @@ export async function audienceSyncImpact(tx: Tx, artifactId: string, version: nu
   return { touches: { segments: typeof segment === 'string' ? [segment] : [], channels: ['ads'] } };
 }
 
-const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
+// An exception's text may quote a provider or a driver, so it is redacted before it is stored in a
+// sync error, a member's lastError or the audit log (#885).
+export const audienceErrorText = (err: unknown) => safeErrorText(err instanceof Error ? err.message : String(err), 300);
 
 const errorOf = (status: number, body: string) => {
   try {
@@ -234,10 +236,19 @@ function metaCall(row: ConnectionRow, secrets: Record<string, unknown>, ref: Des
       egress,
     );
     if (res.status >= 200 && res.status < 300) return { ok: true };
-    const error = errorOf(res.status, res.body);
     // Since January 2026 Meta refuses updates to audiences it flagged; that needs a person in Ads Manager.
-    return { ok: false, error: /flag/i.test(error) ? `${error} (the audience is flagged by Meta: review it in Ads Manager)` : error };
+    return { ok: false, error: metaAudienceError(res.status, res.body) };
   };
+}
+
+/**
+ * The error of a Meta audience write. The Ads Manager guidance for a flagged audience is decided on
+ * the complete body: the flag word can sit past the cut, and the guidance is what a person needs
+ * (#885).
+ */
+export function metaAudienceError(status: number, body: string): string {
+  const error = errorOf(status, body);
+  return /flag/i.test(body) ? `${error} (the audience is flagged by Meta: review it in Ads Manager)` : error;
 }
 
 function googleCall(row: ConnectionRow, secrets: Record<string, unknown>, ref: DestinationRef, egress: EgressPolicy): Call {
@@ -288,7 +299,7 @@ function callFor(
   try {
     return { call: platform === 'meta' ? metaCall(conn, secrets, ref, egress) : googleCall(conn, secrets, ref, egress) };
   } catch (err) {
-    return { error: `connection is unusable: ${messageOf(err)}` };
+    return { error: `connection is unusable: ${audienceErrorText(err)}` };
   }
 }
 
@@ -347,7 +358,7 @@ async function loadConnection(tx: Tx, id: string, kp: KeyProvider): Promise<Load
   try {
     return { conn, secrets: await connectionSecrets(tx, conn, kp), error: null };
   } catch (err) {
-    return { conn, secrets: {}, error: `the connection's secrets are unavailable: ${messageOf(err)}` };
+    return { conn, secrets: {}, error: `the connection's secrets are unavailable: ${audienceErrorText(err)}` };
   }
 }
 
@@ -780,7 +791,7 @@ async function writePlans(
     const addEntries = send.filter((s) => s.plan.add).map((s) => ({ profileId: s.plan.profileId, hashes: s.plan.add! }));
     let failed = false;
     if (removeSets.length) {
-      const r = await call.call('remove', removeSets).catch((e: Error) => ({ ok: false as const, error: e.message }));
+      const r = await call.call('remove', removeSets).catch((e: Error) => ({ ok: false as const, error: audienceErrorText(e) }));
       if (!r.ok) {
         const ids = send.filter((s) => s.remove.length).map((s) => s.plan.profileId);
         await markProfilesOrphaned(db, ws, syncId, platform, destinationKeyOf(ref), ids, `removal failed: ${r.error}`, 'both');
@@ -797,7 +808,7 @@ async function writePlans(
           'add',
           addEntries.map((e) => e.hashes),
         )
-        .catch((e: Error) => ({ ok: false as const, error: e.message }));
+        .catch((e: Error) => ({ ok: false as const, error: audienceErrorText(e) }));
       if (!r.ok) {
         await markProfilesOrphaned(
           db,
@@ -823,7 +834,7 @@ async function writePlans(
     } catch (err) {
       outcome.retryableError = true;
       // The intents stay: a later run or erasure can still remove what the provider accepted.
-      outcome.errors.push(`recording the audience ledger failed: ${messageOf(err)}`);
+      outcome.errors.push(`recording the audience ledger failed: ${audienceErrorText(err)}`);
       if (opts.stopOnError) return outcome;
       continue;
     }
@@ -1611,7 +1622,7 @@ async function fullPlatform(
       try {
         current = refFromCurrent(platform, def, loadedCurrent.conn);
       } catch (err) {
-        currentError = `connection settings are unusable: ${messageOf(err)}`;
+        currentError = `connection settings are unusable: ${audienceErrorText(err)}`;
       }
     }
     if (loadedCurrent.error) currentError = loadedCurrent.error;
@@ -1869,7 +1880,7 @@ export async function syncAudience(
       try {
         out.push(await syncPlatform(db, ws, syncId, def, platform, deps, opts));
       } catch (err) {
-        const message = messageOf(err);
+        const message = audienceErrorText(err);
         logger.error({ workspace: ws, sync: syncId, platform, err }, 'audience platform sync failed');
         out.push(resultOf(platform, message));
       }

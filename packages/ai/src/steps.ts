@@ -1,4 +1,5 @@
 import { type DecisionQuestion, decisionQuestions, type PromptDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
+import { safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
@@ -294,7 +295,7 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
     });
     recorded = true;
   } catch (err) {
-    await finish(db, c, prep, { status: 'fallback', error: `model_error: ${(err as Error).message}`, latencyMs: Date.now() - started });
+    await finish(db, c, prep, { status: 'fallback', error: modelErrorText(err), latencyMs: Date.now() - started });
     recorded = true;
   } finally {
     // The call's real usage is in ai_calls now (finish ran first), so the hold can go. If the
@@ -305,6 +306,11 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
       );
     else logger.error({ workspaceId: c.workspaceId, callId: c.id }, 'AI step usage not recorded; keeping the budget reservation');
   }
+}
+
+/** The `error` of a failed AI call: redacted while it is complete, then cut (#885). */
+export function modelErrorText(err: unknown): string {
+  return `model_error: ${safeErrorText(err instanceof Error ? err.message : String(err), 500)}`;
 }
 
 /** One queued prompt test case (prompts.test): run outside any transaction, then recorded. */
@@ -352,7 +358,7 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
       model: ready.model.modelId,
       input: { ...c.input, person: r.person },
       output: r.answer,
-      error: r.problems.join('; ') || null,
+      error: r.problems.length ? safeErrorText(r.problems.join('; '), 1000) : null,
       ...r.usage,
       latencyMs: Date.now() - started,
     });
@@ -431,7 +437,7 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
     });
     recorded = true;
   } catch (err) {
-    await record({ status: 'failed', error: `model_error: ${(err as Error).message}`, latencyMs: Date.now() - started });
+    await record({ status: 'failed', error: modelErrorText(err), latencyMs: Date.now() - started });
     recorded = true;
   } finally {
     if (recorded)
@@ -546,7 +552,7 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
         ),
     });
   } catch (err) {
-    return finish(db, c, null, { status: 'fallback', error: `model_error: ${(err as Error).message}` });
+    return finish(db, c, null, { status: 'fallback', error: modelErrorText(err) });
   }
 }
 

@@ -163,6 +163,15 @@ const parse = (body: string) => {
     return { raw: redactCredentials(body).slice(0, 500) };
   }
 };
+/**
+ * A provider's own error message when the parsed answer carries one, else its JSON. Redacted while
+ * it is complete, then cut (#885): the fallback used to cut raw JSON, so a token that straddled the
+ * cut survived as a fragment.
+ */
+const errorMessageOf = (b: Record<string, unknown>): string => {
+  const message = (b.error as { message?: unknown } | undefined)?.message;
+  return safeErrorText(typeof message === 'string' && message ? message : JSON.stringify(b), 300);
+};
 const outcome = (status: number, body: string, describe: (b: Record<string, unknown>) => string): SendResult => {
   const b = parse(body);
   if (status >= 200 && status < 300) return { ok: true, statusCode: status, response: b };
@@ -211,9 +220,7 @@ export async function sendToMeta(
     },
     egress,
   );
-  return outcome(res.status, res.body, (b) =>
-    String((b.error as { message?: string } | undefined)?.message ?? JSON.stringify(b).slice(0, 300)),
-  );
+  return outcome(res.status, res.body, errorMessageOf);
 }
 
 export async function sendToGoogle(
@@ -263,7 +270,5 @@ export async function sendToGoogle(
     { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` }, body: JSON.stringify(body) },
     egress,
   );
-  return outcome(res.status, res.body, (b) =>
-    String((b.error as { message?: string } | undefined)?.message ?? JSON.stringify(b).slice(0, 300)),
-  );
+  return outcome(res.status, res.body, errorMessageOf);
 }

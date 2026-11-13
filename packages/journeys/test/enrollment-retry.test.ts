@@ -47,6 +47,17 @@ describe('enrollment chunk retry state', () => {
     });
   });
 
+  it('redacts a credential in the retry branch, like the terminal branch (#885)', () => {
+    // The retry branch appends the message to its own prefix, so the whole text is redacted before
+    // it is cut: the message may quote a driver or a provider.
+    const retrying = chunkFailureOutcome({ status: 'running', attempts: 0 }, 'bad: password=probe-secret', { retry: policy, now: NOW });
+    expect(retrying.status).toBe('running');
+    expect(retrying.error).toContain('chunk attempt 1 of 3 failed; retrying:');
+    expect(retrying.error).not.toContain('probe-secret');
+    const terminal = chunkFailureOutcome({ status: 'running', attempts: 9 }, 'bad: password=probe-secret', { retry: policy, now: NOW });
+    expect(terminal.error).not.toContain('probe-secret');
+  });
+
   it('does not classify a database error as permanent', () => {
     expect(isPermanentEnrollmentError(Object.assign(new Error('deadlock detected'), { code: '40P01' }))).toBe(false);
     expect(isPermanentEnrollmentError(new AppError('conflict', 'republished'))).toBe(true);

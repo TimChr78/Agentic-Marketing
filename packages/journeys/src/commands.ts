@@ -10,7 +10,7 @@ import {
 } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, isoDateTime, newId, newUuid, personalDataInText } from '@agentic-marketing/core';
+import { AppError, isoDateTime, newId, newUuid, personalDataInText, safeErrorText } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
@@ -743,7 +743,7 @@ export const simulateJourney = defineCommand({
       // kind, no trigger), is the journey's own problem and keeps its message. Anything else is a
       // bug and propagates for the executor to sanitise (#885).
       if (!(e instanceof z.ZodError) && !(e instanceof JourneyCompileError)) throw e;
-      throw new AppError('invalid_input', `This journey cannot run: ${(e as Error).message}`);
+      throw new AppError('invalid_input', `This journey cannot run: ${safeErrorText((e as Error).message, 500)}`);
     }
     const ws = ctx.principal.workspaceId;
     const start = new Date('2026-01-01T09:00:00Z');

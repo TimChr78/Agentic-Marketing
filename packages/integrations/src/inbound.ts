@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { PublicRequest } from '@agentic-marketing/commands';
+import { safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventBus } from '@agentic-marketing/events';
 import type { ClaimOutcome, HotState } from '@agentic-marketing/hotstate';
@@ -174,7 +175,9 @@ export function inboundApi(deps: {
         // The mapping runs against a proxy that records which headers it reads (round 7).
         items = await connector.inbound.map(payload, { ...ictx, headers: tracked.proxy });
       } catch (err) {
-        return c.json({ error: 'mapping_failed', message: `The mapping failed: ${(err as Error).message}` }, 422);
+        // The mapping is the workspace's own JSONata, so its message is useful; redact it all the same
+        // before it leaves in an HTTP response (#885).
+        return c.json({ error: 'mapping_failed', message: `The mapping failed: ${safeErrorText((err as Error).message, 500)}` }, 422);
       }
       // A connector's mapping is platform-defined (Shopify orders, Salesforce records, a generic
       // JSONata mapping): a strict tracking plan must not drop those events while the sender is

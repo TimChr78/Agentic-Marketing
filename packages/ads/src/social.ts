@@ -162,7 +162,12 @@ export async function sendToTiktok(
   // TikTok answers 200 with a non-zero code for request errors.
   if (res.status >= 200 && res.status < 300 && b.code === 0) return { ok: true, statusCode: res.status, response: b };
   if (res.status >= 200 && res.status < 300)
-    return { ok: false, statusCode: res.status, error: `TikTok code ${b.code}: ${b.message ?? ''}`, permanent: true };
+    return {
+      ok: false,
+      statusCode: res.status,
+      error: `TikTok code ${b.code}: ${safeErrorText(String(b.message ?? ''), 300)}`,
+      permanent: true,
+    };
   return failure(res.status, safeErrorText(String(b.message ?? res.body), 300));
 }
 
@@ -204,6 +209,12 @@ export async function sendToPinterest(
   const b = parse(res.body) as { message?: string; events?: { status?: string; error_message?: string }[] };
   const failed = b.events?.find((e) => e.status === 'failed');
   if (res.status >= 200 && res.status < 300 && !failed) return { ok: true, statusCode: res.status, response: b };
-  if (failed) return { ok: false, statusCode: res.status, error: `Pinterest: ${failed.error_message ?? 'event failed'}`, permanent: true };
+  if (failed)
+    return {
+      ok: false,
+      statusCode: res.status,
+      error: `Pinterest: ${safeErrorText(failed.error_message ?? 'event failed', 300)}`,
+      permanent: true,
+    };
   return failure(res.status, safeErrorText(String(b.message ?? res.body), 300));
 }
