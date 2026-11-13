@@ -42,7 +42,7 @@ describe('security headers', () => {
   it('API responses and health checks carry the baseline', async () => {
     const api = await fetch(`${t.base}/v1/workspace.get`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: owner.cookie },
+      headers: { 'content-type': 'application/json', cookie: owner.cookie, origin: t.base },
       body: '{}',
     });
     expect(api.status).toBe(200);

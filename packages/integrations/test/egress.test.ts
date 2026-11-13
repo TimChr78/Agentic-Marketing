@@ -167,6 +167,64 @@ describe('IPv4 addresses embedded in IPv6', () => {
   });
 });
 
+describe('SSRF guard gaps (#817)', () => {
+  it('blocks the IPv4-translated (SIIT) form and the local-use NAT64 prefix', () => {
+    // ::ffff:0:a.b.c.d is IPv4-translated (SIIT), not the mapped ::ffff:a.b.c.d form.
+    for (const a of ['::ffff:0:7f00:1', '::ffff:0:a9fe:a9fe', '::ffff:0:a00:1']) expect(isBlockedAddress(a, none), a).toBe(true);
+    for (const url of ['http://[::ffff:0:7f00:1]/', 'http://[::ffff:0:a9fe:a9fe]/'])
+      expect(checkUrl(url, none), url).toContain('private address');
+    // 64:ff9b:1::/48 is the local-use NAT64 prefix: refuse it outright, even for a public embedded address.
+    expect(isBlockedAddress('64:ff9b:1::7f00:1', none)).toBe(true);
+    expect(isBlockedAddress('64:ff9b:1::5db8:d822', none)).toBe(true);
+    // A SIIT form that embeds a public address is still reachable.
+    expect(isBlockedAddress('::ffff:0:5db8:d822', none)).toBe(false);
+  });
+
+  it('fails closed for anything that is not an IP address', () => {
+    for (const a of ['', 'garbage', 'not-an-ip', '127.0.0.1:8080']) expect(isBlockedAddress(a, none), a).toBe(true);
+  });
+
+  it('filters a resolved address list by the requested family, and handles all', async () => {
+    const both: LookupAddress[] = [
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 },
+    ];
+    await expect(lookupOf(resolving(both), { family: 4 })).resolves.toEqual({ address: '93.184.216.34', family: 4 });
+    await expect(lookupOf(resolving(both), { family: 6 })).resolves.toEqual({
+      address: '2606:2800:220:1:248:1893:25c8:1946',
+      family: 6,
+    });
+    await expect(lookupOf(resolving(both), { all: true, family: 6 })).resolves.toEqual({
+      address: [{ address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 }],
+    });
+    // Nothing of the requested family: no IPv4 answer may be handed to an IPv6-only lookup.
+    await expect(lookupOf(resolving([{ address: '93.184.216.34', family: 4 }]), { family: 6 })).rejects.toMatchObject({
+      code: 'ENOTFOUND',
+    });
+  });
+
+  it('keeps refusing internal names even when their address range is allow-listed', () => {
+    // Decision: an allow-listed CIDR covers addresses, not names. `localhost` or `*.internal` resolving
+    // somewhere unexpected must not be reachable through a range; the name itself must be listed.
+    expect(checkUrl('http://localhost:5678/', { allowedHosts: ['127.0.0.0/8'] })).toBe('localhost is an internal address');
+    expect(checkUrl('http://printer.internal/', { allowedHosts: ['10.0.0.0/8'] })).toBe('printer.internal is an internal address');
+    expect(checkUrl('http://localhost:5678/', { allowedHosts: ['localhost'] })).toBeNull();
+  });
+
+  it('memoises the allow-list structures per policy object', () => {
+    let reads = 0;
+    const policy = {
+      get allowedHosts() {
+        reads += 1;
+        return ['127.0.0.1'];
+      },
+    } as EgressPolicy;
+    expect(isBlockedAddress('127.0.0.1', policy)).toBe(false);
+    expect(isBlockedAddress('93.184.216.34', policy)).toBe(false);
+    expect(reads).toBe(1);
+  });
+});
+
 describe('response bounds', () => {
   const local = { allowedHosts: ['127.0.0.1'] };
 

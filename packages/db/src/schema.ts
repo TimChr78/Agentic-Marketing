@@ -98,12 +98,23 @@ export const installationSettings = pgTable('installation_settings', {
  * The OAuth provider reads it through `consentReferenceId` and stores the workspace on the grant;
  * the row is keyed by the Better Auth session and never authorises anything by itself.
  */
-export const oauthWorkspaceSelections = pgTable('oauth_workspace_selections', {
-  sessionId: text('session_id').primaryKey(),
-  workspaceId: uuid('workspace_id').notNull(),
-  createdAt: ts('created_at').notNull().defaultNow(),
-  updatedAt: ts('updated_at').notNull().defaultNow(),
-});
+/**
+ * The workspace a person picked on the OAuth consent page, while the flow is in progress. The
+ * OAuth provider reads it through `consentReferenceId` and stores the workspace on the grant; the
+ * rows are keyed by the Better Auth session and never authorise anything by themselves. One row
+ * per session request: a re-pick replaces it, so the 0.14.15 `ON CONFLICT (session_id)` keeps
+ * working while the rollback window is open (expand-only, #838).
+ */
+export const oauthWorkspaceSelections = pgTable(
+  'oauth_workspace_selections',
+  {
+    sessionId: text('session_id').notNull(),
+    workspaceId: uuid('workspace_id').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.sessionId] })],
+);
 
 export const invitations = pgTable(
   'invitations',
