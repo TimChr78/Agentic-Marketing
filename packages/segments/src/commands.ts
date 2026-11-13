@@ -306,12 +306,18 @@ export const profileSegments = defineCommand({
   title: 'Segments a person is in',
   description: 'The segments a person is currently a member of.',
   input: z.object({ profileId: z.string().regex(/^prf_[0-9a-f]{32}$/) }),
-  output: z.object({ segments: z.array(z.object({ id: z.string(), name: z.string(), since: z.string() })) }),
+  output: z.object({
+    segments: z.array(z.object({ id: z.string(), name: z.string(), since: z.string() })),
+    withheld: z.boolean().optional().describe('True when segment ids and names were withheld because your role needs artifacts:read'),
+  }),
   permission: 'profiles:read',
   effect: 'read',
   auditReads: true,
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
+    // A segment's id and name are artifact metadata: only a caller that may read artifacts learns
+    // them. Membership itself is profile data and still needs profiles:read (0.14.13 review).
+    if (!ctx.principal.permissions.has('artifacts:read')) return { segments: [], withheld: true };
     const rows = await ctx.tx
       .select({ id: schema.segmentMemberships.segmentId, since: schema.segmentMemberships.since, name: schema.artifacts.name })
       .from(schema.segmentMemberships)

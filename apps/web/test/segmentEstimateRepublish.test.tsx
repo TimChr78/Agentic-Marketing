@@ -19,6 +19,10 @@ const h = vi.hoisted(() => ({
   artifacts: {} as Record<string, unknown>,
   resolved: [] as { id: string; version: number; stamp?: string | null }[],
   listStamp: null as string | null,
+  // Holds the next estimate (a condition preview) until the test releases it.
+  holdEstimate: false,
+  estimateHeld: false,
+  releaseEstimate: null as (() => void) | null,
 }));
 
 const artifact = (id: string, name: string, publishedVersion: number | null, mode: 'dynamic' | 'static' = 'dynamic') => ({
@@ -58,6 +62,13 @@ vi.mock('../src/app/api', async (importOriginal) => {
           return found;
         }
         if (name === 'segments.preview') {
+          // The test can delay an estimate to land after a newer focus read has committed.
+          if (!input.artifactId && h.holdEstimate) {
+            h.estimateHeld = true;
+            await new Promise<void>((resolve) => {
+              h.releaseEstimate = resolve;
+            });
+          }
           // Previewing a static list itself reports the membership stamp that moves on an import.
           if (input.artifactId === B) return { count: 42, sample: [], segments: [{ id: B, version: 3, stamp: h.listStamp }] };
           return { count: 42, segments: h.resolved };
@@ -102,6 +113,9 @@ beforeEach(() => {
   };
   h.resolved = [{ id: B, version: 3 }];
   h.listStamp = null;
+  h.holdEstimate = false;
+  h.estimateHeld = false;
+  h.releaseEstimate = null;
   resetPickerIndexes();
   invalidateArtifact(A);
   invalidateArtifact(B);
@@ -250,6 +264,44 @@ describe('segment estimate follows referenced publications (#599)', () => {
     act(() => window.dispatchEvent(new Event('focus')));
     await waitFor(() => expect(estimateText()).toContain('previous estimate'));
     expect(estimateText()).toContain('42 people');
+  });
+
+  it('keeps a newer observed stamp when a delayed estimate answers with an older one (#771 review)', async () => {
+    // The reviewer's repro: estimate at S1; "Estimate again" is still in flight when an import
+    // moves the list to S2 and a focus re-check reads S2; then the old estimate answers with S1.
+    h.artifacts[B] = artifact(B, 'Partner list', 3, 'static');
+    const s1 = '2026-11-12T09:00:00.000000Z';
+    const s2 = '2026-11-12T09:05:00.000000Z';
+    h.listStamp = s1;
+    h.resolved = [{ id: B, version: 3, stamp: s1 }];
+
+    render(editor);
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate audience' }));
+    await waitFor(() => expect(estimateText()).toContain('42 people'));
+
+    // Start the second estimate and hold its response, which still describes S1.
+    h.holdEstimate = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Estimate again' }));
+    await waitFor(() => expect(h.estimateHeld).toBe(true));
+
+    // An import elsewhere moves the list to S2. The focus re-check observes S2 while the estimate
+    // is in flight; its response must not pull the live state back to S1.
+    h.listStamp = s2;
+    h.resolved = [{ id: B, version: 3, stamp: s2 }];
+    const watched = () => h.calls.filter((c) => c.name === 'segments.preview' && c.input.artifactId === B).length;
+    const before = watched();
+    act(() => window.dispatchEvent(new Event('focus')));
+    await waitFor(() => expect(watched()).toBeGreaterThan(before));
+    await act(async () => {});
+
+    h.resolved = [{ id: B, version: 3, stamp: s1 }];
+    h.holdEstimate = false;
+    await act(async () => h.releaseEstimate?.());
+
+    // S2 survives, so the S1 count is a previous estimate, not the current size.
+    await waitFor(() => expect(estimateText()).toContain('previous estimate'));
+    expect(estimateText()).toContain('42 people');
+    expect(estimateText()).not.toContain('Estimating');
   });
 
   it('turns the estimate into a previous estimate when a referenced list gains members (#771)', async () => {

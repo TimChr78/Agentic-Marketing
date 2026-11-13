@@ -8,6 +8,42 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
+
+/**
+ * Bounds on last-touch attribution work in ClickHouse (0.14.12 review round 4). Memory is bounded
+ * by the join shape; CPU grows with each visitor's campaign touches times their conversions, so a
+ * report counts those pairs before it joins and refuses, without partial totals, past a budget.
+ * Mutable only so tests can lower them.
+ */
+/** Campaign touches of a chunk's visitors in its window, with the campaign and source they carry. */
+const TOUCHES_SQL = `SELECT anonymous_id, timestamp, event_id,
+         coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS touch_campaign,
+         coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS touch_source
+  FROM events FINAL
+  WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
+    AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}`;
+
+export const ATTRIBUTION_LIMITS = {
+  /** Candidate touch-conversion pairs one attribution query may compare. */
+  pairsPerQuery: 10_000_000,
+  /** Candidate pairs a whole report may compare across its pages and chunks. */
+  pairsPerReport: 50_000_000,
+  /**
+   * ClickHouse execution limit for each attribution query, in seconds. Below the ClickHouse
+   * client's 30 s request timeout, so the server's own deadline answers first.
+   */
+  queryTimeoutSeconds: 25,
+};
+
+/**
+ * Whether an error is an attribution query running out of time: the server's deadline
+ * (`TIMEOUT_EXCEEDED`, code 159) or the client's request timeout ("Timeout error."), whichever
+ * fires first (0.14.12 review round 5).
+ */
+export function isAttributionTimeout(err: unknown): boolean {
+  return /TIMEOUT_EXCEEDED|Timeout exceeded|Timeout error/i.test(String((err as Error)?.message ?? err));
+}
+
 import { googleAdsConnector, metaAdsConnector } from './platforms';
 
 // Spend and ROAS (performance-marketing.md, flow 3): daily cost, impressions, clicks and the
@@ -390,6 +426,22 @@ export const adPerformance = defineCommand({
       return chunks;
     };
 
+    let reportPairs = 0;
+    // A query that still runs past its execution limit fails the report clearly, never with a
+    // partial total or a generic server error.
+    const bounded = async <T>(run: () => Promise<T>): Promise<T> => {
+      try {
+        return await run();
+      } catch (err) {
+        if (isAttributionTimeout(err))
+          throw new AppError(
+            'precondition_failed',
+            `Attribution for this report took longer than ${ATTRIBUTION_LIMITS.queryTimeoutSeconds} seconds. Narrow the date range or the attribution window.`,
+          );
+        throw err;
+      }
+    };
+    const attributionSettings = { ...clickhouse_settings, max_execution_time: ATTRIBUTION_LIMITS.queryTimeoutSeconds };
     const attribute = async (conversions: ConversionEvent[]) => {
       // Empty identifiers never have a touch to look up; a user-id-only conversion stays
       // unattributed.
@@ -399,29 +451,53 @@ export const adPerformance = defineCommand({
       const byConversion = new Map<number, { campaign: string; source: string }>();
       for (const chunk of conversionChunks(lookups)) {
         const at = chunk.map((r) => r.at);
-        const touches = await (
-          await ch.query({
-            // The conversion chunk is the join's build side (the right table of a hash join), and
-            // the touches stream past it: ClickHouse holds one chunk of conversions and one
-            // aggregate per conversion, never a visitor's touch history, however long it is
-            // (0.14.12 review round 3). Touches with no campaign are dropped first, so an identify
-            // cannot mask a page touch; argMax on (timestamp, event_id) picks the latest touch in
-            // the window, and the greater event id wins a same-timestamp tie. The touch scan is
-            // bounded by the chunk's window, and a conversion with no touch in its window has no
-            // row (unattributed).
-            query: `SELECT c.idx AS idx,
+        // Count the candidate pairs first: one row per visitor, so this read is as small as the
+        // chunk. The join below compares every campaign touch of a visitor with each of that
+        // visitor's conversions, and a bot-like visitor can make that billions of comparisons.
+        const perVisitor = new Map<string, number>();
+        for (const r of chunk) perVisitor.set(r.visitor, (perVisitor.get(r.visitor) ?? 0) + 1);
+        const counts = await bounded(async () =>
+          (
+            await ch.query({
+              query: `SELECT anonymous_id, count() AS n
+                    FROM (${TOUCHES_SQL})
+                    WHERE touch_campaign != ''
+                    GROUP BY anonymous_id`,
+              query_params: {
+                ws,
+                visitors: [...perVisitor.keys()],
+                from: stamp(Math.min(...at) - windowMs),
+                to: stamp(Math.max(...at)),
+              },
+              format: 'JSONEachRow',
+              clickhouse_settings: attributionSettings,
+            })
+          ).json<{ anonymous_id: string; n: number | string }>(),
+        );
+        const pairs = counts.reduce((sum, c) => sum + Number(c.n) * (perVisitor.get(c.anonymous_id) ?? 0), 0);
+        reportPairs += pairs;
+        if (pairs > ATTRIBUTION_LIMITS.pairsPerQuery || reportPairs > ATTRIBUTION_LIMITS.pairsPerReport)
+          throw new AppError(
+            'precondition_failed',
+            `Attribution for this report would compare ${pairs.toLocaleString('en-US')} campaign touches with conversions in one batch (${reportPairs.toLocaleString('en-US')} so far; the limits are ${ATTRIBUTION_LIMITS.pairsPerQuery.toLocaleString('en-US')} per batch and ${ATTRIBUTION_LIMITS.pairsPerReport.toLocaleString('en-US')} per report). Narrow the date range or the attribution window.`,
+          );
+        const touches = await bounded(async () =>
+          (
+            await ch.query({
+              // The conversion chunk is the join's build side (the right table of a hash join), and
+              // the touches stream past it: ClickHouse holds one chunk of conversions and one
+              // aggregate per conversion, never a visitor's touch history, however long it is
+              // (0.14.12 review round 3). Touches with no campaign are dropped first, so an identify
+              // cannot mask a page touch; argMax on (timestamp, event_id) picks the latest touch in
+              // the window, and the greater event id wins a same-timestamp tie. The touch scan is
+              // bounded by the chunk's window, and a conversion with no touch in its window has no
+              // row (unattributed).
+              query: `SELECT c.idx AS idx,
                            argMax(t.touch_campaign, (t.timestamp, t.event_id)) AS campaign,
                            argMax(t.touch_source, (t.timestamp, t.event_id)) AS source
                     FROM (
                       SELECT anonymous_id, timestamp, event_id, touch_campaign, touch_source
-                      FROM (
-                        SELECT anonymous_id, timestamp, event_id,
-                               coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS touch_campaign,
-                               coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS touch_source
-                        FROM events FINAL
-                        WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
-                          AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
-                      )
+                      FROM (${TOUCHES_SQL})
                       WHERE touch_campaign != ''
                     ) AS t
                     INNER JOIN (
@@ -434,19 +510,20 @@ export const adPerformance = defineCommand({
                     GROUP BY idx
                     ORDER BY idx
                     SETTINGS join_algorithm = 'hash'`,
-            query_params: {
-              ws,
-              idxs: chunk.map((r) => r.idx),
-              visitors: chunk.map((r) => r.visitor),
-              times: chunk.map((r) => stamp(r.at)),
-              from: stamp(Math.min(...at) - windowMs),
-              to: stamp(Math.max(...at)),
-              windowMs,
-            },
-            format: 'JSONEachRow',
-            clickhouse_settings,
-          })
-        ).json<{ idx: number | string; campaign: string; source: string }>();
+              query_params: {
+                ws,
+                idxs: chunk.map((r) => r.idx),
+                visitors: chunk.map((r) => r.visitor),
+                times: chunk.map((r) => stamp(r.at)),
+                from: stamp(Math.min(...at) - windowMs),
+                to: stamp(Math.max(...at)),
+                windowMs,
+              },
+              format: 'JSONEachRow',
+              clickhouse_settings: attributionSettings,
+            })
+          ).json<{ idx: number | string; campaign: string; source: string }>(),
+        );
         for (const t of touches) byConversion.set(Number(t.idx), { campaign: String(t.campaign), source: String(t.source) });
       }
       // Attribution is computed per page, which is identical to the whole-window loop because a
