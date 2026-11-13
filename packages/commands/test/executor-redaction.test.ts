@@ -3,7 +3,16 @@ import { createDb } from '@agentic-marketing/db';
 import { afterAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
-import { agentPrincipal, applyVerdict, createExecutor, defineCommand, PolicyDeniedError, ROLE_PERMISSIONS, sanitizeAppError } from '../src';
+import {
+  agentPrincipal,
+  applyVerdict,
+  createExecutor,
+  defineCommand,
+  PolicyDeniedError,
+  ROLE_PERMISSIONS,
+  redactPolicyReasons,
+  sanitizeAppError,
+} from '../src';
 
 // #885 round 6: the executor is the last line of defence. A handler may build its AppError message
 // from a provider's answer or an exception, so every message is redacted before it is returned to
@@ -107,4 +116,27 @@ describe('the independent check verdict in policy reasons (#885 round 7)', () =>
         expect(JSON.stringify(out.reasons)).not.toContain('probe-secret');
         expect(out.reasons.some((r) => r.startsWith('Independent check: '))).toBe(true);
       });
+});
+
+describe('policy reasons leave the policy engine redacted (#885 round 8)', () => {
+  it('redacts top-level and shadow reasons, which reach heldBecause, approval notes and the ledger', () => {
+    const policy = {
+      decision: 'ask',
+      level: 1,
+      autonomous: false,
+      reasons: ['artifact brand_1 is owned by agent password=probe-secret.'],
+      shadow: { decision: 'allow', reasons: ['is owned by agent password=probe-secret.'], mandateId: 'mnd_1', mandateVersion: 1 },
+    } as unknown as Parameters<typeof redactPolicyReasons>[0];
+    const out = redactPolicyReasons(policy);
+    expect(JSON.stringify(out)).not.toContain('probe-secret');
+    expect(out.reasons[0]).toContain('is owned by agent password=');
+    expect(out.decision).toBe('ask');
+  });
+
+  it('returns the same policy when nothing needs redacting', () => {
+    const policy = { decision: 'allow', level: 2, autonomous: true, reasons: ['within the mandate'] } as unknown as Parameters<
+      typeof redactPolicyReasons
+    >[0];
+    expect(redactPolicyReasons(policy)).toBe(policy);
+  });
 });

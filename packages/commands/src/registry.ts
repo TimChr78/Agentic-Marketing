@@ -781,7 +781,24 @@ export async function agentPolicy(
       mandate: mandate.view,
       approvable: req.approvable,
     });
-  return policy;
+  return redactPolicyReasons(policy);
+}
+
+/**
+ * The policy with its reasons (and its shadow decision's reasons) credential-redacted. Reasons quote
+ * names, inputs and exceptions, and they leave here for a successful response (`heldBecause`), the
+ * approval note, the ledger and `agents.activity`, none of which pass through AppError sanitising,
+ * so they are redacted once, where the policy is made (#885 round 8). Unchanged when clean.
+ */
+export function redactPolicyReasons(policy: PolicyOutcome): PolicyOutcome {
+  const clean = (reasons: string[]) => {
+    const out = reasons.map(redactCredentials);
+    return out.some((r, i) => r !== reasons[i]) ? out : reasons;
+  };
+  const reasons = clean(policy.reasons);
+  const shadowReasons = policy.shadow ? clean(policy.shadow.reasons) : undefined;
+  if (reasons === policy.reasons && shadowReasons === policy.shadow?.reasons) return policy;
+  return { ...policy, reasons, ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}) };
 }
 
 /** One agent write in the ledger (#218), with the decision that allowed, escalated or refused it. */
@@ -814,7 +831,8 @@ export async function recordAgentAction(
     surface,
     mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
     mandateVersion: policy.mandate?.version ?? policy.shadow?.mandateVersion ?? null,
-    shadow: policy.shadow ?? null,
+    // The shadow decision's reasons are exposed by agents.activity too (#885 round 8).
+    shadow: policy.shadow ? { ...policy.shadow, reasons: policy.shadow.reasons.map(redactCredentials) } : null,
     level: policy.level ?? null,
     intent: intent?.slice(0, 2000) ?? null,
     undo: undo ?? null,
