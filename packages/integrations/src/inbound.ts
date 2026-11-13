@@ -72,54 +72,21 @@ export function trackHeaderReads(headers: Record<string, string>): { proxy: Reco
 }
 
 /**
- * Request headers that change when a sender retries one delivery (or a proxy forwards it again):
- * dates, request and trace ids, client-IP and forwarding hops, the client string, and the
- * Standard Webhooks timestamp and signature. Every other header is stable across a retry.
- */
-const PER_ATTEMPT_HEADERS = new Set([
-  'date',
-  'x-request-id',
-  'x-amzn-trace-id',
-  'traceparent',
-  'tracestate',
-  'cf-ray',
-  'cdn-loop',
-  'via',
-  'x-forwarded-for',
-  'x-forwarded-proto',
-  'x-forwarded-host',
-  'x-forwarded-port',
-  'x-real-ip',
-  'true-client-ip',
-  'cf-connecting-ip',
-  'cf-ipcountry',
-  'cf-visitor',
-  'user-agent',
-  'accept-encoding',
-  'connection',
-  'content-length',
-  'webhook-timestamp',
-  'webhook-signature',
-]);
-
-/**
- * A delivery's replay identity from its headers (0.14.11 review round 9): every request header,
- * except the per-attempt ones the mapping did not read in its real run. A connector that declares
- * its identity headers (Shopify's topic) uses exactly those instead.
+ * A delivery's replay identity from its headers (0.14.11 review round 10): the values of the headers
+ * the mapping read in its real run (every header if it enumerated or copied the object). A
+ * connector that declares its identity headers (Shopify's topic) uses exactly those instead.
  *
- * - No distinct event is ever folded into another: if a header made two real outputs differ, at
- *   least one of those runs read it, so it is in that delivery's identity and the keys differ; a
- *   header neither run read did not change either output. This holds whatever the mapping does
- *   with time, randomness or `$eval`.
- * - An ordinary retry differs only in per-attempt headers; those it does not read are left out, so
- *   it dedupes. A mapping that reads a per-attempt header (`x-request-id`, a trace id) makes a retry
- *   that changes it a new delivery; use Standard Webhooks, whose signed `webhook-id` is the replay
- *   key whatever the mapping does, if a sender stamps such headers.
+ * - No header-caused difference is folded away: two identities match only when both runs read the
+ *   same headers with the same values, and a header that made two outputs differ was read by at
+ *   least one of those runs. Differences caused only by the clock or randomness dedupe as replays.
+ * - A header the mapping never reads cannot make a replay look new: neither an extra header added
+ *   to a signed body nor a provider's per-attempt signature, timestamp or forwarding header.
+ * - Accepted residual: a mapping whose choice of which headers to read depends on the clock or on
+ *   randomness can give an identical retry another identity, so it may publish twice; it never
+ *   loses an event. Standard Webhooks avoids it: its signed `webhook-id` is the replay key.
  */
 export function headerIdentity(headers: Record<string, string>, reads: HeaderReads, connectorHeaders?: readonly string[]): string {
-  const keys = connectorHeaders
-    ? connectorHeaders.map((h) => h.toLowerCase())
-    : Object.keys(headers).filter((k) => !PER_ATTEMPT_HEADERS.has(k) || reads.all || reads.names.has(k));
+  const keys = connectorHeaders ? connectorHeaders.map((h) => h.toLowerCase()) : reads.all ? Object.keys(headers) : [...reads.names];
   return [...new Set(keys)]
     .sort()
     .map((k) => `${k}:${headers[k] ?? ''}`)
@@ -229,7 +196,7 @@ export function inboundApi(deps: {
       // mapping or the connector reads (0.14.11 review, rounds 1 to 3).
       // A connector that declares its identity headers (Shopify's topic) uses exactly those; any other
       // uses the headers its mapping actually read.
-      // Identity from the real run's reads: every header except unread per-attempt ones (round 9).
+      // Identity from the headers the real run read (round 10).
       const replayHeaders = headerIdentity(headers, tracked.reads, connector.inbound.replayHeaders);
       const replayId =
         webhookId ??

@@ -239,7 +239,7 @@ describe('inbound replay protection for every scheme (#787)', () => {
     }
   });
 
-  it('dedupes an identical retry when a time-dependent branch reads a header only the first time (0.14.11 round 8)', async () => {
+  it('may publish a retry again when a clock branch changes which headers are read, never loses one (accepted residual)', async () => {
     const connection = await api(plainWs).call('connections.create', {
       connector: 'webhook',
       name: 'Time-branch generic',
@@ -250,9 +250,27 @@ describe('inbound replay protection for every scheme (#787)', () => {
     const first = await post(connection.inboundPath!, body, { x: 'person-a' });
     expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    // Past the cutoff the real evaluation no longer reads x, but the identity run is frozen in time.
+    // Past the cutoff the mapping no longer reads x, so the retry has another identity and is
+    // accepted. Its own exact retry then dedupes.
     const retry = await post(connection.inboundPath!, body, { x: 'person-a' });
-    expect(await retry.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+    expect(await retry.json()).toMatchObject({ success: true, accepted: 1 });
+    const again = await post(connection.inboundPath!, body, { x: 'person-a' });
+    expect(await again.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
+  });
+
+  it('refuses a signed body replayed with an extra header the mapping never reads (0.14.11 round 10)', async () => {
+    const connection = await api(plainWs).call('connections.create', {
+      connector: 'webhook',
+      name: 'Signed body-only generic',
+      settings: { mapping: 'body', signature: { scheme: 'hmac-sha256', header: 'x-signature', encoding: 'hex', prefix: '' } },
+      secrets: { signingSecret: HMAC_SECRET },
+    });
+    const body = tracked('signed-extra-header', 's-1');
+    const signature = createHmac('sha256', HMAC_SECRET).update(body).digest('hex');
+    const first = await post(connection.inboundPath!, body, { 'x-signature': signature });
+    expect(await first.json()).toMatchObject({ success: true, accepted: 1 });
+    const replay = await post(connection.inboundPath!, body, { 'x-signature': signature, 'x-unrelated': '1' });
+    expect(await replay.json()).toMatchObject({ success: true, duplicate: true, accepted: 0 });
   });
 
   it('keeps a Shopify order paid with the same body as its create (0.14.11 round 3)', async () => {
