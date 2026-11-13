@@ -1,5 +1,8 @@
 # One image for every role (ADR-0002). Select roles with ROLE=api,worker,scheduler (default: all).
-FROM node:22-slim AS base
+# The base image is pinned by digest (the multi-arch index: linux/amd64 and linux/arm64), so a
+# rebuild of one commit gives the same runtime; bump it deliberately (Dependabot proposes them).
+# node:22-slim
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS base
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH NODE_ENV=production COREPACK_HOME=/corepack
 WORKDIR /app
 # pnpm (the version pinned in package.json) is part of the image, so a container never downloads it.

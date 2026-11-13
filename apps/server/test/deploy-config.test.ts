@@ -395,12 +395,17 @@ describe('image pinning (#870)', () => {
 
   it('pins every Dockerfile stage by digest, with the tag still readable', () => {
     const froms = [...dockerfile.matchAll(/^FROM\s+(\S+)/gm)].map((match) => match[1]);
+    const stages = new Set([...dockerfile.matchAll(/^FROM\s+\S+\s+AS\s+(\S+)/gim)].map((match) => match[1]));
     expect(froms.length).toBeGreaterThan(0);
+    let imageCount = 0;
     for (const ref of froms) {
+      if (stages.has(ref)) continue; // an earlier stage in this file, not an image
+      imageCount += 1;
       expect(ref, `${ref} is not pinned by digest`).toMatch(/@sha256:[0-9a-f]{64}$/);
       // image:tag@sha256:… keeps the human-readable version beside the immutable digest.
       expect(ref).toMatch(/:[^:@/]+@sha256:/);
     }
+    expect(imageCount).toBeGreaterThan(0);
   });
 
   it('pins every service image in every Compose file by digest', () => {
