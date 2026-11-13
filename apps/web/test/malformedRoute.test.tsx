@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RouteErrorBoundary } from '../src/app/ErrorBoundary';
 import { match, setSearchParam } from '../src/app/router';
@@ -153,7 +153,8 @@ describe('malformed route parameters (#791)', () => {
       </ToastProvider>,
     );
     expect(await screen.findByText('People page')).toBeTruthy();
-    expect(mountCount.value).toBe(1);
+    // The page counts its mount in an effect, which can run just after the text appears.
+    await waitFor(() => expect(mountCount.value).toBe(1));
 
     // A tab or filter change lives in the query string; the mounted page keeps its state.
     act(() => setSearchParam('tab', 'blocked'));
