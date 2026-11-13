@@ -130,6 +130,41 @@ describe('conversion paging', () => {
   });
 });
 
+describe('event paging', () => {
+  it('pages eventsOf on the full replacing key, so tied events are not skipped (#840)', async () => {
+    const tieWs = newUuid();
+    const at = '2026-10-04T12:00:00.000Z';
+    const tied = (anonymousId: string, name: string) =>
+      ev(400, { workspaceId: tieWs, messageId: 'tie-event', name, timestamp: at, receivedAt: at, anonymousId });
+    // Same timestamp and event id throughout; the name and anonymous id are what tell them apart.
+    await store.insert([tied('page-a', 'Tie Event'), tied('page-b', 'Tie Event'), tied('page-a', 'Tie Other')]);
+    const ids = { anonymousIds: ['page-a', 'page-b'], userIds: [] };
+    const key = (e: { name: string; anonymousId: string }) => `${e.name}:${e.anonymousId}`;
+    const all = ['Tie Event:page-a', 'Tie Event:page-b', 'Tie Other:page-a'];
+
+    const seen: string[] = [];
+    let cursor: { before: string; beforeId: string; beforeName: string; beforeAnonymousId: string } | undefined;
+    for (let i = 0; i < 5; i++) {
+      const page = await store.eventsOf(tieWs, ids, { limit: 1, ...(cursor ?? {}) });
+      if (!page.length) break;
+      const last = page[0]!;
+      seen.push(key(last));
+      cursor = { before: last.timestamp, beforeId: last.eventId, beforeName: last.name, beforeAnonymousId: last.anonymousId };
+    }
+    expect(seen.sort()).toEqual(all);
+
+    // A cursor written before #840 has no name or anonymous id. Treating them as the tuple
+    // maximum repeats the boundary rows but never drops a tied event.
+    const [first] = await store.eventsOf(tieWs, ids, { limit: 1 });
+    const oldCursor = await store.eventsOf(tieWs, ids, {
+      limit: 10,
+      before: first!.timestamp,
+      beforeId: first!.eventId,
+    });
+    expect(new Set(oldCursor.map(key))).toEqual(new Set(all));
+  });
+});
+
 describe('row policies', () => {
   it('shows a query only the rows of the workspace it names, and none without one', async () => {
     const other = newUuid();
