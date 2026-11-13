@@ -2,6 +2,26 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.18] - 2026-11-13
+
+### Security
+
+- **Breaking:** the Compose file publishes the admin port on `AM_BIND`, which defaults to `127.0.0.1`, instead of every host interface: the admin UI, sign-in, REST API and MCP answer from this machine only, like the public listener's `PUBLIC_BIND`. Set `AM_BIND=0.0.0.0` (or a LAN address) in `.env` to keep the previous behaviour; `am doctor` reports the admin bind and warns when it is widened.
+- **Breaking:** `.env.example` leaves `POSTGRES_PASSWORD` and `APP_DB_PASSWORD` empty, so Compose refuses to start from a copied template instead of running with the known `change-me` values. `am init` fills both; set them by hand only when you write `.env` yourself.
+- The image healthcheck passes for `ROLE=worker` and `ROLE=scheduler`, which start no HTTP listener: a worker-only or scheduler-only container is no longer permanently unhealthy, and `docker compose up --wait` works for it. A role that serves HTTP still probes `/readyz`, like the Helm chart's probes.
+- `scripts/smoke.sh` gives every run its own Compose project, temporary files and free ports, so two runs side by side (or a real install on the same host) no longer collide, and cleanup removes only that run's stack.
+- The Docker image and every Compose service image are pinned by digest, the multi-arch index behind each tag, so rebuilding a commit or pulling a tag no longer changes the runtime.
+
+### Upgrading from 0.14.17
+
+- **Migrations:** none.
+- **Configuration:** `AM_BIND`.
+- **Breaking changes:** the Compose admin port (`AM_PORT`) is now published on `AM_BIND`, default `127.0.0.1`, so the admin UI, sign-in, REST API and MCP are no longer reachable from other machines; set `AM_BIND=0.0.0.0` or a LAN address in `.env` to keep network access. A `.env` copied from `.env.example` without running `am init` now has empty `POSTGRES_PASSWORD` and `APP_DB_PASSWORD`, and Compose refuses to start until they are set.
+- **Manual steps:** if people or a reverse proxy on another host reach the admin port directly, set `AM_BIND` in `.env` before upgrading.
+- **Upgrade:** download `agentic-marketing-compose-0.14.18.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.18 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.18` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.18). Run `docker compose exec app am doctor`.
+
+<!-- issues: 870 -->
+
 ## [0.14.17] - 2026-11-13
 
 ### Fixed
