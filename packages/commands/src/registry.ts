@@ -583,6 +583,16 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               retryable: true,
             }),
           );
+        // A singleton writer that raced another creation still reaches the partial unique index
+        // (for a writer that does not take the advisory lock, or a future one). Answer conflict,
+        // not a 500, and say what to do next (#867).
+        if (isSingletonConflict(err))
+          return fail(
+            new AppError(
+              'conflict',
+              'This workspace already has an artifact of that type: another change created it at the same time. Nothing was written; retry and edit the existing artifact.',
+            ),
+          );
         report('error');
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR });
@@ -878,5 +888,16 @@ export function isSerializationFailure(err: unknown): boolean {
 export function isDeadlock(err: unknown): boolean {
   for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
     if (e.code === '40P01') return true;
+  return false;
+}
+
+/** Postgres 23505 on the singleton partial unique index, directly or as the cause of a query error. */
+export function isSingletonConflict(err: unknown): boolean {
+  for (
+    let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | undefined, depth = 0;
+    e && depth < 5;
+    e = e.cause as typeof e, depth++
+  )
+    if (e.code === '23505' && e.constraint === 'artifacts_singleton_type') return true;
   return false;
 }
