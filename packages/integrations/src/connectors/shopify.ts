@@ -175,6 +175,9 @@ const TOPICS = [
   'customers/update',
 ];
 
+/** The topic decides which event a body maps to, so it is part of a delivery's replay identity. */
+const SHOPIFY_REPLAY_HEADERS = ['x-shopify-topic'] as const;
+
 export const shopifyConnector = defineConnector({
   id: 'shopify',
   label: 'Shopify',
@@ -189,6 +192,8 @@ export const shopifyConnector = defineConnector({
         : 'the Shopify signature does not match';
     },
     map: (payload, { headers, settings }) => shopifyItems(payload as Payload, headers, settings),
+    // One order body arrives as orders/create and orders/paid; the topic decides the event.
+    replayHeaders: SHOPIFY_REPLAY_HEADERS,
   },
 });
 
@@ -283,6 +288,8 @@ export const shopifyAppConnector = defineConnector({
         : 'the Shopify signature does not match';
     },
     map: (payload, { headers, settings }) => shopifyItems(payload as Payload, headers, settings),
+    // One order body arrives as orders/create and orders/paid; the topic decides the event.
+    replayHeaders: SHOPIFY_REPLAY_HEADERS,
   },
   actions: {
     registerWebhooks: {

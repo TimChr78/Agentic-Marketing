@@ -103,7 +103,12 @@ describe('workspace settings and membership', () => {
 });
 
 function agentPrincipalForTest(userId: string, workspaceId: string) {
-  return agentPrincipal(userId, 'test-client', workspaceId, 'owner', ['artifacts:read', 'workspace:admin']);
+  return agentPrincipal(userId, 'test-client', workspaceId, 'owner', ['artifacts:read', 'workspace:admin'], {
+    id: 'agt_00000000000000000000000000000002',
+    name: 'test-client',
+    status: 'active',
+    statusReason: null,
+  });
 }
 
 describe('review-first publishing', () => {

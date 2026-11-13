@@ -78,6 +78,8 @@ describe('the composer template read commits only its latest request (0.14.13 re
     // Two focus returns before either read answers: v3 is requested after v2.
     act(() => window.dispatchEvent(new Event('focus')));
     await flush();
+    // A second return: the person left the window in between (one return reads once, #735).
+    act(() => window.dispatchEvent(new Event('blur')));
     act(() => window.dispatchEvent(new Event('focus')));
     await flush();
     expect(h.pending).toHaveLength(3);

@@ -257,7 +257,12 @@ describe('hosted agents (#258)', () => {
     // The catalogue is a filter, not the enforcement point: a direct call outside the scopes is
     // still refused by the executor with the same mandate.
     const create = commands.find((c) => c.name === 'artifacts.create')!;
-    const principal = agentPrincipal(scope.owner.id, 'hosted-test-client', scope.ws, 'viewer', ['artifacts:read']);
+    const principal = agentPrincipal(scope.owner.id, 'hosted-test-client', scope.ws, 'viewer', ['artifacts:read'], {
+      id: scope.agentId,
+      name: 'Hosted test agent',
+      status: 'active',
+      statusReason: null,
+    });
     const err = await rejects(
       t.srv.executor.execute(create, { type: 'note', name: 'Not allowed', content: { title: 'No', body: 'No.' } }, principal, {
         surface: 'mcp',

@@ -3,11 +3,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // The logger is created at import time, so each case needs a fresh module registry. Compose and
 // Kubernetes pass unset variables as empty strings; an empty string is not a pino level.
 const original = process.env.LOG_LEVEL;
+const originalEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 
 afterEach(() => {
   vi.resetModules();
   if (original === undefined) delete process.env.LOG_LEVEL;
   else process.env.LOG_LEVEL = original;
+  if (originalEndpoint === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = originalEndpoint;
 });
 
 async function levelFor(value: string | undefined): Promise<string> {
@@ -27,5 +30,28 @@ describe('telemetry log level', () => {
 
   it('keeps an explicit level', async () => {
     expect(await levelFor('debug')).toBe('debug');
+  });
+});
+
+describe('the OTLP endpoint in the logs (#808)', () => {
+  it('drops the user, the path and the query from the endpoint', async () => {
+    vi.resetModules();
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'https://user:pw@otel.example:4318/v1/traces?token=x';
+    const { endpointOrigin, initTelemetry, logger, shutdownTelemetry } = await import('../src/index');
+    expect(endpointOrigin('https://user:pw@otel.example:4318/v1/traces?token=x')).toBe('https://otel.example:4318');
+
+    const logged = vi.spyOn(logger, 'info');
+    try {
+      initTelemetry('test');
+      expect(logged).toHaveBeenCalledWith({ endpoint: 'https://otel.example:4318' }, 'OpenTelemetry tracing enabled');
+    } finally {
+      await shutdownTelemetry();
+    }
+  });
+
+  it('says plainly when the endpoint is not a URL', async () => {
+    vi.resetModules();
+    const { endpointOrigin } = await import('../src/index');
+    expect(endpointOrigin('otel.example:4318')).toBe('(invalid URL)');
   });
 });

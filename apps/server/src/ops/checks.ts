@@ -625,6 +625,48 @@ export async function checkDataKeyProvider(config: Config, db: Db): Promise<Chec
   }
 }
 
+/**
+ * The app role must not bypass row-level security (#813). A role created with SUPERUSER or
+ * BYPASSRLS (by hand, by an old install or by another tool) makes every request skip tenant
+ * isolation, and it also inherits that from a privileged role it can `SET ROLE` into. `am migrate`
+ * resets those attributes, but only a superuser can change a superuser's; when the migration user
+ * cannot, this check names the role and the fix instead of letting the bypass go unnoticed.
+ */
+export async function checkAppRole(config: Config, db: Db): Promise<Check> {
+  const id = 'postgres.app-role';
+  const role = config.appDbRole;
+  try {
+    const { rows } = await withTimeout(
+      db.admin.query<{ rolsuper: boolean; rolbypassrls: boolean; inherited: string[] | null }>(
+        `SELECT r.rolsuper, r.rolbypassrls,
+                (SELECT array_agg(p.rolname ORDER BY p.rolname)
+                   FROM pg_roles p
+                  WHERE p.oid <> r.oid
+                    AND (p.rolsuper OR p.rolbypassrls)
+                    AND pg_has_role(r.rolname, p.oid, 'MEMBER')) AS inherited
+           FROM pg_roles r
+          WHERE r.rolname = $1`,
+        [role],
+      ),
+      'the app role',
+    );
+    const row = rows[0];
+    if (!row) return { id, status: 'info', message: `the app role ${role} does not exist yet; starting the app creates it` };
+    const own = [row.rolsuper ? 'SUPERUSER' : '', row.rolbypassrls ? 'BYPASSRLS' : ''].filter(Boolean);
+    if (!own.length && !row.inherited?.length)
+      return { id, status: 'ok', message: `the app role ${role} cannot bypass row-level security` };
+    const via = row.inherited?.length ? ` (or through the privileged role(s) ${row.inherited.join(', ')} it belongs to)` : '';
+    return {
+      id,
+      status: 'fail',
+      message: `the app role ${role} has ${own.join(' and ') || 'a privileged membership'}${via}, so row-level security is bypassed for every request`,
+      hint: `As a superuser run "ALTER ROLE ${role} NOSUPERUSER NOBYPASSRLS" and remove it from the privileged role(s), or set APP_DB_ROLE to a dedicated unprivileged role, then run \`am migrate\` again.`,
+    };
+  } catch (err) {
+    return { id, status: 'warn', message: `could not read the app role’s attributes: ${messageOf(err)}` };
+  }
+}
+
 export async function checkClickHouse(config: Config): Promise<Check> {
   const url = `${config.clickhouse.url.replace(/\/+$/, '')}/ping`;
   try {
@@ -1319,6 +1361,7 @@ export async function liveChecks(config: Config): Promise<Check[]> {
 
     if (postgres.reachable) {
       checks.push(await checkDataKeyProvider(config, db));
+      checks.push(await checkAppRole(config, db));
       checks.push(...(await operationalHealthChecks(db)));
     }
 

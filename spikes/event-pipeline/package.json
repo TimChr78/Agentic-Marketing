@@ -8,11 +8,11 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@hono/node-server": "2.1.5",
+    "@hono/node-server": "2.1.8",
     "@nats-io/jetstream": "3.4.0",
     "@nats-io/transport-node": "3.4.0",
     "chdb": "3.4.0",
-    "hono": "4.13.13"
+    "hono": "4.13.18"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

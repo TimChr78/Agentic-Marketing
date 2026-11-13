@@ -58,6 +58,13 @@ function Boom(): never {
   throw new Error('render exploded');
 }
 
+/** A route that throws until a test says it has recovered; module scope for Biome 2.6. */
+const sometimes = { broken: true };
+function Sometimes() {
+  if (sometimes.broken) throw new Error('render exploded');
+  return <p>Recovered page</p>;
+}
+
 describe('malformed route parameters (#791)', () => {
   it('keeps a malformed percent escape as the raw parameter instead of throwing', () => {
     expect(match('/artifacts/:id', '/artifacts/%')).toEqual({ id: '%' });
@@ -96,11 +103,7 @@ describe('malformed route parameters (#791)', () => {
   });
 
   it('retries the same route from the boundary', () => {
-    let broken = true;
-    function Sometimes() {
-      if (broken) throw new Error('render exploded');
-      return <p>Recovered page</p>;
-    }
+    sometimes.broken = true;
 
     render(
       <RouteErrorBoundary resetKey="/artifacts/one">
@@ -109,17 +112,13 @@ describe('malformed route parameters (#791)', () => {
     );
     expect(screen.getByText('This page could not be shown')).toBeTruthy();
 
-    broken = false;
+    sometimes.broken = false;
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(screen.getByText('Recovered page')).toBeTruthy();
   });
 
   it('clears a failed route on navigation, not on a same-route re-render', () => {
-    let broken = true;
-    function Sometimes() {
-      if (broken) throw new Error('render exploded');
-      return <p>Recovered page</p>;
-    }
+    sometimes.broken = true;
 
     const { rerender } = render(
       <RouteErrorBoundary resetKey="/artifacts/one">
@@ -129,7 +128,7 @@ describe('malformed route parameters (#791)', () => {
     expect(screen.getByText('This page could not be shown')).toBeTruthy();
 
     // The error clears only when the path changes; a plain re-render keeps the boundary page.
-    broken = false;
+    sometimes.broken = false;
     rerender(
       <RouteErrorBoundary resetKey="/artifacts/one">
         <Sometimes />
