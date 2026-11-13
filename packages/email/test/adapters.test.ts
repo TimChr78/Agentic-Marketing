@@ -261,11 +261,42 @@ describe('SNS certificate cache (#634)', () => {
     };
 
     expect(await verifySnsMessage(good.m, deps)).toBe('valid'); // the initial fetch
-    for (let i = 0; i < 5; i++) expect(await verifySnsMessage(attacker.m, deps)).toBe('invalid');
-    // One refetch for the first bad signature; the next four stay inside the cooldown.
+    // The first bad signature is checked against a fresh certificate: that proves it invalid.
+    expect(await verifySnsMessage(attacker.m, deps)).toBe('invalid');
+    // Inside the cooldown nothing new is fetched, so nothing is proven either: retry, never a
+    // permanent 401 (0.14.15 review round 3).
+    for (let i = 0; i < 4; i++) expect(await verifySnsMessage(attacker.m, deps)).toBe('retry');
     expect(calls).toBe(2);
     now += 60_001;
     expect(await verifySnsMessage(attacker.m, deps)).toBe('invalid');
+    expect(calls).toBe(3);
+  });
+
+  it('never refuses a rotated certificate while its refetch failed or is cooling down (0.14.15 round 3)', async () => {
+    const url = certUrl(5);
+    const oldCert = snsFixture(url);
+    const rotated = snsFixture(url); // AWS rotated the key behind the same URL
+    let calls = 0;
+    let failing = false;
+    let served = oldCert.pem;
+    let now = 3_000_000;
+    const deps = {
+      fetch: (async () => {
+        calls++;
+        if (failing) throw new Error('timeout');
+        return new Response(served);
+      }) as typeof globalThis.fetch,
+      now: () => now,
+    };
+    expect(await verifySnsMessage(oldCert.m, deps)).toBe('valid'); // caches the old certificate
+    served = rotated.pem;
+    failing = true;
+    expect(await verifySnsMessage(rotated.m, deps)).toBe('retry'); // the refetch timed out
+    // 20 s later the fetch works again: a failed refetch did not start a cooldown, so this
+    // refetches and verifies instead of refusing a legitimate message.
+    failing = false;
+    now += 20_000;
+    expect(await verifySnsMessage(rotated.m, deps)).toBe('valid');
     expect(calls).toBe(3);
   });
 

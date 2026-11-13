@@ -178,10 +178,16 @@ export async function verifySnsMessage(m: Record<string, string>, deps: AdapterD
   // against a body cached by an older build. Refetch once, but only once per URL per minute: a
   // flood of bad signatures must not turn into a flood of requests to AWS (#634 review). The
   // claim starts the cooldown before awaiting, so concurrent bad signatures join this refetch.
-  if (!reserveRefetch(m.SigningCertURL, now)) return 'invalid';
+  // Inside the cooldown (or while another refetch is in flight) nothing new has been checked, so
+  // nothing proves the signature wrong: retry, never a permanent 401 for a message that may be
+  // signed with a rotated certificate (0.14.15 review round 3).
+  if (!reserveRefetch(m.SigningCertURL, now)) return 'retry';
   try {
     cert = await getCert(m.SigningCertURL, deps, true);
   } catch {
+    // A failed refetch proved nothing either; release the cooldown so the next delivery refetches
+    // (still bounded by the global fetch rate).
+    refetchedAt.delete(m.SigningCertURL);
     return 'retry';
   }
   // getCert just refreshed the entry, so this is a fresh body; verify and give the final answer.

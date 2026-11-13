@@ -66,7 +66,10 @@ export function createDb(config: DbConfig): Db {
   const lockTimeout = config.advisoryLockTimeoutMillis ?? ADVISORY_LOCK_TIMEOUT_MS;
 
   const lockStillBusy = () =>
-    new AppError('conflict', 'A request with this idempotency key is still in progress. Retry after it has finished, or use a new key.');
+    new AppError(
+      'conflict',
+      'A request with this idempotency key is still in progress. Retry with the same key after it has finished; a new key would run the operation again.',
+    );
 
   /** A pooled connection, or null when the deadline passes while the pool has none to give. */
   const connectWithin = async (deadline: number): Promise<pg.PoolClient | null> => {
