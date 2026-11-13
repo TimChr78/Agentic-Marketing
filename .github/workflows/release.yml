@@ -122,7 +122,7 @@ jobs:
             fi
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "sha=$sha" >> "$GITHUB_OUTPUT""
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           case "$v" in 0.*|*-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
 
       # The publication path must not accept a TODO or an incomplete upgrade block.

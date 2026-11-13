@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -619,6 +619,43 @@ describe('the release version check (#671)', () => {
     // The old parseArgs passed the version straight through; the shared check must refuse it first.
     expect(output).toMatch(/not a version: 0\.14\.3-\.\./);
   });
+});
+
+describe('workflow shell steps parse (0.14.14 review round 4)', () => {
+  const root = fileURLToPath(new URL('../../../', import.meta.url));
+  /** Every `run:` script of a workflow, with GitHub expressions replaced by a placeholder. */
+  const runScripts = (file: string) => {
+    const lines = readFileSync(join(root, file), 'utf8').split('\n');
+    const scripts: { line: number; body: string }[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^(\s*)(?:- )?run:\s*(.*)$/.exec(lines[i]!);
+      if (!m) continue;
+      const indent = m[1]!.length;
+      let body = m[2]!;
+      if (body === '|' || body === '>') {
+        const block: string[] = [];
+        for (let j = i + 1; j < lines.length; j++) {
+          const l = lines[j]!;
+          if (l.trim() !== '' && l.length - l.trimStart().length <= indent) break;
+          block.push(l);
+        }
+        body = block.join('\n');
+      }
+      scripts.push({ line: i + 1, body: body.replace(/\$\{\{[^}]*\}\}/g, 'X') });
+    }
+    return scripts;
+  };
+
+  for (const file of ['.github/workflows/release.yml', '.github/workflows/ci.yml']) {
+    it(`every run step in ${file} is valid bash`, () => {
+      const scripts = runScripts(file);
+      expect(scripts.length).toBeGreaterThan(3);
+      for (const { line, body } of scripts) {
+        const result = spawnSync('bash', ['-n'], { input: body, encoding: 'utf8' });
+        expect(result.status, `${file}:${line}: ${result.stderr}`).toBe(0);
+      }
+    });
+  }
 });
 
 describe('the release workflow concurrency (#648)', () => {
