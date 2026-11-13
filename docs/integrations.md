@@ -61,7 +61,7 @@ const ok = sig.split(' ').includes(expected) && Math.abs(Date.now() / 1000 - ts)
 
 `connections.create` with a connector that receives webhooks returns a secret URL `/hooks/in/<connection>/<token>`, once. Its events are platform-produced, like a form submission or an import, so a workspace tracking plan does not reject them: a strict plan must not drop a Shopify order while the sender is told the delivery succeeded. Personal-data rules and identity resolution are the same as for the Segment API.
 
-**Replays.** A delivery is claimed while it is processed and remembered for ten minutes after it publishes. A Standard Webhooks delivery uses its signed `webhook-id`; every other inbound configuration (Shopify, Salesforce, `hmac-sha256` and an unsigned secret URL) derives the key from the connection and the raw body, because those schemes carry no replay-safe id header. Shopify and Salesforce also stamp stable per-record ids, so JetStream still drops a duplicate after a lost store key. A byte-identical replay is answered 200 as already received and publishes nothing, and a different body publishes again. For those schemes the dedupe window is that ten minutes, not a provider timestamp.
+**Replays.** A delivery is claimed while it is processed and remembered for ten minutes after it publishes. A Standard Webhooks delivery uses its signed `webhook-id`; every other inbound configuration (Shopify, Salesforce, `hmac-sha256` and an unsigned secret URL) derives the key from the connection, the raw body and the headers its mapping reads (see *Mappings and retries* below), because those schemes carry no replay-safe id header. Shopify and Salesforce also stamp stable per-record ids, so JetStream still drops a duplicate after a lost store key. A byte-identical replay is answered 200 as already received and publishes nothing, and a different body publishes again. For those schemes the dedupe window is that ten minutes, not a provider timestamp.
 
 | Connector | Receives | Actions |
 |---|---|---|
@@ -76,6 +76,8 @@ Example generic mapping (a form tool):
 ```
 { "type": "track", "event": "Lead Created", "userId": "lead:" & body.id, "properties": { "score": body.score } }
 ```
+
+**Mappings and retries.** The replay identity is the body plus the headers the mapping reads. Name them statically — `headers."x-event-id"`, `headers.x-event-id` or `$lookup(headers, "x-event-id")` — so a retry that changes an unrelated per-attempt header is still the same delivery. Any other use of `headers` (`$keys(headers)`, `$each(headers, …)`, `$sift`, `headers[…]`, a computed name such as `$lookup(headers, "x-request-" & "id")`, or passing `headers` wholesale) makes **every** header part of the identity, because the mapped output can then depend on any of them. A sender retry that changes a per-attempt header such as `x-request-id`, `date` or a trace id then counts as a new event. If the sender stamps such headers, prefer Standard Webhooks: its signed `webhook-id` is the replay key whatever the mapping does.
 
 ## OAuth connections
 

@@ -183,13 +183,26 @@ export interface AppRoleReach {
   chain: string[];
 }
 
+/** PostgreSQL 16 is where `pg_auth_members.set_option` and the `SET` privilege mode exist. */
+const SET_OPTION_VERSION = 160_000;
+
 /**
- * Every role `$1` can `SET ROLE` into, transitively, and the chain that reaches it (0.14.11 round
- * 4). `NOINHERIT` does not stop `SET ROLE`, so a membership is enough to reach a role's
+ * Every role `$1` can `SET ROLE` into, transitively, and the chain that reaches it (0.14.11 rounds
+ * 4 and 5). `NOINHERIT` does not stop `SET ROLE`, so a membership is enough to reach a role's
  * attributes: an app role with neither attribute can still become a member that has BYPASSRLS.
+ *
+ * PostgreSQL 16 can grant a membership `WITH SET FALSE`, which does not allow `SET ROLE` even when
+ * `INHERIT TRUE` keeps the role's privileges; such an edge must not make the role count. The
+ * decision is `pg_has_role($1, role, 'SET')`, which covers transitivity and respects the option on
+ * every edge. The chain is still walked through `pg_auth_members` for the error message, following
+ * only `set_option` edges on 16+, where the column exists. Below 16 every membership implies
+ * `SET ROLE`, so `MEMBER` is the equivalent privilege mode and the column does not exist.
+ *
  * Shared by the migration and `am doctor`'s `postgres.app-role` check (#813).
  */
-export const appRoleReachSql = `WITH RECURSIVE reach(role, chain) AS (
+export function appRoleReachSql(serverVersionNum: number): string {
+  const hasSetOption = serverVersionNum >= SET_OPTION_VERSION;
+  return `WITH RECURSIVE reach(role, chain) AS (
     SELECT r.oid, ARRAY[r.rolname]::text[]
       FROM pg_roles r
      WHERE r.rolname = $1
@@ -198,17 +211,26 @@ export const appRoleReachSql = `WITH RECURSIVE reach(role, chain) AS (
       FROM reach
       JOIN pg_auth_members m ON m.member = reach.role
       JOIN pg_roles r ON r.oid = m.roleid
-     WHERE NOT r.rolname = ANY(reach.chain)
+     WHERE ${hasSetOption ? 'm.set_option' : 'true'}
+       AND NOT r.rolname = ANY(reach.chain)
   )
   SELECT DISTINCT ON (r.rolname)
          r.rolname AS role, r.rolsuper AS superuser, r.rolbypassrls AS bypassrls, reach.chain
     FROM reach
     JOIN pg_roles r ON r.oid = reach.role
+   WHERE pg_has_role($1::name, r.oid, '${hasSetOption ? 'SET' : 'MEMBER'}')
    ORDER BY r.rolname, cardinality(reach.chain), reach.chain`;
+}
+
+/** The server's numeric version, so {@link appRoleReachSql} can pick the right membership columns. */
+async function serverVersionNum(client: Pick<pg.Client, 'query'>): Promise<number> {
+  const { rows } = await client.query<{ version: number }>("SELECT current_setting('server_version_num')::int AS version");
+  return rows[0]?.version ?? 0;
+}
 
 /** Runs {@link appRoleReachSql}; the role itself is one of the rows, with a one-role chain. */
 export async function appRoleReach(client: Pick<pg.Client, 'query'>, role: string): Promise<AppRoleReach[]> {
-  const { rows } = await client.query<AppRoleReach>(appRoleReachSql, [role]);
+  const { rows } = await client.query<AppRoleReach>(appRoleReachSql(await serverVersionNum(client)), [role]);
   return rows;
 }
 

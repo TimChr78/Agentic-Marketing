@@ -3,6 +3,7 @@ import { replayHeaderValues } from '../src/inbound';
 
 // The replay identity of a generic delivery includes the headers its mapping reads (0.14.11 review).
 const headers = { 'x-event-id': 'e1', 'x-device': 'd1', 'user-agent': 'ua', host: 'h', 'x-other': 'o' };
+const all = 'host:h\nuser-agent:ua\nx-device:d1\nx-event-id:e1\nx-other:o';
 
 describe('replayHeaderValues', () => {
   it('takes only the headers a mapping names, in any JSONata form', () => {
@@ -12,12 +13,18 @@ describe('replayHeaderValues', () => {
     );
   });
 
-  it('takes every header except the per-attempt ones when the mapping uses the headers object wholesale', () => {
-    // A wholesale mapping can select any header, so the client-identity headers count too
-    // (0.14.11 round 4); only the headers that change per delivery attempt are left out.
-    expect(replayHeaderValues({ mapping: '$merge([body, {"h": headers}])' }, headers)).toBe(
-      'user-agent:ua\nx-device:d1\nx-event-id:e1\nx-other:o',
-    );
+  it('takes only a bare field reference (headers.x)', () => {
+    expect(replayHeaderValues({ mapping: '{"id": headers.x}' }, { ...headers, x: 'only' })).toBe('x:only');
+  });
+
+  it('takes every header when the mapping uses the headers object wholesale (0.14.11 round 5)', () => {
+    // A wholesale mapping can select any header, so every header counts, including the ones that
+    // change per delivery attempt: the mapping's output may depend on them.
+    expect(replayHeaderValues({ mapping: '$merge([body, {"h": headers}])' }, headers)).toBe(all);
+  });
+
+  it('takes every header when the mapping enumerates their names (0.14.11 round 5)', () => {
+    expect(replayHeaderValues({ mapping: '{"keys": $keys(headers)}' }, headers)).toBe(all);
   });
 
   it('is empty for a body-only mapping or a connector without a mapping expression', () => {
@@ -27,25 +34,30 @@ describe('replayHeaderValues', () => {
 
   it('keeps only a named header when the mapping reads it by name, even through $lookup (0.14.11 round 3)', () => {
     const h = { ...headers, 'x-forwarded-for': '192.0.2.1' };
-    expect(replayHeaderValues({ mapping: '{"anonymousId": $lookup(headers, "x-forwarded-for")}' }, h)).toContain(
-      'x-forwarded-for:192.0.2.1',
-    );
+    expect(replayHeaderValues({ mapping: '{"anonymousId": $lookup(headers, "x-forwarded-for")}' }, h)).toBe('x-forwarded-for:192.0.2.1');
+    expect(replayHeaderValues({ mapping: '{"anonymousId": $lookup(headers, \'x-forwarded-for\')}' }, h)).toBe('x-forwarded-for:192.0.2.1');
     expect(replayHeaderValues({ mapping: '{"ip": headers."x-forwarded-for"}' }, h)).toBe('x-forwarded-for:192.0.2.1');
   });
 
-  it('includes a client-identity header under a wholesale mapping (0.14.11 round 4)', () => {
-    const h = { ...headers, 'x-forwarded-for': '192.0.2.1' };
-    expect(replayHeaderValues({ mapping: '$lookup(headers, "x-forwarded-" & "for")' }, h)).toContain('x-forwarded-for:192.0.2.1');
+  it('takes every header when a $lookup name is computed (0.14.11 round 5)', () => {
+    // The reviewer's reproducer: `$lookup(headers, "x-request-" & "id")` can read any header, so
+    // the per-attempt x-request-id must be part of the identity.
+    const h = { ...headers, 'x-request-id': 'person-a', date: 'Thu, 12 Nov 2026', traceparent: '00-abc-def-01' };
+    const values = replayHeaderValues({ mapping: '$merge([body, {"anonymousId": $lookup(headers, "x-request-" & "id")}])' }, h);
+    expect(values).toContain('x-request-id:person-a');
+    expect(values).toContain('date:Thu, 12 Nov 2026');
+    expect(values).toContain('traceparent:00-abc-def-01');
+    expect(values).toBe(
+      'date:Thu, 12 Nov 2026\nhost:h\ntraceparent:00-abc-def-01\nuser-agent:ua\nx-device:d1\nx-event-id:e1\nx-other:o\nx-request-id:person-a',
+    );
   });
 
-  it('excludes a per-attempt header under a wholesale mapping (0.14.11 round 4)', () => {
-    const h = { ...headers, traceparent: '00-abc-def-01', 'cf-ray': '8f00-AMS', 'x-request-id': 'r1', date: 'Thu, 12 Nov 2026' };
-    const values = replayHeaderValues({ mapping: '$merge([body, {"h": headers}])' }, h);
-    expect(values).toBe('user-agent:ua\nx-device:d1\nx-event-id:e1\nx-other:o');
-    expect(values).not.toContain('traceparent');
-    expect(values).not.toContain('cf-ray');
-    expect(values).not.toContain('x-request-id');
-    expect(values).not.toContain('date');
+  it('takes every header for an unrecognised use of the headers object (0.14.11 round 5)', () => {
+    const h = { ...headers, 'x-request-id': 'r1' };
+    expect(replayHeaderValues({ mapping: '{"id": headers["x-request-id"]}' }, h)).toBe(
+      'host:h\nuser-agent:ua\nx-device:d1\nx-event-id:e1\nx-other:o\nx-request-id:r1',
+    );
+    expect(replayHeaderValues({ mapping: '{"id": $each(headers, function($v, $k) {$k})}' }, h)).toContain('x-request-id:r1');
   });
 
   it('still joins a per-attempt header the mapping names as a string literal (0.14.11 round 3)', () => {
