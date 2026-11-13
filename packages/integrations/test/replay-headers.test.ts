@@ -69,4 +69,20 @@ describe('mappedReplayHeaders', () => {
       expect(identity, expr).toContain('x:person-a');
     }
   });
+
+  it('gives a time-dependent branch the same identity on every retry (0.14.11 round 8)', async () => {
+    // The real clock decides the branch: before the cutoff the mapping reads x, after it it does
+    // not. The identity run freezes $millis, $now and $random, so both deliveries agree.
+    const mapping = '$merge([body, {"anonymousId": $millis() < body.cutoff ? headers.x : "person-a"}])';
+    const h = { x: 'person-a', other: 'o' };
+    const before = await mappedReplayHeaders(mapping, { cutoff: Date.now() + 60_000 }, h);
+    const after = await mappedReplayHeaders(mapping, { cutoff: Date.now() + 60_000 }, h);
+    expect(before).toBe(after);
+    const randomBranch = '$random() < 0.5 ? headers.x : headers.other';
+    expect(new Set(await Promise.all(Array.from({ length: 8 }, () => mappedReplayHeaders(randomBranch, {}, h)))).size).toBe(1);
+  });
+
+  it('treats a mapping that fails in the identity run as reading every header', async () => {
+    expect(await mappedReplayHeaders('$error("boom")', {}, { a: '1', b: '2' })).toBe('a:1\nb:2');
+  });
 });
