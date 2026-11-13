@@ -437,10 +437,34 @@ describe('staged send', () => {
   it('stops when a canary smaller than minCanary could not deliver (#300)', async () => {
     const { id, canary } = await heldCanary(5, 50);
     expect(canary.length).toBeLessThan(50);
-    await t.srv.db.admin.query(`UPDATE messages SET status = 'failed' WHERE workspace_id = $1 AND journey_id = $2 AND status = 'queued'`, [
-      ws,
-      id,
-    ]);
+    const canaryIds = canary.map((m) => m.id);
+    // The canary's outcome has to be settled before the check reads it. A send window normally
+    // keeps these rows queued, but delivery and the scheduler run concurrently, so the test first
+    // holds the rows out of the claim window, then waits for any claim already taken to finish,
+    // and only then fails every canary row. Nothing is decided on a sleep or on how fast the
+    // worker happened to be (#831).
+    await t.srv.db.admin.query(
+      `UPDATE messages SET not_before = now() + interval '1 day'
+        WHERE workspace_id = $1 AND id = ANY($2) AND status IN ('queued', 'sending')`,
+      [ws, canaryIds],
+    );
+    const inFlight = async () =>
+      Number(
+        (
+          await t.srv.db.admin.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM messages WHERE workspace_id = $1 AND id = ANY($2) AND status = 'sending'`,
+            [ws, canaryIds],
+          )
+        ).rows[0]?.n ?? 0,
+      );
+    const sending = await eventually(inFlight, (n) => n === 0, 20_000);
+    expect(sending).toBe(0);
+    // The provider failed every canary message: every row is terminal and nothing is in flight,
+    // so no canary send can produce the evidence a threshold check needs.
+    await t.srv.db.admin.query(
+      `UPDATE messages SET status = 'failed', reason = 'provider outage' WHERE workspace_id = $1 AND id = ANY($2)`,
+      [ws, canaryIds],
+    );
     await checkNow(id);
     const stopped = await eventually(
       () => status(id),

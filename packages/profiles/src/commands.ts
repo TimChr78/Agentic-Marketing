@@ -330,12 +330,18 @@ export const profileEvents = defineCommand({
   name: 'profiles.events',
   title: 'A person’s events',
   description:
-    'Events of a person across all their anonymous and user ids, newest first. Page with `before` + `beforeId` from nextCursor; `before` alone is the legacy timestamp-only cursor and keeps its old strictly-before behavior.',
+    'Events of a person across all their anonymous and user ids, newest first. Page with `before`, `beforeId`, `beforeName` and `beforeAnonymousId` from nextCursor, the full replacing key; a cursor without the name and anonymous id still works, uses the old `(timestamp, eventId)` order, and may skip a row that ties on both rather than repeat a page forever.',
   input: z.object({
     profileId: ProfileId,
     limit: z.number().int().min(1).max(500).default(100),
-    before: cursorTimestamp('before').optional().describe('Legacy timestamp-only cursor; pair with beforeId for a stable keyset'),
+    before: cursorTimestamp('before').optional().describe('The last event timestamp of the previous page, from nextCursor.timestamp'),
     beforeId: z.string().min(1).max(200).optional().describe('The last event id of the previous page, from nextCursor.eventId'),
+    beforeName: z.string().min(1).max(500).optional().describe('The last event name of the previous page, from nextCursor.name'),
+    beforeAnonymousId: z
+      .string()
+      .max(500)
+      .optional()
+      .describe('The last event anonymous id of the previous page, from nextCursor.anonymousId'),
   }),
   output: z.object({
     events: z.array(
@@ -349,9 +355,16 @@ export const profileEvents = defineCommand({
       }),
     ),
     nextCursor: z
-      .object({ timestamp: z.string(), eventId: z.string() })
+      .object({
+        timestamp: z.string(),
+        eventId: z.string(),
+        name: z.string(),
+        anonymousId: z.string(),
+      })
       .nullable()
-      .describe('Pass timestamp as `before` and eventId as `beforeId` for the next page; null on the last page'),
+      .describe(
+        'Pass timestamp as `before`, eventId as `beforeId`, name as `beforeName` and anonymousId as `beforeAnonymousId` for the next page; null on the last page',
+      ),
   }),
   permission: 'profiles:read',
   effect: 'read',
@@ -371,6 +384,8 @@ export const profileEvents = defineCommand({
         limit: input.limit + 1,
         ...(input.before ? { before: input.before } : {}),
         ...(input.before && input.beforeId ? { beforeId: input.beforeId } : {}),
+        ...(input.before && input.beforeName ? { beforeName: input.beforeName } : {}),
+        ...(input.before && input.beforeAnonymousId !== undefined ? { beforeAnonymousId: input.beforeAnonymousId } : {}),
       },
     );
     const page = rows.slice(0, input.limit);
@@ -384,7 +399,10 @@ export const profileEvents = defineCommand({
         properties,
         context,
       })),
-      nextCursor: rows.length > input.limit && last ? { timestamp: last.timestamp, eventId: last.eventId } : null,
+      nextCursor:
+        rows.length > input.limit && last
+          ? { timestamp: last.timestamp, eventId: last.eventId, name: last.name, anonymousId: last.anonymousId }
+          : null,
     };
   },
 });
@@ -715,16 +733,24 @@ export const exportProfile = defineCommand({
     const events: Record<string, unknown>[] = [];
     let eventsTruncated = false;
     if (input.maxEvents === 0) eventsTruncated = (await profileEvents.handler({ profileId: profile.id, limit: 1 }, ctx)).events.length > 0;
-    // Page with the composite (timestamp, event_id) cursor so a burst of tied events is exported
-    // in full instead of ending the loop at the first page boundary (#397). maxEvents remains the
-    // honest upper bound; we never silently stop below it while a next page exists.
-    let cursor: { timestamp: string; eventId: string } | null = null;
+    // Page with the full replacing key (timestamp, name, anonymous_id, event_id) so a burst of
+    // tied events is exported in full instead of ending the loop at the first page boundary
+    // (#397, #840). maxEvents remains the honest upper bound; we never silently stop below it
+    // while a next page exists.
+    let cursor: { timestamp: string; eventId: string; name: string; anonymousId: string } | null = null;
     while (events.length < input.maxEvents) {
       const page = await profileEvents.handler(
         {
           profileId: profile.id,
           limit: Math.min(500, input.maxEvents - events.length),
-          ...(cursor ? { before: cursor.timestamp, beforeId: cursor.eventId } : {}),
+          ...(cursor
+            ? {
+                before: cursor.timestamp,
+                beforeId: cursor.eventId,
+                beforeName: cursor.name,
+                beforeAnonymousId: cursor.anonymousId,
+              }
+            : {}),
         },
         ctx,
       );

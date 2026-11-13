@@ -142,7 +142,7 @@ const events = (overrides: Record<string, unknown> = {}) => ({
       context: {},
     },
   ],
-  nextCursor: { timestamp: '2026-11-06T21:42:00.000000Z', eventId: 'evt_1' },
+  nextCursor: { timestamp: '2026-11-06T21:42:00.000000Z', eventId: 'evt_1', name: 'Signed in', anonymousId: 'anon_ada' },
   ...overrides,
 });
 
@@ -703,6 +703,8 @@ describe('Person detail (#510)', () => {
       limit: 100,
       before: '2026-11-06T21:42:00.000000Z',
       beforeId: 'evt_1',
+      beforeName: 'Signed in',
+      beforeAnonymousId: 'anon_ada',
     });
 
     await userEvent.click(await screen.findByRole('button', { name: 'Load more messages' }));

@@ -52,12 +52,20 @@ function MetricGrid({ summary }: { summary: MeasuredSummary }) {
         <StatCard
           label="E-mails delivered"
           value={int(h.delivered)}
-          hint={h.emailSent > 0 ? `${int(h.delivered)} of ${int(h.emailSent)} e-mails sent` : 'Unavailable · no e-mails sent'}
+          hint={
+            h.emailSent !== null && h.emailSent > 0
+              ? `${int(h.delivered)} of ${int(h.emailSent)} e-mails sent`
+              : 'Unavailable · no e-mails sent'
+          }
         />
         <StatCard
           label="E-mail clickers"
           value={int(h.clickers)}
-          hint={h.delivered > 0 ? `${int(h.clickers)} of ${int(h.delivered)} delivered e-mails` : 'Unavailable · no delivered e-mails'}
+          hint={
+            h.delivered !== null && h.delivered > 0
+              ? `${int(h.clickers)} of ${int(h.delivered)} delivered e-mails`
+              : 'Unavailable · no delivered e-mails'
+          }
         />
         <StatCard
           label="Converters"
@@ -72,12 +80,16 @@ function MetricGrid({ summary }: { summary: MeasuredSummary }) {
         <StatCard
           label="E-mail complaint rate"
           value={rateOrDash(h.complaintRate, h.delivered)}
-          hint={h.delivered > 0 ? `of ${int(h.delivered)} delivered e-mails` : 'Unavailable · no delivered e-mails'}
+          hint={h.delivered !== null && h.delivered > 0 ? `of ${int(h.delivered)} delivered e-mails` : 'Unavailable · no delivered e-mails'}
         />
         <StatCard
           label="E-mail unsubscribe rate"
           value={rateOrDash(h.unsubscribeRate, h.delivered)}
-          hint={h.delivered > 0 ? `${int(h.unsubscribers)} of ${int(h.delivered)} delivered e-mails` : 'Unavailable · no delivered e-mails'}
+          hint={
+            h.delivered !== null && h.delivered > 0
+              ? `${int(h.unsubscribers)} of ${int(h.delivered)} delivered e-mails`
+              : 'Unavailable · no delivered e-mails'
+          }
         />
         {h.revenue.length === 0 ? (
           <StatCard label="Revenue" value="—" hint="No attributed revenue" />
@@ -359,8 +371,10 @@ function JourneyHoldouts({
 function SuppressionNotice({ summary }: { summary: MeasuredSummary }) {
   return (
     <Alert tone="warn" title="Some member rows are suppressed">
-      Member rows with fewer than k={int(summary.meta.k)} people reached have their counts and rates hidden. Campaign totals stay visible,
-      and no identities or inferred values are shown.
+      Member rows with fewer than k={int(summary.meta.k)} people reached have their counts and rates hidden, and when only one row would be
+      hidden the smallest visible row with a value is hidden with it, so the hidden numbers cannot be derived from the campaign totals. A
+      total that has no visible member row with a value to hide is withheld and named in the notes. No identities or inferred values are
+      shown.
     </Alert>
   );
 }

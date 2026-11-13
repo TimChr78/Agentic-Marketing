@@ -195,6 +195,123 @@ export function anyArmBelowK(arms: readonly { entered: number }[], k = K): boole
   return arms.some((arm) => arm.entered < k);
 }
 
+/** How one row of a dimensioned result stands against the k floor. */
+export interface SuppressionCandidate {
+  /** The row's group size: the same measure the k test uses (distinct people, or members). */
+  group: number;
+  /** True when the row is already hidden because its group is below k. */
+  hidden: boolean;
+}
+
+/**
+ * One contributor to a total. Contributors are the rows grouped by their independent population
+ * (the campaign or member), not the physical currency row: a campaign that converts in two
+ * currencies is one population, and hiding its two currency rows is not two hidden groups.
+ */
+export interface TotalContributor {
+  /** Opaque identity used by the caller to apply the decision. */
+  id: number | string;
+  /** The contributor's independent population; the deterministic tie-break for equal values. */
+  group: number;
+  /** The contributor's value in this total. A zero cannot be a complement: hiding it hides nothing. */
+  value: number;
+  /** True when this contributor's value in this total is already suppressed. */
+  hidden: boolean;
+  /**
+   * False when the contributor cannot contribute to this total at all (its value is zero by
+   * construction, e.g. an SMS-only member in an e-mail total). Such a hidden contributor does not
+   * protect the total, because everyone knows its share is zero. An observed zero still applies:
+   * "none of these people converted" is itself a small-group disclosure. Defaults to true.
+   */
+  applies?: boolean;
+}
+
+/** What one total needs so a single hidden contributor cannot be recovered by subtraction. */
+export interface ComplementaryTotalDecision {
+  /** Contributors to hide for this total. Empty unless exactly one was hidden. */
+  hide: (number | string)[];
+  /** True when there is no visible non-zero contributor, so the total itself must be withheld. */
+  withheld: boolean;
+}
+
+/**
+ * Complementary suppression for one total (#692, option B). When exactly one contributor is hidden,
+ * a reader recovers it as the total minus the visible contributors. Hide the smallest visible
+ * contributor with a non-zero value in this total, so only a sum of hidden values is derivable.
+ * Ties go to the first contributor, the result's deterministic order.
+ *
+ * When the only visible contributors are zero, hiding one would change nothing and the hidden
+ * value would stay recoverable. The total is withheld instead; that is the narrow option-A
+ * fallback, used only when no visible non-zero contributor exists.
+ */
+export function complementaryTotal(contributors: readonly TotalContributor[]): ComplementaryTotalDecision {
+  // Only a hidden contributor that can contribute to this total protects it (0.14.19 review round 2).
+  let hidden = 0;
+  for (const contributor of contributors) if (contributor.hidden && contributor.applies !== false) hidden += 1;
+  if (hidden !== 1) return { hide: [], withheld: false };
+  let pick: TotalContributor | undefined;
+  for (const contributor of contributors) {
+    if (contributor.hidden || !(contributor.value > 0)) continue;
+    if (!pick || contributor.value < pick.value) pick = contributor;
+  }
+  return pick ? { hide: [pick.id], withheld: false } : { hide: [], withheld: true };
+}
+
+/**
+ * Applies {@link complementaryTotal} to every total a response exposes beside its rows, until no
+ * total has exactly one hidden contributor. Hiding a complement in one total can make the same
+ * contributor hidden in another, so the pass repeats; `contributors` is re-derived each time.
+ *
+ * Termination: hiding and withholding are monotone. A pass that changes something either hides at
+ * least one contributor (a finite set) or withholds one total (also finite), so the budget below is
+ * an upper bound and the loop cannot spin.
+ */
+export function planComplementarySuppression(opts: {
+  totals: readonly string[];
+  contributors: (total: string) => readonly TotalContributor[];
+  /** Applies one hide. Returns true only when it hid something that was visible. */
+  hide: (total: string, id: number | string) => boolean;
+}): { withheld: string[]; hidden: number } {
+  const withheld = new Set<string>();
+  let hidden = 0;
+  let budget = opts.totals.length + 1;
+  for (const total of opts.totals) budget += opts.contributors(total).length;
+  let changed = true;
+  while (changed && budget-- > 0) {
+    changed = false;
+    for (const total of opts.totals) {
+      if (withheld.has(total)) continue;
+      const decision = complementaryTotal(opts.contributors(total));
+      if (decision.withheld) {
+        withheld.add(total);
+        changed = true;
+        continue;
+      }
+      for (const id of decision.hide)
+        if (opts.hide(total, id)) {
+          hidden += 1;
+          changed = true;
+        }
+    }
+  }
+  return { withheld: [...withheld], hidden };
+}
+
+/**
+ * Complementary suppression for one flat row list, the segment path. Rows are their own
+ * contributors, so this is {@link complementaryTotal} over the group sizes. Returns the index of the
+ * row to hide, or null when nothing more is needed: no row is hidden, two or more already are, or
+ * every visible row is empty and the caller has no total to withhold.
+ *
+ * The rule applies when the array is one dimensioned result with a visible total above it. A view
+ * with only two arms already withholds both arms and every comparison instead (#590).
+ */
+export function complementarySuppression(rows: readonly SuppressionCandidate[]): number | null {
+  const decision = complementaryTotal(rows.map((row, id) => ({ id, group: row.group, value: row.group, hidden: row.hidden })));
+  if (decision.withheld || !decision.hide.length) return null;
+  return Number(decision.hide[0]);
+}
+
 export interface SuppressedArmResult {
   entered: null;
   converted: null;

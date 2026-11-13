@@ -185,7 +185,7 @@ export function holdoutVerdict(result: { verdict: string; minSampleSizeMet: bool
 export interface FunnelBar {
   step: FunnelStep['step'];
   label: string;
-  count: number;
+  count: number | null;
   width: number;
   stepRate: string;
   previous: string | null;
@@ -199,7 +199,7 @@ export interface FunnelBar {
  * visible. The visible table below the figure uses the same returned values.
  */
 export function funnelBars(funnel: FunnelStep[]): FunnelBar[] {
-  const largest = Math.max(1, ...funnel.map((step) => step.count));
+  const largest = Math.max(1, ...funnel.map((step) => step.count ?? 0));
   return funnel.map((step) => {
     const previousStep = PREVIOUS_STEP[step.step];
     // Delivered divides by e-mail sent, not by all-channel recipients (#586 P3).
@@ -209,7 +209,7 @@ export function funnelBars(funnel: FunnelStep[]): FunnelBar[] {
       step: step.step,
       label: STEP_LABEL[step.step],
       count: step.count,
-      width: Math.max(0, Math.min(100, (step.count / largest) * 100)),
+      width: Math.max(0, Math.min(100, ((step.count ?? 0) / largest) * 100)),
       stepRate: percentText(step.stepRate),
       previous,
       sharePercent: step.shareOfRecipients === null ? 'Unavailable' : percentText(step.shareOfRecipients),
@@ -234,7 +234,7 @@ export function allHeadlineZero(headline: MeasuredSummary['headline']): boolean 
 export function revenuePerRecipientFor(
   headline: MeasuredSummary['headline'],
   currency: string,
-): { currency: string; amount: number } | null {
+): { currency: string; amount: number | null } | null {
   return headline.revenuePerRecipient.find((row) => row.currency === currency) ?? null;
 }
 
