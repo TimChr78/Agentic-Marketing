@@ -14,6 +14,7 @@ import {
   artifactTypes,
   contentValidators,
   draftContentSchemas,
+  isSingleton,
   publishValidators,
   referencesOf,
 } from './types';
@@ -395,11 +396,14 @@ export const createArtifact = defineCommand({
     const warnings = contentWarnings(input.type, content);
     const id = newId(artifactTypes[input.type].prefix);
     const ws = ctx.principal.workspaceId;
-    if ('singleton' in artifactTypes[input.type]) {
+    if (isSingleton(input.type)) {
+      // Serialise creations per workspace + type: two concurrent callers must not both pass the
+      // read below, and the second must see a clear conflict rather than a unique violation (#869).
+      await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('am.artifact-singleton'), hashtext(${`${ws}:${input.type}`}))`);
       const [existing] = await ctx.tx
         .select({ id: schema.artifacts.id })
         .from(schema.artifacts)
-        .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.type, input.type)));
+        .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.type, input.type), eq(schema.artifacts.archived, false)));
       if (existing)
         throw new AppError('conflict', `A workspace has one ${input.type}; it is ${existing.id}. Edit it with artifacts.updateDraft.`);
     }
@@ -1871,6 +1875,6 @@ export async function publishedSingleton<
         eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
       ),
     )
-    .where(eq(schema.artifacts.type, type));
+    .where(and(eq(schema.artifacts.type, type), eq(schema.artifacts.archived, false)));
   return row ? (artifactTypes[type].content.parse(row.content) as never) : null;
 }
