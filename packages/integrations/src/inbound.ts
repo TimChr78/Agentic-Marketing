@@ -8,6 +8,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
+import jsonata from 'jsonata';
 import { connectionSecrets, connectorOf, inboundTokenHash } from './connections';
 
 // Inbound webhooks: POST /hooks/in/<connection>/<token>. The secret URL authenticates the
@@ -28,96 +29,93 @@ const PENDING_TTL_S = 60;
 const DONE_TTL_S = 10 * 60;
 const RETRY_AFTER_S = 30;
 
-const isWordChar = (ch: string | undefined) => ch !== undefined && /[\w$]/.test(ch);
-const skipWhitespace = (text: string, from: number) => {
-  let i = from;
-  while (i < text.length && /\s/.test(text[i] as string)) i++;
-  return i;
+/** A JSONata parse tree node (only the fields read here). */
+type AstNode = {
+  type?: string;
+  value?: unknown;
+  steps?: AstNode[];
+  procedure?: AstNode;
+  arguments?: AstNode[];
+  [key: string]: unknown;
 };
 
-/** The index just past the string literal that starts at `start`, or the text's end if it is open. */
-function skipString(text: string, start: number): number {
-  const quote = text[start];
-  let i = start + 1;
-  while (i < text.length) {
-    if (text[i] === '\\') {
-      i += 2;
-      continue;
-    }
-    if (text[i] === quote) return i + 1;
-    i++;
-  }
-  return i;
-}
-
-/** A field name after `headers.`: a quoted string, a backquoted name or a bare identifier. */
-function readFieldName(text: string, start: number): { value: string; end: number } | null {
-  const ch = text[start];
-  if (ch === '"') {
-    const end = skipString(text, start);
-    return text[end - 1] === '"' ? { value: text.slice(start + 1, end - 1), end } : null;
-  }
-  if (ch === '`') {
-    const end = text.indexOf('`', start + 1);
-    return end < 0 ? null : { value: text.slice(start + 1, end), end: end + 1 };
-  }
-  const ident = /^[A-Za-z_$][\w$]*/.exec(text.slice(start));
-  return ident ? { value: ident[0], end: start + ident[0].length } : null;
-}
+const isHeadersName = (n: AstNode | undefined) => !!n && (n.type === 'name' || n.type === 'string') && n.value === 'headers';
 
 /**
- * The headers a mapping names statically, or null when it uses the `headers` object in any other
- * way. Strings are skipped, so a `headers` in a literal is not a reference.
- *
- * Static: `headers.x`, `headers."x-name"`, `headers.` + backquoted name, and
- * `$lookup(headers, "<one string literal>")` with either quote.
- * Dynamic: `headers` alone, `$keys(headers)`, `$each(headers, …)`, `headers[…]`, a computed
- * `$lookup(headers, …)`, `headers` passed into an object, and every other shape.
+ * The headers a mapping names statically, or null when it may read any header (0.14.11 round 6).
+ * The mapping is read through JSONata's own parser, so comments, quoting and escapes are decoded
+ * exactly as evaluation decodes them. Static means every mention of `headers` is either:
+ * - a path that starts with `headers` followed by a field name (`headers.x`, `headers."x"`,
+ *   `` headers.`x` ``, `"headers".x`), which records `x`; or
+ * - `$lookup(headers, "<string literal>")`, which records the literal.
+ * Anything else may read a header the scan cannot name, so the mapping is dynamic: `headers` in any
+ * other position (alone, as an argument, an object key or a string), a context reference (`$` or
+ * `$$`, through which `$.headers` or an alias reaches the input), `$eval`, or a mapping that does not
+ * parse. Ambiguity costs only replay dedupe for retries; a missed header would lose an event.
  */
 function staticHeaderNames(mapping: string): Set<string> | null {
-  const names = new Set<string>();
-  let i = 0;
-  while (i < mapping.length) {
-    const ch = mapping[i];
-    if (ch === '"' || ch === "'") {
-      i = skipString(mapping, i);
-      continue;
-    }
-    if (
-      mapping.startsWith('headers', i) &&
-      !isWordChar(mapping[i - 1]) &&
-      mapping[i - 1] !== '$' &&
-      mapping[i - 1] !== '.' &&
-      !isWordChar(mapping[i + 7])
-    ) {
-      const end = i + 7;
-      const dot = skipWhitespace(mapping, end);
-      if (mapping[dot] === '.') {
-        const field = readFieldName(mapping, skipWhitespace(mapping, dot + 1));
-        if (!field) return null;
-        names.add(field.value.toLowerCase());
-        i = field.end;
-        continue;
-      }
-      // `$lookup(headers, "one literal")` is static; anything else about the call is not.
-      if (/\$lookup\s*\(\s*$/.test(mapping.slice(0, i))) {
-        const comma = skipWhitespace(mapping, end);
-        const literal = skipWhitespace(mapping, comma + 1);
-        if (mapping[comma] === ',' && (mapping[literal] === '"' || mapping[literal] === "'")) {
-          const literalEnd = skipString(mapping, literal);
-          const close = skipWhitespace(mapping, literalEnd);
-          if (mapping[literalEnd - 1] === mapping[literal] && mapping[close] === ')') {
-            names.add(mapping.slice(literal + 1, literalEnd - 1).toLowerCase());
-            i = close + 1;
-            continue;
-          }
-        }
-      }
-      return null;
-    }
-    i++;
+  let ast: AstNode;
+  try {
+    ast = jsonata(mapping).ast() as AstNode;
+  } catch {
+    return null;
   }
-  return names;
+  const names = new Set<string>();
+  let dynamic = false;
+  const walk = (node: unknown): void => {
+    if (dynamic || node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    const n = node as AstNode;
+    if (n.type === 'variable' && (n.value === '' || n.value === '$')) {
+      dynamic = true;
+      return;
+    }
+    if (n.type === 'function' && n.procedure?.type === 'variable') {
+      if (n.procedure.value === 'eval') {
+        dynamic = true;
+        return;
+      }
+      const [target, key, ...rest] = n.arguments ?? [];
+      const targetIsHeaders =
+        target?.type === 'path' && target.steps?.length === 1 && isHeadersName(target.steps[0]) && !hasExtras(target.steps[0]!);
+      if (
+        n.procedure.value === 'lookup' &&
+        targetIsHeaders &&
+        key?.type === 'string' &&
+        typeof key.value === 'string' &&
+        rest.length === 0
+      ) {
+        names.add(key.value.toLowerCase());
+        return;
+      }
+    }
+    if (n.type === 'path' && n.steps && isHeadersName(n.steps[0]) && n.steps[1]?.type === 'name' && typeof n.steps[1].value === 'string') {
+      if (hasExtras(n.steps[0]!)) {
+        dynamic = true;
+        return;
+      }
+      names.add(n.steps[1].value.toLowerCase());
+      // The field step's own predicates and the steps after it are ordinary expressions.
+      for (const [key, child] of Object.entries(n.steps[1])) if (key !== 'value' && key !== 'type') walk(child);
+      walk(n.steps.slice(2));
+      return;
+    }
+    if (isHeadersName(n)) {
+      dynamic = true;
+      return;
+    }
+    for (const [key, child] of Object.entries(n)) if (key !== 'position') walk(child);
+  };
+  walk(ast);
+  return dynamic ? null : names;
+}
+
+/** A `headers` step with a predicate, a group or a focus binding is not a plain field read. */
+function hasExtras(step: AstNode): boolean {
+  return ['stages', 'predicate', 'group', 'focus', 'index', 'tuple', 'ancestor'].some((k) => step[k] !== undefined);
 }
 
 /**
@@ -138,7 +136,8 @@ function staticHeaderNames(mapping: string): Set<string> | null {
  * header counts as a new event, while dropping a header the mapping reads would lose an event.
  * Name the headers you read statically, or use Standard Webhooks, whose signed `webhook-id` is the
  * replay key regardless of the mapping. A connector without a mapping expression derives its
- * events from the body and its identity headers alone (0.14.11 round 5).
+ * events from the body and its identity headers alone (0.14.11 round 5). The mapping is read through
+ * JSONata's parser, so comments and escapes cannot hide a header read (round 6).
  */
 export function replayHeaderValues(settings: unknown, headers: Record<string, string>, connectorHeaders: readonly string[] = []): string {
   const mapping = settings && typeof settings === 'object' ? (settings as { mapping?: unknown }).mapping : undefined;
