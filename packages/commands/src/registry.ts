@@ -564,7 +564,10 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         report('ok');
         span.end();
         return result;
-      } catch (err) {
+      } catch (thrown) {
+        const conflict = knownConflict(thrown);
+        if (conflict) span.recordException(thrown as Error);
+        const err = conflict ?? thrown;
         // The transaction rolled back: keep the agent's attempt (a refusal or a failed write) in the ledger.
         const outcome = policy;
         // An AppError is written for a person; anything else is unexpected and its text may carry
@@ -586,24 +589,6 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             appendAudit(tx, principal, opts.surface, cmd, inputHash, target, UNEXPECTED_FAILURE),
           )
           .catch((e) => span.recordException(e as Error));
-        // A deadlock is a scheduling conflict, not a server fault (#871): the work rolled back and
-        // the same request can safely run again. Keep the failure audit above unchanged.
-        if (isDeadlock(err))
-          return fail(
-            new AppError('conflict', 'Another change locked the same artifacts at the same time. Retry this action; nothing was written.', {
-              retryable: true,
-            }),
-          );
-        // A singleton writer that raced another creation still reaches the partial unique index
-        // (for a writer that does not take the advisory lock, or a future one). Answer conflict,
-        // not a 500, and say what to do next (#867).
-        if (isSingletonConflict(err))
-          return fail(
-            new AppError(
-              'conflict',
-              'This workspace already has an artifact of that type: another change created it at the same time. Nothing was written; retry and edit the existing artifact.',
-            ),
-          );
         report('error');
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR });
@@ -896,6 +881,24 @@ export function isSerializationFailure(err: unknown): boolean {
 }
 
 /** Postgres SQLSTATE 40P01, directly or as the cause of a Drizzle query error. */
+// A deadlock is a scheduling conflict, not a server fault (#871): the work rolled back and the
+// same request can safely run again. A singleton writer that raced another creation still reaches
+// the partial unique index (a writer that does not take the advisory lock, or a future one): answer
+// conflict, not a 500, and say what to do next (#867). Mapped before the ledger and audit so both
+// record the readable conflict once, like any other AppError.
+function knownConflict(err: unknown): AppError | null {
+  if (isDeadlock(err))
+    return new AppError('conflict', 'Another change locked the same artifacts at the same time. Retry this action; nothing was written.', {
+      retryable: true,
+    });
+  if (isSingletonConflict(err))
+    return new AppError(
+      'conflict',
+      'This workspace already has an artifact of that type: another change created it at the same time. Nothing was written; retry and edit the existing artifact.',
+    );
+  return null;
+}
+
 export function isDeadlock(err: unknown): boolean {
   for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
     if (e.code === '40P01') return true;
