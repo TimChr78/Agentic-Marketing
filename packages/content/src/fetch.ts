@@ -1,3 +1,4 @@
+import { safeErrorText } from '@agentic-marketing/core';
 import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
@@ -57,8 +58,9 @@ const MAX_ERROR_LENGTH = 500;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function failureMessage(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  return message.slice(0, MAX_ERROR_LENGTH);
+  // Redact while the message is complete, then cut (#885): a response that echoes a token must not
+  // leave a fragment of it in `content_sources.last_error` or in the caller's summary.
+  return safeErrorText(err instanceof Error ? err.message : String(err), MAX_ERROR_LENGTH);
 }
 
 /**

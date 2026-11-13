@@ -134,3 +134,18 @@ describe.runIf(process.env.OPENBAO_TEST_ADDR)('a real OpenBao', () => {
     expect(await kp.unwrap(await kp.wrap(dk), kp.id)).toEqual(dk);
   });
 });
+
+describe('a key provider’s failure (#885 round 6)', () => {
+  it('redacts a credential before cutting the server’s answer', async () => {
+    // The answer starts with filler, so a token that straddles the 200-character cut would survive
+    // as an unrecognisable fragment if the text were cut before it was redacted.
+    const token = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718';
+    const f = (async () => new Response(`${' '.repeat(183)}${token}`, { status: 500 })) as typeof globalThis.fetch;
+    const kp = openbaoKeyProvider({ addr: 'https://bao.test', key: 'am', token: 'root-token', fetch: f });
+    const failure = await kp.wrap(newDataKey()).catch((e: Error) => e);
+    expect(failure).toBeInstanceOf(Error);
+    const text = (failure as Error).message;
+    expect(text).toContain('OpenBao encrypt failed: HTTP 500');
+    expect(text).not.toContain('a1b2c3d4e5f60718');
+  });
+});

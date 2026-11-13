@@ -1,4 +1,4 @@
-import { appendAuditEntry, defineCommand } from '@agentic-marketing/commands';
+import { type AuditedError, appendAuditEntry, defineCommand, sanitizeAppError, UNEXPECTED_FAILURE } from '@agentic-marketing/commands';
 import { AppError, hashValue, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
@@ -219,14 +219,18 @@ export const renewMandates = defineCommand({
       } catch (err) {
         // Undo this mandate's version and success entry, keep the rest of the call.
         await ctx.tx.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`)).catch(() => {});
-        const error = err instanceof AppError ? err : new AppError('conflict', err instanceof Error ? err.message : String(err));
+        // This command writes its own audit entry, so it must sanitise like the executor does
+        // (#885): an AppError's message is written for a person and goes out as is, while an
+        // unexpected failure (the database, a secret provider, a bug) becomes the fixed internal
+        // marker. Its text may carry SQL, a credential or a driver detail.
+        const failure: AuditedError = err instanceof AppError ? sanitizeAppError(err) : UNEXPECTED_FAILURE;
         renewed.push({
           mandateId,
           ok: false,
           status: null,
           version: null,
           validUntil: null,
-          error: error.message,
+          error: failure.message,
         });
         await appendAuditEntry(
           ctx.tx,
@@ -235,7 +239,7 @@ export const renewMandates = defineCommand({
           { name: 'agents.renewMandates', effect: 'publish' },
           inputHash,
           mandateId,
-          error,
+          failure,
         );
       }
     }

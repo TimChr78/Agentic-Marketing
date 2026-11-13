@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { safeErrorText } from '@agentic-marketing/core';
 import { AwsClient } from 'aws4fetch';
 import type { KeyProvider } from './keys';
 
@@ -13,7 +14,7 @@ type Fetch = typeof fetch;
 async function call<T>(f: Fetch, url: string, init: RequestInit, what: string): Promise<T> {
   const res = await f(url, init);
   const text = await res.text();
-  if (!res.ok) throw new Error(`${what} failed: HTTP ${res.status} ${text.slice(0, 200)}`);
+  if (!res.ok) throw new Error(`${what} failed: HTTP ${res.status} ${safeErrorText(text, 200)}`);
   return JSON.parse(text) as T;
 }
 

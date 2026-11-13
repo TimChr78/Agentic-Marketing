@@ -1,6 +1,6 @@
 import { decisionQuestions } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
+import { AppError, isoDateTime, newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -43,6 +43,8 @@ const Answer = z.object({
 
 const appError = (err: unknown): never => {
   if (err instanceof DecisionError) {
+    // A DecisionError's message is written for the caller, and decision.ts already reduces a
+    // provider's answer to its own code and message (#885), so it can be copied as is.
     if (err.code === 'no_provider') throw new AppError('conflict', err.message);
     if (err.code === 'personal_data' || err.code === 'too_many_questions' || err.code === 'too_large' || err.code === 'invalid_request')
       throw new AppError('invalid_input', err.message);
@@ -128,7 +130,7 @@ export const score = defineCommand({
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
         status: 'failed',
-        error: err instanceof Error ? err.message.slice(0, 1000) : String(err),
+        error: safeErrorText(err instanceof Error ? err.message : String(err), 1000),
       });
       return appError(err);
     }
@@ -161,7 +163,7 @@ export const score = defineCommand({
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
         status: 'failed',
-        error: err instanceof Error ? err.message.slice(0, 1000) : String(err),
+        error: safeErrorText(err instanceof Error ? err.message : String(err), 1000),
       });
       return appError(err);
     }
@@ -372,8 +374,7 @@ export const calibration = defineCommand({
     // Scope the read to the scored profiles and their current identifiers: an outcome that cannot
     // map to one of them cannot affect the calibration anyway. conversionEvents pages the whole
     // window by (timestamp, event_id) with no 100k workspace cap (#366), so a busy workspace cannot
-    // silently drop outcomes. A failed read is not "nobody converted": report it rather than a zero
-    // report (#360).
+    // silently drop outcomes.
     const profileIds = [...new Set(rows.map((r) => r.profileId))];
     const ids = await ctx.tx
       .select({ profileId: schema.identifiers.profileId, type: schema.identifiers.type, value: schema.identifiers.value })
@@ -388,21 +389,19 @@ export const calibration = defineCommand({
     // Event profile ids are historical; current identifiers follow the canonical merge survivor.
     const userProfiles = new Map(ids.filter((i) => i.type === 'user_id').map((i) => [i.value, i.profileId]));
     const anonymousProfiles = new Map(ids.filter((i) => i.type === 'anonymous_id').map((i) => [i.value, i.profileId]));
-    let events: Awaited<ReturnType<typeof ctx.services.events.conversionEvents>>;
-    try {
-      events = await ctx.services.events.conversionEvents(ws, {
-        names: [input.event],
-        from,
-        to,
-        profileIds,
-        identifiers: {
-          anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-          userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
-        },
-      });
-    } catch (err) {
-      throw new AppError('conflict', `ai.calibration could not read outcome events: ${(err as Error).message}`);
-    }
+    // A failed read is not "nobody converted": an event-store failure propagates rather than
+    // becoming a zero report (#360). It is unexpected, so the executor answers and audits it as the
+    // sanitised internal failure instead of echoing its text (#885).
+    const events = await ctx.services.events.conversionEvents(ws, {
+      names: [input.event],
+      from,
+      to,
+      profileIds,
+      identifiers: {
+        anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+        userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+      },
+    });
     const measuredProfiles = new Set(profileIds);
     const outcomes = new Map<string, number[]>();
     for (const e of events) {

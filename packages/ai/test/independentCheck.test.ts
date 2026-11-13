@@ -24,6 +24,27 @@ describe('the independent check verdict', () => {
     expect(() => parseVerdict('{"match": true, "reason": ')).toThrow();
   });
 
+  it('redacts a credential in an unusable answer before quoting it (#885)', () => {
+    // The message is rethrown and interpolated into the policy reasons, which the agent ledger keeps.
+    const err = (() => {
+      try {
+        parseVerdict('Looks fine: password=probe-secret');
+      } catch (e) {
+        return e as Error;
+      }
+      return null;
+    })();
+    expect(err?.message).toContain('did not answer with a JSON verdict');
+    expect(err?.message).not.toContain('probe-secret');
+    const token = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718';
+    expect(() => parseVerdict(`${' '.repeat(190)}${token}`)).toThrow(/did not answer/);
+    try {
+      parseVerdict(`${' '.repeat(190)}${token}`);
+    } catch (e) {
+      expect((e as Error).message).not.toContain('a1b2c3d4e5f60718');
+    }
+  });
+
   it('stays fast on long runs of whitespace (no regex over model output)', () => {
     const started = Date.now();
     expect(() => parseVerdict(`\`\`\`${' '.repeat(200_000)}x`)).toThrow();

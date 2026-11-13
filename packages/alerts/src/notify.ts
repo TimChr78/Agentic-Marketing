@@ -1,4 +1,4 @@
-import { newId } from '@agentic-marketing/core';
+import { newId, redactCredentials } from '@agentic-marketing/core';
 import { type AlertChannel, type AlertKind, type AlertNotification, type DeliveryStatus, schema, type Tx } from '@agentic-marketing/db';
 import { MESSAGE_ID_HEADER, transportFor } from '@agentic-marketing/email';
 import { logger } from '@agentic-marketing/telemetry';
@@ -414,7 +414,7 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
           .where(eq(schema.messages.id, messageId));
         out.push({ userId: email.userId, status: 'sent' });
       } catch (err) {
-        const error = (err as Error).message.split('\n')[0];
+        const error = redactCredentials((err as Error).message).split('\n')[0]!; // redact whole, then cut (#885)
         logger.warn({ err, idempotencyKey: email.idempotencyKey, userId: email.userId }, 'member e-mail failed');
         await tx
           .update(schema.messages)
@@ -424,7 +424,7 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
       }
     }
   } catch (err) {
-    const error = (err as Error).message.split('\n')[0];
+    const error = redactCredentials((err as Error).message).split('\n')[0]!; // redact whole, then cut (#885)
     logger.warn({ err }, 'member e-mail transport could not be created');
     for (const email of emails)
       if (!out.some((n) => n.userId === email.userId && n.status === 'failed')) out.push({ userId: email.userId, status: 'failed', error });

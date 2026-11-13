@@ -1,6 +1,6 @@
 import { BrandSummarySchema, type CommandContext, defineCommand, type Permission } from '@agentic-marketing/commands';
 import { AppError, canonicalJson, hashValue, newId, newUuid, sha256 } from '@agentic-marketing/core';
-import { normalizeDomainInput, schema } from '@agentic-marketing/db';
+import { DomainError, normalizeDomainInput, schema } from '@agentic-marketing/db';
 import { and, asc, desc, eq, gte, inArray, isNotNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { author, lockSingleton, Requester, resolveActors, validateContent } from './commands';
@@ -229,8 +229,11 @@ export const createWorkspace = defineCommand({
           try {
             return normalizeDomainInput({ host: input.primaryDomain, pathPrefix: input.pathPrefix ?? null });
           } catch (err) {
-            // normalizeDomainInput throws db DomainError with a person-readable message.
-            throw new AppError('invalid_input', (err as Error).message);
+            // A domain that cannot be normalised is the caller's to fix: DomainError carries a
+            // person-readable reason, so it is wrapped. Anything else (a bug in the normaliser) is
+            // unexpected and propagates for the executor to sanitise (#885).
+            if (err instanceof DomainError) throw new AppError('invalid_input', err.message);
+            throw err;
           }
         })()
       : null;

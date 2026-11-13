@@ -1,3 +1,4 @@
+import { redactCredentials, safeErrorText } from '@agentic-marketing/core';
 import { type DeliveryDeps, defineConnector, registerConnector, safeRequest } from '@agentic-marketing/integrations';
 import { z } from 'zod';
 import { googlePhone, metaEmail, metaPhone, sha256 } from './hashing';
@@ -67,7 +68,7 @@ const parse = (body: string) => {
   try {
     return JSON.parse(body) as Record<string, unknown>;
   } catch {
-    return { raw: body.slice(0, 500) };
+    return { raw: redactCredentials(body).slice(0, 500) };
   }
 };
 const failure = (status: number, message: string): SendResult => ({
@@ -114,7 +115,7 @@ export async function sendToLinkedin(
     egress,
   );
   if (res.status >= 200 && res.status < 300) return { ok: true, statusCode: res.status, response: parse(res.body) };
-  return failure(res.status, String(parse(res.body).message ?? res.body.slice(0, 300)));
+  return failure(res.status, safeErrorText(String(parse(res.body).message ?? res.body), 300));
 }
 
 export async function sendToTiktok(
@@ -161,8 +162,13 @@ export async function sendToTiktok(
   // TikTok answers 200 with a non-zero code for request errors.
   if (res.status >= 200 && res.status < 300 && b.code === 0) return { ok: true, statusCode: res.status, response: b };
   if (res.status >= 200 && res.status < 300)
-    return { ok: false, statusCode: res.status, error: `TikTok code ${b.code}: ${b.message ?? ''}`, permanent: true };
-  return failure(res.status, b.message ?? res.body.slice(0, 300));
+    return {
+      ok: false,
+      statusCode: res.status,
+      error: `TikTok code ${b.code}: ${safeErrorText(String(b.message ?? ''), 300)}`,
+      permanent: true,
+    };
+  return failure(res.status, safeErrorText(String(b.message ?? res.body), 300));
 }
 
 export async function sendToPinterest(
@@ -203,6 +209,12 @@ export async function sendToPinterest(
   const b = parse(res.body) as { message?: string; events?: { status?: string; error_message?: string }[] };
   const failed = b.events?.find((e) => e.status === 'failed');
   if (res.status >= 200 && res.status < 300 && !failed) return { ok: true, statusCode: res.status, response: b };
-  if (failed) return { ok: false, statusCode: res.status, error: `Pinterest: ${failed.error_message ?? 'event failed'}`, permanent: true };
-  return failure(res.status, b.message ?? res.body.slice(0, 300));
+  if (failed)
+    return {
+      ok: false,
+      statusCode: res.status,
+      error: `Pinterest: ${safeErrorText(failed.error_message ?? 'event failed', 300)}`,
+      permanent: true,
+    };
+  return failure(res.status, safeErrorText(String(b.message ?? res.body), 300));
 }

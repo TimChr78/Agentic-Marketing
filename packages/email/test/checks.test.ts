@@ -296,6 +296,51 @@ describe('link reachability', () => {
     expect(r.findings.filter((f) => f.category === 'links' && f.severity !== 'info')).toEqual([]);
   });
 
+  it('reports a fixed reason for an unexpected link failure, never the driver’s text (#885 round 2)', async () => {
+    const failing = async () => {
+      throw new Error('driver failure: password=probe-secret');
+    };
+    const r = await checkEmailTemplate(template({ mjml: withLink(`${baseUrl}/secret`) }), opts({ checkLinks: true, request: failing }));
+    const finding = r.findings.find((f) => f.category === 'links' && f.severity === 'warning')!;
+    expect(finding.message).toContain('The link could not be reached');
+    expect(finding.message).not.toContain('probe-secret');
+    expect(finding.message).not.toContain('driver failure');
+  });
+
+  it('classifies a DNS failure, a refusal and an egress refusal safely (#885 round 2)', async () => {
+    const coded = (code: string) => async () => {
+      throw Object.assign(new Error(`raw ${code} password=probe-secret`), { code });
+    };
+    const dns = await checkEmailTemplate(
+      template({ mjml: withLink('https://missing.example.test/page') }),
+      opts({ checkLinks: true, request: coded('ENOTFOUND') }),
+    );
+    expect(dns.findings.find((f) => f.category === 'links')!.message).toMatch(/could not be resolved/i);
+    expect(JSON.stringify(dns)).not.toContain('probe-secret');
+
+    clearLinkCache();
+    const refused = await checkEmailTemplate(
+      template({ mjml: withLink('https://refused.example.test/page') }),
+      opts({ checkLinks: true, request: coded('ECONNREFUSED') }),
+    );
+    expect(refused.findings.find((f) => f.category === 'links')!.message).toMatch(/refused/i);
+
+    clearLinkCache();
+    class EgressError extends Error {}
+    const egress = await checkEmailTemplate(
+      template({ mjml: withLink('https://blocked.example.test/page') }),
+      opts({
+        checkLinks: true,
+        request: async () => {
+          throw new EgressError('blocked.example.test resolves to private address 10.0.0.1');
+        },
+      }),
+    );
+    const egressFinding = egress.findings.find((f) => f.category === 'links')!;
+    expect(egressFinding.message).toContain('private address');
+    expect(egressFinding.message).not.toContain('probe-secret');
+  });
+
   it('never fetches the platform’s own links', async () => {
     const t = template({ mjml: withLink(`${baseUrl}/ok`) });
     const r = await checkEmailTemplate(t, opts({ checkLinks: true, request, platformUrl: (url) => url.startsWith(baseUrl) }));

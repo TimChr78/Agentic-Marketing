@@ -1,5 +1,5 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, redactCredentials, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { consentStateOf, currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
@@ -96,8 +96,14 @@ async function attempt(db: Db, d: Row, deps: DeliveryDeps): Promise<Outcome | 'l
     if (!target) return { ok: false, error: 'the endpoint was deleted or disabled', permanent: true };
     const body = JSON.stringify(d.payload);
     const res = await safeRequest(target.url, { method: 'POST', headers: webhookHeaders(target.secret, d.id, body), body }, deps.egress);
-    if (res.status >= 200 && res.status < 300) return { ok: true, statusCode: res.status, response: res.body.slice(0, 2000) };
-    return { ok: false, statusCode: res.status, error: `HTTP ${res.status}: ${res.body.slice(0, 300)}`, permanent: res.status === 410 };
+    if (res.status >= 200 && res.status < 300)
+      return { ok: true, statusCode: res.status, response: redactCredentials(res.body).slice(0, 2000) };
+    return {
+      ok: false,
+      statusCode: res.status,
+      error: `HTTP ${res.status}: ${safeErrorText(res.body, 300)}`,
+      permanent: res.status === 410,
+    };
   }
   const conn = await db.withWorkspace(d.workspaceId, async (tx) => {
     const [c] = await tx.select().from(schema.connections).where(eq(schema.connections.id, d.targetId));

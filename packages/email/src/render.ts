@@ -1,7 +1,19 @@
 /// <reference path="./mjml.d.ts" />
 import type { EmailBlockParam, EmailTemplate } from '@agentic-marketing/artifacts';
+import { AppError, redactCredentials, safeErrorText } from '@agentic-marketing/core';
 import { convert } from 'html-to-text';
-import { type Context, Hash, Liquid, Tag, type TagToken, type TopLevelToken, toPromise } from 'liquidjs';
+import {
+  AssertionError,
+  type Context,
+  Hash,
+  Liquid,
+  LiquidError,
+  RenderError,
+  Tag,
+  type TagToken,
+  type TopLevelToken,
+  toPromise,
+} from 'liquidjs';
 import mjml2html from 'mjml';
 import { isAllowedBlockUrl, parseBlockTagArgs } from './blockTags';
 import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
@@ -14,6 +26,27 @@ import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe
 class RawHtml {
   constructor(readonly value: string) {}
 }
+
+/**
+ * An expected render failure (#885): the template, a block or the data passed to them is wrong, so
+ * the person who wrote it is the one who can fix it. Anything else a render can throw (a database
+ * error from the block resolver, a bug) is not this, propagates, and the executor answers it as the
+ * sanitised internal failure rather than echoing its text.
+ */
+export class TemplateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TemplateError';
+  }
+}
+
+/** The first line of a message: library errors append a stack or an excerpt after it. */
+/**
+ * The first line of an error message, credential-redacted. Redaction runs on the whole message
+ * first: cutting at a newline can separate a quoted credential from its closing quote, and the
+ * rule would no longer recognise what is left (#885 round 4).
+ */
+export const firstLine = (message: string) => redactCredentials(message).split('\n')[0]!;
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeOutput(value: unknown): string {
@@ -46,10 +79,10 @@ const engine = new Liquid({
   // Includes and layouts would read files; there are none to read.
   fs: {
     readFileSync: () => {
-      throw new Error('includes are not available in templates');
+      throw new TemplateError('includes are not available in templates');
     },
     readFile: async () => {
-      throw new Error('includes are not available in templates');
+      throw new TemplateError('includes are not available in templates');
     },
     existsSync: () => false,
     exists: async () => false,
@@ -71,20 +104,22 @@ function blockScope(block: BlockDefinition, passed: Record<string, unknown>): Re
   const declared = new Map(block.params.map((p) => [p.key, p]));
   for (const key of Object.keys(passed))
     if (!declared.has(key))
-      throw new Error(`Block ${block.id} has no parameter "${key}". It accepts ${[...declared.keys()].join(', ') || 'no parameters'}.`);
+      throw new TemplateError(
+        `Block ${block.id} has no parameter "${key}". It accepts ${[...declared.keys()].join(', ') || 'no parameters'}.`,
+      );
   const out: Record<string, string | RawHtml> = {};
   for (const p of block.params) {
     const raw = passed[p.key] ?? p.default;
     if (raw === undefined || raw === null || raw === '') {
-      if (p.required) throw new Error(`Block ${block.id} needs the parameter "${p.key}"${p.label ? ` (${p.label})` : ''}.`);
+      if (p.required) throw new TemplateError(`Block ${block.id} needs the parameter "${p.key}"${p.label ? ` (${p.label})` : ''}.`);
       out[p.key] = p.type === 'html' ? new RawHtml('') : '';
       continue;
     }
     const value = String(raw);
     if (p.maxLength && value.length > p.maxLength)
-      throw new Error(`Block ${block.id}: "${p.key}" is longer than ${p.maxLength} characters.`);
+      throw new TemplateError(`Block ${block.id}: "${p.key}" is longer than ${p.maxLength} characters.`);
     if ((p.type === 'url' || p.type === 'image') && !isAllowedBlockUrl(value))
-      throw new Error(`Block ${block.id}: "${p.key}" must be an http(s) or asset URL, not "${value.slice(0, 80)}".`);
+      throw new TemplateError(`Block ${block.id}: "${p.key}" must be an http(s) or asset URL, not "${safeErrorText(value, 80)}".`);
     out[p.key] = p.type === 'html' ? new RawHtml(value) : value;
   }
   return out;
@@ -103,11 +138,12 @@ class BlockTag extends Tag {
   render(ctx: Context) {
     return (async () => {
       const env = ctx.environments as Record<PropertyKey, unknown>;
-      if (env[IN_BLOCK]) throw new Error('Blocks cannot use other blocks in v1.');
+      if (env[IN_BLOCK]) throw new TemplateError('Blocks cannot use other blocks in v1.');
       const resolve = env[BLOCK_RESOLVER] as BlockResolver | undefined;
-      if (!resolve) throw new Error(`Block ${this.id} cannot be rendered here: blocks are not available.`);
+      if (!resolve) throw new TemplateError(`Block ${this.id} cannot be rendered here: blocks are not available.`);
       const block = await resolve(this.id);
-      if (!block) throw new Error(`Block ${this.id} is not published or does not exist. Publish it before the templates that use it.`);
+      if (!block)
+        throw new TemplateError(`Block ${this.id} is not published or does not exist. Publish it before the templates that use it.`);
       const passed = this.hash ? ((await toPromise(this.hash.render(ctx))) as Record<string, unknown>) : {};
       const scope = { ...ctx.environments, block: blockScope(block, passed), [IN_BLOCK]: true };
       return await engine.parseAndRender(block.mjml, scope);
@@ -127,8 +163,71 @@ export async function renderBlockFragment(block: BlockDefinition, params: Record
  * which validates and renders in a promise.
  */
 export async function compileMjml(mjml: string): Promise<{ html: string; warnings: string[] }> {
-  const out = await mjml2html(mjml, { validationLevel: 'soft', ignoreIncludes: true, minify: false });
+  let out: Awaited<ReturnType<typeof mjml2html>>;
+  try {
+    out = await mjml2html(mjml, { validationLevel: 'soft', ignoreIncludes: true, minify: false });
+  } catch (e) {
+    // MJML compiling is pure: it has no I/O, so a failure is the document's own (a malformed tag
+    // or nesting), not the platform's (#885).
+    throw new TemplateError(firstLine((e as Error).message));
+  }
   return { html: pngRenditionUrls(out.html), warnings: out.errors.map((e) => `mjml line ${e.line}: ${e.message}`) };
+}
+
+/**
+ * Whether an error was raised by Liquid itself rather than by something Liquid called. Liquid
+ * treats filters and tags alike: a bad filter argument (its own `AssertionError`) and a missing
+ * include/render target (its loader's plain `ENOENT` Error) are wrapped in a `RenderError` exactly
+ * like an error our block resolver throws (#885 round 2).
+ */
+function raisedByLiquid(err: unknown): err is Error {
+  if (!(err instanceof Error)) return false;
+  if (err instanceof LiquidError || err instanceof AssertionError) return true;
+  const code = (err as { code?: unknown }).code;
+  return code === 'ENOENT' && /failed to lookup/i.test(err.message);
+}
+
+/**
+ * The expected cause inside a Liquid error chain: Liquid's own parse/render complaint (including
+ * its filter argument and include/render lookup failures), or our TemplateError for a block's
+ * parameters. Liquid wraps whatever a tag throws, so the chain is followed: a block resolver's
+ * database error is wrapped just the same and is *not* expected (#885).
+ */
+function expectedCause(err: unknown, depth = 0): Error | null {
+  if (depth > 6) return null;
+  if (err instanceof TemplateError) return err;
+  if (err instanceof LiquidError) {
+    // Liquid's aggregate of several render errors: expected only if every one of them is.
+    const many = (err as { errors?: unknown }).errors;
+    if (Array.isArray(many) && many.length) {
+      const causes = many.map((inner) => expectedCause(inner, depth + 1));
+      return causes.every((cause) => cause) ? (causes[0] ?? null) : null;
+    }
+    if (err instanceof RenderError) {
+      // RenderError wraps whatever the template or a tag threw. No cause of its own means Liquid
+      // raised it; with a cause, only a cause from Liquid or our block-parameter check is expected.
+      const inner = (err as { originalError?: unknown }).originalError;
+      if (!inner) return err;
+      return expectedCause(inner, depth + 1);
+    }
+    // TokenizationError, ParseError, UndefinedVariableError: the template's syntax, not the platform.
+    return err;
+  }
+  // A filter's AssertionError, or the loader's own lookup failure: both are Liquid's.
+  if (raisedByLiquid(err)) return err;
+  return null;
+}
+
+/**
+ * The AppError an expected render failure deserves, or null when the failure is not the content's
+ * fault (#885). Only a Liquid syntax/render error or a TemplateError qualifies, so the caller can
+ * rethrow anything else (a database error from the block resolver, a bug) for the executor to
+ * answer and audit as the sanitised internal failure.
+ */
+export function templateRenderError(err: unknown, prefix: string): AppError | null {
+  const cause = expectedCause(err);
+  if (!cause) return null;
+  return new AppError('invalid_input', `${prefix}: ${firstLine(cause.message)}`);
 }
 
 export interface RenderVars {
@@ -222,7 +321,7 @@ export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
     try {
       engine.parse(src);
     } catch (e) {
-      problems.push(`${field}: Liquid error: ${(e as Error).message.split('\n')[0]}`);
+      problems.push(`${field}: Liquid error: ${firstLine((e as Error).message)}`);
     }
   }
   if (!problems.length) {
@@ -235,7 +334,7 @@ export async function validateTemplate(t: EmailTemplate): Promise<string[]> {
       });
       for (const e of r.errors.slice(0, 10)) problems.push(`mjml line ${e.line}: ${e.message}`);
     } catch (e) {
-      problems.push(`mjml: ${(e as Error).message.split('\n')[0]}`);
+      problems.push(`mjml: ${firstLine((e as Error).message)}`);
     }
   }
   if (t.purpose !== 'onboarding' && t.purpose !== 'necessary') {
@@ -265,7 +364,7 @@ export function validateSubject(subject: string): string | null {
     engine.parse(subject);
     return null;
   } catch (e) {
-    return `Liquid error: ${(e as Error).message.split('\n')[0]}`;
+    return `Liquid error: ${firstLine((e as Error).message)}`;
   }
 }
 

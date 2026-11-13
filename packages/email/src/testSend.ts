@@ -1,16 +1,16 @@
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
 import type { CommandContext } from '@agentic-marketing/commands';
-import { AppError, newId, newUuid } from '@agentic-marketing/core';
+import { AppError, newId, newUuid, redactCredentials } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { personCrypto, profileForMessage } from '@agentic-marketing/profiles';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { MESSAGE_ID_HEADER } from './adapters';
+import { MESSAGE_ID_HEADER, ProviderSendError } from './adapters';
 import { blockResolver } from './blocks';
 import { tagLinks, tagTextLinks } from './links';
 import { transportFor } from './providers';
-import { renderTemplate } from './render';
+import { firstLine, renderTemplate, templateRenderError } from './render';
 
 // Test sends (#46): the same template and provider a real send would use, to a workspace member
 // or an address on the admin-configured seed list. Purpose and consent are skipped on purpose;
@@ -187,7 +187,12 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
           { blocks: blockResolver(ctx.tx) },
         );
       } catch (e) {
-        const reason = `render_error: ${(e as Error).message.split('\n')[0]}`;
+        // The template's own Liquid/MJML/parameter failure is expected and keeps its message; a
+        // block resolver's database error or a bug gets a fixed reason, never its text (#885).
+        const expected = templateRenderError(e, 'the template could not be rendered');
+        const reason = expected
+          ? `render_error: ${firstLine(redactCredentials(expected.message)).slice(0, 300)}`
+          : 'render_error: the template could not be rendered';
         await ctx.tx
           .update(schema.messages)
           .set({ status: 'failed', reason, updatedAt: new Date() })
@@ -218,7 +223,12 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
           .where(eq(schema.messages.id, message.id));
         messages.push({ email, messageId: message.id, status: 'sent', reason: null, subject });
       } catch (e) {
-        const reason = `provider_error: ${(e as Error).message.split('\n')[0]}`;
+        // A provider's typed refusal is expected and keeps its (redacted) diagnostic; a transport,
+        // socket or driver error is not, so it becomes a fixed reason (#885 round 2).
+        const reason =
+          e instanceof ProviderSendError
+            ? `provider_error: ${firstLine(redactCredentials(e.message)).slice(0, 300)}`
+            : 'provider_error: the provider did not accept the message';
         logger.warn({ messageId: message.id, provider: provider.adapter, err: (e as Error).message }, 'test e-mail send failed');
         await ctx.tx
           .update(schema.messages)

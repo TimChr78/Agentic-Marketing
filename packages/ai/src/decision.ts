@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { type DecisionQuestion, decisionQuestions, publishedSingleton } from '@agentic-marketing/artifacts';
+import { providerDiagnostic, redactCredentials } from '@agentic-marketing/core';
 import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -320,18 +321,16 @@ export async function callSystemOne(
   } catch (err) {
     if ((err as Error).message.startsWith('timed out after'))
       throw new DecisionError('timeout', `The decision provider did not answer within ${timeoutMs} ms.`);
-    throw new DecisionError('provider_error', `The decision provider could not be reached: ${(err as Error).message}`);
+    // A transport failure is the caller's diagnostic, but its text (a URL, a request) may carry a
+    // credential, so it is redacted (#885).
+    throw new DecisionError('provider_error', `The decision provider could not be reached: ${redactCredentials((err as Error).message)}`);
   }
   const text = res.body;
   if (res.status < 200 || res.status >= 300) {
-    let detail = text.slice(0, 500);
-    try {
-      const parsed = JSON.parse(text) as { detail?: unknown };
-      if (typeof parsed.detail === 'string') detail = parsed.detail;
-    } catch {
-      // keep the raw text
-    }
-    throw new DecisionError('provider_error', `The decision provider answered ${res.status}: ${detail}`);
+    // Only the provider's own code and message, never its body: it may echo the Authorization
+    // header or the request's key (#885). DecisionError carries this into an AppError.
+    const detail = providerDiagnostic(text, 300);
+    throw new DecisionError('provider_error', `The decision provider answered ${res.status}${detail ? `: ${detail}` : ''}`);
   }
   let json: unknown;
   try {

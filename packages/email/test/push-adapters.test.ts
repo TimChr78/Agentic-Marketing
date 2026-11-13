@@ -1,7 +1,8 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { createECDH, generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { AdapterDeps } from '../src/adapters/types';
-import { apnsAdapter, fcmAdapter, type OutgoingPush, pushPayload } from '../src/push/adapters';
+import { apnsAdapter, fcmAdapter, type OutgoingPush, pushPayload, webPushAdapter } from '../src/push/adapters';
+import { b64url, vapidKeys } from '../src/push/crypto';
 
 // #753: a push send is retried when one device's provider fails transiently, and a send whose
 // provider accepted but whose response was lost is retried by the outbox. The payload therefore
@@ -92,5 +93,42 @@ describe('push adapters: retry collapse keys (#753)', () => {
     );
     // A retry builds a byte-identical tag from the same message.
     expect(pushPayload(message).messageId).toBe(message.messageId);
+  });
+});
+
+describe('push adapters: a failed send’s body (#885 round 6)', () => {
+  it('redacts a credential before cutting the push service’s answer', async () => {
+    // The body starts with filler, so a token that straddles the 200-character cut would survive as
+    // an unrecognisable fragment if the text were cut first.
+    const token = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718';
+    const body = `${' '.repeat(183)}${token}`;
+    const subscription = createECDH('prime256v1');
+    subscription.generateKeys();
+    const deps: AdapterDeps = {
+      fetch: (async () => new Response(body, { status: 500 })) as typeof globalThis.fetch,
+    };
+    const vapid = vapidKeys();
+    const transport = webPushAdapter.create(
+      { publicKey: vapid.publicKey, subject: 'mailto:ops@example.com' },
+      { privateKey: vapid.privateKey },
+      deps,
+    );
+
+    const failure = await transport
+      .send(
+        {
+          kind: 'web',
+          endpoint: 'https://push.test/sub',
+          p256dh: b64url(subscription.getPublicKey()),
+          auth: b64url(Buffer.from('0123456789abcdef')),
+        },
+        message,
+      )
+      .catch((e: Error) => e);
+    expect(failure).toBeInstanceOf(Error);
+    const text = (failure as Error).message;
+    expect(text).toContain('push service answered 500');
+    expect(text).not.toContain('a1b2c3d4e5f60718');
+    expect(text.length).toBeLessThanOrEqual(230);
   });
 });
