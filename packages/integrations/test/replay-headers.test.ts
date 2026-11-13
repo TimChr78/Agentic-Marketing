@@ -20,4 +20,19 @@ describe('replayHeaderValues', () => {
     expect(replayHeaderValues({ mapping: 'body' }, headers)).toBe('');
     expect(replayHeaderValues({}, headers)).toBe('');
   });
+
+  it('keeps a transport header the mapping reads by name, even through $lookup (0.14.11 round 3)', () => {
+    const h = { ...headers, 'x-forwarded-for': '192.0.2.1' };
+    expect(replayHeaderValues({ mapping: '{"anonymousId": $lookup(headers, "x-forwarded-for")}' }, h)).toContain(
+      'x-forwarded-for:192.0.2.1',
+    );
+    expect(replayHeaderValues({ mapping: '{"ip": headers."x-forwarded-for"}' }, h)).toBe('x-forwarded-for:192.0.2.1');
+    // A wholesale mapping that names no transport header still ignores per-hop headers.
+    expect(replayHeaderValues({ mapping: '$merge([body, {"h": headers}])' }, h)).not.toContain('x-forwarded-for');
+  });
+
+  it("adds the connector's own identity headers, such as the Shopify topic (0.14.11 round 3)", () => {
+    const h = { 'x-shopify-topic': 'orders/paid', 'x-shopify-webhook-id': 'w1' };
+    expect(replayHeaderValues({}, h, ['x-shopify-topic'])).toBe('x-shopify-topic:orders/paid');
+  });
 });

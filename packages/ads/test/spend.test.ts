@@ -40,7 +40,14 @@ const context = (): CommandContext => {
   }));
   const events = {
     settingsFor: async () => ({}),
-    conversionEvents: async () => paged,
+    // The real store streams page by page when onPage is given; mimic that so the report folds
+    // every event without ever holding the whole window in one array (#786).
+    conversionEvents: async (_ws: string, q: { onPage?: (rows: typeof paged) => void | Promise<void>; pageSize?: number }) => {
+      const size = q.pageSize ?? 10_000;
+      if (!q.onPage) return paged;
+      for (let i = 0; i < paged.length; i += size) await q.onPage(paged.slice(i, i + size));
+      return [];
+    },
     client: {
       query: async ({ query }: { query: string }) => ({
         json: async () =>

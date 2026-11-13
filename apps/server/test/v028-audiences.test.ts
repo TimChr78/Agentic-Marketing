@@ -179,6 +179,71 @@ describe('static and snapshot audiences', () => {
     expect(after.segments[0].stamp).not.toBe(first);
   });
 
+  it('gives concurrent imports into one list strictly increasing stamps (#771 review)', async () => {
+    // A stamp only moves forward: two imports that commit one after the other must never share
+    // (or go backwards from) the previous value, or a client polling preview misses one of them.
+    const micros = (stamp: string) => {
+      const m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})\.(\d{6})Z$/.exec(stamp);
+      if (!m) throw new Error(`unexpected stamp ${stamp}`);
+      return BigInt(Date.parse(`${m[1]}T${m[2]}Z`)) * 1000n + BigInt(m[3]);
+    };
+
+    const concurrent = await createSegment('Concurrent list', { mode: 'static' });
+    const people = ['c1', 'c2', 'c3', 'c4'];
+    for (const name of people) await person(`v028-concurrent-${name}`, { city: 'Testholm' });
+    await api().call('audiences.add', { segmentId: concurrent, emails: [emailOf('v028-concurrent-c1')] });
+    const before = (await api().call('segments.preview', { artifactId: concurrent })).segments[0].stamp as string;
+
+    const imports = await Promise.all(
+      people.map((name) =>
+        api().call('audiences.import', {
+          segmentId: concurrent,
+          csv: `email\n${emailOf(`v028-concurrent-${name}`)}`,
+          column: 'email',
+          idType: 'email',
+        }),
+      ),
+    );
+    // c1 is already on the list; the other three are new.
+    expect(imports.reduce((n, r) => n + r.added, 0)).toBe(3);
+
+    const after = (await api().call('segments.preview', { artifactId: concurrent })).segments[0].stamp as string;
+    expect(after).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/);
+    // Four list writes (one adds nobody, but each records a run) ran concurrently after the stamp
+    // was read: each must have advanced it by at least one microsecond, even when
+    // clock_timestamp() returned the same instant for two.
+    expect(micros(after) - micros(before)).toBeGreaterThanOrEqual(BigInt(people.length));
+    expect((await api().call('segments.members', { artifactId: concurrent })).total).toBe(4);
+  });
+
+  it('reports no reference stamp to a caller that cannot read the segment (#771 review)', async () => {
+    const hidden = await createSegment('Hidden list', { mode: 'static' });
+    await api().call('audiences.add', { segmentId: hidden, emails: [emailOf('ada')] });
+
+    // The workspace can read artifacts, so the estimate can watch the list it referenced.
+    expect(await api().call('segments.preview', { condition: { segment: hidden } })).toMatchObject({
+      count: 1,
+      segments: [{ id: hidden, version: 1, stamp: expect.stringMatching(/^\d{4}-/) }],
+    });
+
+    // A token limited to profiles:read may count the audience, but the segment's version and
+    // membership stamp belong to an artifact it cannot read.
+    const token = await api().call('apiTokens.create', { name: 'preview only', scopes: ['profiles:read'] });
+    const preview = (body: unknown) =>
+      fetch(`${t.base}/v1/segments.preview`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${token.token}` },
+        body: JSON.stringify(body),
+      });
+    const byRule = await preview({ condition: { segment: hidden } });
+    expect(byRule.status).toBe(200);
+    expect(await byRule.json()).toMatchObject({ count: 1, segments: [] });
+
+    const byId = await preview({ artifactId: hidden });
+    expect(byId.status).toBe(200);
+    expect(await byId.json()).toMatchObject({ count: 1, segments: [] });
+  });
+
   it('a broadcast to a static list reaches members with consent only', async () => {
     const template = await api().call('artifacts.create', {
       type: 'email_template',

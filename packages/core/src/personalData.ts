@@ -131,13 +131,6 @@ function replaceMatches(input: string, detector: Detector): string {
   return last === 0 ? input : out + input.slice(last);
 }
 
-/** Rule-based redaction of contact, address and payment details in free text. */
-export function redactText(s: string): string {
-  let out = s;
-  for (const detector of detectors) out = replaceMatches(out, detector);
-  return out;
-}
-
 /**
  * The same detectors in strict mode: an 8-digit run (a Danish or Norwegian phone number) also
  * counts. For places where a false positive only withholds something, such as consent proof shown
@@ -146,6 +139,16 @@ export function redactText(s: string): string {
 const strictDetectors: Detector[] = detectors.map((d) =>
   d.label === '[phone]' && d.re === PHONE_CANDIDATE ? { ...d, accept: (m, t, i) => isPhone(m, t, i, true) } : d,
 );
+
+/**
+ * Rule-based redaction of contact, address and payment details in free text. `strict` also
+ * redacts 8-digit runs (DK/NO phone numbers), for text that must never carry personal data.
+ */
+export function redactText(s: string, options: { strict?: boolean } = {}): string {
+  let out = s;
+  for (const detector of options.strict ? strictDetectors : detectors) out = replaceMatches(out, detector);
+  return out;
+}
 
 /**
  * Which kinds of personal data the same detectors find in free text, e.g. ["[email]"] (hosted memory

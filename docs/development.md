@@ -184,7 +184,7 @@ pnpm shots                                    # screenshots of every admin route
 
 `scripts/e2e-docker.sh` runs the same browser CI runs, from any checkout, without installing
 Chromium: it builds the UI, starts the seeded server on a fresh database, waits for `/ready`, then
-runs Playwright inside `mcr.microsoft.com/playwright:v1.64.1-noble` with the repository mounted at
+runs Playwright inside `mcr.microsoft.com/playwright:v1.65.0-noble` with the repository mounted at
 its own path.
 
 ```bash
@@ -263,9 +263,9 @@ Baselines are Linux screenshots, so record and update them in the official Playw
 on `localhost:3100`:
 
 ```bash
-CH=$(docker run --rm mcr.microsoft.com/playwright:v1.64.1-noble sh -c 'ls -d /ms-playwright/chromium-*/chrome-linux*/chrome | head -1')
+CH=$(docker run --rm mcr.microsoft.com/playwright:v1.65.0-noble sh -c 'ls -d /ms-playwright/chromium-*/chrome-linux*/chrome | head -1')
 docker run --rm --network host -v "$PWD":"$PWD" -w "$PWD" -e CHROMIUM="$CH" -e E2E_BASE=http://localhost:3100 \
-  mcr.microsoft.com/playwright:v1.64.1-noble npx playwright test -c playwright.visual.config.ts --update-snapshots
+  mcr.microsoft.com/playwright:v1.65.0-noble npx playwright test -c playwright.visual.config.ts --update-snapshots
 ```
 
 The same command runs the checks without `--update-snapshots`; swap the last argument for
