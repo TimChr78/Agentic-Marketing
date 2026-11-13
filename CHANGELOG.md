@@ -8,6 +8,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 - The Docker smoke test no longer picks host ports before starting the stack: Docker assigns them and the script reads them back, so a port taken by another run in between can no longer fail it.
 - The linear-time helper's own test no longer depends on wall-clock timing, so the segments package test run can no longer fail on a busy CI runner.
+- The advisory-lock test waits for a destroyed connection's backend to exit before it checks that no lock is left, instead of racing it (#897).
 
 ### Security
 
@@ -31,7 +32,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **Manual steps:** none.
 - **Upgrade:** download `agentic-marketing-compose-0.14.20.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.20 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.20` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.20). Run `docker compose exec app am doctor`.
 
-<!-- issues: 877, 885, 892, 893 -->
+<!-- issues: 877, 885, 892, 893, 897 -->
 
 ## [0.14.19] - 2026-11-13
 

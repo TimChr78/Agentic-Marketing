@@ -148,12 +148,22 @@ describe('idempotency advisory-lock waiting (#807)', () => {
       await expect(
         db.withWorkspace(d.workspace, async () => 'never', { advisoryLockKey: 'idempotency:acquisition-error' }),
       ).rejects.toThrow(/injected acquisition failure/);
-      const { rows } = await d.db.admin.query<{ n: number }>(
-        `SELECT count(*)::int AS n
-           FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
-          WHERE l.locktype = 'advisory' AND a.datname = current_database()`,
-      );
-      expect(rows[0].n).toBe(0);
+      // The destroyed connection's backend exits asynchronously after the client disconnects, so its
+      // lock can stay visible for a moment: wait (bounded) for it to go rather than racing it (#897).
+      const advisoryLocks = async () =>
+        (
+          await d.db.admin.query<{ n: number }>(
+            `SELECT count(*)::int AS n
+               FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+              WHERE l.locktype = 'advisory' AND a.datname = current_database()`,
+          )
+        ).rows[0]!.n;
+      let locks = await advisoryLocks();
+      for (let i = 0; locks !== 0 && i < 50; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        locks = await advisoryLocks();
+      }
+      expect(locks).toBe(0);
     } finally {
       await dispose(db, d);
     }
