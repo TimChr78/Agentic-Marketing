@@ -11,6 +11,7 @@ import { topicSuppression } from '../gateway';
 import type { ClickLink } from '../links';
 import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
 import { checkPolicy, isMarketing } from '../policy';
+import { firstLine } from '../render';
 import { type PushKind, type PushRegistration, type PushTransport, pushAdapters } from './adapters';
 import { pushTransportFor } from './providers';
 import { renderPush } from './render';
@@ -189,7 +190,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
     try {
       text = await renderPush(tpl.template, { ...m.data, profile: v.vars });
     } catch (e) {
-      return finish('failed', `render_error: ${(e as Error).message.split('\n')[0]}`);
+      return finish('failed', `render_error: ${firstLine((e as Error).message)}`);
     }
     const stream: 'marketing' | 'transactional' = isMarketing(v.basis) ? 'marketing' : 'transactional';
     const providers = (await tx.select().from(schema.pushProviders).where(eq(schema.pushProviders.enabled, true))).filter((p) =>
@@ -252,7 +253,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
       if (r.ok) delivered.push({ device: s.device.id, id: r.providerMessageId, provider: s.provider.id, adapter: s.provider.adapter });
       else gone.push(s.device.id);
     } catch (e) {
-      errors.push(`${s.provider.adapter}: ${(e as Error).message.split('\n')[0]}`);
+      errors.push(`${s.provider.adapter}: ${firstLine((e as Error).message)}`);
     }
   }
   const reachedDevices = [...alreadyDelivered, ...delivered.map((d) => d.device)];

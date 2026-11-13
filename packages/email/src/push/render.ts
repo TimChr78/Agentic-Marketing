@@ -1,5 +1,7 @@
 import type { PushTemplate } from '@agentic-marketing/artifacts';
+import { safeErrorText } from '@agentic-marketing/core';
 import { Liquid } from 'liquidjs';
+import { firstLine, TemplateError } from '../render';
 
 // Push text: Liquid without HTML escaping (notifications are plain text), sandboxed like e-mail
 // and SMS templates.
@@ -7,10 +9,10 @@ const engine = new Liquid({
   strictFilters: true,
   fs: {
     readFileSync: () => {
-      throw new Error('includes are not available in templates');
+      throw new TemplateError('includes are not available in templates');
     },
     readFile: async () => {
-      throw new Error('includes are not available in templates');
+      throw new TemplateError('includes are not available in templates');
     },
     existsSync: () => false,
     exists: async () => false,
@@ -30,7 +32,7 @@ export function validatePushTemplate(t: PushTemplate): string[] {
     try {
       engine.parse(v);
     } catch (e) {
-      problems.push(`${field}: Liquid error: ${(e as Error).message.split('\n')[0]}`);
+      problems.push(`${field}: Liquid error: ${firstLine((e as Error).message)}`);
     }
   }
   return problems;
@@ -46,6 +48,6 @@ export async function renderPush(t: PushTemplate, vars: Record<string, unknown>)
     t.url ? engine.parseAndRender(t.url, vars) : Promise.resolve(''),
   ]);
   const link = tidy(url);
-  if (link && !/^https?:\/\//i.test(link)) throw new Error(`the link "${link.slice(0, 80)}" is not an http(s) URL`);
+  if (link && !/^https?:\/\//i.test(link)) throw new TemplateError(`the link "${safeErrorText(link, 80)}" is not an http(s) URL`);
   return { title: tidy(title).slice(0, 200), body: tidy(body).slice(0, 1000), url: link || null };
 }

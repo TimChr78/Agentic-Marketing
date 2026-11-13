@@ -1,4 +1,3 @@
-import { AppError } from '@agentic-marketing/core';
 import { Resvg } from '@resvg/resvg-js';
 import type { ImageSize } from './media';
 
@@ -17,16 +16,19 @@ export interface PngRendition {
 /**
  * Rasterise at twice the intrinsic size, capped at 2000 px per side. An SVG without a usable size
  * is treated as 200 px tall, so a logo always has a predictable e-mail image.
+ *
+ * A resvg failure is not wrapped (#885): the bytes reach this point only after `sanitiseSvg` has
+ * parsed, bounded and re-serialised them, and every content problem it can find (not an SVG, no
+ * drawable content, too many elements, nested too deep, a DOCTYPE) is already an AppError the author
+ * can act on. What is left is the renderer failing (unsupported geometry, a native panic), which
+ * nobody in the workspace can fix; it propagates and the executor answers and audits it as the
+ * sanitised internal failure rather than quoting resvg's text.
  */
 export function rasteriseSvg(svg: string, size: ImageSize | null): PngRendition {
   const intrinsicWidth = size?.width ?? DEFAULT_HEIGHT;
   const intrinsicHeight = size?.height ?? DEFAULT_HEIGHT;
   const scale = Math.min(2, MAX_PX / intrinsicWidth, MAX_PX / intrinsicHeight);
   const width = Math.max(1, Math.round(intrinsicWidth * scale));
-  try {
-    const image = new Resvg(svg, { fitTo: { mode: 'width', value: width }, background: 'transparent' }).render();
-    return { data: Buffer.from(image.asPng()), width: image.width, height: image.height };
-  } catch (error) {
-    throw new AppError('invalid_input', `The SVG could not be rendered to a PNG for e-mail: ${(error as Error).message.split('\n')[0]}`);
-  }
+  const image = new Resvg(svg, { fitTo: { mode: 'width', value: width }, background: 'transparent' }).render();
+  return { data: Buffer.from(image.asPng()), width: image.width, height: image.height };
 }

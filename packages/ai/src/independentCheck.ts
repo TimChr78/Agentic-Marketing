@@ -1,5 +1,5 @@
 import type { MandateView, PolicyOutcome, Principal } from '@agentic-marketing/commands';
-import { newId } from '@agentic-marketing/core';
+import { newId, redactedText, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { generateText } from 'ai';
@@ -138,12 +138,12 @@ export function parseVerdict(text: string): z.infer<typeof Verdict> {
   cleaned = cleaned.trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error(`the model did not answer with a JSON verdict: ${text.slice(0, 200)}`);
+  if (start < 0 || end <= start) throw new Error(`the model did not answer with a JSON verdict: ${safeErrorText(text, 200)}`);
   let raw: unknown;
   try {
     raw = JSON.parse(cleaned.slice(start, end + 1));
   } catch {
-    throw new Error(`the model’s verdict was not valid JSON: ${text.slice(0, 200)}`);
+    throw new Error(`the model’s verdict was not valid JSON: ${safeErrorText(text, 200)}`);
   }
   const verdict = Verdict.safeParse(raw);
   if (!verdict.success) throw new Error('the model’s verdict was not {"match": boolean, "reason": string}');
@@ -223,9 +223,12 @@ export async function independentCheck(
   } catch (err) {
     // No usage is known: the provider refused the request or it never completed. Log it and let the
     // hold go, like decisionCall does before the provider has billed anything.
-    await logged({ status: 'failed', error: (err as Error).message.slice(0, 1000) }).catch(() => undefined);
+    const message = safeErrorText((err as Error).message, 1000);
+    await logged({ status: 'failed', error: message }).catch(() => undefined);
     await releaseTokens(deps.db, workspaceId, reservation);
-    throw err;
+    // Rethrow the sanitized text: the executor interpolates it into the policy reasons and the
+    // caller's message, which end up in the agent ledger (#885).
+    throw new Error(message, { cause: err });
   }
   const usage = { inputTokens: answer.usage.inputTokens ?? 0, outputTokens: answer.usage.outputTokens ?? 0 };
   let verdict: z.infer<typeof Verdict>;
@@ -234,16 +237,15 @@ export async function independentCheck(
   } catch (err) {
     // The provider has billed these tokens even though the answer is unusable. Settle the failed row
     // with its real usage; a failed write keeps and extends the hold (#642).
-    await settleReservation(
-      deps.db,
-      workspaceId,
-      reservation,
-      (logTx) => record(logTx, { status: 'failed', error: (err as Error).message.slice(0, 1000), ...usage }),
-      { label: 'independent check' },
-    );
-    throw err;
+    const message = safeErrorText((err as Error).message, 1000);
+    await settleReservation(deps.db, workspaceId, reservation, (logTx) => record(logTx, { status: 'failed', error: message, ...usage }), {
+      label: 'independent check',
+    });
+    throw new Error(message, { cause: err });
   }
-  const reason = verdict.reason.slice(0, 500);
+  // A model's reason is stored, shown to the reviewer and put into policy reasons: redact it whole,
+  // then cut it (#885 round 7).
+  const reason = redactedText(verdict.reason, 500);
   const outcome = await settleReservation(
     deps.db,
     workspaceId,

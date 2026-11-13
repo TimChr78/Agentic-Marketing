@@ -63,6 +63,18 @@ export type TrackingCapability = 'forced' | 'configurable' | 'none';
  */
 export type WebhookVerification = 'valid' | 'invalid' | 'retry';
 
+/**
+ * An expected provider refusal: the message is the provider's own diagnostic, written for a person
+ * (e.g. "Postmark refused the message: invalid To address"). A transport, socket or driver error is
+ * not this, so the test-send path reports a fixed reason instead of quoting it (#885 round 2).
+ */
+export class ProviderSendError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderSendError';
+  }
+}
+
 export interface EmailTransport {
   /** `events`: what the provider already knows from the send itself (e.g. a suppressed address). */
   send(msg: OutgoingEmail): Promise<{ providerMessageId: string | null; events?: DeliveryEvent[] }>;

@@ -1,3 +1,4 @@
+import { AppError, safeErrorText } from '@agentic-marketing/core';
 import jsonata from 'jsonata';
 import { z } from 'zod';
 import { defineConnector, type InboundItem } from '../sdk';
@@ -75,7 +76,7 @@ export const slackConnector = defineConnector({
           body: JSON.stringify({ text: input.text }),
           headers: { 'content-type': 'application/json' },
         });
-        if (res.status >= 300) throw new Error(`Slack answered ${res.status}: ${res.body.slice(0, 200)}`);
+        if (res.status >= 300) throw new Error(`Slack answered ${res.status}: ${safeErrorText(res.body, 200)}`);
         return { posted: true };
       },
     },
@@ -114,7 +115,7 @@ export const httpConnector = defineConnector({
         try {
           body = JSON.parse(res.body);
         } catch {}
-        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${res.body.slice(0, 200)}`);
+        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${safeErrorText(res.body, 200)}`);
         return { status: res.status, body };
       },
     },
@@ -151,7 +152,9 @@ export const oauthHttpConnector = defineConnector({
         body: z.unknown().optional(),
       }),
       async run(input: { method: string; path: string; body?: unknown }, { settings, accessToken, request }) {
-        if (!accessToken) throw new Error('not connected: authorize the connection first');
+        // An expected connection-state failure: the person can fix it by authorizing, so it stays
+        // an AppError whose message reaches the caller instead of the executor's fixed failure (#885).
+        if (!accessToken) throw new AppError('conflict', 'not connected: authorize the connection first (connections.authorize).');
         const url = `${settings.baseUrl.replace(/\/+$/, '')}/${input.path.replace(/^\/+/, '')}`;
         const res = await request(url, {
           method: input.method,
@@ -166,7 +169,7 @@ export const oauthHttpConnector = defineConnector({
         try {
           body = JSON.parse(res.body);
         } catch {}
-        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${res.body.slice(0, 200)}`);
+        if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}: ${safeErrorText(res.body, 200)}`);
         return { status: res.status, body };
       },
     },

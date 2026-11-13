@@ -1,7 +1,7 @@
 import { createVerify } from 'node:crypto';
 import { AwsClient } from 'aws4fetch';
 import { z } from 'zod';
-import { type AdapterDeps, type DeliveryEvent, defineAdapter, type WebhookRequest } from './types';
+import { type AdapterDeps, type DeliveryEvent, defineAdapter, ProviderSendError, type WebhookRequest } from './types';
 
 // Amazon SES v2 (SendEmail, signed with SigV4). Delivery events come from a configuration set
 // publishing to an SNS topic subscribed to our webhook URL; SNS messages are signed, and the
@@ -330,7 +330,7 @@ export const sesAdapter = defineAdapter({
         });
         const res = await deps.fetch(signed);
         const body = (await res.json().catch(() => ({}))) as { MessageId?: string; message?: string };
-        if (!res.ok) throw new Error(`SES refused the message: ${body.message ?? res.status}`);
+        if (!res.ok) throw new ProviderSendError(`SES refused the message: ${body.message ?? res.status}`);
         return { providerMessageId: body.MessageId ?? null };
       },
       ...sesWebhook(deps),

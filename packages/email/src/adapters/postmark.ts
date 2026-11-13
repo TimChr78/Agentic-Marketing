@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { type DeliveryEvent, defineAdapter, type WebhookRequest } from './types';
+import { type DeliveryEvent, defineAdapter, ProviderSendError, type WebhookRequest } from './types';
 
 // Postmark: https://postmarkapp.com/developer/api/email-api and webhooks. Transactional and
 // broadcast mail go to separate message streams, as Postmark requires.
@@ -37,7 +37,7 @@ export const postmarkAdapter = defineAdapter({
         }),
       });
       const body = (await res.json().catch(() => ({}))) as { ErrorCode?: number; Message?: string; MessageID?: string };
-      if (!res.ok || body.ErrorCode) throw new Error(`Postmark refused the message: ${body.Message ?? res.status}`);
+      if (!res.ok || body.ErrorCode) throw new ProviderSendError(`Postmark refused the message: ${body.Message ?? res.status}`);
       return { providerMessageId: body.MessageID ?? null };
     },
     parseWebhook: parsePostmarkWebhook,

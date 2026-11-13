@@ -2,6 +2,7 @@ import type { LookupAddress } from 'node:dns';
 import { lookup } from 'node:dns/promises';
 import { isIP, Socket } from 'node:net';
 import { gzipSync } from 'node:zlib';
+import { safeErrorText } from '@agentic-marketing/core';
 import type { WarehouseDataset } from '@agentic-marketing/db';
 import { type EgressPolicy, egressFetch, isBlockedAddress } from '@agentic-marketing/integrations';
 import { AwsClient } from 'aws4fetch';
@@ -234,7 +235,7 @@ export function s3Destination(
       body,
     });
     const res = await f(req.url, { method: 'PUT', headers: req.headers, body });
-    if (!res.ok) throw new Error(`S3 PUT ${key} failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) throw new Error(`S3 PUT ${key} failed: HTTP ${res.status} ${safeErrorText(await res.text(), 200)}`);
   }
   const next = (k: string) => {
     const n = (parts.get(k) ?? 0) + 1;

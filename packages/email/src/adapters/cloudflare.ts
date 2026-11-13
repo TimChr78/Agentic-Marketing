@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { type DeliveryEvent, defineAdapter } from './types';
+import { type DeliveryEvent, defineAdapter, ProviderSendError } from './types';
 
 // Cloudflare Email Service (public beta): POST /accounts/{account}/email/sending/send with an API
 // token (Email Sending: Edit). It documents no delivery webhooks yet, but the send response says
@@ -45,7 +45,7 @@ export const cloudflareAdapter = defineAdapter({
       });
       const body = (await res.json().catch(() => ({}))) as { success?: boolean; errors?: { message?: string }[]; result?: SendResult };
       if (!res.ok || body.success === false)
-        throw new Error(`Cloudflare refused the message: ${body.errors?.map((e) => e.message).join('; ') || res.status}`);
+        throw new ProviderSendError(`Cloudflare refused the message: ${body.errors?.map((e) => e.message).join('; ') || res.status}`);
       const r = body.result ?? {};
       const to = m.to.toLowerCase();
       const has = (list?: string[]) => !!list?.some((a) => a.toLowerCase() === to);

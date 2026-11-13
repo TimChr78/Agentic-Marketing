@@ -1,6 +1,6 @@
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { MEASURES, runAnalyticsQuery } from '@agentic-marketing/analytics';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
@@ -406,7 +406,8 @@ async function deliverPause(deps: RolloutDeps, key: PauseKey): Promise<'sent' | 
   } catch (err) {
     // Sending errored and the send transaction rolled back; keep the pause owed, with a backoff.
     logger.warn({ err, artifact: key.artifactId }, 'rollout e-mail could not be sent');
-    await recordFailure((err instanceof Error ? err.message : String(err)).split('\n')[0] ?? 'send failed');
+    // Redacted while complete, then cut to one line (#885).
+    await recordFailure(safeErrorText(err instanceof Error ? err.message : String(err), 500) || 'send failed');
     return 'failed';
   }
 }

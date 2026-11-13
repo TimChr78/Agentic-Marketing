@@ -7,7 +7,7 @@ import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { connectionSecrets, connectorOf } from './connections';
 import { CUSTOMERS_QUERY, graphqlCustomerItems, shopifyAppConnector, shopifyGraphql } from './connectors/shopify';
-import { safeRequest } from './egress';
+import { EgressError, safeRequest } from './egress';
 import { accessTokenOf } from './oauth';
 
 // Importing a shop's existing customers (Phase 11): one page of 250 per call, through the same
@@ -49,7 +49,11 @@ export const importShopifyCustomers = defineCommand({
         { after: input.cursor ?? null },
       );
     } catch (err) {
-      throw new AppError('conflict', `Shopify: ${(err as Error).message}`);
+      // An egress refusal is a typed, controlled diagnostic. Shopify's own refusal is already an
+      // AppError carrying only its code and message (shopifyGraphql, #885); anything else (the
+      // secret provider, the database, a bug) propagates for the executor to sanitise.
+      if (err instanceof EgressError) throw new AppError('conflict', err.message);
+      throw err;
     }
     const page = data.customers as { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: Record<string, unknown>[] };
     const items = page.nodes.flatMap((n) => graphqlCustomerItems(n, settings));

@@ -1,3 +1,4 @@
+import { redactCredentials, safeErrorText } from '@agentic-marketing/core';
 import { type DeliveryDeps, defineConnector, registerConnector, safeRequest } from '@agentic-marketing/integrations';
 import { z } from 'zod';
 import type { ClickIds } from './clickIds';
@@ -128,7 +129,7 @@ export async function sendToMicrosoft(
   return {
     ok: false,
     statusCode: res.status,
-    error: `HTTP ${res.status}: ${messages.join('; ') || res.body.slice(0, 300)}`,
+    error: `HTTP ${res.status}: ${safeErrorText(messages.join('; ') || res.body, 300)}`,
     permanent: res.status !== 429 && res.status < 500,
   };
 }
@@ -159,8 +160,17 @@ const parse = (body: string) => {
   try {
     return JSON.parse(body) as Record<string, unknown>;
   } catch {
-    return { raw: body.slice(0, 500) };
+    return { raw: redactCredentials(body).slice(0, 500) };
   }
+};
+/**
+ * A provider's own error message when the parsed answer carries one, else its JSON. Redacted while
+ * it is complete, then cut (#885): the fallback used to cut raw JSON, so a token that straddled the
+ * cut survived as a fragment.
+ */
+const errorMessageOf = (b: Record<string, unknown>): string => {
+  const message = (b.error as { message?: unknown } | undefined)?.message;
+  return safeErrorText(typeof message === 'string' && message ? message : JSON.stringify(b), 300);
 };
 const outcome = (status: number, body: string, describe: (b: Record<string, unknown>) => string): SendResult => {
   const b = parse(body);
@@ -210,9 +220,7 @@ export async function sendToMeta(
     },
     egress,
   );
-  return outcome(res.status, res.body, (b) =>
-    String((b.error as { message?: string } | undefined)?.message ?? JSON.stringify(b).slice(0, 300)),
-  );
+  return outcome(res.status, res.body, errorMessageOf);
 }
 
 export async function sendToGoogle(
@@ -262,7 +270,5 @@ export async function sendToGoogle(
     { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${accessToken}` }, body: JSON.stringify(body) },
     egress,
   );
-  return outcome(res.status, res.body, (b) =>
-    String((b.error as { message?: string } | undefined)?.message ?? JSON.stringify(b).slice(0, 300)),
-  );
+  return outcome(res.status, res.body, errorMessageOf);
 }

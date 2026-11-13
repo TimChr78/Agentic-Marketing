@@ -1,4 +1,5 @@
 import type { CommandContext } from '@agentic-marketing/commands';
+import { AppError } from '@agentic-marketing/core';
 import { describe, expect, it } from 'vitest';
 import { adPerformance } from '../src/spend';
 
@@ -117,5 +118,101 @@ describe('spend import errors (0.14.16 review round 2)', () => {
     // internal failure; it must not become an AppError, whose message reaches the caller verbatim.
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(AppError);
+  });
+});
+
+describe('provider error bodies (#885)', () => {
+  // A platform (or a gateway in front of it) that echoes the request's credential must not have that
+  // text copied into the AppError: this message reaches the caller, the audit log and the agent
+  // ledger. Only the provider's own code and message may survive.
+  const startProvider = async (status: number, body: string) => {
+    const { createServer } = await import('node:http');
+    const server = createServer((_req, res) => {
+      res.statusCode = status;
+      res.setHeader('content-type', 'application/json');
+      res.end(body);
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    return {
+      base: `http://127.0.0.1:${port}`,
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  };
+  const egress = { allowedHosts: ['127.0.0.1'] };
+
+  it('keeps Meta Insights to its own code and message, without the token', async () => {
+    const { metaSpend } = await import('../src/spend');
+    const provider = await startProvider(
+      400,
+      JSON.stringify({
+        error: { code: 190, message: 'Invalid OAuth access token: access_token=probe-secret' },
+        debug: { access_token: 'probe-secret' },
+      }),
+    );
+    try {
+      const conn = {
+        connector: 'meta_ads',
+        settings: { pixelId: '1234567890', adAccountId: '1234567890', apiBase: provider.base, apiVersion: 'v24.0' },
+      } as never;
+      const err = (await metaSpend(conn, { accessToken: 't'.repeat(30) }, '2026-01-01', '2026-01-02', egress).catch(
+        (e: unknown) => e,
+      )) as Error;
+      expect(err).toBeInstanceOf(AppError);
+      expect(err.message).toContain('Meta Insights answered 400');
+      expect(err.message).toContain('190');
+      expect(err.message).toContain('Invalid OAuth access token');
+      expect(err.message).toContain('access_token=[redacted]');
+      expect(err.message).not.toContain('probe-secret');
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('keeps Google Ads to its own code and message, without the token', async () => {
+    const { googleSpend } = await import('../src/spend');
+    const provider = await startProvider(
+      403,
+      JSON.stringify({ error: { code: 403, status: 'PERMISSION_DENIED', message: 'developer-token=probe-secret is not authorised' } }),
+    );
+    try {
+      const conn = {
+        connector: 'google_ads',
+        oauthStatus: 'connected',
+        settings: { customerId: '1234567890', reportingBase: provider.base },
+      } as never;
+      const secrets = {
+        clientId: 'client',
+        clientSecret: 'secret',
+        developerToken: 'd'.repeat(20),
+        __oauth: { accessToken: 't'.repeat(30) },
+      };
+      const err = (await googleSpend(conn, secrets, '2026-01-01', '2026-01-02', egress).catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(AppError);
+      expect(err.message).toContain('Google Ads answered 403');
+      expect(err.message).toContain('PERMISSION_DENIED');
+      expect(err.message).not.toContain('probe-secret');
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('never quotes a body that is not a JSON error object', async () => {
+    const { metaSpend } = await import('../src/spend');
+    const provider = await startProvider(502, 'access_token=probe-secret');
+    try {
+      const conn = {
+        connector: 'meta_ads',
+        settings: { pixelId: '1234567890', adAccountId: '1234567890', apiBase: provider.base, apiVersion: 'v24.0' },
+      } as never;
+      const err = (await metaSpend(conn, { accessToken: 't'.repeat(30) }, '2026-01-01', '2026-01-02', egress).catch(
+        (e: unknown) => e,
+      )) as Error;
+      expect(err).toBeInstanceOf(AppError);
+      expect(err.message).toBe('Meta Insights answered 502.');
+      expect(err.message).not.toContain('probe-secret');
+    } finally {
+      await provider.close();
+    }
   });
 });

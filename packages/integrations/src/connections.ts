@@ -6,7 +6,7 @@ import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { connectors } from './connectors';
-import { type EgressPolicy, safeRequest } from './egress';
+import { EgressError, type EgressPolicy, safeRequest } from './egress';
 import { accessTokenOf } from './oauth';
 import type { Connector } from './sdk';
 
@@ -250,12 +250,16 @@ export const runConnectionAction = defineCommand({
   handler: async (input, ctx) => {
     const [row] = await ctx.tx.select().from(schema.connections).where(eq(schema.connections.id, input.id));
     if (!row?.enabled) throw new AppError('not_found', `No enabled connection ${input.id}.`);
+    const secrets = await connectionSecrets(ctx.tx, row, ctx.services.keyProvider);
     try {
-      const secrets = await connectionSecrets(ctx.tx, row, ctx.services.keyProvider);
       return { result: await runAction(row, secrets, input.action, input.input, ctx.services.egress ?? { allowedHosts: [] }) };
     } catch (err) {
-      if (err instanceof AppError) throw err;
-      throw new AppError('conflict', `The action failed: ${(err as Error).message}`);
+      // An egress refusal is a typed, controlled diagnostic: it says which host or address was
+      // blocked and is the caller's to read. Everything else (a connector's own AppError, or a
+      // failure of the secret provider, the database or a bug) propagates unchanged, so the
+      // executor answers and audits it as the sanitised internal failure (#885).
+      if (err instanceof EgressError) throw new AppError('conflict', err.message);
+      throw err;
     }
   },
 });

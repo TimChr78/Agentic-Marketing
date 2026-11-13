@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, sha256 } from '@agentic-marketing/core';
+import { AppError, providerDiagnostic, redactCredentials, sha256 } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -61,6 +61,34 @@ function oauthOf(row: Row) {
   return c.oauth(c.settings.parse(row.settings));
 }
 
+/** One line of provider text, credential-redacted and bounded: it reaches a callback page and the
+ * `oauthError` that `connections.list` exposes, so it must never carry a raw exception or body. */
+const MAX_OAUTH_TEXT = 300;
+function safeOAuthText(text: string): string {
+  // Redact the whole text first: cutting at the first line can split a quoted credential from its
+  // closing quote, and the redaction rule would no longer recognise it (#885 round 3).
+  const first = redactCredentials(String(text)).split('\n')[0].trim();
+  return first.length > MAX_OAUTH_TEXT ? `${first.slice(0, MAX_OAUTH_TEXT - 1)}…` : first;
+}
+
+/** An expected token-endpoint refusal: its safe diagnostic may be shown, unlike a transport error. */
+class OAuthTokenError extends Error {
+  constructor(
+    readonly code: string | undefined,
+    readonly diagnostic: string,
+  ) {
+    super(diagnostic);
+    this.name = 'OAuthTokenError';
+  }
+}
+
+/** What the person may read about a failed exchange. Anything not from the token endpoint is
+ * unexpected, so it gets a fixed text rather than an exception that may echo a credential. */
+function oauthFailureText(err: unknown): string {
+  if (err instanceof OAuthTokenError) return err.diagnostic;
+  return 'the token endpoint could not be reached; connect again';
+}
+
 /** Calls the token endpoint (authorization code or refresh token) and returns what to store. */
 async function tokenRequest(tokenUrl: string, params: Record<string, string>, egress: EgressPolicy, request: OAuthRequest = safeRequest) {
   const res = await request(
@@ -76,8 +104,12 @@ async function tokenRequest(tokenUrl: string, params: Record<string, string>, eg
   try {
     body = JSON.parse(res.body);
   } catch {}
-  if (res.status < 200 || res.status >= 300 || typeof body.access_token !== 'string')
-    throw Object.assign(new Error(String(body.error_description ?? body.error ?? `HTTP ${res.status}`)), { code: body.error });
+  if (res.status < 200 || res.status >= 300 || typeof body.access_token !== 'string') {
+    // Only the documented OAuth fields survive: the code, and a redacted, length-limited description.
+    const code = typeof body.error === 'string' ? body.error : undefined;
+    const diagnostic = providerDiagnostic(res.body) || (code ? safeOAuthText(code) : `HTTP ${res.status}`);
+    throw new OAuthTokenError(code, diagnostic);
+  }
   return {
     tokens: {
       accessToken: body.access_token,
@@ -218,12 +250,13 @@ export function oauthRoutes(deps: OAuthDeps) {
       const oauth = oauthOf(row);
       const secrets = await secretsOf(tx, row, deps.kp);
       if (c.req.query('error')) {
-        const why = c.req.query('error_description') ?? c.req.query('error') ?? 'denied';
+        const why = safeOAuthText(c.req.query('error_description') ?? c.req.query('error') ?? 'denied');
         await tx
           .update(schema.connections)
           .set({ oauthStatus: 'error', oauthError: why, oauthPending: null, updatedAt: new Date() })
           .where(eq(schema.connections.id, id));
-        return { ok: false as const, text: `The provider did not allow access: ${escapeHtml(why)}` };
+        // The single escape happens when the whole prepared text becomes the page below.
+        return { ok: false as const, text: `The provider did not allow access: ${why}` };
       }
       // One-time: mark this state consumed before the network call. A replay finds the marker.
       await tx
@@ -254,7 +287,9 @@ export function oauthRoutes(deps: OAuthDeps) {
         deps.http,
       );
     } catch (err) {
-      const why = (err as Error).message;
+      // An OAuth refusal is expected and keeps the provider's code plus a redacted description; a
+      // transport error, a bug or an egress refusal gets a fixed text, never its own message.
+      const why = oauthFailureText(err);
       const result = await deps.db.withWorkspace(ws, async (tx) => {
         const [row] = await tx.select().from(schema.connections).where(eq(schema.connections.id, id)).for('update');
         if (!row || !row.enabled) return { ok: false, text: 'This connection was deleted or disabled. Nothing was connected.' };
@@ -265,9 +300,9 @@ export function oauthRoutes(deps: OAuthDeps) {
           .update(schema.connections)
           .set({ oauthStatus: 'error', oauthError: why, oauthPending: null, updatedAt: new Date() })
           .where(eq(schema.connections.id, id));
-        return { ok: false, text: `The provider did not allow access: ${escapeHtml(why)}` };
+        return { ok: false, text: `The provider did not allow access: ${why}` };
       });
-      return c.html(page('Not connected', result.text), 400);
+      return c.html(page('Not connected', escapeHtml(result.text)), 400);
     }
 
     // 3. Persist only if this exact authorization is still the current one.
@@ -405,7 +440,7 @@ export async function refreshConnection(db: Db, ws: string, id: string, deps: OA
         .update(schema.connections)
         .set({
           oauthStatus: 'error',
-          oauthError: `the provider refused the refresh token: connect again (${(err as Error).message})`,
+          oauthError: `the provider refused the refresh token: connect again (${oauthFailureText(err)})`,
           oauthRefreshLeaseUntil: null,
           oauthRefreshLeaseToken: null,
           updatedAt: new Date(),

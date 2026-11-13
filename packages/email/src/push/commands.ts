@@ -11,6 +11,7 @@ import { schema } from '@agentic-marketing/db';
 import { profileForMessage } from '@agentic-marketing/profiles';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { templateRenderError } from '../render';
 import { directSendImpact, directSendLedger } from '../sendTouches';
 import { topicProblems } from '../topicValidation';
 import { MAX_PAYLOAD } from './crypto';
@@ -88,7 +89,11 @@ export const previewPush = defineCommand({
     try {
       text = await renderPush(t, { ...(t.sampleData ?? {}), ...(input.data ?? {}) });
     } catch (e) {
-      throw new AppError('invalid_input', `The template could not be rendered with this data: ${(e as Error).message.split('\n')[0]}`);
+      // A Liquid failure or a non-http link is the template's own and keeps its message; anything
+      // else propagates for the executor to sanitise (#885).
+      const expected = templateRenderError(e, 'The template could not be rendered with this data');
+      if (!expected) throw e;
+      throw expected;
     }
     const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
     const warnings: string[] = [];

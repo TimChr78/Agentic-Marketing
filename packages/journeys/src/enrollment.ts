@@ -1,6 +1,6 @@
 import { artifactTypes, type JourneyDefinition } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
-import { AppError } from '@agentic-marketing/core';
+import { AppError, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
@@ -76,13 +76,13 @@ export function chunkFailureOutcome(
   const now = opts.now ?? new Date();
   const attempts = job.attempts + 1;
   if (opts.permanent || attempts >= policy.maxAttempts)
-    return { status: 'failed', attempts, nextAttemptAt: null, error: message.slice(0, 1000), finishedAt: now };
+    return { status: 'failed', attempts, nextAttemptAt: null, error: safeErrorText(message, 1000), finishedAt: now };
   const delay = policy.backoffMs[Math.min(attempts - 1, policy.backoffMs.length - 1)] ?? 0;
   return {
     status: job.status === 'failed' || job.status === 'done' || job.status === 'cancelled' ? 'running' : job.status,
     attempts,
     nextAttemptAt: new Date(now.getTime() + delay),
-    error: `chunk attempt ${attempts} of ${policy.maxAttempts} failed; retrying: ${message}`.slice(0, 1000),
+    error: safeErrorText(`chunk attempt ${attempts} of ${policy.maxAttempts} failed; retrying: ${message}`, 1000),
     finishedAt: null,
   };
 }

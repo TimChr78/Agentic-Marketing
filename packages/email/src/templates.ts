@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { blockPublishProblems, blockResolver } from './blocks';
 import { type AssetInfo, checkEmailTemplate, emailPublishProblems, type LinkCache, memoryLinkCache } from './checks';
 import { isMarketing } from './policy';
-import { renderTemplate, validateTemplate } from './render';
+import { renderTemplate, templateRenderError, validateTemplate } from './render';
 import { sendTestMessages, testRecipientsInput, testSendOutput } from './testSend';
 import { topicProblems } from './topicValidation';
 
@@ -94,7 +94,11 @@ export const previewTemplate = defineCommand({
     try {
       return { version: v.number, ...(await renderTemplate(t, vars, { blocks: blockResolver(ctx.tx) })) };
     } catch (e) {
-      throw new AppError('invalid_input', `The template could not be rendered with this data: ${(e as Error).message.split('\n')[0]}`);
+      // A Liquid or block-parameter failure is the template's own and keeps its message; a database
+      // error from the block resolver, or a bug, propagates for the executor to sanitise (#885).
+      const expected = templateRenderError(e, 'The template could not be rendered with this data');
+      if (!expected) throw e;
+      throw expected;
     }
   },
 });
@@ -275,7 +279,12 @@ export const checkTemplate = defineCommand({
         render: { blocks: blockResolver(ctx.tx) },
       });
     } catch (e) {
-      throw new AppError('invalid_input', `The template could not be rendered with this data: ${(e as Error).message.split('\n')[0]}`);
+      // As in the preview: only a render failure of the template itself is expected. A block
+      // resolver's database error, an asset lookup or a link check that fails unexpectedly
+      // propagates, so the executor answers it as the sanitised internal failure (#885).
+      const expected = templateRenderError(e, 'The template could not be rendered with this data');
+      if (!expected) throw e;
+      throw expected;
     }
     return { version: v.number, ...result };
   },

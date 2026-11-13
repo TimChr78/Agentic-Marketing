@@ -2,6 +2,38 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.20] - 2026-11-13
+
+### Fixed
+
+- The Docker smoke test no longer picks host ports before starting the stack: Docker assigns them and the script reads them back, so a port taken by another run in between can no longer fail it.
+- The linear-time helper's own test no longer depends on wall-clock timing, so the segments package test run can no longer fail on a busy CI runner.
+- The advisory-lock test waits for a destroyed connection's backend to exit before it checks that no lock is left, instead of racing it (#897).
+
+### Security
+
+- Unexpected failures no longer reach people, the audit log or the agent ledger with their own text: a database, secret-provider, event-store or provider error that used to be wrapped into a user-facing message now propagates, and the executor answers and audits it as the fixed internal failure.
+- A provider's HTTP error is reduced to its own error code and message, length-limited and with token-shaped values redacted, so a gateway echoing an `access_token`, an `Authorization` header or a developer token cannot leak it to the caller or to anyone with `audit:read`. Redaction now covers `key=value`, `key: value` and JSON pairs for token, secret, password, key, auth, credential, signature and session fields; Shopify, Stripe, Slack, GitHub, AWS, Google and JWT prefixes; and shorter base64/hex runs. The complete text is redacted before it is truncated.
+- The command executor now redacts every `AppError` message in one place before it is returned to the caller, written to the audit log or written to the agent ledger, and the ledger's reasons and error text are redacted as well. A command that builds its message from a provider's answer or an exception (or writes its own audit entry, such as mandate renewal) can no longer leak a credential, while a message with nothing to redact is kept exactly as written.
+- Stored error and reason columns are sanitised the same way: ad-platform conversion failures (Meta, Google, TikTok's HTTP-200 error and Pinterest's failed events), audience sync errors and member `lastError`, edge sync `last_error`, journey enrollment retry text, `ai_calls.error` and prompt test problems, `content_sources.last_error`, and a journey participant's `error` and stored context for JSONata `$error` and condition-service exceptions. A webhook mapping that throws now answers 422 with redacted text, and Meta's "audience is flagged" guidance is decided on the full body before it is cut.
+- Policy reasons are redacted where the policy is made, including the independent check's verdict (pass or fail, redacted whole before its 500-character cut) and a shadow-mode decision's reasons, so `heldBecause`, approval notes, the agent ledger, `agents.activity` and idempotent replays never carry a credential a reason quoted. `agents.report` and `agents.compare` give a fixed note for a journey or goal that could not be measured unexpectedly, and a failed copilot turn streams and stores a typed failure's redacted message, a provider's HTTP status, or a fixed text, never the exception's own text. A rollout pause's notification error and the scheduled backup's `lastError` are redacted too.
+- Push, S3 and key-provider failures redact the complete response before their 200-character cut, so a token that straddled the cut no longer survives as a fragment.
+- OAuth token-endpoint failures are sanitised before they reach the callback page or the `oauthError` that `connections.list` returns: the provider's OAuth code plus a redacted, length-limited description when the endpoint answered, and a fixed text for a transport or other unexpected failure.
+- A test e-mail's per-recipient reason uses a fixed text for an unexpected transport or render failure; a typed provider refusal keeps its own redacted diagnostic, and the all-failed message never carries raw exception text.
+- A link the pre-send check cannot fetch is reported with a safe classification (DNS, refused, timeout, egress refusal) rather than the driver's `message`.
+- Validation failures keep their helpful message: a domain that cannot be registered, a journey that cannot run, a template's Liquid or MJML error, an e-mail block's parameter error, a non-http push link, a not-connected OAuth connection and an unexpected failure in a mandate renewal are still explained to the person who can fix them.
+- The e-mail editor's transitive `uuid` dependency is pinned to 11.1.1 (GHSA-w5hq-g745-h8pq, CVE-2026-41907, Dependabot alert 9). The flaw is a missing bounds check in `v3`/`v5`/`v6` when a caller passes its own buffer; the editor only calls `v4()` without one, so it was not reachable, but the vulnerable versions are gone from the lockfile.
+
+### Upgrading from 0.14.19
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** unexpected failures now answer the fixed internal-failure message instead of the underlying error text, and credential-shaped values in error messages, stored error columns and policy reasons are replaced with `[redacted]`. Scripts or alerts that matched on a raw provider or driver message should match on the error code or HTTP status instead. Operators still find the full error in the server log.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.20.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.20 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.20` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.20). Run `docker compose exec app am doctor`.
+
+<!-- issues: 877, 885, 892, 893, 897 -->
+
 ## [0.14.19] - 2026-11-13
 
 ### Fixed

@@ -1,6 +1,6 @@
 import { artifactTypes, type PromptDefinition } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
+import { AppError, newId, safeErrorText } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { generateText, Output } from 'ai';
 import { and, desc, eq, sql } from 'drizzle-orm';
@@ -252,7 +252,7 @@ export async function runTestCase(m: ReadyModel, def: PromptDefinition, t: TestC
       for (const c of t.expect.notContains ?? []) if (all.includes(c.toLowerCase())) problems.push(`contains "${c}"`);
     }
   } catch (err) {
-    problems.push(`model call failed: ${(err as Error).message}`);
+    problems.push(`model call failed: ${safeErrorText((err as Error).message, 500)}`);
   }
   return { person, answer, problems, usage };
 }

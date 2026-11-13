@@ -4,7 +4,7 @@
 # with `scripts/smoke.sh` (it creates and removes its own compose project).
 #
 # Every run has its own id: its compose project (and so its containers, network and volumes), its
-# throw-away env file and cookie jar, and its own free ports. Two runs side by side, or a real
+# throw-away env file and cookie jar, and its own host ports. Two runs side by side, or a real
 # install on the same host, never touch each other, and cleanup removes only this run's project.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -14,36 +14,21 @@ cd "$(dirname "$0")/.."
 RUN_ID="am_smoke_$$_$RANDOM"
 export COMPOSE_PROJECT_NAME="$RUN_ID"
 
-# Free host ports for this run, never a fixed 3000 that an installed stack may hold. Both sockets
-# are opened together, so the two ports differ; the first is the admin port, the second the public
-# listener. SMOKE_PORT/SMOKE_PUBLIC_PORT override them.
-if [ -n "${SMOKE_PORT:-}" ] && [ -n "${SMOKE_PUBLIC_PORT:-}" ]; then
-  PORT="$SMOKE_PORT"
-  PUBLIC_PORT="$SMOKE_PUBLIC_PORT"
-else
-  read -r FREE_ADMIN FREE_PUBLIC <<<"$(node -e '
-    const { createServer } = require("node:net");
-    const servers = [];
-    const open = () =>
-      new Promise((resolve) => {
-        const server = createServer();
-        servers.push(server);
-        server.listen(0, "127.0.0.1", () => resolve(server.address().port));
-      });
-    Promise.all([open(), open()]).then(([admin, pub]) => {
-      console.log(admin, pub);
-      for (const server of servers) server.close();
-    });
-  ')"
-  PORT="${SMOKE_PORT:-$FREE_ADMIN}"
-  PUBLIC_PORT="${SMOKE_PUBLIC_PORT:-$FREE_PUBLIC}"
-fi
+# Host ports are not picked here: a free port found now can be taken by another run before `up`
+# binds it, and inside a container the check only sees the container's loopback (#877). Instead the
+# run publishes port 0 and lets Docker pick the port when the container starts, then reads it back
+# with `docker compose port`. SMOKE_PORT/SMOKE_PUBLIC_PORT pin a port instead.
+ADMIN_HOST_PORT="${SMOKE_PORT:-0}"
+PUBLIC_HOST_PORT="${SMOKE_PUBLIC_PORT:-0}"
+
+# The port the app listens on for the public-only listener inside the container. The published host
+# port differs (Docker assigns it); `am smoke` below talks to this one from inside the container.
+PUBLIC_LISTEN_PORT=3001
 
 # Inside a container the Docker daemon is the host's, so the published ports are on the host, and
 # the host's bridge address is what this script can reach; on a normal host that is loopback.
 in_container() { [ -f /.dockerenv ] || grep -qa docker /proc/1/cgroup 2>/dev/null; }
 BIND_IP="${SMOKE_BIND_IP:-$(in_container && echo 172.17.0.1 || echo 127.0.0.1)}"
-BASE="http://$BIND_IP:$PORT"
 EMAIL=owner@example.com
 PASSWORD='smoke-test-password-123'
 
@@ -81,23 +66,48 @@ dc() (
   docker compose --env-file "$ENV_FILE" -p "$RUN_ID" -f docker-compose.yml -f docker-compose.build.yml "$@"
 )
 
-cat >"$ENV_FILE" <<ENV
+# Write this run's env file. It is rewritten with the ports Docker assigned, because the trusted
+# origin (needed for the browser-style sign-in request) contains the host port, which is known only
+# after `up`. Re-running `up` after the rewrite recreates only the app container, with the same
+# ports pinned, so it keeps answering on $BASE.
+write_env() {
+  local admin_host_port="$1" public_host_port="$2" trusted_origins="$3"
+  cat >"$ENV_FILE" <<ENV
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 APP_DB_PASSWORD=$APP_DB_PASSWORD
 AUTH_SECRET=$AUTH_SECRET
 MASTER_KEY=$MASTER_KEY
 # PUBLIC_URL stays the container's own admin address: MCP (which `am smoke` below checks) is
 # disabled for a plain-HTTP non-loopback address, and inside the container localhost:3000 is the
-# admin listener. The script reaches the same server from outside at $BASE, so that origin is
-# trusted explicitly for the browser-style sign-in request.
+# admin listener.
 PUBLIC_URL=http://localhost:3000
-TRUSTED_ORIGINS=$BASE
+# The script reaches the same server from outside at $BASE, so that origin is trusted explicitly for
+# the browser-style sign-in request. Empty until Docker has assigned the port.
+TRUSTED_ORIGINS=$trusted_origins
 AM_BIND=$BIND_IP
-AM_PORT=$PORT
+AM_PORT=$admin_host_port
 AM_BUILD_IMAGE=$AM_BUILD_IMAGE
-PUBLIC_BIND=$BIND_IP:$PUBLIC_PORT
-PUBLIC_PORT=$PUBLIC_PORT
+PUBLIC_BIND=$BIND_IP:$public_host_port
+PUBLIC_PORT=$PUBLIC_LISTEN_PORT
 ENV
+}
+
+# The host port Docker published for a container port, e.g. `127.0.0.1:32768` -> `32768`.
+published_port() {
+  local mapping first
+  mapping="$(dc port app "$1")"
+  [ -n "$mapping" ] || { echo "no published port for $1" >&2; exit 1; }
+  first="${mapping%%$'\n'*}"
+  echo "${first##*:}"
+}
+
+# Both ports pinned (SMOKE_PORT and SMOKE_PUBLIC_PORT): the trusted origin is known up front, so a
+# single `up` suffices. Otherwise Docker assigns them, and the env file is completed after `up`.
+BASE=""
+if [ -n "${SMOKE_PORT:-}" ] && [ -n "${SMOKE_PUBLIC_PORT:-}" ]; then
+  BASE="http://$BIND_IP:$ADMIN_HOST_PORT"
+fi
+write_env "$ADMIN_HOST_PORT" "$PUBLIC_HOST_PORT" "$BASE"
 
 # Only this run's project is removed: the name carries the run id, and the temp files are ours.
 cleanup() {
@@ -115,6 +125,18 @@ trap cleanup EXIT
 # Always build through the overlay: the default compose file pulls the release image.
 # SMOKE_NO_BUILD=1 reuses an image built beforehand as $AM_BUILD_IMAGE.
 dc up -d $([ -n "${SMOKE_NO_BUILD:-}" ] || echo --build) --wait --wait-timeout 300
+
+# With a port left at 0 Docker chose it at container start. Read it back and record it, along with
+# the origin this script calls, then `up` again: only the app container changes (it keeps the same
+# pinned ports and the image is already built), so the sign-in's CSRF check sees $BASE as trusted.
+if [ -z "$BASE" ]; then
+  ADMIN_HOST_PORT=$(published_port 3000)
+  PUBLIC_HOST_PORT=$(published_port "$PUBLIC_LISTEN_PORT")
+  BASE="http://$BIND_IP:$ADMIN_HOST_PORT"
+  write_env "$ADMIN_HOST_PORT" "$PUBLIC_HOST_PORT" "$BASE"
+  dc up -d --wait --wait-timeout 300
+fi
+
 curl -fsS "$BASE/readyz" >/dev/null && echo "ready"
 
 dc exec -T -e AM_BOOTSTRAP_PASSWORD="$PASSWORD" app am bootstrap --email "$EMAIL" --workspace Smoke
@@ -142,5 +164,5 @@ done
 # The checks an operator runs after an upgrade (am smoke) with a narrow token, as an agent has, inside the container against both
 # listeners: admin paths hidden on the public one, dot-segments refused, MCP, the provider, a signup.
 TOKEN=$(call apiTokens.create '{"name":"smoke","scopes":["artifacts:read"]}' | json '.token')
-dc exec -T -e AM_TOKEN="$TOKEN" app am smoke --public-url "http://localhost:$PUBLIC_PORT" --admin-url http://localhost:3000 \
+dc exec -T -e AM_TOKEN="$TOKEN" app am smoke --public-url "http://localhost:$PUBLIC_LISTEN_PORT" --admin-url http://localhost:3000 \
   --form "$FORM" --email grace@example.com

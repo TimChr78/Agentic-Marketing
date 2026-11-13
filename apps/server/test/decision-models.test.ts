@@ -640,13 +640,22 @@ describe('ai.calibration', () => {
     expect(r.reliability.filter((b) => b.n === 0).every((b) => b.predicted === null)).toBe(true);
   }, 30_000);
 
-  it('reports a ClickHouse failure instead of a zero report (#360)', async () => {
+  it('fails instead of reporting a zero when the event store is down (#360, #885)', async () => {
     const api = t.api(owner);
-    const spy = vi.spyOn(t.srv.events, 'conversionEvents').mockRejectedValueOnce(new Error('ClickHouse is down'));
+    const spy = vi.spyOn(t.srv.events, 'conversionEvents').mockRejectedValueOnce(new Error('ClickHouse is down: password=probe-secret'));
     try {
       const err = await rejects(api.call('ai.calibration', { scoreKey: 'calibration_test', event: 'Order Completed' }));
-      expect(err.code).toBe('conflict');
-      expect(err.message).toContain('ClickHouse is down');
+      // The caller still learns the report failed rather than reading a zero (#360), but an
+      // event-store failure is unexpected: the executor answers and audits the fixed internal
+      // marker, never the driver's text (#885).
+      expect(err.code).toBe('internal');
+      expect(JSON.stringify(err)).not.toContain('probe-secret');
+      expect(JSON.stringify(err)).not.toContain('ClickHouse');
+      const { rows } = await t.srv.db.admin.query<{ error: string | null }>(
+        'SELECT error FROM audit_log WHERE workspace_id = $1 AND command = $2 ORDER BY seq DESC LIMIT 1',
+        [workspaceId, 'ai.calibration'],
+      );
+      expect(rows).toEqual([{ error: 'internal: The command failed with an unexpected error.' }]);
     } finally {
       spy.mockRestore();
     }
