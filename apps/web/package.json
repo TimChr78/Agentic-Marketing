@@ -1,7 +1,7 @@
 {
   "name": "@agentic-marketing/web",
   "private": true,
-  "version": "0.14.12",
+  "version": "0.14.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
