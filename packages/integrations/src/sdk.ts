@@ -52,6 +52,12 @@ export interface Connector<S = any, K = any> {
     /** Returns why a request is not authentic, or null. */
     verify(ctx: InboundContext<S, K>): string | null;
     map(payload: unknown, ctx: InboundContext<S, K>): Promise<InboundItem[]> | InboundItem[];
+    /**
+     * Headers that, with the body, identify one event for replay protection: those whose value
+     * changes what `map` produces for the same body (e.g. the Shopify topic). Leave out per-delivery
+     * ids that a sender's own retry would change.
+     */
+    replayHeaders?: readonly string[];
   };
   actions?: Record<string, ConnectorAction<S, K>>;
   /**

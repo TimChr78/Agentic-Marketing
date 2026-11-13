@@ -24,6 +24,50 @@ import { Tabs } from '../src/ui/tabs';
 
 afterEach(cleanup);
 
+/** Tabs keep their selection in the parent, so the harness owns it. */
+function TabsHarness() {
+  const [v, setV] = useState<'a' | 'b' | 'c'>('a');
+  return (
+    <Tabs
+      label="T"
+      value={v}
+      onChange={setV}
+      items={[
+        { key: 'a', label: 'A' },
+        { key: 'b', label: 'B' },
+        { key: 'c', label: 'C' },
+      ]}
+    >
+      {v}
+    </Tabs>
+  );
+}
+
+/** The confirm dialog is a hook, so a component must call it and report the answer. */
+function ConfirmHarness({
+  title,
+  confirmLabel,
+  destructive,
+  typeToConfirm,
+  onAnswer,
+}: {
+  title: string;
+  confirmLabel: string;
+  destructive?: boolean;
+  typeToConfirm?: string;
+  onAnswer: (answer: boolean) => void;
+}) {
+  const [dialog, ask] = useConfirm();
+  return (
+    <>
+      <button type="button" onClick={async () => onAnswer(await ask({ title, confirmLabel, destructive, typeToConfirm }))}>
+        open
+      </button>
+      {dialog}
+    </>
+  );
+}
+
 describe('ui components', () => {
   it('Field wires its label, hint and error to the control', () => {
     render(
@@ -41,24 +85,7 @@ describe('ui components', () => {
   });
 
   it('Tabs move with the arrow keys (WAI-ARIA)', async () => {
-    function T() {
-      const [v, setV] = useState<'a' | 'b' | 'c'>('a');
-      return (
-        <Tabs
-          label="T"
-          value={v}
-          onChange={setV}
-          items={[
-            { key: 'a', label: 'A' },
-            { key: 'b', label: 'B' },
-            { key: 'c', label: 'C' },
-          ]}
-        >
-          {v}
-        </Tabs>
-      );
-    }
-    render(<T />);
+    render(<TabsHarness />);
     screen.getByRole('tab', { name: 'A' }).focus();
     await userEvent.keyboard('{ArrowRight}');
     expect(screen.getByRole('tab', { name: 'B' }).getAttribute('aria-selected')).toBe('true');
@@ -70,23 +97,15 @@ describe('ui components', () => {
 
   it('a destructive confirm with the object name stays disabled until the name is typed', async () => {
     let answer: boolean | undefined;
-    function C() {
-      const [dialog, ask] = useConfirm();
-      return (
-        <>
-          <button
-            type="button"
-            onClick={async () =>
-              (answer = await ask({ title: 'Delete “Hermes”?', confirmLabel: 'Revoke token', destructive: true, typeToConfirm: 'Hermes' }))
-            }
-          >
-            open
-          </button>
-          {dialog}
-        </>
-      );
-    }
-    render(<C />);
+    render(
+      <ConfirmHarness
+        title="Delete “Hermes”?"
+        confirmLabel="Revoke token"
+        destructive
+        typeToConfirm="Hermes"
+        onAnswer={(value) => (answer = value)}
+      />,
+    );
     await userEvent.click(screen.getByText('open'));
     const confirm = screen.getByRole('button', { name: 'Revoke token' });
     expect(confirm).toHaveProperty('disabled', true);
@@ -98,18 +117,7 @@ describe('ui components', () => {
 
   it('Escape cancels a confirm', async () => {
     let answer: boolean | undefined;
-    function C() {
-      const [dialog, ask] = useConfirm();
-      return (
-        <>
-          <button type="button" onClick={async () => (answer = await ask({ title: 'Delete?', confirmLabel: 'Delete' }))}>
-            open
-          </button>
-          {dialog}
-        </>
-      );
-    }
-    render(<C />);
+    render(<ConfirmHarness title="Delete?" confirmLabel="Delete" onAnswer={(value) => (answer = value)} />);
     await userEvent.click(screen.getByText('open'));
     await userEvent.keyboard('{Escape}');
     expect(answer).toBe(false);

@@ -8,7 +8,7 @@
 #   1. builds the admin UI (unless E2E_SKIP_BUILD=1),
 #   2. starts apps/server/test/e2e/server.ts on E2E_PORT with a fresh, run-scoped database,
 #   3. waits for /ready on E2E_PORT+1 and refuses a server that answered before it could have seeded,
-#   4. runs Playwright in mcr.microsoft.com/playwright:v1.64.1-noble,
+#   4. runs Playwright in mcr.microsoft.com/playwright:v1.65.0-noble,
 #   5. always stops the server it started (by its own process group) and drops only the database
 #      this invocation created.
 #
@@ -44,7 +44,7 @@ cd "$REPO_ROOT"
 # shellcheck source=scripts/container-id.sh
 . "$REPO_ROOT/scripts/container-id.sh"
 
-IMAGE="${E2E_IMAGE:-mcr.microsoft.com/playwright:v1.64.1-noble}"
+IMAGE="${E2E_IMAGE:-mcr.microsoft.com/playwright:v1.65.0-noble}"
 READY_TIMEOUT="${E2E_READY_TIMEOUT:-240}"
 # A real seed takes about 30 s. Answering sooner than this is not proof, but it is the wording we
 # use when the fresh database is also missing.

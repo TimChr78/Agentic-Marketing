@@ -105,6 +105,31 @@ describe('bus → ClickHouse sink', () => {
   }, 20_000);
 });
 
+describe('conversion paging', () => {
+  it('pages conversions that tie on timestamp and event id without skipping either (#786)', async () => {
+    const tieWs = newUuid();
+    const at = '2026-10-02T12:00:00.000Z';
+    const first = ev(200, {
+      workspaceId: tieWs,
+      messageId: 'conversion-tie',
+      name: 'Tie Purchase',
+      timestamp: at,
+      receivedAt: at,
+      anonymousId: 'tie-a',
+    });
+    // The replacing key includes anonymous_id, so both rows survive FINAL even though timestamp
+    // and event_id are identical. A strict (timestamp, event_id) cursor assumed otherwise and
+    // dropped the second at a page boundary; the reviewer reproduced 2 rows with pageSize 1
+    // returning 1.
+    await store.insert([first, { ...first, anonymousId: 'tie-b' }]);
+    const from = new Date('2026-10-02T00:00:00.000Z');
+    const to = new Date('2026-10-02T23:59:59.999Z');
+    expect(await store.conversionEvents(tieWs, { names: ['Tie Purchase'], from, to })).toHaveLength(2);
+    const paged = await store.conversionEvents(tieWs, { names: ['Tie Purchase'], from, to, pageSize: 1 });
+    expect(paged.map((e) => e.anonymousId).sort()).toEqual(['tie-a', 'tie-b']);
+  });
+});
+
 describe('row policies', () => {
   it('shows a query only the rows of the workspace it names, and none without one', async () => {
     const other = newUuid();

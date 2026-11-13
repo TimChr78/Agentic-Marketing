@@ -421,4 +421,38 @@ describe('am doctor live checks', () => {
       JSON.stringify(checks),
     ).toEqual([]);
   }, 20_000);
+
+  it('reports an app role that can bypass row-level security (#813)', async () => {
+    const role = runScoped(`doctor_bypass_${randomBytes(4).toString('hex')}`);
+    const config = loadConfig({
+      DATABASE_URL: dbUrl,
+      APP_DB_ROLE: role,
+      APP_DB_PASSWORD: 'doctor-app-password',
+      AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
+      MASTER_KEY: Buffer.alloc(32, 7).toString('base64'),
+      CLICKHOUSE_URL: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
+      CLICKHOUSE_DATABASE: dbName,
+      CLICKHOUSE_ROW_POLICIES: process.env.CLICKHOUSE_ROW_POLICIES ?? 'auto',
+      NATS_URL: process.env.NATS_URL ?? 'nats://127.0.0.1:4222',
+      NATS_NAMESPACE: dbName,
+      VALKEY_URL: process.env.VALKEY_URL ?? 'redis://localhost:6379',
+      VALKEY_PREFIX: dbName,
+    });
+    const admin = new pg.Client({ connectionString: maintenanceUrl });
+    await admin.connect();
+    try {
+      await admin.query(`DROP ROLE IF EXISTS ${role}`);
+      await admin.query(`CREATE ROLE ${role} LOGIN PASSWORD 'doctor-app-password' BYPASSRLS`);
+
+      const found = (await liveChecks(config)).find((item) => item.id === 'postgres.app-role');
+      expect(found).toBeTruthy();
+      expect(found!.status).toBe('fail');
+      expect(found!.message).toContain(role);
+      expect(found!.message).toContain('BYPASSRLS');
+      expect(found!.hint).toContain('APP_DB_ROLE');
+    } finally {
+      await admin.query(`DROP ROLE IF EXISTS ${role}`).catch(() => {});
+      await admin.end();
+    }
+  }, 30_000);
 });

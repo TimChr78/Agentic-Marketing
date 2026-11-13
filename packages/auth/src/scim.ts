@@ -16,9 +16,16 @@ const RANK: Record<string, number> = { viewer: 1, approver: 2, marketer: 3, admi
 
 export const scimTokenHash = (token: string) => sha256(`scim:${token}`);
 
-/** The principal SCIM requests act as: the identity provider, allowed to manage members only. */
+/**
+ * The principal SCIM requests act as: the identity provider, allowed to manage members only.
+ *
+ * It is not an agent (#811): provisioning is a trusted administrative integration, not an
+ * autonomous actor, so the agent policy, the autonomy switch and the per-agent limits must not
+ * decide whether the IdP can sync people. Only the `workspace:admin` permission is granted, and
+ * the SCIM route runs only the member commands.
+ */
 export const scimPrincipal = (workspaceId: string): Principal => ({
-  type: 'agent',
+  type: 'user',
   userId: 'scim',
   clientId: 'scim',
   workspaceId,

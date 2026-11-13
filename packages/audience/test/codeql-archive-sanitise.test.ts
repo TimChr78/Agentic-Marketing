@@ -1000,10 +1000,14 @@ describe('archive sanitising: end tags that walk a long open stack are bounded (
   // getNamespaceURI per level) and insert nothing, so the insert-path clock check never fires.
   const deepEndTags = (n: number) => `${'<b>'.repeat(250)}${'</div>'.repeat(n)}`;
 
-  it('fails closed on a deep stack followed by many end tags', () => {
-    const out = sanitiseEmailBody(deepEndTags(10_000));
+  it('keeps a deep stack followed by many end tags safe: escaped, or unchanged', () => {
+    // parse5 8.1 indexes the open-element stack, so an unmatched end tag no longer walks it and the
+    // read cap rarely trips; under parse5 8.0 it failed closed. Either answer is safe, since the
+    // input holds no active content. The linear test below is the guard against the old blow-up.
+    const html = deepEndTags(10_000);
+    const out = sanitiseEmailBody(html);
 
-    expect(out.startsWith('&lt;b&gt;')).toBe(true);
+    expect(out === html || out.startsWith('&lt;b&gt;')).toBe(true);
   });
 
   it('keeps a realistic document with repeated end tags byte-identical', () => {
@@ -1013,5 +1017,32 @@ describe('archive sanitising: end tags that walk a long open stack are bounded (
 
   it('stays linear when end tags walk a deep stack', () => {
     expectLinear(deepEndTags, (html) => sanitiseEmailBody(html), 2_500);
+  });
+});
+
+describe('archive sanitising: case folding never shifts extraction indices (#748)', () => {
+  it('extracts the style and body around a case-expanding İ', () => {
+    expect(emailParts('İ<style>.x{color:red}</style><body><p>ok</p></body>')).toEqual({
+      body: '<p>ok</p>',
+      styles: '.x{color:red}',
+    });
+  });
+
+  it('finds mixed-case tags after İ, ẞ and ﬁ without shifting the slice', () => {
+    clearEmailPartsCache();
+    expect(emailParts('İẞﬁ<STYLE>.y{color:blue}</STYLE><BODY><p>İẞﬁ ok</p></BODY>')).toEqual({
+      body: '<p>İẞﬁ ok</p>',
+      styles: '.y{color:blue}',
+    });
+  });
+
+  it('keeps extraction unchanged when İ sits before a second style block', () => {
+    clearEmailPartsCache();
+    expect(
+      emailParts('<html><head><style>.a{color:red}</style>İ<STYLE>.b{color:blue}</STYLE></head><body><p>ok</p></body></html>'),
+    ).toEqual({
+      body: '<p>ok</p>',
+      styles: '.a{color:red}\n.b{color:blue}',
+    });
   });
 });

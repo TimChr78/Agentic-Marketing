@@ -58,24 +58,34 @@ const TRANSPORT_HEADERS = new Set([
 
 /**
  * The header values that belong to a delivery's replay identity: the headers a generic mapping
- * reads. JSONata names a header as `headers.name`, `headers."x-name"` or `headers.` + backquoted
- * name; a mapping that uses the `headers` object any other way (`$keys(headers)`, `headers` alone)
- * takes every header except per-hop transport ones. A connector without a mapping expression derives
- * its events from the body, so its identity is the body alone.
+ * reads, plus the connector's own identity headers (`connectorHeaders`, e.g. the Shopify topic,
+ * since one order body arrives as both `orders/create` and `orders/paid`). JSONata names a header as
+ * `headers.name`, `headers."x-name"` or `headers.` + backquoted name; a mapping that uses the
+ * `headers` object any other way (`$lookup(headers, …)`, `$keys(headers)`, `headers` alone) takes
+ * every header except per-hop transport ones, and also every transport header whose name appears
+ * as a string literal in the mapping (`$lookup(headers, "x-forwarded-for")`). A connector without a
+ * mapping expression derives its events from the body and its identity headers alone.
  */
-export function replayHeaderValues(settings: unknown, headers: Record<string, string>): string {
+export function replayHeaderValues(settings: unknown, headers: Record<string, string>, connectorHeaders: readonly string[] = []): string {
   const mapping = settings && typeof settings === 'object' ? (settings as { mapping?: unknown }).mapping : undefined;
-  if (typeof mapping !== 'string' || !/\bheaders\b/.test(mapping)) return '';
-  const named = new Set<string>();
+  const named = new Set<string>(connectorHeaders.map((h) => h.toLowerCase()));
   let wholesale = false;
-  const ref = /\bheaders\b(?:\s*\.\s*(?:"([^"]*)"|`([^`]*)`|([A-Za-z_$][\w$]*)))?/g;
-  for (const m of mapping.matchAll(ref)) {
-    const name = m[1] ?? m[2] ?? m[3];
-    if (name === undefined) wholesale = true;
-    else named.add(name.toLowerCase());
+  if (typeof mapping === 'string' && /\bheaders\b/.test(mapping)) {
+    const ref = /\bheaders\b(?:\s*\.\s*(?:"([^"]*)"|`([^`]*)`|([A-Za-z_$][\w$]*)))?/g;
+    for (const m of mapping.matchAll(ref)) {
+      const name = m[1] ?? m[2] ?? m[3];
+      if (name === undefined) wholesale = true;
+      else named.add(name.toLowerCase());
+    }
+    if (wholesale)
+      for (const m of mapping.matchAll(/"([^"]*)"|'([^']*)'/g)) {
+        const literal = (m[1] ?? m[2] ?? '').toLowerCase();
+        if (TRANSPORT_HEADERS.has(literal)) named.add(literal);
+      }
   }
-  const keys = wholesale ? Object.keys(headers).filter((k) => !TRANSPORT_HEADERS.has(k)) : [...named];
-  return keys
+  const keys = new Set(named);
+  if (wholesale) for (const k of Object.keys(headers)) if (!TRANSPORT_HEADERS.has(k)) keys.add(k);
+  return [...keys]
     .sort()
     .map((k) => `${k}:${headers[k] ?? ''}`)
     .join('\n');
@@ -168,8 +178,8 @@ export function inboundApi(deps: {
       // can read a header (`x-event-id`, a device id, a timestamp) into any field, so two deliveries
       // with one body can be two events; and it can call $millis() or $uuid(), so its output differs
       // on every replay. The key is the connection, the raw body and the values of the headers the
-      // mapping reads (0.14.11 review, rounds 1 and 2).
-      const replayHeaders = replayHeaderValues(ictx.settings, headers);
+      // mapping or the connector reads (0.14.11 review, rounds 1 to 3).
+      const replayHeaders = replayHeaderValues(ictx.settings, headers, connector.inbound.replayHeaders);
       const replayId =
         webhookId ??
         (scheme === 'standard-webhooks'

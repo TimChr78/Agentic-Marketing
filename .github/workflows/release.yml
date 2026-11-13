@@ -73,12 +73,16 @@ jobs:
     timeout-minutes: 60
     # The group is acquired before the version and release-existence checks below run, so a second
     # run queued for the same version sees the first release when it starts.
-    # One group per release line (major.minor), not per version: every patch of a line pushes the
-    # same floating `:0.14` image tag, so overlapping patches must queue behind each other (#773).
-    # cancel-in-progress stays false so none of them is cancelled mid-publish.
+    # One group for every release, not one per version or per line: each patch of a line pushes the
+    # same floating `:0.14` tag, and `latest` spans lines, so two releases deciding their tags at
+    # once could both think they are newest (#773). A manual release creates its Git tag only after
+    # publishing, so the next queued run sees it. cancel-in-progress stays false so none is
+    # cancelled mid-publish, and `queue: max` keeps every waiting release instead of replacing the
+    # pending one (GitHub's default keeps one), so a third release cannot drop the second.
     concurrency:
-      group: release-v${{ needs.prepare.outputs.line }}
+      group: release
       cancel-in-progress: false
+      queue: max
     # The release files and the image need the token of the event; the attestations need a signed
     # identity (`id-token`) and the permission to store an attestation (`attestations`).
     permissions:
@@ -107,11 +111,18 @@ jobs:
           # Every version surface (packages, chart, Compose defaults, README, CHANGELOG): #175.
           node scripts/check-versions.mjs "$v" || { echo "::error::Version files disagree with $v (see above)"; exit 1; }
           if gh release view "v$v" >/dev/null 2>&1; then echo "::error::Release v$v exists already"; exit 1; fi
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null; then
-            echo "::error::Tag v$v exists already: push it again to release it, or delete it first"; exit 1
+          sha="$(git rev-parse HEAD)"
+          # A manual run reserves its tag before publishing (below). A retry of that run finds the
+          # tag on the same commit and continues; a tag on another commit is a different release.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            existing="$(git ls-remote --tags origin "refs/tags/v$v^{}" | cut -f1)"
+            [ -n "$existing" ] || existing="$(git ls-remote --tags origin "refs/tags/v$v" | cut -f1)"
+            if [ -n "$existing" ] && [ "$existing" != "$sha" ]; then
+              echo "::error::Tag v$v points at $existing, not $sha: release that commit by pushing the tag, or delete the tag first"; exit 1
+            fi
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT""
           case "$v" in 0.*|*-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;; esac
 
       # The publication path must not accept a TODO or an incomplete upgrade block.
@@ -134,6 +145,21 @@ jobs:
       - name: Resolve the image name
         id: image
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agentic-marketing" >> "$GITHUB_OUTPUT"
+      # A manual run creates its version tag now, before any image is pushed, so a retry of an older
+      # release always sees this version in the tag list even if this run fails after publishing an
+      # image. The token's tag does not start another release run (GITHUB_TOKEN events never do).
+      - name: Reserve the version tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SHA: ${{ steps.version.outputs.sha }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo "Tag v$VERSION already reserved on $SHA"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$SHA" >/dev/null
+          fi
       # A re-run of an older patch may start after a newer one finished. Concurrency queues a line,
       # and this guard makes the floating major.minor tag follow semver, never publish order: the
       # line tag is pushed only when this version is the newest release in the line (#773), and
@@ -235,6 +261,6 @@ jobs:
             "$bundle" "$(awk -v f="$bundle" '$2 == f {print $1}' dist/SHA256SUMS)" >> notes.md
           flags=""
           [ "${{ steps.version.outputs.prerelease }}" = "true" ] && flags="--prerelease"
-          # On a manual run the tag does not exist yet: the release creates it on the commit built above.
+          # On a manual run the tag was reserved above on the commit built here; the release uses it.
           gh release create "v$v" dist/*.tgz dist/*.tar.gz dist/SHA256SUMS --target "${{ steps.version.outputs.sha }}" \
             --title "Agentic Marketing v$v" --notes-file notes.md $flags

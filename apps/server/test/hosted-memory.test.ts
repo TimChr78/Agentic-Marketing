@@ -190,6 +190,10 @@ describe('hosted memory and skills (#340)', () => {
     await expect(
       s.api.call('agents.memory.add', { agentId: s.agentId, text: 'Call +45 12 34 56 78 before the send.' }),
     ).rejects.toMatchObject({ message: expect.stringContaining('personal data') });
+    // A Danish or Norwegian number without a country code is a phone too (0.14.11 round 3).
+    await expect(s.api.call('agents.memory.add', { agentId: s.agentId, text: 'Call 12345678 before the send.' })).rejects.toMatchObject({
+      message: expect.stringContaining('personal data'),
+    });
     expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).count).toBe(0);
   }, 30_000);
 

@@ -37,6 +37,12 @@ function row(i: number): ArtifactRow {
   };
 }
 
+/** A mounted picker selector, so a completed refresh can be observed. */
+function SegmentNames() {
+  const index = usePickerIndex('segment');
+  return <p>{index.loading ? 'loading' : (index.data?.artifacts.map((a) => a.name).join(', ') ?? 'none')}</p>;
+}
+
 function deferredRows() {
   let resolve!: (value: { artifacts: ArtifactRow[]; total: number; nextCursor: null }) => void;
   const promise = new Promise<{ artifacts: ArtifactRow[]; total: number; nextCursor: null }>((done) => {
@@ -76,11 +82,7 @@ describe('picker index refresh ordering (#525)', () => {
 
   it('notifies a mounted selector when a refresh completes', async () => {
     h.initial = [row(1)];
-    function Names() {
-      const index = usePickerIndex('segment');
-      return <p>{index.loading ? 'loading' : (index.data?.artifacts.map((a) => a.name).join(', ') ?? 'none')}</p>;
-    }
-    render(<Names />);
+    render(<SegmentNames />);
     expect(await screen.findByText('segment 1')).toBeTruthy();
 
     const next = deferredRows();

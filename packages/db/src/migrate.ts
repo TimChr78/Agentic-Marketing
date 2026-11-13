@@ -162,9 +162,35 @@ export async function recordServerVersion(admin: Pick<pg.Pool, 'query'>, version
 
 type RoleClient = Pick<pg.Client, 'query' | 'escapeLiteral'>;
 
+/** Whether a role currently has the attributes that let it bypass row-level security. */
+async function rolePrivileges(client: RoleClient, role: string) {
+  const { rows } = await client.query<{ rolsuper: boolean; rolbypassrls: boolean }>(
+    'SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = $1',
+    [role],
+  );
+  return rows[0];
+}
+
+const privilegesOf = (row: { rolsuper: boolean; rolbypassrls: boolean } | undefined) =>
+  [row?.rolsuper ? 'SUPERUSER' : '', row?.rolbypassrls ? 'BYPASSRLS' : ''].filter(Boolean).join(' and ');
+
+/** Postgres refuses to change these attributes of a role the migration user does not administer. */
+const isPrivilegeDenied = (err: unknown) => {
+  const e = err as { code?: string; message?: string };
+  return (
+    e.code === '42501' ||
+    /must be superuser|permission denied to alter role|admin option on role|not have CREATEROLE/i.test(e.message ?? '')
+  );
+};
+
 /**
  * Create or update the app role. Migrations and a restore both need it: the GRANTs in the
  * migrations and in a dump name it, and it must exist before they run.
+ *
+ * The role must never bypass row-level security (#813), so an existing role is reset too: an
+ * operator who pointed APP_DB_ROLE at a privileged role would otherwise run every request with
+ * tenant isolation off. Changing a superuser's attributes needs a superuser; when the migration
+ * user may not do it, this says so plainly instead of leaving the bypass in place.
  */
 export async function ensureAppRole(client: RoleClient, opts: { appRolePassword: string; appRole?: string }): Promise<string> {
   const role = opts.appRole ?? 'am_app';
@@ -175,18 +201,36 @@ export async function ensureAppRole(client: RoleClient, opts: { appRolePassword:
   // race on the same role row. Postgres reports that as "tuple concurrently updated" or a
   // duplicate role; both mean another session just wrote the same role, so look again and retry.
   for (let attempt = 1; ; attempt++) {
-    const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role]);
+    const existing = await rolePrivileges(client, role);
     try {
       await client.query(
-        rowCount ? `ALTER ROLE ${role} WITH LOGIN PASSWORD ${pwd}` : `CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
+        existing
+          ? `ALTER ROLE ${role} WITH LOGIN NOSUPERUSER NOBYPASSRLS PASSWORD ${pwd}`
+          : `CREATE ROLE ${role} LOGIN PASSWORD ${pwd} NOSUPERUSER NOBYPASSRLS`,
       );
-      return role;
     } catch (err) {
+      if (existing && (existing.rolsuper || existing.rolbypassrls) && isPrivilegeDenied(err)) {
+        throw new Error(
+          `The app role “${role}” has ${privilegesOf(existing)}, so row-level security would be bypassed, and the migration user may not reset it: ` +
+            `${(err as { message?: string }).message ?? String(err)}. Fix it as a superuser with "ALTER ROLE ${role} NOSUPERUSER NOBYPASSRLS", ` +
+            'or set APP_DB_ROLE to a dedicated unprivileged role, then run the migration again.',
+        );
+      }
       const e = err as { code?: string; message?: string };
       const raced = e.code === '23505' || e.code === '42710' || /tuple concurrently updated/.test(e.message ?? '');
       if (!raced || attempt >= 5) throw err;
       await new Promise((r) => setTimeout(r, 50 * attempt));
+      continue;
     }
+    // Read the attributes back: another session could have granted them again mid-migration, and
+    // a superuser role must never reach the running app.
+    const after = await rolePrivileges(client, role);
+    if (after?.rolsuper || after?.rolbypassrls)
+      throw new Error(
+        `The app role “${role}” still has ${privilegesOf(after)} after the migration; row-level security would be bypassed. ` +
+          `Run "ALTER ROLE ${role} NOSUPERUSER NOBYPASSRLS" as a superuser, or set APP_DB_ROLE to an unprivileged role.`,
+      );
+    return role;
   }
 }
 
