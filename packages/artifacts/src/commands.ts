@@ -14,6 +14,7 @@ import {
   artifactTypes,
   contentValidators,
   draftContentSchemas,
+  isSingleton,
   publishValidators,
   referencesOf,
 } from './types';
@@ -198,6 +199,9 @@ export const publishHooks: ((
 ) => Promise<void>)[] = [];
 
 async function publishVersion(ctx: CommandContext, artifactId: string, number: number) {
+  // Lock before reading the live version: two approvals (or a re-publish and an approval) that
+  // both see `publishedVersion = null` would otherwise mark two versions published (#868).
+  await lockArtifacts(ctx, [artifactId]);
   const a = await loadArtifact(ctx, artifactId);
   await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content, artifactId);
   if (a.publishedVersion && a.publishedVersion !== number) await setVersionState(ctx, artifactId, a.publishedVersion, 'superseded');
@@ -211,8 +215,17 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
   for (const l of publishListeners) ctx.afterCommit ? ctx.afterCommit(() => l(ctx, artifact)) : await l(ctx, artifact);
 }
 
+/**
+ * Serialises every writer that can create a singleton artifact for one workspace + type (#869).
+ * All such writers take this lock before checking whether the singleton exists, so two callers
+ * cannot both see none and race the partial unique index. The key must stay identical everywhere.
+ */
+export async function lockSingleton(tx: CommandContext['tx'], workspaceId: string, type: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('am.artifact-singleton'), hashtext(${`${workspaceId}:${type}`}))`);
+}
+
 /** Locks artifact rows (in id order) so their latest version cannot change until the transaction ends. */
-async function lockArtifacts(ctx: CommandContext, ids: string[]) {
+export async function lockArtifacts(ctx: CommandContext, ids: string[]) {
   await ctx.tx
     .select({ id: schema.artifacts.id })
     .from(schema.artifacts)
@@ -392,11 +405,14 @@ export const createArtifact = defineCommand({
     const warnings = contentWarnings(input.type, content);
     const id = newId(artifactTypes[input.type].prefix);
     const ws = ctx.principal.workspaceId;
-    if ('singleton' in artifactTypes[input.type]) {
+    if (isSingleton(input.type)) {
+      // Serialise creations per workspace + type: two concurrent callers must not both pass the
+      // read below, and the second must see a clear conflict rather than a unique violation (#869).
+      await lockSingleton(ctx.tx, ws, input.type);
       const [existing] = await ctx.tx
         .select({ id: schema.artifacts.id })
         .from(schema.artifacts)
-        .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.type, input.type)));
+        .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.type, input.type), eq(schema.artifacts.archived, false)));
       if (existing)
         throw new AppError('conflict', `A workspace has one ${input.type}; it is ${existing.id}. Edit it with artifacts.updateDraft.`);
     }
@@ -909,6 +925,9 @@ export const requestPublish = defineCommand({
   ledgerImpact: (out) => (out.approvalId ? { approvalId: out.approvalId } : undefined),
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
+    // Every principal locks before reading the draft and its author: an agent's updateDraft
+    // committed between the read and publishVersion must not go live unreviewed (#867).
+    await lockArtifacts(ctx, [input.artifactId]);
     const a = await loadArtifact(ctx, input.artifactId);
     refuseAgentsFor(ctx, a.type);
     const v = await loadVersion(ctx, a.id, a.latestVersion);
@@ -1028,6 +1047,8 @@ export const requestPublishBundle = defineCommand({
     const ids = [...new Set(input.artifactIds)];
     if (ids.length < 2)
       throw new AppError('invalid_input', 'A bundle needs at least two different artifacts; use artifacts.requestPublish for one.');
+    // All members are locked before any version or author is read (#867), in id order (#871).
+    await lockArtifacts(ctx, ids);
     const members = [];
     for (const id of ids) {
       const a = await loadArtifact(ctx, id);
@@ -1532,6 +1553,11 @@ export const approve = defineCommand({
     const r = await decide(ctx, input.approvalId);
     await refuseIfAgentStopped(ctx, r);
     const members = await bundleMembers(ctx, r);
+    // All bundle members are locked before any version is published (#868), in id order (#871).
+    await lockArtifacts(
+      ctx,
+      members.map((m) => m.artifactId),
+    );
     for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
     await ctx.tx
       .update(schema.approvalRequests)
@@ -1718,6 +1744,12 @@ export async function runHeldChange(
   const r = await lockApproval(ctx, approvalId);
   if (r?.status !== 'pending' || !r.holdUntil || r.holdUntil > new Date()) return { status: 'not_due' };
   const members = await bundleMembers(ctx, r);
+  // Lock every member before publishing, in id order, so a held run, an approval and a publish
+  // cannot interleave versions or deadlock with each other (#868, #871).
+  await lockArtifacts(
+    ctx,
+    members.map((m) => m.artifactId),
+  );
   const agent = await requestingAgent(ctx, r);
   const held = agent ? await heldActionFor(ctx, agent.id, r.artifactId) : null;
   let problem: string | null = null;
@@ -1852,6 +1884,6 @@ export async function publishedSingleton<
         eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
       ),
     )
-    .where(eq(schema.artifacts.type, type));
+    .where(and(eq(schema.artifacts.type, type), eq(schema.artifacts.archived, false)));
   return row ? (artifactTypes[type].content.parse(row.content) as never) : null;
 }

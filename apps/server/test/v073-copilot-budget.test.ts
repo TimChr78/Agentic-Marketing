@@ -30,7 +30,7 @@ async function answer(r: FakeRequest) {
 async function copilot(user: User, message: string, signal?: AbortSignal) {
   const res = await fetch(`${t.base}/api/copilot`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', cookie: user.cookie },
+    headers: { 'content-type': 'application/json', cookie: user.cookie, origin: t.base },
     body: JSON.stringify({ message }),
     signal,
   });
@@ -120,7 +120,7 @@ describe('a copilot turn is capped by its reservation (#356)', () => {
     const controller = new AbortController();
     const res = await fetch(`${t.base}/api/copilot`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: owner.cookie },
+      headers: { 'content-type': 'application/json', cookie: owner.cookie, origin: t.base },
       body: JSON.stringify({ message: 'List the prompts cancel-turn' }),
       signal: controller.signal,
     });

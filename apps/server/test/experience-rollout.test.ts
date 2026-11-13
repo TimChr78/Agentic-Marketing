@@ -438,6 +438,26 @@ describe('a person’s stop is sticky (#454)', () => {
   });
 });
 
+describe('rollout errors are sanitised (0.14.16 review round 2)', () => {
+  it('stores a fixed reason when an unexpected step failure carries secret text', async () => {
+    const { ws, api } = await person();
+    const id = await publishExperience(api, ramp());
+    await setDue(ws, id);
+    const base = deps();
+    await runExperienceRolloutsOnce({
+      ...base,
+      hot: {
+        ...base.hot,
+        bump: async () => {
+          throw new Error('cache failure: password=probe-secret');
+        },
+      } as typeof base.hot,
+    });
+    const status = await api.call('experiences.rolloutStatus', { artifactId: id });
+    expect(status.lastError ?? '').not.toContain('probe-secret');
+  });
+});
+
 describe('a sweep isolates each ramp (#474)', () => {
   it('one broken guardrail read freezes only its own ramp and records the error', async () => {
     const { ws, api } = await person();
@@ -449,14 +469,17 @@ describe('a sweep isolates each ramp (#474)', () => {
     const out = await runExperienceRolloutsOnce({
       ...deps(),
       measure: async () => {
-        throw new Error('ClickHouse timed out');
+        throw new Error('ClickHouse timed out: password=probe-secret');
       },
     });
     expect(out.failed).toBe(1);
     // The un-guarded ramp widened; the broken one waited at its current step.
     expect((await api.call('experiences.rolloutStatus', { artifactId: a })).share).toBe(25);
     expect(await api.call('experiences.rolloutStatus', { artifactId: b })).toMatchObject({ status: 'running', share: 5 });
-    expect((await api.call('experiences.rolloutStatus', { artifactId: b })).lastError).toContain('ClickHouse timed out');
+    // A fixed reason, never the raw driver text, which can carry credentials (0.14.16 review round 2).
+    const lastError = (await api.call('experiences.rolloutStatus', { artifactId: b })).lastError;
+    expect(lastError).toContain('guardrail');
+    expect(lastError).not.toContain('probe-secret');
     expect((await api.call('experiences.rolloutStatus', { artifactId: a })).lastError).toBeNull();
 
     // The next round retries it alone and clears the error.

@@ -122,6 +122,8 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0088_suppressions_delete_grant.sql': '0.14.4',
   '0089_delivery_kind_index.sql': '0.14.6',
   '0090_suppressions_update_grant.sql': '0.14.11',
+  '0091_oauth_selection_rls.sql': '0.14.16',
+  '0092_singleton_artifacts.sql': '0.14.17',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

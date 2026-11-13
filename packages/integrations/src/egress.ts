@@ -28,6 +28,9 @@ for (const [net, prefix] of [
 for (const [net, prefix] of [
   ['::', 128],
   ['::1', 128],
+  // Local-use NAT64 (RFC 8215). The well-known 64:ff9b::/96 is checked through its embedded IPv4
+  // address instead, so a transition address carrying a public address can still be reached.
+  ['64:ff9b:1::', 48],
   ['fc00::', 7],
   ['fe80::', 10],
   ['ff00::', 8],
@@ -41,7 +44,20 @@ export interface EgressPolicy {
 
 export class EgressError extends Error {}
 
-function allowList(policy: EgressPolicy) {
+interface AllowList {
+  names: Set<string>;
+  nets: BlockList;
+}
+
+/**
+ * The allow-list structures are derived from the policy, which is immutable in practice. Rebuild
+ * them once per policy object instead of twice on every URL check and every resolved address.
+ */
+const allowCache = new WeakMap<EgressPolicy, AllowList>();
+
+function allowList(policy: EgressPolicy): AllowList {
+  const cached = allowCache.get(policy);
+  if (cached) return cached;
   const names = new Set<string>();
   const nets = new BlockList();
   for (const h of policy.allowedHosts.map((x) => x.trim().toLowerCase()).filter(Boolean)) {
@@ -51,7 +67,9 @@ function allowList(policy: EgressPolicy) {
     else if (v) nets.addAddress(addr, v === 6 ? 'ipv6' : 'ipv4');
     else names.add(h);
   }
-  return { names, nets };
+  const built = { names, nets };
+  allowCache.set(policy, built);
+  return built;
 }
 
 const family = (a: string) => (isIP(a) === 6 ? 'ipv6' : 'ipv4');
@@ -88,24 +106,29 @@ function ipv6Words(address: string): number[] | null {
 const ipv4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
 
 /**
- * The IPv4 address an IPv6 form embeds, or null. IPv4-mapped (`::ffff:0:0/96`), IPv4-compatible
- * (`::/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`, the address in bits 16-48) all carry
- * an IPv4 address that must be checked against the IPv4 block list.
+ * The IPv4 address an IPv6 form embeds, or null. IPv4-mapped (`::ffff:0:0/96`), IPv4-translated
+ * (SIIT, `::ffff:0:0:0/96`), IPv4-compatible (`::/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`,
+ * the address in bits 16-48) all carry an IPv4 address that must be checked against the IPv4 block
+ * list.
  */
 function embeddedIpv4(address: string): string | null {
   const w = ipv6Words(address);
   if (!w) return null;
   const zero = (from: number, to: number) => w.slice(from, to).every((n) => n === 0);
   if (zero(0, 5) && w[5] === 0xffff) return ipv4(w[6]!, w[7]!);
+  // SIIT: ::ffff:0:a.b.c.d. It is not mapped (w[5] is 0), so the rule above does not match it.
+  if (zero(0, 4) && w[4] === 0xffff && w[5] === 0) return ipv4(w[6]!, w[7]!);
   if (zero(0, 6)) return ipv4(w[6]!, w[7]!);
   if (w[0] === 0x64 && w[1] === 0xff9b && zero(2, 6)) return ipv4(w[6]!, w[7]!);
   if (w[0] === 0x2002) return ipv4(w[1]!, w[2]!);
   return null;
 }
 
-/** Whether an address is private (and not explicitly allowed). */
+/** Whether an address is private (and not explicitly allowed). Anything that is not an IP address is refused. */
 export function isBlockedAddress(address: string, policy: EgressPolicy): boolean {
   const a = address.trim().replace(/^\[|\]$/g, '');
+  // Fail closed: a resolver that returns junk must not reach connect as if it were public.
+  if (isIP(a) === 0) return true;
   const { nets } = allowList(policy);
   if (nets.check(a, family(a))) return false;
   const embedded = isIP(a) === 6 ? embeddedIpv4(a) : null;
@@ -128,6 +151,9 @@ export function checkUrl(raw: string, policy: EgressPolicy): string | null {
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return 'only http and https URLs are allowed';
   if (u.username || u.password) return 'credentials in the URL are not allowed; use a secret header';
   const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  // Decision (#817): an allow-listed CIDR range covers addresses, not names. A name is only reachable
+  // when the name itself is listed, so `localhost` or `*.internal` cannot be redirected through a
+  // range and resolve somewhere unexpected.
   if (allowList(policy).names.has(host)) return null;
   if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.internal')) return `${host} is an internal address`;
   if (isIP(host) && isBlockedAddress(host, policy)) return `${host} is a private address; allow it with EGRESS_ALLOWED_HOSTS`;
@@ -146,6 +172,9 @@ const dnsLookup = lookup as unknown as DnsResolve;
  * Resolve, then refuse private addresses unless the name itself is on the allow list. Every
  * address is checked, so a mixed public/private answer cannot slip through. `autoSelectFamily`
  * (the default since Node 20) calls this with `all: true` and expects an array.
+ *
+ * A lookup with `family: 4` or `family: 6` must never answer with the other family: otherwise an
+ * IPv6-only connection could be routed to IPv4. Every address is still checked before the filter.
  */
 export function lookupFor(u: URL, policy: EgressPolicy, resolve: DnsResolve = dnsLookup): LookupFunction {
   const named = allowList(policy).names.has(u.hostname.toLowerCase());
@@ -161,8 +190,15 @@ export function lookupFor(u: URL, policy: EgressPolicy, resolve: DnsResolve = dn
         for (const { address } of addresses)
           if (isBlockedAddress(address, policy)) return cb(new EgressError(`${hostname} resolves to private address ${address}`), '', 0);
       }
-      if (options.all) return cb(null, addresses);
-      cb(null, addresses[0].address, addresses[0].family);
+      const wanted = options.family === 4 || options.family === 6 ? options.family : undefined;
+      const matching = wanted ? addresses.filter((a) => a.family === wanted) : addresses;
+      if (!matching.length) {
+        const notFound: NodeJS.ErrnoException = new Error(`getaddrinfo ENOTFOUND ${hostname}`);
+        notFound.code = 'ENOTFOUND';
+        return cb(notFound, '', 0);
+      }
+      if (options.all) return cb(null, matching);
+      cb(null, matching[0]!.address, matching[0]!.family);
     });
   };
 }

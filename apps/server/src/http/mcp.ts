@@ -167,7 +167,17 @@ export function mcpServerFor(
           };
         } catch (err) {
           if (err instanceof AppError) return { isError: true, content: [{ type: 'text' as const, text: JSON.stringify(err.toJSON()) }] };
-          throw err;
+          // An unexpected exception's text can carry SQL, secrets or driver details. The MCP
+          // client sees the same fixed failure as the audit log; the original stays on the span.
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text' as const,
+                text: JSON.stringify({ error: 'internal', message: 'The command failed with an unexpected error.' }),
+              },
+            ],
+          };
         }
       },
     );

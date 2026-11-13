@@ -126,6 +126,11 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
 // not overlap another active mandate for the same agent, and it ends within a year.
 publishValidators.set('agent_mandate', async (content, tx: Tx, artifact) => {
   const m = content as AgentMandate;
+  // Serialise the "no other active mandate" check per workspace + agent (#871): two different
+  // mandate rows otherwise lock different artifacts and both pass.
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtext('am.agent-mandate'), hashtext(${`${artifact?.workspaceId ?? ''}:${m.agent}`}))`,
+  );
   const problems: string[] = [];
   const [agent] = await tx.select({ status: schema.agents.status }).from(schema.agents).where(eq(schema.agents.id, m.agent));
   if (!agent) problems.push(`agent ${m.agent} does not exist`);

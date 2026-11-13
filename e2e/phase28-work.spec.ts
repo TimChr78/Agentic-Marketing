@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test';
-import { PEOPLE, signIn } from './helpers';
+import { BASE, PEOPLE, signIn } from './helpers';
 import { loadFixtureIds, primePage, settle } from './matrix.mjs';
 
 // Phase 28 (#556) W acceptance: Home's empty blocks name the next action, the agent Pause and the
@@ -163,7 +163,7 @@ test('a stale review still warns and approves the version on screen', async ({ p
   await primePage(page, { theme: 'light', width: 1440 });
   await signIn(page, PEOPLE.approver);
   const ids = await loadFixtureIds(async (name: string, input: unknown) => {
-    const response = await page.request.post(`/v1/${name}`, { data: input });
+    const response = await page.request.post(`/v1/${name}`, { data: input, headers: { origin: BASE } });
     return response.json();
   });
   const id = ids.approvals.broadcast ?? ids.approvals.email;

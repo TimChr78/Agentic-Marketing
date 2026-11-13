@@ -39,6 +39,7 @@ import {
   selectDiscovered,
   trimHistory,
 } from './copilot-tools';
+import { type BrowserRequestPolicy, csrfRefusal } from './csrf';
 import { mcpServerFor } from './mcp';
 
 // The in-app copilot (agents-and-mcp.md §6) is just another MCP client: it acts as an agent
@@ -218,11 +219,14 @@ async function builtinCopilotAgent(tx: Tx, workspaceId: string, user: { userId: 
   return created;
 }
 
-export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: KeyProvider }) {
+export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: KeyProvider; origin: BrowserRequestPolicy }) {
   const app = new Hono();
   app.post('/api/copilot', bodyLimit(COPILOT_MAX_BODY, COPILOT_TOO_LARGE), async (c) => {
     const user = await principalFromSession(deps.auth, deps.db, c.req.raw.headers);
     if (!user) throw new AppError('unauthorized', 'Sign in first.');
+    // The copilot is a cookie-authenticated write: only JSON from the app's origin.
+    const refused = csrfRefusal(c.req.raw, deps.origin);
+    if (refused) return refused;
     const parsed = Body.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success)
       throw new AppError('invalid_input', 'Send {"message": "…", "conversationId"?: "cop_…"}.', z.treeifyError(parsed.error));

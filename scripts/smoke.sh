@@ -120,7 +120,7 @@ curl -fsS "$BASE/readyz" >/dev/null && echo "ready"
 dc exec -T -e AM_BOOTSTRAP_PASSWORD="$PASSWORD" app am bootstrap --email "$EMAIL" --workspace Smoke
 curl -fsS -c "$COOKIES" -H 'content-type: application/json' -H "origin: $BASE" \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" "$BASE/api/auth/sign-in/email" >/dev/null
-call() { curl -fsS -b "$COOKIES" -H 'content-type: application/json' -d "$2" "$BASE/v1/$1"; }
+call() { curl -fsS -b "$COOKIES" -H 'content-type: application/json' -H "origin: $BASE" -d "$2" "$BASE/v1/$1"; }
 json() { node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>console.log(JSON.parse(s)$1))"; }
 
 call workspace.get '{}' | json '.name' | grep -qx Smoke && echo "signed in"

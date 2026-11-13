@@ -36,7 +36,9 @@ _Last updated: 2026-11-12_
   - **0.14.12** (analytics and experiments) is released and verified: Sol approved after six rounds (ads attribution is bounded in memory, pairs and time).
   - **0.14.13** (UI freshness and e-mail) is released and verified: Sol approved after five rounds (ordered reference observations, one re-check per return).
   - **0.14.14** (operations and release tooling) is released: Sol approved after six rounds (one release queue with `queue: max`, tag reserved before publishing, `latest` only for the newest stable release, workflow shell steps checked by `bash -n`).
-  - **0.14.15** (delivery and data edge cases) is released: Sol approved after four rounds (retryable SNS refusals, a non-blocking idempotency lock). This completes the 2026-11-12 audit plan. Plan: https://claude.ai/artifact/BDXuwrEBa6hevSKU4s9vAL
+  - **0.14.15** (delivery and data edge cases) is released and verified: Sol approved after four rounds (retryable SNS refusals, a non-blocking idempotency lock). This completes the 2026-11-12 audit plan.
+  - **0.14.16** (security and availability: #838, #829, #817, #818) is released and verified. Sol confirmed every finding on these issues closed over three rounds; its last round still said BLOCK, on pre-existing error-text sites elsewhere in the codebase, which are released separately as the #885 sweep (0.14.20). Plan: https://claude.ai/artifact/BpmvEUAQFvWKJfDEJmMMR9 (previous plan: https://claude.ai/artifact/BDXuwrEBa6hevSKU4s9vAL)
+  - **0.14.17** (artifact integrity: #867, #868, #869, #871) is released: Sol approved after three rounds (singleton uniqueness enforced in the database, archived duplicates restored unpublished, deadlocks answered as a retryable `conflict`).
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
@@ -82,4 +84,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.15, released from `main`; v0.14.14 is verified.
+- The last release is v0.14.17, released from `main`; v0.14.16 is verified.

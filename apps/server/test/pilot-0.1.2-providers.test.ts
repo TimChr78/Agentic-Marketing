@@ -91,8 +91,11 @@ describe('provider-side tracking warnings', () => {
   let admin: User;
 
   beforeAll(async () => {
-    off = await startTestServer('test_pilot_providers_tracking', testPort(3300), {
-      PUBLIC_URL: 'http://localhost:3300',
+    // PUBLIC_URL must be the server's own address: the CSRF origin check (#838) compares the
+    // client's Origin with it, and testPort shifts the port per worker.
+    const port = testPort(3300);
+    off = await startTestServer('test_pilot_providers_tracking', port, {
+      PUBLIC_URL: `http://localhost:${port}`,
       PUBLIC_LINKS_URL: LINKS,
       EMAIL_TRACK_CLICKS: 'false',
     });
