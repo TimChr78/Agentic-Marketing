@@ -6,9 +6,15 @@
 # replacing this file with the new release's copy and bumping AM_VERSION, with no merge to resolve.
 #
 # Copy .env.example to .env and fill in the secrets first.
+#
+# Service images are pinned by digest: the multi-arch index (linux/amd64 and linux/arm64) behind
+# the tag, so `docker compose pull` never changes the runtime behind a release. The tag stays in
+# front of the digest, so an update is readable; Dependabot proposes new digests for the pinned
+# images (and the Dockerfile's), and bumping one is a deliberate change. The `app` image follows
+# AM_VERSION, the release you choose.
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
     restart: unless-stopped
     environment:
       POSTGRES_USER: am
@@ -22,7 +28,7 @@ services:
       retries: 10
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.8
+    image: clickhouse/clickhouse-server:26.8@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
     restart: unless-stopped
     environment:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1  # row policies need it
@@ -39,7 +45,7 @@ services:
 
   nats:
     # The alpine variant has a shell and wget for the healthcheck; the plain image has neither.
-    image: nats:2.15.0-alpine
+    image: nats:2.15.0-alpine@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
     restart: unless-stopped
     # -m 8222 serves the monitoring endpoint the healthcheck reads.
     command: ["-js", "-sd", "/data", "-m", "8222"]
@@ -51,7 +57,7 @@ services:
       retries: 20
 
   valkey:
-    image: valkey/valkey:8.1.9
+    image: valkey/valkey:8.1.9@sha256:d5e642b89ee060a784f322cad2daad61c35d55530c32b74ce38b73ae01cd9fb3
     restart: unless-stopped
     command: ["valkey-server", "--save", "", "--appendonly", "no"]
     healthcheck:
@@ -61,7 +67,7 @@ services:
 
   app:
     # Pull the release image; docker-compose.build.yml builds this checkout from source instead.
-    image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.14.15}
+    image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.14.18}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -140,7 +146,11 @@ services:
     volumes:
       - backups:/backups
     ports:
-      - "${AM_PORT:-3000}:3000"
+      # Loopback only by default, like the public listener below: the admin UI, sign-in and REST API
+      # are reachable from this machine until AM_BIND widens it. Set AM_BIND=0.0.0.0 (or a LAN
+      # address) only when the network in front is trusted, or keep it loopback and put a tunnel or
+      # reverse proxy on this host.
+      - "${AM_BIND:-127.0.0.1}:${AM_PORT:-3000}:3000"
       # The public-only listener, published on PUBLIC_BIND (host:port, loopback-only by default; 3201
       # because 3001 is a common homelab port and 3210 is a natural admin port). With PUBLIC_PORT
       # unset nothing listens behind it. A tunnel on a Docker network reaches http://app:3001 and

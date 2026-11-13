@@ -164,7 +164,7 @@ export const TEMPLATE_DB = scopedDbName('am_test_template');
 // prefix keeps one run's buckets out of the next one, which matters now that seeded fixtures reuse
 // the same client IPs and message ids on every run.
 const VALKEY_RUN_ID = `${process.pid.toString(36)}_${Date.now().toString(36)}`;
-const APP_ROLE = { appRole: 'am_app_test', appRolePassword: 'am_app_test_password' };
+export const APP_ROLE = { appRole: 'am_app_test', appRolePassword: 'am_app_test_password' };
 
 /** The admin URL of a test database on the TEST_DATABASE_URL server. */
 export function testDatabaseUrl(dbName: string) {
@@ -367,7 +367,11 @@ export async function startTestServer(
     signUp,
     workspaceWith,
     api: (u: User, workspaceId?: string) =>
-      createClient<Commands>({ baseUrl: base, headers: { cookie: u.cookie, ...(workspaceId ? { 'x-workspace-id': workspaceId } : {}) } }),
+      createClient<Commands>({
+        baseUrl: base,
+        // A browser sends Origin on every cookie-authenticated POST; the REST surface now requires it.
+        headers: { cookie: u.cookie, origin: base, ...(workspaceId ? { 'x-workspace-id': workspaceId } : {}) },
+      }),
     async close() {
       stop.abort();
       publicHttp?.close();

@@ -179,7 +179,7 @@ describe('assets.upload', () => {
     const res = await fetch(`${t.base}/v1/assets.upload`, {
       method: 'POST',
       // Close the socket: the server rejects the body by size and does not read the rest of it.
-      headers: { 'content-type': 'application/json', cookie: owner.cookie, connection: 'close' },
+      headers: { 'content-type': 'application/json', cookie: owner.cookie, origin: t.base, connection: 'close' },
       body: JSON.stringify({
         fileName: 'huge.png',
         contentType: 'image/png',

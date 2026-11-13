@@ -76,7 +76,7 @@ const consent = (userId: string, ai: boolean) => ({
 async function copilot(u: User, message: string, conversationId?: string, agentId?: string) {
   const res = await fetch(`${t.base}/api/copilot`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', cookie: u.cookie },
+    headers: { 'content-type': 'application/json', cookie: u.cookie, origin: t.base },
     body: JSON.stringify({ message, conversationId, agentId }),
   });
   if (!res.ok) return { status: res.status, body: await res.json(), events: [] as Record<string, any>[] };

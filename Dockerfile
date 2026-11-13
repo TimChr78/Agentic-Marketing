@@ -1,5 +1,8 @@
 # One image for every role (ADR-0002). Select roles with ROLE=api,worker,scheduler (default: all).
-FROM node:22-slim AS base
+# The base image is pinned by digest (the multi-arch index: linux/amd64 and linux/arm64), so a
+# rebuild of one commit gives the same runtime; bump it deliberately (Dependabot proposes them).
+# node:22-slim
+FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS base
 ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH NODE_ENV=production COREPACK_HOME=/corepack
 WORKDIR /app
 # pnpm (the version pinned in package.json) is part of the image, so a container never downloads it.
@@ -54,5 +57,9 @@ RUN apt-get update \
 RUN mkdir -p /backups && chown node:node /backups
 USER node
 EXPOSE 3000
-HEALTHCHECK --interval=15s --timeout=3s --start-period=120s CMD node -e "fetch('http://localhost:3000/readyz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+# Only the api and ingest roles listen on HTTP (apps/server/src/main.ts), so a worker-only or
+# scheduler-only container has nothing to probe. The script reads ROLE and passes those roles, like
+# the Helm chart's probe guard (#645); a listener role still probes /readyz.
+COPY scripts/healthcheck.mjs /usr/local/bin/healthcheck.mjs
+HEALTHCHECK --interval=15s --timeout=3s --start-period=120s CMD ["node", "/usr/local/bin/healthcheck.mjs"]
 CMD ["pnpm", "--filter", "@agentic-marketing/server", "start"]

@@ -2,6 +2,71 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.18] - 2026-11-13
+
+### Security
+
+- **Breaking:** the Compose file publishes the admin port on `AM_BIND`, which defaults to `127.0.0.1`, instead of every host interface: the admin UI, sign-in, REST API and MCP answer from this machine only, like the public listener's `PUBLIC_BIND`. Set `AM_BIND=0.0.0.0` (or a LAN address) in `.env` to keep the previous behaviour; `am doctor` reports the admin bind and warns when it is widened.
+- **Breaking:** `.env.example` leaves `POSTGRES_PASSWORD` and `APP_DB_PASSWORD` empty, so Compose refuses to start from a copied template instead of running with the known `change-me` values. `am init` fills both; set them by hand only when you write `.env` yourself.
+- The image healthcheck passes for `ROLE=worker` and `ROLE=scheduler`, which start no HTTP listener: a worker-only or scheduler-only container is no longer permanently unhealthy, and `docker compose up --wait` works for it. A role that serves HTTP still probes `/readyz`, like the Helm chart's probes.
+- `scripts/smoke.sh` gives every run its own Compose project, temporary files and free ports, so two runs side by side (or a real install on the same host) no longer collide, and cleanup removes only that run's stack.
+- The Docker image and every Compose service image are pinned by digest, the multi-arch index behind each tag, so rebuilding a commit or pulling a tag no longer changes the runtime.
+
+### Upgrading from 0.14.17
+
+- **Migrations:** none.
+- **Configuration:** `AM_BIND`.
+- **Breaking changes:** the Compose admin port (`AM_PORT`) is now published on `AM_BIND`, default `127.0.0.1`, so the admin UI, sign-in, REST API and MCP are no longer reachable from other machines; set `AM_BIND=0.0.0.0` or a LAN address in `.env` to keep network access. A `.env` copied from `.env.example` without running `am init` now has empty `POSTGRES_PASSWORD` and `APP_DB_PASSWORD`, and Compose refuses to start until they are set.
+- **Manual steps:** if people or a reverse proxy on another host reach the admin port directly, set `AM_BIND` in `.env` before upgrading.
+- **Upgrade:** download `agentic-marketing-compose-0.14.18.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.18 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.18` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.18). Run `docker compose exec app am doctor`.
+
+<!-- issues: 870 -->
+
+## [0.14.17] - 2026-11-13
+
+### Fixed
+
+- A person's publish now locks the artifact (all members of a bundle, in id order) before it reads the draft and its author, so an agent's concurrent edit cannot go live without review under the `agent_changes` policy; approvals and held changes lock the same rows before publishing, so exactly one version is `published` and it matches `published_version`.
+- Singleton artifact types are unique per workspace in the database, not only in the application: `config.import` refuses a bundle with two entries of one singleton type and keeps its map current as it inserts, concurrent `artifacts.create` calls serialise on a workspace + type advisory lock and answer `conflict` instead of a raw unique violation, and a new migration resolves existing duplicates before it creates the partial unique index. Per workspace and type it keeps the published row, or the oldest if none is published; the others are archived (not deleted), renamed with ` (archived duplicate <id>)`, and excluded from the index.
+- `config.import` resolves a singleton to the active, non-archived row and never picks the duplicate rows migration 0092 archived. An entry whose explicit id names an archived singleton restores that row, unpublished, when no active singleton exists (the version that was live before it was archived never goes live again on its own; only the import's publish step, under the approval policy, can publish); when one does, the import refuses with `conflict` naming both ids rather than creating a second active row. Non-singleton imports keep updating an archived row in place. `artifacts.create`, `config.import` and `workspace.create` now share the same workspace + type advisory lock before their existence check, and a remaining `23505` on `artifacts_singleton_type` maps to `conflict` instead of HTTP 500.
+- Concurrent publishes of two mandates for one agent serialise on a workspace + agent advisory lock, so exactly one is active. `config.import` locks every affected artifact in id order before writing, which removes the A,B vs B,A deadlock, and any remaining Postgres deadlock (`40P01`) surfaces as a retryable `conflict` instead of an internal error.
+- **Upgrading:** the migration archives duplicate singleton rows deterministically (keeping the published one, or the oldest), so review archived rows named ` (archived duplicate …)` if a workspace used more than one brand, tracking plan, purposes, conversion map, delivery policy or business context. Nothing is deleted. No configuration or command changes are needed.
+
+### Upgrading from 0.14.16
+
+- **Migrations:** `packages/db/migrations/0092_singleton_artifacts.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** migration 0092 archives duplicate singleton artifacts (brand, tracking plan, purposes, conversion map, delivery policy, business context) per workspace, keeping the published or oldest row; `config.import` refuses a bundle with two entries of one singleton type and answers `conflict` when an explicit id names an archived singleton while another is active; a Postgres deadlock now returns a retryable `conflict` instead of an internal error, so clients should retry it.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.17.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.17 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.17` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.17). Run `docker compose exec app am doctor`.
+
+<!-- issues: 867, 868, 869, 871 -->
+
+## [0.14.16] - 2026-11-13
+
+### Security
+
+- **Breaking:** a write authenticated by the session cookie now has to send `Content-Type: application/json` from the app's own origin (`PUBLIC_URL`, or a `TRUSTED_ORIGINS` entry; `Sec-Fetch-Site: same-origin` is the fallback when `Origin` is absent). A form-encoded or `text/plain` post from another site is refused with 413/415 or 403 instead of running the command. The invitation and OAuth consent-workspace form endpoints accept urlencoded forms but run the same origin check; bearer and API tokens are unaffected. Better Auth's own `/api/auth/*` routes already validate Origin against the same trusted list.
+- **Breaking:** a workspace autonomy draft ceiling of 0 now makes every agent observe-only: drafts are refused with a reason, with or without a mandate, while reads still work.
+- `am reset-password` deletes every existing session of that person in the same operation (and nobody else's), so a cookie stolen before the reset stops working.
+- Agent auto-creation on first credential use and the OAuth consent workspace choice now write as the app role under row-level security; the global cleanup of abandoned consent choices moved to the scheduler.
+- The consent-selection migration is expand-only: the `session_id` key from 0.8.0 stays, so 0.14.15 API pods keep working during a Helm pre-upgrade migration and an app rollback still chooses a brand. A re-pick for the same request replaces the row under a session-scoped policy; removing the old key is deferred to 0.14.17+.
+- The agent activity ledger stores the same fixed sanitized failure as the audit log for an unexpected exception, so `agent_actions.error` and `agents.activity` no longer expose driver text or secrets. Hosted-run failures, webhook/action delivery errors and unexpected MCP tool errors use the same rule; an `AppError` message written for people is kept.
+- The Postgres admin and application pools handle a failure of an idle pooled connection instead of exiting the process, so a database restart or failover no longer takes the server down.
+- The egress guard refuses the IPv4-translated (SIIT) and local-use NAT64 forms, fails closed on anything that is not an IP address, filters resolved addresses by the requested family, and keeps internal names reachable only when the name itself is allow-listed.
+- An unexpected exception in the command executor is audited as a sanitized internal failure before it is rethrown, so a failed write leaves a trace without recording SQL, secrets or stack details.
+- `ads.importSpend` no longer turns an unexpected failure (the database, a secret, a bug) into a user-facing error with its raw text; provider answers and egress refusals still explain themselves. A rollout step that fails unexpectedly records a fixed reason on its status (the full error goes to the server log), and an unreadable guardrail says which measure could not be read.
+
+### Upgrading from 0.14.15
+
+- **Migrations:** `packages/db/migrations/0091_oauth_selection_rls.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** cookie-authenticated writes (REST `/v1`, workspace selection, invitations, Copilot) need `Content-Type: application/json` and an `Origin` matching `PUBLIC_URL` or `TRUSTED_ORIGINS`; scripts that call the API with a session cookie must send `Origin`, and bearer-token clients are unaffected. A workspace autonomy draft ceiling of 0 now refuses agent drafts. A CIDR in `EGRESS_ALLOWED_HOSTS` no longer covers internal names such as `localhost`; list the name itself.
+- **Manual steps:** if the admin UI is served on a custom domain other than `PUBLIC_URL`, add that origin to `TRUSTED_ORIGINS` before upgrading, or its writes are refused with 403.
+- **Upgrade:** download `agentic-marketing-compose-0.14.16.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.16 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.16` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.16). Run `docker compose exec app am doctor`.
+
+<!-- issues: 817, 818, 829, 838 -->
+
 ## [0.14.15] - 2026-11-13
 
 ### Fixed

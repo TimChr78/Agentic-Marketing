@@ -296,6 +296,14 @@ function auditTargetList(single: string | undefined, extra: readonly string[]): 
 }
 
 /**
+ * What the audit log records about a failure: an AppError's code and message, or, for an
+ * unexpected exception, a fixed internal marker. The original exception is never written to the
+ * log (it can carry SQL, secrets or stack details); it stays on the span for diagnostics.
+ */
+export type AuditedError = { code: string; message: string };
+const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
+
+/**
  * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for
  * every command; a command that records several items itself (agents.renewMandates, one per
  * mandate) calls it directly and declares `auditsItself`.
@@ -307,7 +315,7 @@ export async function appendAuditEntry(
   cmd: { name: string; effect: string },
   inputHash: string,
   target: string | undefined,
-  error?: AppError,
+  error?: AuditedError,
   ip?: string | null,
 ) {
   // Serialise appends per workspace so the hash chain never forks under concurrency.
@@ -344,7 +352,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
     cmd: AnyCommand,
     inputHash: string,
     target: string | undefined,
-    error?: AppError,
+    error?: AuditedError,
   ) => appendAuditEntry(tx, p, surface, cmd, inputHash, target, error);
 
   /** Validate → authorize → idempotency → handler → validate output → audit (writes and failures), in one transaction. */
@@ -556,25 +564,31 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         report('ok');
         span.end();
         return result;
-      } catch (err) {
+      } catch (thrown) {
+        const conflict = knownConflict(thrown);
+        if (conflict) span.recordException(thrown as Error);
+        const err = conflict ?? thrown;
         // The transaction rolled back: keep the agent's attempt (a refusal or a failed write) in the ledger.
         const outcome = policy;
+        // An AppError is written for a person; anything else is unexpected and its text may carry
+        // SQL, secrets or driver details, so the ledger stores the same fixed failure as the audit
+        // log. The original exception stays on the span for diagnostics (#838).
+        const failure = err instanceof AppError ? err.message : UNEXPECTED_FAILURE.message;
         if (agent && outcome)
           await db
             .withWorkspace(principal.workspaceId, (tx) =>
-              recordAgentAction(
-                tx,
-                agent.id,
-                cmd,
-                outcome,
-                opts.surface,
-                target,
-                err instanceof Error ? err.message : String(err),
-                intentOf(parsed.data),
-              ),
+              recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure, intentOf(parsed.data)),
             )
             .catch((e) => span.recordException(e as Error));
         if (err instanceof AppError) return fail(err);
+        // An unexpected exception is audited too (as a sanitized internal failure): a write that
+        // failed must leave a trace whatever the cause. Its own transaction; the original text stays
+        // on the span only.
+        await db
+          .withWorkspace(principal.workspaceId, (tx) =>
+            appendAudit(tx, principal, opts.surface, cmd, inputHash, target, UNEXPECTED_FAILURE),
+          )
+          .catch((e) => span.recordException(e as Error));
         report('error');
         span.recordException(err as Error);
         span.setStatus({ code: SpanStatusCode.ERROR });
@@ -863,5 +877,41 @@ async function retrySnapshotConflicts<T>(isRead: boolean, run: () => Promise<T>)
 export function isSerializationFailure(err: unknown): boolean {
   for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
     if (e.code === '40001') return true;
+  return false;
+}
+
+/** Postgres SQLSTATE 40P01, directly or as the cause of a Drizzle query error. */
+// A deadlock is a scheduling conflict, not a server fault (#871): the work rolled back and the
+// same request can safely run again. A singleton writer that raced another creation still reaches
+// the partial unique index (a writer that does not take the advisory lock, or a future one): answer
+// conflict, not a 500, and say what to do next (#867). Mapped before the ledger and audit so both
+// record the readable conflict once, like any other AppError.
+function knownConflict(err: unknown): AppError | null {
+  if (isDeadlock(err))
+    return new AppError('conflict', 'Another change locked the same artifacts at the same time. Retry this action; nothing was written.', {
+      retryable: true,
+    });
+  if (isSingletonConflict(err))
+    return new AppError(
+      'conflict',
+      'This workspace already has an artifact of that type: another change created it at the same time. Nothing was written; retry and edit the existing artifact.',
+    );
+  return null;
+}
+
+export function isDeadlock(err: unknown): boolean {
+  for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
+    if (e.code === '40P01') return true;
+  return false;
+}
+
+/** Postgres 23505 on the singleton partial unique index, directly or as the cause of a query error. */
+export function isSingletonConflict(err: unknown): boolean {
+  for (
+    let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | undefined, depth = 0;
+    e && depth < 5;
+    e = e.cause as typeof e, depth++
+  )
+    if (e.code === '23505' && e.constraint === 'artifacts_singleton_type') return true;
   return false;
 }

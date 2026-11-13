@@ -203,6 +203,10 @@ async function admin(command: string, rest: string[]) {
           accountId: found.user.id,
           password: hashed,
         });
+      // A reset is the break-glass path for a compromised password: end every session of this person
+      // in the same operation, so a cookie stolen before the reset cannot outlive it. Other people's
+      // sessions and other credentials are untouched.
+      await context.internalAdapter.deleteUserSessions(found.user.id);
       console.log(`password updated for ${values.email}`);
     } else if (command === 'rotate-keys') {
       const { rewrapped } = await rewrapDataKeys(db.admin, keyProvider);

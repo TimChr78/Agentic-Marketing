@@ -34,6 +34,9 @@ updates:
       actions:
         patterns: ['*']
   - package-ecosystem: docker
+    # Covers the Dockerfile's base image and the digest pins in docker-compose.yml,
+    # docker-compose.test.yml and docker-compose.build.yml at the repository root. A bump of a
+    # pinned digest is a runtime change: read it like a version bump, not a formality.
     directory: /
     schedule:
       interval: weekly

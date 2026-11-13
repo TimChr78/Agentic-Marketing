@@ -1,5 +1,6 @@
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { MEASURES, runAnalyticsQuery } from '@agentic-marketing/analytics';
+import { AppError } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
@@ -191,7 +192,16 @@ async function sweepRamp(deps: RolloutDeps, tx: Tx, workspaceId: string, artifac
   const { row } = found;
   const out: SweptRamp = { checked: 1, advanced: 0, paused: 0 };
   let reading: GuardrailReading | null = null;
-  if (row.guardrail) reading = await readGuardrail(deps, tx, workspaceId, row.guardrail, row.stepHours, now);
+  if (row.guardrail) {
+    try {
+      reading = await readGuardrail(deps, tx, workspaceId, row.guardrail, row.stepHours, now);
+    } catch (err) {
+      // A guardrail that cannot be measured is a reason the ramp waits, shown on its status; the
+      // driver's own text (which can carry connection details) goes to the log only.
+      logger.warn({ err, workspaceId, artifactId: row.artifactId }, 'experience rollout guardrail could not be read');
+      throw new AppError('conflict', `The ${row.guardrail.measure} guardrail could not be read; the step waits and is retried.`);
+    }
+  }
   if (reading && !reading.ok) {
     const reason = `${reading.measure} fell ${reading.dropPercent.toFixed(1)}% (from ${reading.baseline} to ${reading.value}); the ramp allows ${row.guardrail?.maxDropPercent ?? 0}%`;
     const [paused] = await tx
@@ -265,7 +275,13 @@ async function sweepRamp(deps: RolloutDeps, tx: Tx, workspaceId: string, artifac
 
 /** Records why one ramp could not be swept, without touching any other ramp (#474). */
 async function recordRampError(deps: RolloutDeps, workspaceId: string, artifactId: string, err: unknown, now: Date) {
-  const message = (err instanceof Error ? err.message : String(err)).split('\n')[0].slice(0, 500);
+  // Only a reason written for people (an AppError) is shown on the ramp's status; any other failure
+  // (the database, the cache, a bug) is recorded as a fixed reason and logged in full by the caller,
+  // because its text can carry credentials (0.14.16 review round 2).
+  const message =
+    err instanceof AppError
+      ? err.message.split('\n')[0].slice(0, 500)
+      : 'The rollout step failed unexpectedly; the step waits and is retried. Operators can find the error in the server log.';
   await deps.db.withWorkspace(workspaceId, (tx) =>
     tx
       .update(schema.experienceRollouts)

@@ -2042,6 +2042,18 @@ export const ARTIFACT_TYPES = Object.keys(artifactTypes) as [ArtifactType, ...Ar
 export const artifactTypeEnum = z.enum(ARTIFACT_TYPES);
 
 /**
+ * Types a workspace has at most one of (#869). Derived from the registry flags, so adding
+ * `singleton: true` to a type widens this list without a second place to edit; the database's
+ * partial unique index must then be widened too, and `singleton-index.test.ts` fails until it is.
+ */
+export const SINGLETON_TYPES: readonly ArtifactType[] = ARTIFACT_TYPES.filter((type) => 'singleton' in artifactTypes[type]).sort();
+
+/** Whether a workspace holds at most one artifact of this type. */
+export function isSingleton(type: string): boolean {
+  return (SINGLETON_TYPES as readonly string[]).includes(type);
+}
+
+/**
  * Looser schemas for saving drafts: a draft may be unfinished (e.g. a journey step with no
  * template yet). Types without an entry use their normal content schema. Publishing always
  * validates the full schema in artifactTypes.

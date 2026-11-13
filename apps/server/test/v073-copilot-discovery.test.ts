@@ -31,7 +31,7 @@ async function answer(r: FakeRequest) {
 async function copilot(user: User, message: string) {
   const res = await fetch(`${t.base}/api/copilot`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', cookie: user.cookie },
+    headers: { 'content-type': 'application/json', cookie: user.cookie, origin: t.base },
     body: JSON.stringify({ message }),
   });
   if (!res.ok) return { status: res.status, body: await res.json(), events: [] as Record<string, any>[] };

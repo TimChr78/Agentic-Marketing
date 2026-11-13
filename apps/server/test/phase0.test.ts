@@ -39,7 +39,7 @@ const cookieOf = (res: Response) =>
     .getSetCookie()
     .map((c) => c.split(';')[0])
     .join('; ');
-const api = (u: User) => createClient<Commands>({ baseUrl: BASE, headers: { cookie: u.cookie } });
+const api = (u: User) => createClient<Commands>({ baseUrl: BASE, headers: { cookie: u.cookie, origin: BASE } });
 const rejects = async (p: Promise<unknown>) => {
   try {
     await p;
@@ -541,7 +541,7 @@ describe('members and invitations', () => {
   const accept = (u: User, token: string) =>
     fetch(`${BASE}/api/invitations/accept`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: u.cookie },
+      headers: { 'content-type': 'application/json', cookie: u.cookie, origin: BASE },
       body: JSON.stringify({ token }),
     });
 

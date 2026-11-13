@@ -3,9 +3,9 @@ import { AppError, canonicalJson, hashValue } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
-import { author, requestPublish, updateDraft, validateContent } from './commands';
+import { author, lockArtifacts, lockSingleton, requestPublish, updateDraft, validateContent } from './commands';
 import { diffJson } from './diff';
-import { type ArtifactType, artifactTypeEnum, artifactTypes } from './types';
+import { type ArtifactType, artifactTypeEnum, artifactTypes, isSingleton } from './types';
 
 // Config as code: a workspace's artifacts as one JSON bundle, to keep in git, review as diffs and
 // promote from staging to production. Ids travel with the bundle (they are unique per
@@ -242,13 +242,11 @@ export const driftConfig = defineCommand({
         ),
       );
     const byId = new Map(existing.map((entry) => [entry.a.id, entry]));
-    const singletons = new Map(
-      existing.filter((entry) => 'singleton' in artifactTypes[entry.a.type as ArtifactType]).map((entry) => [entry.a.type, entry]),
-    );
+    const singletons = new Map(existing.filter((entry) => isSingleton(entry.a.type)).map((entry) => [entry.a.type, entry]));
     const drift: z.infer<typeof Drift>[] = [];
     for (const item of input.bundle.artifacts) {
       const content = await validateContent(item.type, item.content, 'draft');
-      const current = byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(item.type) : undefined);
+      const current = byId.get(item.id) ?? (isSingleton(item.type) ? singletons.get(item.type) : undefined);
       if (current && current.a.type !== item.type) {
         drift.push({
           kind: 'artifact',
@@ -337,6 +335,28 @@ export const importConfig = defineCommand({
         'Importing workspace settings needs a person with workspace:admin. Import the artifacts without settings, or ask a person.',
       );
     const ws = ctx.principal.workspaceId;
+    // A bundle holds at most one entry per singleton type: two ids would both insert (or both
+    // update the same row) and break "one per workspace" (#869).
+    const singletonEntries = new Map<string, string[]>();
+    for (const item of input.bundle.artifacts) {
+      if (!isSingleton(item.type)) continue;
+      singletonEntries.set(item.type, [...(singletonEntries.get(item.type) ?? []), item.id]);
+    }
+    for (const [type, ids] of singletonEntries)
+      if (ids.length > 1)
+        throw new AppError(
+          'invalid_input',
+          `A bundle can contain only one ${type}, because a workspace has one. It contains ${ids.join(' and ')}; keep one and edit it with artifacts.updateDraft.`,
+        );
+
+    // Every writer that can create a singleton takes the same advisory lock before it checks for
+    // one, so a concurrent artifacts.create cannot race this insert to the partial unique index
+    // (#867). Sorted, so two imports touching several singleton types cannot deadlock on the keys.
+    if (!input.dryRun) for (const type of [...singletonEntries.keys()].sort()) await lockSingleton(ctx.tx, ws, type as ArtifactType);
+
+    // Read after the locks: this is the existence check every singleton writer makes inside its
+    // lock. Archived rows stay in byId, for an explicit id the bundle names, but they never resolve
+    // as the workspace's singleton: migration 0092 left archived duplicates behind (#867).
     const existing = await ctx.tx
       .select({ a: schema.artifacts, hash: schema.artifactVersions.contentHash })
       .from(schema.artifacts)
@@ -348,8 +368,41 @@ export const importConfig = defineCommand({
           eq(schema.artifactVersions.number, schema.artifacts.latestVersion),
         ),
       );
-    const byId = new Map(existing.map((e) => [e.a.id, e]));
-    const singletons = new Map(existing.filter((e) => 'singleton' in artifactTypes[e.a.type as ArtifactType]).map((e) => [e.a.type, e]));
+    type Existing = { id: string; type: string; name: string; hash: string; archived: boolean };
+    const byId = new Map<string, Existing>(
+      existing.map((e) => [e.a.id, { id: e.a.id, type: e.a.type, name: e.a.name, hash: e.hash, archived: e.a.archived }]),
+    );
+    const singletons = new Map<ArtifactType, Existing>(
+      existing.filter((e) => isSingleton(e.a.type) && !e.a.archived).map((e) => [e.a.type as ArtifactType, byId.get(e.a.id)!]),
+    );
+    // Resolve every existing artifact this bundle touches, then lock them all in id order before
+    // the first write: two imports of the same artifacts in opposite orders would otherwise
+    // deadlock (#871).
+    const resolve = (item: { id: string; type: string }) => {
+      const match = byId.get(item.id);
+      if (match && match.type !== item.type) throw new AppError('conflict', `${item.id} is a ${match.type} here, not a ${item.type}.`);
+      // A non-singleton explicit id is not a uniqueness question: today an archived row is updated
+      // in place and stays archived, which this import keeps.
+      if (!isSingleton(item.type)) return match;
+      const active = singletons.get(item.type as ArtifactType);
+      // An explicit id that names an archived singleton is handled deterministically (#867): restore
+      // it only when the workspace has no active singleton; otherwise keep the one active row and
+      // refuse, naming both ids, rather than creating a second active singleton.
+      if (match?.archived && active)
+        throw new AppError(
+          'conflict',
+          `${match.id} is an archived ${item.type}, but this workspace already has the active ${item.type} ${active.id}. A workspace can have only one active ${item.type}; use ${active.id}, or archive it before restoring ${match.id}.`,
+        );
+      return match ?? active;
+    };
+    if (!input.dryRun) {
+      const affected = new Set<string>();
+      for (const item of input.bundle.artifacts) {
+        const current = resolve(item);
+        if (current) affected.add(current.id);
+      }
+      await lockArtifacts(ctx, [...affected]);
+    }
     const changes: z.infer<typeof Change>[] = [];
     const toPublish: { id: string; type: ArtifactType; change: z.infer<typeof Change> }[] = [];
     for (const item of input.bundle.artifacts) {
@@ -364,14 +417,16 @@ export const importConfig = defineCommand({
         throw new AppError('forbidden', `${item.id} is a ${item.type}: only people can import it.`);
       const content = await validateContent(item.type, item.content, 'draft');
       // A workspace has one of each singleton type, whatever its id.
-      const current = byId.get(item.id) ?? ('singleton' in artifactTypes[item.type] ? singletons.get(item.type) : undefined);
-      if (current && current.a.type !== item.type)
-        throw new AppError('conflict', `${item.id} is a ${current.a.type} here, not a ${item.type}.`);
-      const id = current?.a.id ?? item.id;
-      const action = !current ? 'create' : current.hash !== hashValue(content) || current.a.name !== item.name ? 'update' : 'unchanged';
+      const current = resolve(item);
+      const id = current?.id ?? item.id;
+      const differs = !!current && (current.hash !== hashValue(content) || current.name !== item.name);
+      // Restoring an archived singleton is a write even when its content is already identical.
+      const restore = !!current && isSingleton(item.type) && current.archived;
+      const action = !current ? 'create' : differs || restore ? 'update' : 'unchanged';
       const change: z.infer<typeof Change> = { id, type: item.type, name: item.name, action };
       changes.push(change);
       if (input.dryRun || action === 'unchanged') continue;
+      const entry: Existing = { id, type: item.type, name: item.name, hash: hashValue(content), archived: false };
       if (action === 'create') {
         await ctx.tx.insert(schema.artifacts).values({ workspaceId: ws, id, type: item.type, name: item.name, latestVersion: 1 });
         await ctx.tx.insert(schema.artifactVersions).values({
@@ -384,7 +439,41 @@ export const importConfig = defineCommand({
           note: input.note,
           ...author(ctx),
         });
-      } else await updateDraft.handler({ artifactId: id, content, name: item.name, note: input.note }, ctx);
+      } else {
+        if (restore) {
+          // Restore it unpublished: the version that was live before it was archived must not go live
+          // again on its own. Only this import's publish step, which follows the approval policy, can
+          // put a version live (0.14.17 review round 2). The old version is superseded rather than
+          // turned back into a draft, so the next edit starts a new version instead of rewriting it.
+          const [row] = await ctx.tx
+            .select({ publishedVersion: schema.artifacts.publishedVersion })
+            .from(schema.artifacts)
+            .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, id)));
+          if (row?.publishedVersion != null)
+            await ctx.tx
+              .update(schema.artifactVersions)
+              .set({ state: 'superseded', updatedAt: new Date() })
+              .where(
+                and(
+                  eq(schema.artifactVersions.workspaceId, ws),
+                  eq(schema.artifactVersions.artifactId, id),
+                  eq(schema.artifactVersions.number, row.publishedVersion),
+                ),
+              );
+          await ctx.tx
+            .update(schema.artifacts)
+            .set({ archived: false, publishedVersion: null, updatedAt: new Date() })
+            .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, id)));
+        }
+        // A restored row with identical content still needs a draft when publishing: its latest
+        // version may be the published one, and requestPublish only accepts a draft.
+        if (differs || (restore && input.publish))
+          await updateDraft.handler({ artifactId: id, content, name: item.name, note: input.note }, ctx);
+      }
+      // Keep the maps current as rows are inserted, restored or updated, so a later entry resolving
+      // the same singleton edits the row this import just wrote instead of creating a second one.
+      byId.set(id, entry);
+      if (isSingleton(item.type)) singletons.set(item.type as ArtifactType, entry);
       if (input.publish) toPublish.push({ id, type: item.type, change });
     }
     // Settings go in after the drafts and before publishing, so a clone publishes under the copied
