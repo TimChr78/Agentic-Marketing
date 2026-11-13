@@ -6,7 +6,9 @@
 #
 # The images match .github/workflows/ci.yml. CI keeps its own service containers and does not use
 # this file. Every service, volume and network carries am-test=1: scripts/docker-clean.sh removes
-# only those, never another project's containers.
+# only those, never another project's containers. Images are pinned by digest (the multi-arch index,
+# linux/amd64 and linux/arm64) so the shared stack does not change under a test run; the tag stays
+# in front of the digest and Dependabot proposes bumps.
 #
 # Published ports default to the host's long-lived test ports, bound to 127.0.0.1 (loopback only):
 # this stack includes a dev OpenBao whose root token is `root` and a writable Postgres (am:am), so
@@ -21,7 +23,7 @@ name: am-test
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
     labels: ["am-test=1"]
     environment:
       POSTGRES_USER: am
@@ -39,7 +41,7 @@ services:
     mem_limit: 1g
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.8
+    image: clickhouse/clickhouse-server:26.8@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
     labels: ["am-test=1"]
     environment:
       # The row-policy tests create policies; that needs access management.
@@ -63,7 +65,7 @@ services:
     mem_limit: 4g
 
   valkey:
-    image: valkey/valkey:8.1.9
+    image: valkey/valkey:8.1.9@sha256:d5e642b89ee060a784f322cad2daad61c35d55530c32b74ce38b73ae01cd9fb3
     labels: ["am-test=1"]
     command: ["valkey-server", "--save", "", "--appendonly", "no"]
     ports:
@@ -76,7 +78,7 @@ services:
     mem_limit: 256m
 
   nats:
-    image: nats:2.15.0-alpine
+    image: nats:2.15.0-alpine@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
     labels: ["am-test=1"]
     # -js is JetStream; the monitoring port backs the healthcheck.
     command: ["-js", "-sd", "/data", "-m", "8222"]
@@ -92,7 +94,7 @@ services:
     mem_limit: 1g
 
   openbao:
-    image: openbao/openbao:2.6.4
+    image: openbao/openbao:2.6.4@sha256:cf2340fc9a22cb9358ca0defd1f39b65673836bd23fe2bb8984a07e11fe13ef4
     labels: ["am-test=1"]
     # Dev mode: in-memory, root token `root`, exactly what packages/secrets and phase10-ops expect.
     command: ["server", "-dev", "-dev-root-token-id=root", "-dev-listen-address=0.0.0.0:8200"]
@@ -111,7 +113,7 @@ services:
 
   # Optional: `scripts/test-services.sh up mail` (SMTP 21025, UI http://localhost:28025).
   mailpit:
-    image: axllent/mailpit:v1.27.8
+    image: axllent/mailpit:v1.27.8@sha256:6abc8e633df15eaf785cfcf38bae48e66f64beecdc03121e249d0f9ec15f0707
     labels: ["am-test=1"]
     profiles: ["mail"]
     ports:
@@ -126,7 +128,7 @@ services:
 
   # Optional: `scripts/test-services.sh up obs` (Grafana 23000, OTLP 24317/24318).
   otel-lgtm:
-    image: grafana/otel-lgtm:0.11.1
+    image: grafana/otel-lgtm:0.11.1@sha256:2bc63304ef2d51e879c6101637eab186cb644fa4367240db16bcd81b893e8632
     labels: ["am-test=1"]
     profiles: ["obs"]
     ports:

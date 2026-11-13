@@ -44,6 +44,21 @@ const DEFAULT_PUBLIC_BIND = (() => {
   }
 })();
 
+/** The admin port's host address (AM_BIND); loopback unless the operator widened it (#870). */
+const DEFAULT_ADMIN_BIND = (() => {
+  const fallback = '127.0.0.1';
+  try {
+    const compose = fileURLToPath(new URL('../../../../docker-compose.yml', import.meta.url));
+    if (!existsSync(compose)) return fallback;
+    return /\$\{AM_BIND:-([^}]+)\}:\$\{AM_PORT/.exec(readFileSync(compose, 'utf8'))?.[1] ?? fallback;
+  } catch {
+    return fallback;
+  }
+})();
+
+/** Host addresses that only reach this machine. `0.0.0.0` and `::` are every interface. */
+const LOOPBACK_BINDS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** Race a promise against the check timeout, so a stuck socket or query cannot block the CLI. */
@@ -254,11 +269,13 @@ function hostPort(bind: string): number | undefined {
  * equal to AM_PORT makes `docker compose up` fail with "address already in use". PUBLIC_BIND and
  * AM_PORT are Compose settings the app container does not see, so `am doctor --env-file` passes
  * them in; this compares the two values instead of probing the host's ports, which a container
- * could not see.
+ * could not see. AM_BIND (#870) is reported too: the admin listener is loopback-only by default,
+ * and widening it exposes the admin UI, auth and API to the network.
  */
 export function checkPorts(env: Env): Check {
   const id = 'ports';
   const bind = (env.PUBLIC_BIND ?? '').trim() || DEFAULT_PUBLIC_BIND;
+  const adminBind = (env.AM_BIND ?? '').trim() || DEFAULT_ADMIN_BIND;
   const adminRaw = (env.AM_PORT ?? '').trim();
   const admin = adminRaw ? Number(adminRaw) : 3000;
   const publicPort = hostPort(bind);
@@ -284,10 +301,17 @@ export function checkPorts(env: Env): Check {
       message: `PUBLIC_BIND publishes the public listener on port ${publicPort}, the same as AM_PORT`,
       hint: `Set PUBLIC_BIND to another port (for example 127.0.0.1:3201), or drop the public mapping with ${drop}. Compose would try to bind ${bind} and ${admin} and fail with "address already in use"; on the host, check with \`ss -ltn | grep ':${publicPort} '\`.`,
     };
+  if (!LOOPBACK_BINDS.has(adminBind))
+    return {
+      id,
+      status: 'warn',
+      message: `the admin port is published on ${adminBind}:${admin} (AM_BIND), so the admin UI, sign-in and REST API answer from that network`,
+      hint: 'Keep AM_BIND at 127.0.0.1 and put the tunnel or reverse proxy on this host, or make sure the network is trusted and the proxy sets TRUSTED_PROXY_CIDRS.',
+    };
   return {
     id,
     status: 'ok',
-    message: `PUBLIC_BIND publishes the public listener on ${bind}, which does not collide with AM_PORT=${admin}`,
+    message: `PUBLIC_BIND publishes the public listener on ${bind}, which does not collide with the admin port on ${adminBind}:${admin} (AM_BIND)`,
   };
 }
 

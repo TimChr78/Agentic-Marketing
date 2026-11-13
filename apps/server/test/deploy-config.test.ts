@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,7 @@ const [
   compose,
   composeOverride,
   composeDoc,
+  composeTest,
   buildOverlay,
   envExample,
   smoke,
@@ -26,6 +28,7 @@ const [
   read('docker-compose.yml'),
   read('compose.override.example.yaml'),
   read('docs/deployment/compose.md'),
+  read('docker-compose.test.yml'),
   read('docker-compose.build.yml'),
   read('.env.example'),
   read('scripts/smoke.sh'),
@@ -88,8 +91,13 @@ describe('compose deployment configuration', () => {
     expect(compose).not.toMatch(/^\s*build:/m);
   });
 
-  it('publishes the app on AM_PORT', () => {
-    expect(app).toMatch(/"\$\{AM_PORT:-3000\}:3000"/);
+  it('publishes the admin port on AM_BIND, loopback only by default (#870)', () => {
+    // The public listener beside it is already loopback-only; the admin UI, auth and API must not
+    // be reachable from every network the host is on just because the template was copied.
+    expect(app).toMatch(/"\$\{AM_BIND:-127\.0\.0\.1\}:\$\{AM_PORT:-3000\}:3000"/);
+    const mapping = app.split('\n').find((line) => line.includes('AM_PORT') && line.trim().startsWith('-'));
+    expect(mapping).toBeTruthy();
+    expect(mapping).not.toContain('#');
   });
 
   it('caps ClickHouse memory with CLICKHOUSE_MEM_LIMIT', () => {
@@ -189,6 +197,21 @@ describe('.env.example', () => {
   it('documents the public listener bind address', () => {
     expect(envExample).toMatch(/^# PUBLIC_BIND=127\.0\.0\.1:3201$/m);
     expect(envExample).toMatch(/PUBLIC_BIND[\s\S]{0,300}(tunnel|network)/i);
+  });
+
+  it('documents the admin port bind address beside the public one (#870)', () => {
+    expect(envExample).toMatch(/^# AM_BIND=127\.0\.0\.1$/m);
+    expect(envExample).toMatch(/AM_BIND[\s\S]{0,400}(0\.0\.0\.0|loopback|interface)/i);
+  });
+
+  it('leaves the database passwords empty so a copied template cannot start (#870)', () => {
+    expect(envExample).toMatch(/^POSTGRES_PASSWORD=$/m);
+    expect(envExample).toMatch(/^APP_DB_PASSWORD=$/m);
+    // Compose's `:?` check fails on an empty value too, not only on an unset one.
+    expect(service(compose, 'postgres')).toContain('${POSTGRES_PASSWORD:?');
+    expect(service(compose, 'app')).toContain('${APP_DB_PASSWORD:?');
+    // Nothing may still advertise the old known password, including the dev DATABASE_URL.
+    expect(envExample).not.toContain('change-me');
   });
 
   it('documents every variable the server reads, including runtime plumbing (#387)', () => {
@@ -325,8 +348,24 @@ describe('Helm refuses a divergent config.PORT (#774)', () => {
 describe('smoke test', () => {
   it('always uses the source-build overlay, including logs and down', () => {
     expect(smoke).toContain('-f docker-compose.yml -f docker-compose.build.yml');
-    expect(smoke).toMatch(/trap 'dc logs app[\s\S]*dc down -v/);
+    expect(smoke).toMatch(/trap cleanup EXIT/);
+    expect(smoke).toMatch(/dc logs app[\s\S]*dc down -v/);
     expect(smoke).toContain('SMOKE_NO_BUILD');
+  });
+
+  it('gives every run its own project, temp files and port (#870)', () => {
+    // A fixed project name let a second run's `down -v` remove the first run's containers and volume.
+    expect(smoke).not.toContain('COMPOSE_PROJECT_NAME=am_smoke');
+    expect(smoke).toMatch(/RUN_ID=.*\$\$/);
+    expect(smoke).toMatch(/RUN_ID=.*RANDOM/);
+    expect(smoke).toContain('COMPOSE_PROJECT_NAME="$RUN_ID"');
+    // Temp files belong to the run: an env file, a cookie jar, and nothing shared under /tmp.
+    expect(smoke).not.toContain('/tmp/am_smoke_cookies');
+    expect(smoke.match(/mktemp/g)?.length ?? 0).toBeGreaterThanOrEqual(2);
+    // A free port for this run, never a fixed 3000 that an installed stack may hold.
+    expect(smoke).not.toMatch(/AM_PORT=3000\b/);
+    expect(smoke).toMatch(/SMOKE_PORT/);
+    expect(smoke).toMatch(/AM_PORT=\$PORT\b/);
   });
 });
 
@@ -347,6 +386,76 @@ describe('Docker build context', () => {
     expect(dockerfile).toContain('COPY apps/web ./apps/web');
     expect(dockerfile).toContain('build:live');
     expect(dockerfile).toContain('COPY --from=web /app/apps/web/dist /app/apps/web/dist');
+  });
+});
+
+describe('image pinning (#870)', () => {
+  const isAppImage = (ref: string) => /\$\{AM_(?:VERSION|BUILD_IMAGE)/.test(ref);
+  const images = (text: string) => [...text.matchAll(/^\s*image:\s*(\S+)\s*$/gm)].map((match) => match[1]);
+
+  it('pins every Dockerfile stage by digest, with the tag still readable', () => {
+    const froms = [...dockerfile.matchAll(/^FROM\s+(\S+)/gm)].map((match) => match[1]);
+    const stages = new Set([...dockerfile.matchAll(/^FROM\s+\S+\s+AS\s+(\S+)/gim)].map((match) => match[1]));
+    expect(froms.length).toBeGreaterThan(0);
+    let imageCount = 0;
+    for (const ref of froms) {
+      if (stages.has(ref)) continue; // an earlier stage in this file, not an image
+      imageCount += 1;
+      expect(ref, `${ref} is not pinned by digest`).toMatch(/@sha256:[0-9a-f]{64}$/);
+      // image:tag@sha256:… keeps the human-readable version beside the immutable digest.
+      expect(ref).toMatch(/:[^:@/]+@sha256:/);
+    }
+    expect(imageCount).toBeGreaterThan(0);
+  });
+
+  it('pins every service image in every Compose file by digest', () => {
+    const files: Array<[string, string]> = [
+      ['docker-compose.yml', compose],
+      ['docker-compose.test.yml', composeTest],
+      ['docker-compose.build.yml', buildOverlay],
+    ];
+    for (const [file, text] of files) {
+      const refs = images(text);
+      expect(refs.length, `${file} has no images`).toBeGreaterThan(0);
+      for (const ref of refs) {
+        // The release and source-build images are selected by version, not by digest.
+        if (isAppImage(ref)) continue;
+        expect(ref, `${file}: ${ref} is not pinned by digest`).toMatch(/@sha256:[0-9a-f]{64}$/);
+        expect(ref, `${file}: ${ref} lost its tag`).toMatch(/:[^:@/]+@sha256:/);
+      }
+    }
+  });
+
+  it('keeps the released image tag readable beside its version variable', () => {
+    expect(compose).toMatch(/image:\s*ghcr\.io\/timchr78\/agentic-marketing:\$\{AM_VERSION:-\d+\.\d+\.\d+\}/);
+  });
+});
+
+describe('image healthcheck (#870)', () => {
+  const script = join(root, 'scripts/healthcheck.mjs');
+  const probe = (env: Record<string, string>) =>
+    spawnSync(process.execPath, [script], { encoding: 'utf8', timeout: 15_000, env: { ...process.env, ...env } });
+
+  it('passes for roles that start no HTTP listener, without one to reach', () => {
+    // Only api and ingest listen (apps/server/src/main.ts). PORT=1 has nothing behind it, so a
+    // probe here would fail if the script ignored ROLE; #645 is the same bug in the Helm chart.
+    for (const role of ['worker', 'scheduler', 'worker,scheduler']) {
+      const result = probe({ ROLE: role, PORT: '1' });
+      expect(result.status, `${role}: ${result.stderr}`).toBe(0);
+    }
+  });
+
+  it('still probes /readyz for a role that listens', () => {
+    expect(probe({ ROLE: 'api', PORT: '1', HEALTHCHECK_TIMEOUT_MS: '1000' }).status).toBe(1);
+    expect(probe({ ROLE: 'ingest', PORT: '1', HEALTHCHECK_TIMEOUT_MS: '1000' }).status).toBe(1);
+  });
+
+  it('installs the probe in the image and keeps the Helm role check', () => {
+    expect(dockerfile).toContain('COPY scripts/healthcheck.mjs /usr/local/bin/healthcheck.mjs');
+    expect(dockerfile).toMatch(/HEALTHCHECK[\s\S]{0,400}CMD \["node", "\/usr\/local\/bin\/healthcheck\.mjs"\]/);
+    expect(dockerfile).not.toMatch(/HEALTHCHECK[\s\S]{0,400}\/readyz/);
+    // The chart's own guard is the reference: api and ingest get the HTTP probes, nothing else does.
+    expect(helmDeployments).toMatch(/\$httpRole\s*:=\s*or \(eq \$role "api"\) \(eq \$role "ingest"\)/);
   });
 });
 

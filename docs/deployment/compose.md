@@ -18,9 +18,13 @@ docker compose exec app am doctor
 
 `am init` writes `.env` with generated values for `POSTGRES_PASSWORD`, `APP_DB_PASSWORD`, `AUTH_SECRET` and `MASTER_KEY`, and asks for the two public URLs. It never prints a secret. See [operations](operations.md) for its options.
 
+The template leaves `POSTGRES_PASSWORD` and `APP_DB_PASSWORD` empty on purpose: Compose's `${VAR:?…}` checks refuse an empty value as well as an unset one, so a copied `.env.example` stops with "set POSTGRES_PASSWORD in .env" instead of starting with a password everyone knows. Run `am init` (or fill both by hand) before the first `docker compose up -d`.
+
 By hand, generate the two passwords as **hex** (`openssl rand -hex 32`) and the two keys as base64 (`openssl rand -base64 32`). Compose substitutes `POSTGRES_PASSWORD` into `DATABASE_URL` verbatim and cannot percent-encode it, so a base64 password that contains `/` makes the URL invalid: the app then stops with `Configuration is incomplete: DATABASE_URL is not a valid URL` instead of a stack trace. If a password must stay as it is, percent-encode the reserved character in `DATABASE_URL` yourself (`/` as `%2F`) and set that `DATABASE_URL` for the `app` service in `compose.override.yaml`.
 
 `AM_VERSION` pins the released image `ghcr.io/timchr78/agentic-marketing`; `AM_PORT` is the published admin port (the app still listens on 3000 inside the container). The admin UI and REST API are then on `http://localhost:3000`; MCP needs an HTTPS `PUBLIC_URL`.
+
+`AM_BIND` is the host address the admin port is published on, `127.0.0.1` by default: the admin UI, sign-in, REST API and MCP answer from this machine only, exactly like the public listener's `PUBLIC_BIND`. Set `AM_BIND` to a LAN address, or to `0.0.0.0` for every interface, only when the network in front is trusted; otherwise keep it loopback and put the tunnel or reverse proxy on this host. Takes effect on `docker compose up -d` (the container is recreated when its published ports change).
 
 ## Environment variables
 
@@ -57,7 +61,7 @@ The app sets baseline headers on every response: `X-Content-Type-Options: nosnif
 
 Every service has `restart: unless-stopped`, so the stack comes back after a host reboot or a Docker daemon restart. NATS is health-checked through its monitoring endpoint on 8222 (the Alpine image, which has `wget`), Valkey through `valkey-cli ping`; the app waits for Postgres, ClickHouse, NATS and Valkey to be healthy before it starts.
 
-The app image's healthcheck probes `/readyz` every 15 s and ignores the first 120 s (`--start-period=120s`): the pre-upgrade backup and migrations run before the server listens, so they must not count as failed probes. An upgrade on a large install can take longer than two minutes; start it with `docker compose up -d` rather than `docker compose up --wait` when you expect slow migrations, then follow `docker compose ps` and `docker compose logs -f app` until the container is healthy.
+The app image's healthcheck runs every 15 s and ignores the first 120 s (`--start-period=120s`): the pre-upgrade backup and migrations run before the server listens, so they must not count as failed probes. It checks `/readyz` for the roles that serve HTTP (`api`, `ingest`, or `all`) and passes without a probe for a worker-only or scheduler-only container, which starts no listener — the same rule as the Helm chart's probes. An upgrade on a large install can take longer than two minutes; start it with `docker compose up -d` rather than `docker compose up --wait` when you expect slow migrations, then follow `docker compose ps` and `docker compose logs -f app` until the container is healthy.
 
 ## Upgrading
 
