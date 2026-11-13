@@ -7,6 +7,8 @@ import { eventually, startTestServer, testPort, type User } from './harness';
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
+let viewer: User;
+let ws: string;
 let key: string;
 let welcomeTemplate: string;
 
@@ -98,7 +100,14 @@ const waitJourney = (name: string, wait: Record<string, unknown>, purpose = 'onb
 beforeAll(async () => {
   t = await startTestServer('test_v028_nodes', testPort(3314));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
-  await t.workspaceWith([[owner, 'owner']], 'none');
+  viewer = await t.signUp(`viewer-${Date.now()}@example.com`);
+  ws = await t.workspaceWith(
+    [
+      [owner, 'owner'],
+      [viewer, 'viewer'],
+    ],
+    'none',
+  );
   key = (await api().call('sources.create', { name: 'Backend', kind: 'server' })).key;
   await api().call('emailProviders.create', {
     name: 'Outbox',
@@ -353,6 +362,13 @@ describe('entry keys (#93)', () => {
       sampleEvent: { name: 'Order Placed', properties: { order_id: 'A-1' } },
     });
     expect(sim.entry).toMatchObject({ key: 'prop:order_id:A-1', source: 'event_property', duplicate: true });
+    // A viewer without profiles:read must not learn whether a key already entered (0.14.11 review).
+    const asViewer = await t.api(viewer, ws).call('journeys.simulate', {
+      artifactId: journeyId,
+      sampleEvent: { name: 'Order Placed', properties: { order_id: 'A-1' } },
+    });
+    expect(asViewer.entry).toMatchObject({ key: 'prop:order_id:A-1', duplicate: false });
+    expect(asViewer.entry?.note).toContain('profiles:read');
   });
 
   it('enters twice for two different order_id values', async () => {

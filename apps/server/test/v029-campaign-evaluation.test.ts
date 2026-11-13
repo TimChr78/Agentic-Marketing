@@ -17,6 +17,9 @@ const WIDE_TO = '2026-04-01T00:00:00.000Z';
 // the campaign-dimension expectations above.
 const LATE_FROM = '2026-10-31T00:00:00.000Z';
 const LATE_TO = '2026-11-05T00:00:00.000Z';
+// The revenue k fixtures (#756) send in May, outside every other window in this file.
+const REV_FROM = '2026-05-01T00:00:00.000Z';
+const REV_TO = '2026-05-10T00:00:00.000Z';
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let wsA = '';
@@ -40,6 +43,10 @@ let broadcastGuard = '';
 let broadcastNoStart = '';
 let broadcastOldStart = '';
 let broadcastFuture = '';
+let broadcastRevenueBelow = '';
+let broadcastRevenueAbove = '';
+let campaignRevenueBelow = '';
+let campaignRevenueAbove = '';
 let journeyA = '';
 let journeyTiny = '';
 let journeyControlSmall = '';
@@ -211,6 +218,8 @@ beforeAll(async () => {
   broadcastNoStart = await broadcast('No-start broadcast');
   broadcastOldStart = await broadcast('Old-start broadcast');
   broadcastFuture = await broadcast('Future broadcast');
+  broadcastRevenueBelow = await broadcast('Revenue below k broadcast');
+  broadcastRevenueAbove = await broadcast('Revenue above k broadcast');
   await api().call('artifacts.requestPublishBundle', {
     artifactIds: [
       broadcastA,
@@ -221,6 +230,8 @@ beforeAll(async () => {
       broadcastNoStart,
       broadcastOldStart,
       broadcastFuture,
+      broadcastRevenueBelow,
+      broadcastRevenueAbove,
     ],
     note: 'broadcasts',
   });
@@ -264,6 +275,8 @@ beforeAll(async () => {
   campaignHealthy = await createCampaign('Healthy holdout campaign', [journeyHealthy], {}, '2026-11-01T00:00:00.000Z');
   // A campaign that starts tomorrow: the default window must not reject its own start (#588).
   campaignFuture = await createCampaign('Future campaign', [broadcastFuture], {}, new Date(Date.now() + 86_400_000).toISOString());
+  campaignRevenueBelow = await createCampaign('Revenue below k campaign', [broadcastRevenueBelow], {}, '2026-05-01T00:00:00.000Z');
+  campaignRevenueAbove = await createCampaign('Revenue above k campaign', [broadcastRevenueAbove], {}, '2026-05-01T00:00:00.000Z');
   await api().call('artifacts.requestPublishBundle', {
     artifactIds: [
       campaignA,
@@ -279,7 +292,7 @@ beforeAll(async () => {
     note: 'campaigns',
   });
   await api().call('artifacts.requestPublishBundle', {
-    artifactIds: [campaignHealthy, campaignFuture],
+    artifactIds: [campaignHealthy, campaignFuture, campaignRevenueBelow, campaignRevenueAbove],
     note: 'holdout fixture campaigns',
   });
 
@@ -315,6 +328,9 @@ beforeAll(async () => {
   const pTiny = Array.from({ length: 3 }, person);
   const pControlSmall = Array.from({ length: 8 }, person);
   const pHealthy = Array.from({ length: 10 }, person);
+  const pRevBelow = Array.from({ length: 6 }, person);
+  const pRevAboveEur = Array.from({ length: 5 }, person);
+  const pRevAboveDkk = Array.from({ length: 5 }, person);
   await t.srv.events.insertMessageEvents([
     ...messageEvents(wsA, broadcastA, '2026-03-01T10:00:00.000Z', pA, [5, 2, 1, 1]),
     ...messageEvents(wsA, journeyA, '2026-03-02T10:00:00.000Z', pJ, [4, 1, 1, 0]),
@@ -332,6 +348,9 @@ beforeAll(async () => {
     ...messageEvents(wsA, journeyTiny, '2026-11-03T10:00:00.000Z', pTiny, [3, 0, 0, 0]),
     ...messageEvents(wsA, journeyControlSmall, '2026-11-03T10:00:00.000Z', pControlSmall, [8, 0, 0, 0]),
     ...messageEvents(wsA, journeyHealthy, '2026-11-03T10:00:00.000Z', pHealthy, [10, 0, 0, 0]),
+    // Revenue k (#756): six recipients with one EUR converter, and ten with five per currency.
+    ...messageEvents(wsA, broadcastRevenueBelow, '2026-05-02T10:00:00.000Z', pRevBelow, [6, 0, 0, 0]),
+    ...messageEvents(wsA, broadcastRevenueAbove, '2026-05-02T10:00:00.000Z', [...pRevAboveEur, ...pRevAboveDkk], [10, 0, 0, 0]),
   ]);
 
   await t.srv.events.insertJourneyEvents(
@@ -350,6 +369,10 @@ beforeAll(async () => {
     goal(wsA, pChannelEmail[0]!, 100, 'DKK', '2026-11-01T11:00:00.000Z'),
     goal(wsA, pChannelEmail[1]!, 50, 'DKK', '2026-11-01T11:30:00.000Z'),
     goal(wsA, pChannelEmail[2]!, 25, 'DKK', '2026-11-01T12:00:00.000Z'),
+    // One EUR converter in the six-recipient campaign, and five per currency in the other.
+    goal(wsA, pRevBelow[0]!, 2499, 'EUR', '2026-05-02T11:00:00.000Z'),
+    ...pRevAboveEur.map((p, i) => goal(wsA, p, 10, 'EUR', `2026-05-02T11:0${i}:00.000Z`)),
+    ...pRevAboveDkk.map((p, i) => goal(wsA, p, 20, 'DKK', `2026-05-02T11:1${i}:00.000Z`)),
   ]);
 
   // A journey control group large enough for a verdict, with outcomes for both arms.
@@ -459,16 +482,70 @@ describe('campaign dimension and filter', () => {
     const revenue = await api().call('analytics.query', {
       measures: ['campaign.revenue', 'campaign.revenue_per_recipient'],
       dimensions: ['campaign'],
-      from: FROM,
-      to: TO,
+      from: REV_FROM,
+      to: REV_TO,
+      filters: { campaign: [campaignRevenueAbove] },
       order: { by: 'campaign', dir: 'asc' },
     });
     const byCurrency = Object.fromEntries(revenue.rows.map((r) => [r[columnIndex(revenue, 'currency')], r]));
-    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100 + 75);
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100);
     expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue')]).toBe(50);
-    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue_per_recipient')]).toBeCloseTo(17.5, 5);
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue_per_recipient')]).toBeCloseTo(10, 5);
     expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue_per_recipient')]).toBeCloseTo(5, 5);
     expect(revenue.meta.currency).toBeNull();
+    expect(revenue.meta.suppressed).toBe(0);
+  });
+
+  it('suppresses a currency revenue row whose converter count is below k (#756)', async () => {
+    const revenue = await api().call('analytics.query', {
+      measures: ['campaign.recipients', 'campaign.converters', 'campaign.revenue'],
+      dimensions: ['campaign'],
+      from: REV_FROM,
+      to: REV_TO,
+      filters: { campaign: [campaignRevenueBelow] },
+    });
+    // Six recipients and one EUR converter: the currency row's subject is one person, so the
+    // revenue is null while the campaign row's recipient and converter counts stay.
+    expect(revenue.rows).toHaveLength(1);
+    expect(cell(revenue, 0, 'campaign.recipients')).toBe(6);
+    expect(cell(revenue, 0, 'campaign.converters')).toBe(1);
+    expect(cell(revenue, 0, 'campaign.revenue')).toBeNull();
+    expect(revenue.meta.suppressed).toBe(1);
+
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignRevenueBelow, from: REV_FROM, to: REV_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+    expect(summary.headline.recipients).toBe(6);
+    expect(summary.headline.converters).toBe(1);
+    expect(summary.headline.revenue).toEqual([]);
+    expect(summary.headline.revenuePerRecipient).toEqual([]);
+    expect(summary.meta.suppressed).toBe(1);
+  });
+
+  it('shows a currency revenue row with k or more converters (#756)', async () => {
+    const revenue = await api().call('analytics.query', {
+      measures: ['campaign.recipients', 'campaign.converters', 'campaign.revenue'],
+      dimensions: ['campaign'],
+      from: REV_FROM,
+      to: REV_TO,
+      filters: { campaign: [campaignRevenueAbove] },
+      order: { by: 'campaign', dir: 'asc' },
+    });
+    const byCurrency = Object.fromEntries(revenue.rows.map((r) => [r[columnIndex(revenue, 'currency')], r]));
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.recipients')]).toBe(10);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.converters')]).toBe(5);
+    expect(byCurrency.EUR?.[columnIndex(revenue, 'campaign.revenue')]).toBe(50);
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.converters')]).toBe(5);
+    expect(byCurrency.DKK?.[columnIndex(revenue, 'campaign.revenue')]).toBe(100);
+    expect(revenue.meta.suppressed).toBe(0);
+
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaignRevenueAbove, from: REV_FROM, to: REV_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+    expect(summary.headline.revenue).toEqual([
+      { currency: 'DKK', amount: 100 },
+      { currency: 'EUR', amount: 50 },
+    ]);
   });
 
   it('never sees another workspace', async () => {
@@ -500,14 +577,8 @@ describe('analytics.campaignSummary', () => {
     expect(summary.headline.unsubscribeRate).toBeCloseTo(2 / 9, 5);
     expect(summary.headline.converters).toBe(3);
     expect(summary.headline.conversionRate).toBeCloseTo(0.3, 5);
-    expect(summary.headline.revenue).toEqual([
-      { currency: 'DKK', amount: 175 },
-      { currency: 'EUR', amount: 50 },
-    ]);
-    expect(summary.headline.revenuePerRecipient).toEqual([
-      { currency: 'DKK', amount: 17.5 },
-      { currency: 'EUR', amount: 5 },
-    ]);
+    expect(summary.headline.revenue).toEqual([]);
+    expect(summary.headline.revenuePerRecipient).toEqual([]);
     expect(summary.headline.targetProgress).toBeCloseTo(0.3, 5);
 
     expect(summary.funnel).toEqual([
@@ -566,7 +637,7 @@ describe('analytics.campaignSummary', () => {
     expect(summary.meta.timeZone).toBe(TZ);
     expect(summary.meta.k).toBe(5);
     expect(summary.meta.currency).toBeNull();
-    expect(summary.meta.suppressed).toBe(2);
+    expect(summary.meta.suppressed).toBe(4);
     expect(summary.meta.notes.join(' ')).toContain('fewer than k');
     expect(summary.meta.notes.join(' ')).toContain(
       'got a campaign message and converted within 7 days of their first campaign message (first touch)',

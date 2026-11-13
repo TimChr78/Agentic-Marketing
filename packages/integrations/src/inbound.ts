@@ -3,11 +3,12 @@ import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventBus } from '@agentic-marketing/events';
 import type { ClaimOutcome, HotState } from '@agentic-marketing/hotstate';
-import { acceptItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
+import { acceptInternalItems, bodyLimit, sourceLookups } from '@agentic-marketing/ingest';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
+import jsonata from 'jsonata';
 import { connectionSecrets, connectorOf, inboundTokenHash } from './connections';
 
 // Inbound webhooks: POST /hooks/in/<connection>/<token>. The secret URL authenticates the
@@ -28,7 +29,81 @@ const PENDING_TTL_S = 60;
 const DONE_TTL_S = 10 * 60;
 const RETRY_AFTER_S = 30;
 
-/** One signed delivery's idempotency key: workspace + endpoint + signed id (#643). */
+/** What a mapping read from the request headers while it ran (0.14.11 review round 7). */
+export interface HeaderReads {
+  /** Header names read individually (only names the request carries). */
+  names: Set<string>;
+  /** The headers object was enumerated or copied, so any header may have been read. */
+  all: boolean;
+}
+
+/**
+ * The request headers behind a proxy that records which of them a mapping reads. Reading a header
+ * (any property access, `in`, a descriptor) records its name; enumerating the object (`*`, `**`,
+ * `$keys`, `$each`, `$spread`, `$string()`, `$eval`, copying it into the output) records "all".
+ * Analysing the mapping's source cannot follow every JSONata construct; watching the evaluation can.
+ * Names the request does not carry are not recorded (JSONata probes internal properties), but a
+ * delivery that does carry a read header records it, so the identity still changes.
+ */
+export function trackHeaderReads(headers: Record<string, string>): { proxy: Record<string, string>; reads: HeaderReads } {
+  const reads: HeaderReads = { names: new Set(), all: false };
+  const note = (key: string | symbol) => {
+    if (typeof key === 'string' && Object.hasOwn(headers, key)) reads.names.add(key);
+  };
+  const proxy = new Proxy(headers, {
+    get(target, key, receiver) {
+      note(key);
+      return Reflect.get(target, key, receiver);
+    },
+    has(target, key) {
+      note(key);
+      return Reflect.has(target, key);
+    },
+    getOwnPropertyDescriptor(target, key) {
+      note(key);
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    },
+    ownKeys(target) {
+      reads.all = true;
+      return Reflect.ownKeys(target);
+    },
+  });
+  return { proxy, reads };
+}
+
+/**
+ * A delivery's replay identity from its headers (0.14.11 review round 10): the values of the headers
+ * the mapping read in its real run (every header if it enumerated or copied the object). A
+ * connector that declares its identity headers (Shopify's topic) uses exactly those instead.
+ *
+ * - No header-caused difference is folded away: two identities match only when both runs read the
+ *   same headers with the same values, and a header that made two outputs differ was read by at
+ *   least one of those runs. Differences caused only by the clock or randomness dedupe as replays.
+ * - A header the mapping never reads cannot make a replay look new: neither an extra header added
+ *   to a signed body nor a provider's per-attempt signature, timestamp or forwarding header.
+ * - Accepted residual: a mapping whose choice of which headers to read depends on the clock or on
+ *   randomness can give an identical retry another identity, so it may publish twice; it never
+ *   loses an event. Standard Webhooks avoids it: its signed `webhook-id` is the replay key.
+ */
+export function headerIdentity(headers: Record<string, string>, reads: HeaderReads, connectorHeaders?: readonly string[]): string {
+  const keys = connectorHeaders ? connectorHeaders.map((h) => h.toLowerCase()) : reads.all ? Object.keys(headers) : [...reads.names];
+  return [...new Set(keys)]
+    .sort()
+    .map((k) => `${k}:${headers[k] ?? ''}`)
+    .join('\n');
+}
+
+/**
+ * The header identity a generic JSONata mapping gives one request, evaluated the way the generic
+ * connector maps it (one real run, output copied). Used by tests.
+ */
+export async function mappedReplayHeaders(mapping: string, body: unknown, headers: Record<string, string>): Promise<string> {
+  const { proxy, reads } = trackHeaderReads(headers);
+  const v = await jsonata(mapping).evaluate({ body, headers: proxy });
+  if (v !== undefined) JSON.stringify(v);
+  return headerIdentity(headers, reads);
+}
+
 export const inboundReplayKey = (workspaceId: string, connectionId: string, webhookId: string) =>
   `inbound:${workspaceId}:${connectionId}:${webhookId}`;
 
@@ -93,24 +168,47 @@ export function inboundApi(deps: {
       } catch {
         return c.json({ error: 'invalid_json', message: 'The body is not JSON.' }, 400);
       }
+      const tracked = trackHeaderReads(headers);
       let items: unknown[];
       try {
-        items = await connector.inbound.map(payload, ictx);
+        // The mapping runs against a proxy that records which headers it reads (round 7).
+        items = await connector.inbound.map(payload, { ...ictx, headers: tracked.proxy });
       } catch (err) {
         return c.json({ error: 'mapping_failed', message: `The mapping failed: ${(err as Error).message}` }, 422);
       }
-      const source = { id: conn.row.id, workspaceId: ws, kind: 'server' as const, requiredPurpose: null };
+      // A connector's mapping is platform-defined (Shopify orders, Salesforce records, a generic
+      // JSONata mapping): a strict tracking plan must not drop those events while the sender is
+      // told the delivery succeeded (#764). `acceptInternalItems` is the trusted path, so a public
+      // `/v1` client still cannot claim the exemption.
+      const source = { id: conn.row.id, workspaceId: ws, kind: 'server' as const, requiredPurpose: null, platform: true };
       const policy = await loadPolicy(ws);
-      // Standard Webhooks signs the webhook-id with the body, so it is safe to use as an
-      // idempotency key. Other schemes (Shopify, Salesforce) have no such header and keep their
-      // own deterministic event ids.
-      const webhookId = ictx.settings?.signature?.scheme === 'standard-webhooks' ? headers['webhook-id'] : undefined;
-      const replayKey = webhookId ? inboundReplayKey(ws, conn.row.id, webhookId) : undefined;
+      // Standard Webhooks signs the webhook-id with the body, so the header is a sender-chosen
+      // idempotency key. Every other scheme has no id that changes with the body: hmac-sha256 has
+      // no timestamp or nonce (signing.ts verifyHmac) and an unsigned secret URL has nothing at
+      // all. There the raw body is the only stable identity a replay has, so derive the key from
+      // it; the hot-state done TTL is the dedupe window, since those schemes carry no timestamp.
+      const scheme = ictx.settings?.signature?.scheme;
+      const webhookId = scheme === 'standard-webhooks' ? headers['webhook-id'] : undefined;
+      // The replay identity comes from the **request**, never from the mapping's output: a mapping
+      // can read a header (`x-event-id`, a device id, a timestamp) into any field, so two deliveries
+      // with one body can be two events; and it can call $millis() or $uuid(), so its output differs
+      // on every replay. The key is the connection, the raw body and the values of the headers the
+      // mapping or the connector reads (0.14.11 review, rounds 1 to 3).
+      // A connector that declares its identity headers (Shopify's topic) uses exactly those; any other
+      // uses the headers its mapping actually read.
+      // Identity from the headers the real run read (round 10).
+      const replayHeaders = headerIdentity(headers, tracked.reads, connector.inbound.replayHeaders);
+      const replayId =
+        webhookId ??
+        (scheme === 'standard-webhooks'
+          ? undefined
+          : createHash('sha256').update(`${conn.row.id}\n${raw}\n${replayHeaders}`).digest('hex'));
+      const replayKey = replayId ? inboundReplayKey(ws, conn.row.id, replayId) : undefined;
       let claimToken: string | undefined;
       // A stable id per mapped record: if the hot state loses the key, JetStream still drops the
       // retried delivery because both attempts derive the same message ids (120 s window).
-      const messageIdFor = webhookId
-        ? (index: number) => `wh-${conn.row.id}-${createHash('sha256').update(`${ws}\n${webhookId}`).digest('hex').slice(0, 32)}-${index}`
+      const messageIdFor = replayId
+        ? (index: number) => `wh-${conn.row.id}-${createHash('sha256').update(`${ws}\n${replayId}`).digest('hex').slice(0, 32)}-${index}`
         : undefined;
       if (replayKey) {
         let claim: ClaimOutcome;
@@ -128,21 +226,21 @@ export function inboundApi(deps: {
         if (claim.state === 'done') {
           // The spec treats any 2xx as delivered and any other status as a failure to retry, so a
           // duplicate is a success that says nothing new was ingested (200, not 409).
-          logger.warn({ connection: conn.row.id, webhookId }, 'inbound webhook already received');
+          logger.warn({ connection: conn.row.id, replayId }, 'inbound webhook already received');
           return c.json({ success: true, duplicate: true, accepted: 0, duplicates: 0, dropped: 0 });
         }
         if (claim.state === 'pending') {
           // Another request claimed this id and has not published yet. Acknowledging now would let
           // a crash between its claim and its publish look like a completed delivery; the sender
           // must retry instead. Its lease expires if that request died.
-          logger.warn({ connection: conn.row.id, webhookId }, 'inbound webhook still in progress');
+          logger.warn({ connection: conn.row.id, replayId }, 'inbound webhook still in progress');
           return c.json({ error: 'in_progress', message: 'This webhook is already being processed. Retry shortly.' }, 503, {
             'retry-after': String(RETRY_AFTER_S),
           });
         }
         claimToken = claim.token;
       }
-      const { accepted, rejected, dropped } = acceptItems(items, source, policy, messageIdFor ? { messageId: messageIdFor } : {});
+      const { accepted, rejected, dropped } = acceptInternalItems(items, source, policy, messageIdFor ? { messageId: messageIdFor } : {});
       let duplicates: number;
       try {
         ({ duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 });
@@ -162,7 +260,7 @@ export function inboundApi(deps: {
           logger.warn({ err, connection: conn.row.id }, 'inbound webhook could not be marked done');
           return false;
         });
-        if (!done) logger.warn({ connection: conn.row.id, webhookId }, 'inbound webhook lease expired before it was marked done');
+        if (!done) logger.warn({ connection: conn.row.id, replayId }, 'inbound webhook lease expired before it was marked done');
       }
       if (rejected.length) logger.warn({ connection: conn.row.id, rejected }, 'inbound webhook events rejected');
       return c.json({ success: true, accepted: accepted.length, duplicates, dropped, ...(rejected.length ? { rejected } : {}) });

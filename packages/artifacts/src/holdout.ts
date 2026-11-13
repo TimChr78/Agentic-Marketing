@@ -190,6 +190,11 @@ export function holdoutBelowK(analysis: { control: { entered: number }; treatmen
   return analysis.control.entered < k || analysis.treatment.entered < k;
 }
 
+/** True when any split arm holds fewer people than k, so small-arm counts and every comparison are hidden. */
+export function anyArmBelowK(arms: readonly { entered: number }[], k = K): boolean {
+  return arms.some((arm) => arm.entered < k);
+}
+
 export interface SuppressedArmResult {
   entered: null;
   converted: null;

@@ -192,9 +192,18 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   target?: (input: z.output<I>) => string | undefined;
   /**
    * What the audit log records as the target when the id is only known after the handler ran, e.g.
-   * a freshly created token or invitation. Falls back to `target` when it returns undefined.
+   * a freshly created token or invitation, or the profile a lookup resolved (#763). Falls back to
+   * `target` when it returns undefined.
    */
   auditTarget?: (output: z.output<O>) => string | undefined;
+  /**
+   * For a read that reached many people (a segment sample, an unfiltered message list): one audit
+   * entry per id, so `audit.list` can answer "who accessed which person". The audit schema records
+   * a single target per entry and has no details column, so the list becomes its own entries: the
+   * entry count is the number of people named, deduplicated and capped at {@link MAX_AUDIT_TARGETS}
+   * per call. Ignored for writes, whose audit row names what the write changed.
+   */
+  auditTargets?: (output: z.output<O>) => readonly string[];
   /**
    * Facts about what the handler created, merged into the agent ledger's impact (#265). The
    * ledger is written after the handler so it can link the action to the rows it produced, e.g.
@@ -269,6 +278,24 @@ function redact(input: unknown, fields?: readonly string[]) {
 }
 
 /**
+ * How many people one audited read may name in the audit log (#763). A sample or a page is
+ * bounded already; the cap keeps a large unfiltered read from adding an unbounded chain of rows.
+ * The first ids in the output's own order are recorded, so the rows cover what the caller saw.
+ */
+export const MAX_AUDIT_TARGETS = 50;
+
+/** The targets of one audited read: its single target first, then the extras, deduplicated and capped. */
+function auditTargetList(single: string | undefined, extra: readonly string[]): (string | undefined)[] {
+  const out: (string | undefined)[] = [];
+  for (const candidate of [single, ...extra]) {
+    if (candidate === undefined || out.includes(candidate)) continue;
+    if (out.length >= MAX_AUDIT_TARGETS) break;
+    out.push(candidate);
+  }
+  return out.length ? out : [undefined];
+}
+
+/**
  * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for
  * every command; a command that records several items itself (agents.renewMandates, one per
  * mandate) calls it directly and declares `auditsItself`.
@@ -337,6 +364,8 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const input = rawInput ?? {};
       const inputHash = hashValue(redact(input, cmd.sensitive));
       let target: string | undefined;
+      /** People an audited read reached besides `target` (#763); one audit row each. */
+      let extraTargets: readonly string[] = [];
       const startedAt = Date.now();
       // Metrics or logging hooks are observers: they must never fail a command or mask its error.
       const report = (outcome: 'ok' | 'error') => {
@@ -357,6 +386,26 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         span.end();
         throw err;
       };
+
+      // #811: an agent principal always names its agent record. A surface that builds one without
+      // it (a new credential kind, a test helper, a future integration) would otherwise run a
+      // write with the policy engine, the status check, the limits and the ledger all skipped.
+      // Fail closed: reads stay available, writes never reach a handler. The refusal is audited
+      // best-effort, so a failing audit cannot mask the forbidden error.
+      const agent = principal.type === 'agent' ? principal.agent : undefined;
+      if (principal.type === 'agent' && !agent && cmd.effect !== 'read') {
+        const refused = new AppError(
+          'forbidden',
+          `${cmd.name} changes data, but this connection acts as an agent without an agent record. Sign in again or create a new agent credential; only reads are allowed.`,
+        );
+        await db
+          .withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, refused))
+          .catch(() => {});
+        report('error');
+        span.setStatus({ code: SpanStatusCode.ERROR, message: refused.code });
+        span.end();
+        throw refused;
+      }
 
       if (unknown.length) {
         if (options.strictInputs) return fail(new AppError('invalid_input', unknownMessages.join(' '), { unknownKeys: unknown }));
@@ -385,7 +434,6 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
           );
       }
 
-      const agent = principal.type === 'agent' ? principal.agent : undefined;
       if (agent && agent.status !== 'active')
         return fail(
           new AppError(
@@ -474,7 +522,10 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   inputHash,
                   response: redact(out, cmd.sensitiveOutput) as object,
                 });
-              if (cmd.effect !== 'read') target = cmd.auditTarget?.(out) ?? target;
+              // A read's target can only come from its output too (#763): a lookup resolves the
+              // person, a preview samples people, a list returns rows about people.
+              target = cmd.auditTarget?.(out) ?? target;
+              if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(out);
               if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
               if (agent && policy)
                 await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data), undo.get());
@@ -486,8 +537,12 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         );
         // An audited read is recorded in its own transaction: the hash chain must be appended under
         // its lock with the latest entries visible, which a snapshot taken earlier would not show.
+        // A read that reached several people gets one entry per person (#763).
         if (cmd.effect === 'read' && cmd.auditReads)
-          await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target));
+          await db.withWorkspace(principal.workspaceId, async (tx) => {
+            for (const readTarget of auditTargetList(target, extraTargets))
+              await appendAudit(tx, principal, opts.surface, cmd, inputHash, readTarget);
+          });
         for (const fn of committed) await fn().catch((err) => span.recordException(err as Error));
         report('ok');
         span.end();

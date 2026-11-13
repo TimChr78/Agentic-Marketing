@@ -298,6 +298,9 @@ export const findProfile = defineCommand({
   effect: 'read',
   auditReads: true,
   sensitive: ['value'],
+  // A lookup resolves the person from an input that must stay out of the log (it is redacted
+  // before hashing), so the resolved id is the only target that can answer "who looked them up" (#763).
+  auditTarget: (out) => out.profileId ?? undefined,
   handler: async (input, ctx) => {
     const crypto = personCrypto(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider);
     const value = input.type === 'email' || input.type === 'phone' ? await crypto.matchHash(input.type, input.value) : input.value;

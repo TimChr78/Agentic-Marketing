@@ -4,7 +4,7 @@ import type { MessageEvent } from '@agentic-marketing/events';
 import { profileForMessage, recordConsent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { DeliveryEvent } from './adapters';
 
 // What providers report about messages (webhooks, or the send response itself): the message log,
@@ -93,7 +93,15 @@ export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provi
           valueHash: m.recipientHash,
           reason: e.type === 'complained' ? 'complaint' : 'hard_bounce',
         })
-        .onConflictDoNothing();
+        // A delivery fact outranks an SMS STOP: STOP can be lifted by START, a bounce or complaint
+        // cannot. When the stop row already holds the key, escalate it; never downgrade a stronger
+        // row back to stop (#750). SMS STOP itself inserts with DO NOTHING, so it cannot overwrite
+        // a bounce or complaint either.
+        .onConflictDoUpdate({
+          target: [schema.suppressions.workspaceId, schema.suppressions.channel, schema.suppressions.valueHash],
+          set: { reason: e.type === 'complained' ? 'complaint' : 'hard_bounce' },
+          setWhere: sql`${schema.suppressions.reason} = 'stop'`,
+        });
     if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
       await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp);
   }

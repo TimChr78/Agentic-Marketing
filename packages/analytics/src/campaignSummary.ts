@@ -419,7 +419,7 @@ export const analyticsCampaignSummary = defineCommand({
   name: 'analytics.campaignSummary',
   title: 'Campaign evaluation',
   description:
-    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
+    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed; a currency revenue row below k=5 converters has its revenue suppressed while the rest of the campaign headline stays. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
   input: z.object({
     campaignId: CampaignId,
     from: isoDateTime('from')

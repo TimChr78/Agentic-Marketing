@@ -468,10 +468,12 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
   it('a paused agent is stopped at its next command, even with a principal resolved before (#275)', async () => {
     const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 } });
     // A principal resolved while the agent was active, as a hosted run holds for its whole run.
-    const stale = {
-      ...agentPrincipal(owner.id, 'hosted:stale', ws, 'owner', ['artifacts:read', 'artifacts:write']),
-      agent: { id: a.id, name: 'Stale', status: 'active' as const, statusReason: null },
-    };
+    const stale = agentPrincipal(owner.id, 'hosted:stale', ws, 'owner', ['artifacts:read', 'artifacts:write'], {
+      id: a.id,
+      name: 'Stale',
+      status: 'active',
+      statusReason: null,
+    });
     expect(await t.srv.executor.execute(getAgent, { id: a.id }, stale, { surface: 'mcp' })).toMatchObject({ id: a.id });
     await t.api(owner).call('agents.pause', { id: a.id, reason: 'Stop now' });
     await expect(t.srv.executor.execute(getAgent, { id: a.id }, stale, { surface: 'mcp' })).rejects.toMatchObject({
@@ -538,10 +540,12 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
 
   it('every policy decision sees a pause, including those inside one long command (#292)', async () => {
     const a = await freshAgent({ scope: scope(), levels: { 'content.publish': 3 } });
-    const principal = {
-      ...agentPrincipal(owner.id, 'hosted:import', ws, 'owner', ['artifacts:read', 'artifacts:write', 'artifacts:publish']),
-      agent: { id: a.id, name: 'Importer', status: 'active' as const, statusReason: null },
-    };
+    const principal = agentPrincipal(owner.id, 'hosted:import', ws, 'owner', ['artifacts:read', 'artifacts:write', 'artifacts:publish'], {
+      id: a.id,
+      name: 'Importer',
+      status: 'active',
+      statusReason: null,
+    });
     await t.api(owner).call('agents.pause', { id: a.id, reason: 'Mid-import' });
     await expect(
       t.srv.db.withWorkspace(ws, (tx) =>

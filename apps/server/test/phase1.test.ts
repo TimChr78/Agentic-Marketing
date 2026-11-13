@@ -236,7 +236,12 @@ describe('profiles, identity and consent', () => {
     });
     const { agentPrincipal } = await import('@agentic-marketing/commands');
     const { recordConsentCommand } = await import('@agentic-marketing/profiles');
-    const agent = agentPrincipal(owner.id, 'test-agent', ws, 'owner', ['profiles:write']);
+    const agent = agentPrincipal(owner.id, 'test-agent', ws, 'owner', ['profiles:write'], {
+      id: 'agt_00000000000000000000000000000001',
+      name: 'test-agent',
+      status: 'active',
+      statusReason: null,
+    });
     await expect(
       t.srv.executor.execute(recordConsentCommand, { profileId, purpose: 'marketing_email', status: 'granted' }, agent, { surface: 'mcp' }),
     ).rejects.toMatchObject({ code: 'forbidden' });

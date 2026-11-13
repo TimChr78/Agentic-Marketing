@@ -225,7 +225,7 @@ export async function principalFromAccessToken(db: Db, claims: JWTPayload): Prom
     .filter(Boolean);
   const clientId = String(claims.azp ?? claims.client_id ?? 'unknown-client');
   const agent = await agentForCredential(db, m.workspace_id, 'oauth_client', clientId, claims.sub, () => oauthClientName(db, clientId));
-  return { ...agentPrincipal(claims.sub, clientId, m.workspace_id, m.role, scopes), agent };
+  return agentPrincipal(claims.sub, clientId, m.workspace_id, m.role, scopes, agent);
 }
 
 async function singleMembership(db: Db, userId: string): Promise<{ workspace_id: string; role: Role } | undefined> {

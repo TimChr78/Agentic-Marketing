@@ -4,7 +4,7 @@ import { readdir } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
-import { createDb, type Db, normalizeHost } from '@agentic-marketing/db';
+import { appRoleReach, createDb, type Db, normalizeHost } from '@agentic-marketing/db';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { type Config, ENV_KEYS, loadConfig, REQUIRED_ENV_KEYS } from '../config';
 import { keyProviderFor } from '../keys';
@@ -622,6 +622,43 @@ export async function checkDataKeyProvider(config: Config, db: Db): Promise<Chec
         'Set MASTER_KEY to the key the workspace was created with, or add the old key to MASTER_KEY_PREVIOUS ' +
         'and run `am rotate-keys`. A restore needs the same key; see docs/deployment/backups.md.',
     };
+  }
+}
+
+/**
+ * The app role must not bypass row-level security (#813). A role created with SUPERUSER or
+ * BYPASSRLS (by hand, by an old install or by another tool) makes every request skip tenant
+ * isolation, and so does any role it can `SET ROLE` into — directly or through a chain, since
+ * `NOINHERIT` does not stop `SET ROLE` (0.14.11 round 4). `am migrate` resets the role's own
+ * attributes and refuses a privileged membership; only a superuser can change either, so when the
+ * migration user cannot, this check names the role, the chain and the fix instead of letting the
+ * bypass go unnoticed.
+ */
+export async function checkAppRole(config: Config, db: Db): Promise<Check> {
+  const id = 'postgres.app-role';
+  const role = config.appDbRole;
+  try {
+    const reach = await withTimeout(appRoleReach(db.admin, role), 'the app role');
+    const self = reach.find((r) => r.role === role);
+    if (!self) return { id, status: 'info', message: `the app role ${role} does not exist yet; starting the app creates it` };
+    const words = (r: { superuser: boolean; bypassrls: boolean }) =>
+      [r.superuser ? 'SUPERUSER' : '', r.bypassrls ? 'BYPASSRLS' : ''].filter(Boolean).join(' and ');
+    const own = words(self);
+    const reached = reach.filter((r) => r.role !== role && (r.superuser || r.bypassrls));
+    if (!own && !reached.length) return { id, status: 'ok', message: `the app role ${role} cannot bypass row-level security` };
+    const parts = [
+      own ? `has ${own}` : '',
+      reached.length ? `can SET ROLE to ${reached.map((r) => `“${r.role}” (${words(r)}) via ${r.chain.join(' → ')}`).join('; ')}` : '',
+    ].filter(Boolean);
+    const revoke = reached.map((r) => ` and "REVOKE ${r.role} FROM ${role}"`).join('');
+    return {
+      id,
+      status: 'fail',
+      message: `the app role ${role} ${parts.join(', and ')}, so row-level security is bypassed for every request`,
+      hint: `As a superuser run "ALTER ROLE ${role} NOSUPERUSER NOBYPASSRLS"${revoke}, or set APP_DB_ROLE to a dedicated unprivileged role, then run \`am migrate\` again.`,
+    };
+  } catch (err) {
+    return { id, status: 'warn', message: `could not read the app role’s attributes: ${messageOf(err)}` };
   }
 }
 
@@ -1319,6 +1356,7 @@ export async function liveChecks(config: Config): Promise<Check[]> {
 
     if (postgres.reachable) {
       checks.push(await checkDataKeyProvider(config, db));
+      checks.push(await checkAppRole(config, db));
       checks.push(...(await operationalHealthChecks(db)));
     }
 

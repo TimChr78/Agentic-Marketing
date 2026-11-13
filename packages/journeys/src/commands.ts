@@ -1,14 +1,16 @@
 import {
   analyseHoldout,
+  anyArmBelowK,
   artifactTypes,
   DEFAULT_PURPOSES,
   type JourneyDefinition,
+  K,
   publishedSingleton,
   publishValidators,
 } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, isoDateTime, newId, newUuid } from '@agentic-marketing/core';
+import { AppError, isoDateTime, newId, newUuid, personalDataInText } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
@@ -23,7 +25,7 @@ import { compile, unsupported } from './graph';
 import { assignHoldout, computeJourneyHoldout, holdoutDetail, holdoutHashVersion } from './holdout';
 import { conditionSegments, journeyTouches } from './impact';
 import { advance, type ParticipantState } from './interpreter';
-import { attributeSplitOutcomes } from './split';
+import { attributeSplitOutcomes, splitArmPeople } from './split';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
@@ -236,18 +238,19 @@ export const journeyHoldoutResult = defineCommand({
 const ArmOut = z.object({
   arm: z.number().int().describe('0-based: arm 0 is the split’s first edge (variant 1)'),
   weight: z.number(),
-  entered: z.number().int().describe('Participants who took this arm'),
-  converted: z.number().int(),
-  unsubscribed: z.number().int(),
-  conversionRate: z.number(),
-  unsubscribeRate: z.number(),
+  entered: z.number().int().nullable().describe('Participants who took this arm; null when the arm is below k'),
+  converted: z.number().int().nullable().describe('People in the arm who converted; null when the arm is below k'),
+  unsubscribed: z.number().int().nullable().describe('E-mail unsubscribes, the guardrail; null when the arm is below k'),
+  conversionRate: z.number().nullable().describe('Converted divided by entered; null when the arm is below k'),
+  unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the arm is below k'),
+  suppressed: z.boolean().describe('True when this arm held fewer than k people, so its counts and rates are hidden'),
 });
 
 export const journeySplitResult = defineCommand({
   name: 'journeys.splitResult',
   title: 'Results per arm of a journey split',
   description:
-    "For a split node in a published journey: how many people took each arm, their goal conversions and e-mail unsubscribes, and each arm compared with the first (variant 1) — absolute and relative lift, Newcombe's 95% interval and a verdict that needs the minimum sample in both arms and an interval excluding zero. Each outcome is attributed once, to the split entry active at the outcome (a recorded participant wins; otherwise the latest entry at or before it), so a re-entrant cannot count for every arm. The lifecycle optimiser uses it to promote or retire a variant (#313).",
+    "For a split node in a published journey: how many people took each arm, their goal conversions and e-mail unsubscribes, and each arm compared with the first (variant 1) — absolute and relative lift, Newcombe's 95% interval and a verdict that needs the minimum sample in both arms and an interval excluding zero. Each outcome is attributed once, to the split entry active at the outcome (a recorded participant wins; otherwise the latest entry at or before it), so a re-entrant cannot count for every arm. The lifecycle optimiser uses it to promote or retire a variant (#313). When any arm holds fewer than k=5 people, that arm's counts and rates are null, suppressed is true and k is reported, and every comparison and its verdict is withheld.",
   input: z.object({
     journeyId: JourneyId,
     node: z.string().min(1).describe('The split node id'),
@@ -258,6 +261,10 @@ export const journeySplitResult = defineCommand({
   output: z.object({
     journeyId: z.string(),
     node: z.string(),
+    k: z.number().int().describe('The k-anonymity floor; an arm below it is suppressed'),
+    suppressed: z
+      .boolean()
+      .describe('True when an arm held fewer than k people, so small-arm counts, rates and every comparison are hidden'),
     arms: z.array(ArmOut),
     comparisons: z.array(
       z.object({
@@ -303,34 +310,58 @@ export const journeySplitResult = defineCommand({
       weights.length,
     );
     const rate = (n: number, of: number) => (of ? n / of : 0);
-    const arms = counts.map((c, i) => ({
-      arm: i,
-      weight: weights[i],
-      ...c,
-      conversionRate: rate(c.converted, c.entered),
-      unsubscribeRate: rate(c.unsubscribed, c.entered),
-    }));
-    const comparisons = counts.slice(1).map((c, i) => {
-      const r = analyseHoldout(counts[0], c, input.minSampleSize);
-      return {
-        arm: i + 1,
-        versus: 0 as const,
-        absoluteLift: r.absoluteLift,
-        relativeLift: r.relativeLift,
-        ci95: r.ci95,
-        minSampleSizeMet: r.minSampleSizeMet,
-        verdict: r.verdict,
-      };
-    });
+    // The same k floor the holdout read applies, per arm (#757): an arm below k never reports a
+    // count or rate, and no comparison or verdict is computed from a hidden baseline. The floor
+    // counts distinct people, not entries: one person re-entering an arm five times is still one
+    // person (0.14.11 review).
+    const armPeople = splitArmPeople(taken, weights.length).map((n) => ({ entered: n }));
+    const belowK = anyArmBelowK(armPeople);
+    const arms = counts.map((c, i) =>
+      belowK && armPeople[i]!.entered < K
+        ? {
+            arm: i,
+            weight: weights[i],
+            entered: null,
+            converted: null,
+            unsubscribed: null,
+            conversionRate: null,
+            unsubscribeRate: null,
+            suppressed: true,
+          }
+        : {
+            arm: i,
+            weight: weights[i],
+            ...c,
+            conversionRate: rate(c.converted, c.entered),
+            unsubscribeRate: rate(c.unsubscribed, c.entered),
+            suppressed: false,
+          },
+    );
+    const comparisons = belowK
+      ? []
+      : counts.slice(1).map((c, i) => {
+          const r = analyseHoldout(counts[0], c, input.minSampleSize);
+          return {
+            arm: i + 1,
+            versus: 0 as const,
+            absoluteLift: r.absoluteLift,
+            relativeLift: r.relativeLift,
+            ci95: r.ci95,
+            minSampleSizeMet: r.minSampleSizeMet,
+            verdict: r.verdict,
+          };
+        });
     const better = comparisons.filter((c) => c.verdict === 'treatment_better').map((c) => `arm ${c.arm}`);
     const note = !taken.length
       ? 'Nobody has reached this split yet.'
-      : better.length
-        ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
-        : comparisons.every((c) => c.verdict === 'not_enough_data')
-          ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
-          : 'No arm is clearly better than arm 0 yet.';
-    return { journeyId: input.journeyId, node: input.node, arms, comparisons, note };
+      : belowK
+        ? `An arm has fewer than k=${K} people, so its counts and rates and every comparison are withheld.`
+        : better.length
+          ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
+          : comparisons.every((c) => c.verdict === 'not_enough_data')
+            ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
+            : 'No arm is clearly better than arm 0 yet.';
+    return { journeyId: input.journeyId, node: input.node, k: K, suppressed: belowK, arms, comparisons, note };
   },
 });
 
@@ -635,7 +666,7 @@ export const simulateJourney = defineCommand({
   name: 'journeys.simulate',
   title: 'Simulate a journey',
   description:
-    'Walk through a journey version (default: latest) on a virtual clock, without sending anything. With a profile, e-mail steps say whether the gateway would send or why not, and branches use the person’s data. `events` lets you script what the person does (e.g. clicks after 1 day). `sampleEvent` resolves the trigger entry key and says whether that entry would be suppressed as a duplicate.',
+    'Walk through a journey version (default: latest) on a virtual clock, without sending anything. With a profile, e-mail steps say whether the gateway would send or why not, and branches use the person’s data. `events` lets you script what the person does (e.g. clicks after 1 day). `sampleEvent` resolves the trigger entry key and says whether that entry would be suppressed as a duplicate. Simulating a named person needs `profiles:read`, and any step whose detail would show personal data (e.g. an updateProfile value that is a phone number) needs `profiles:pii`, otherwise that step is withheld. Without a `profileId` the dry run stays with `artifacts:read`.',
   input: z.object({
     artifactId: JourneyId,
     version: z.number().int().min(1).optional(),
@@ -694,6 +725,15 @@ export const simulateJourney = defineCommand({
   auditReads: true,
   target: (i) => i.profileId ?? i.artifactId,
   handler: async (input, ctx) => {
+    // #762: a walk for a named person discloses their consent, topic and suppression state — the
+    // same facts consent.history gates behind profiles:read. A dry run without a profile stays a
+    // journey-builder scope. The extra permission is checked here because the registry has no
+    // conditional permission: `selfService` is an alternative permission, not an input-dependent one.
+    if (input.profileId && !ctx.principal.permissions.has('profiles:read'))
+      throw new AppError(
+        'forbidden',
+        'Walking a journey for a named person shows their consent, topic and suppression state, which needs the "profiles:read" permission. Simulate without a profileId, or ask the workspace owner for the permission.',
+      );
     const { version, def } = await loadDefinition(ctx.tx, input.artifactId, input.version);
     let graph: ReturnType<typeof compile>;
     try {
@@ -720,7 +760,17 @@ export const simulateJourney = defineCommand({
           duplicate: false,
           note: 'the key property is missing, so the entry would be skipped',
         };
-      else {
+      else if (!ctx.principal.permissions.has('profiles:read')) {
+        // A duplicate check looks up existing participants by key (often an e-mail address), so it
+        // would reveal whether that person is in the journey. Without profiles:read the dry run
+        // resolves the key from the sample event only (0.14.11 review).
+        entry = {
+          key: choice.key,
+          source: choice.source,
+          duplicate: false,
+          note: 'participant state is not checked: looking up whether this key already entered needs the "profiles:read" permission',
+        };
+      } else {
         const keyed = graph.trigger.entryKey?.source === 'event_property';
         let duplicate = false;
         if (keyed) duplicate = await duplicateEntryKey(ctx.tx, input.artifactId, choice.key, graph.trigger.reentry);
@@ -918,6 +968,13 @@ export const simulateJourney = defineCommand({
     }
     const outcome: 'completed' | 'exited' | 'waiting' =
       state.status === 'completed' || state.status === 'exited' ? state.status : 'waiting';
+    // #762: a step can carry personal data from the journey content (e.g. an updateProfile value
+    // that is a phone number or an address). Showing it needs profiles:pii; without it the step is
+    // withheld rather than reworded, so nothing about the person leaks through the walk.
+    if (input.profileId && !ctx.principal.permissions.has('profiles:pii'))
+      for (const step of steps)
+        if (personalDataInText(step.detail, { strict: true }).length)
+          step.detail = 'withheld: this step would show personal data, which needs the profiles:pii permission';
     return { version, outcome, converted: state.converted, steps, entry };
   },
 });
