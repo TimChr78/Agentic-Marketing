@@ -3,7 +3,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
-import { accessTokenOf, connectionSecrets, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
+import { accessTokenOf, connectionSecrets, EgressError, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
@@ -89,7 +89,7 @@ async function metaSpend(
   const rows: SpendRow[] = [];
   for (let page = 0; url && page < 50; page++) {
     const res = await safeRequest(url, { method: 'GET', headers: { accept: 'application/json' } }, egress);
-    if (res.status !== 200) throw new Error(`Meta Insights answered ${res.status}: ${res.body.slice(0, 300)}`);
+    if (res.status !== 200) throw new AppError('conflict', `Meta Insights answered ${res.status}: ${res.body.slice(0, 300)}`);
     const body = JSON.parse(res.body) as {
       data: {
         campaign_id: string;
@@ -154,7 +154,7 @@ async function googleSpend(
       },
       egress,
     );
-    if (res.status !== 200) throw new Error(`Google Ads answered ${res.status}: ${res.body.slice(0, 300)}`);
+    if (res.status !== 200) throw new AppError('conflict', `Google Ads answered ${res.status}: ${res.body.slice(0, 300)}`);
     const body = JSON.parse(res.body) as {
       results?: {
         campaign: { id: string; name: string };
@@ -283,8 +283,11 @@ export const importSpendCommand = defineCommand({
         egress: ctx.services.egress ?? { allowedHosts: [] },
       });
     } catch (err) {
-      if (err instanceof AppError) throw err;
-      throw new AppError('conflict', (err as Error).message);
+      // Provider answers and egress refusals are the caller's diagnostics; anything else (the
+      // database, secrets, a bug) propagates as is, so the executor audits and answers it as a
+      // sanitised internal failure rather than echoing its text (0.14.16 review round 2).
+      if (err instanceof EgressError) throw new AppError('conflict', err.message);
+      throw err;
     }
   },
 });
