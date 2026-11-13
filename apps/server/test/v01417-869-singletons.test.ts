@@ -178,6 +178,32 @@ describe('singleton artifacts stay unique (#869)', () => {
     expect(row).toEqual({ archived: false, published_version: 1 });
   });
 
+  it('restores an archived singleton unpublished, so its old published version never goes live without review (0.14.17 round 2)', async () => {
+    const run = async (policy: string, publish: boolean) => {
+      // v1 goes live without review; the policy under test applies to the import.
+      const ws = await t.workspaceWith([[owner, 'owner']], 'none');
+      const api = t.api(owner, ws);
+      const brand = await api.call('artifacts.create', { type: 'brand', name: 'Old brand', content: { siteName: 'Old live' } });
+      await api.call('artifacts.requestPublish', { artifactId: brand.artifactId, note: 'v1' });
+      expect((await publishedBrand(ws))?.siteName).toBe('Old live');
+      await archive(ws, brand.artifactId);
+      await t.srv.db.admin.query('UPDATE workspaces SET approval_policy = $2 WHERE id = $1', [ws, policy]);
+      const out = await api.call('config.import', {
+        bundle: bundleOf([{ id: brand.artifactId, type: 'brand', name: 'Restored brand', content: { siteName: 'New' } }]),
+        dryRun: false,
+        publish,
+      });
+      return { ws, brand, out };
+    };
+    // Draft-only import: restored, but nothing is live until someone publishes.
+    const draft = await run('none', false);
+    expect(await publishedBrand(draft.ws)).toBeNull();
+    // A publish that needs approval: still nothing live while the request is in review.
+    const reviewed = await run('all_publishes', true);
+    expect(reviewed.out.changes[0]).toMatchObject({ action: 'update', publish: 'in_review' });
+    expect(await publishedBrand(reviewed.ws)).toBeNull();
+  });
+
   it('refuses an explicit archived singleton id when an active singleton exists', async () => {
     const ws = await t.workspaceWith([[owner, 'owner']], 'none');
     const api = t.api(owner, ws);
