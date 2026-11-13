@@ -2,6 +2,30 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.15] - 2026-11-13
+
+### Fixed
+
+- A date-time entered with an impossible calendar field is refused with the usual validation error instead of being silently rolled over: `2026-02-30`, `2026-04-31`, a non-leap `2026-02-29`, `24:00`, minute 60 and second 60 no longer move a scheduled send to another day. Lowercase `t` and `z` are accepted, as the ISO parser already did.
+- Two requests that send the same idempotency key at the same moment now run the command once, including read commands (whose snapshot used to predate the winner's commit); the second waits and returns the first one's response instead of running the handler again (an external effect such as a send could happen twice) and failing on the key's unique constraint. The waiter no longer holds a database connection while it waits: it retries `pg_try_advisory_lock` with jittered backoff and, if the first request is still running after ten seconds, answers `409 conflict` so the caller retries with the same key (a new key would run the operation again). A failed lock acquisition destroys the connection, because its lock state is unknown.
+- Retention re-reads the event store inside its deletion re-check, so a person whose page view or second form submission arrives between the round's history snapshot and the delete is kept rather than erased with the new events.
+- The archive's e-mail-parts cache now keeps a fail-closed result that only ran out of time for a minute, so an always-slow issue costs one parse per minute rather than one per request; after the minute it is parsed again and can succeed.
+- Retried push notifications carry a per-message key (APNs `apns-collapse-id`, FCM `android.notification.tag`), so an at-least-once retry replaces the first notification instead of showing it twice. FCM ignores `collapse_key` for notifications with a payload, so the Android tag is what deduplicates a display message.
+- Click ids from conversion cookies pick the first value for `_fbp` and `_ttp` as they already did for `_fbc` and `_epik`, so a legacy cookie at `/` cannot shadow the newer one at `/lp`.
+- SNS webhook refusals are retryable: a cache miss is always fetched (no cooldown refusal after a certificate is evicted), the per-URL refetch cooldown is a bounded LRU, and a process-wide limit of 120 certificate fetches per rolling minute bounds amplification instead. A rate limit, timeout or certificate-fetch failure is now `retry`, which the webhook route answers with `503` and `retry-after`; only a signature that fails against a freshly fetched certificate, or a foreign certificate host, is a permanent `401` (inside the refetch cooldown the answer is `retry`, and a failed refetch releases the cooldown), so AWS SNS no longer drops a delivery event that it would have retried.
+- A reusable preference-centre link no longer loses segment-change events: each re-evaluation of a person's segment membership gets its own event id, so a topic toggled back within two minutes still triggers `Segment Entered`/`Segment Exited` journeys and webhooks.
+- The archive sanitiser's linear-time self-test drives a synthetic clock, so a busy CI runner can no longer make it flaky.
+
+### Upgrading from 0.14.14
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** a date-time with an impossible calendar field (`2026-02-30`, `24:00`, minute 60) is refused with a validation error instead of being rolled over; a request that repeats an idempotency key still in progress for more than ten seconds gets `409 conflict` (retry with the same key); SNS webhook refusals that are only temporary answer `503` with `retry-after`, so SNS redelivers them. Idempotency now uses PostgreSQL session advisory locks, which do not work through a PgBouncer pool in transaction mode (no shipped deployment uses one).
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.15.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.15 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.15` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.15). Run `docker compose exec app am doctor`.
+
+<!-- issues: 753, 754, 755, 766, 777, 781, 807, 812, 816 -->
+
 ## [0.14.14] - 2026-11-13
 
 ### Fixed

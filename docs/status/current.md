@@ -34,9 +34,9 @@ _Last updated: 2026-11-12_
   - **0.14.10** (bug follow-ups: #735, #732, #671, #672, #673, #746) is released and verified. Sol approved. parse5 8.1 indexes the open-element stack, so the #673 read cap is now a backstop.
   - **0.14.11** (privacy and security) is released and verified: Sol approved after eleven rounds; webhook replay identity is the headers a mapping reads (documented residual: clock- or random-dependent reads may publish a retry twice, never lose one).
   - **0.14.12** (analytics and experiments) is released and verified: Sol approved after six rounds (ads attribution is bounded in memory, pairs and time).
-  - **0.14.13** (UI freshness and e-mail) is released: Sol approved after five rounds (ordered reference observations, one re-check per return).
+  - **0.14.13** (UI freshness and e-mail) is released and verified: Sol approved after five rounds (ordered reference observations, one re-check per return).
   - **0.14.14** (operations and release tooling) is released: Sol approved after six rounds (one release queue with `queue: max`, tag reserved before publishing, `latest` only for the newest stable release, workflow shell steps checked by `bash -n`).
-  - **0.14.15** (delivery and data edge cases): approved, releasing next. Plan: https://claude.ai/artifact/BDXuwrEBa6hevSKU4s9vAL
+  - **0.14.15** (delivery and data edge cases) is released: Sol approved after four rounds (retryable SNS refusals, a non-blocking idempotency lock). This completes the 2026-11-12 audit plan. Plan: https://claude.ai/artifact/BDXuwrEBa6hevSKU4s9vAL
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
@@ -82,4 +82,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.14, released from `main`; v0.14.13 is being verified.
+- The last release is v0.14.15, released from `main`; v0.14.14 is verified.

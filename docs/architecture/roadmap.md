@@ -1,6 +1,6 @@
 # Roadmap (team of one, no deadline)
 
-> **Waves 2–4 (2026-10-22 to 2026-11-01):** waves 1–3 are built: wave 1 below, then [wave 2](roadmap-wave-2.md) after the MartechSignal pilot, then [wave 3](roadmap-wave-3.md) for install/upgrade, pilot correctness, the newsletter and measurement (through Phase 16, 0.2.10). Wave 4, [roadmap-wave-4.md](roadmap-wave-4.md), shipped Phases 17–22 (0.3.0–0.8.0); wave 5, [roadmap-wave-5.md](roadmap-wave-5.md), shipped Phases 23–28 (0.9.0–0.14.0). The current release is 0.14.14. The table below is wave 1 and is kept as history.
+> **Waves 2–4 (2026-10-22 to 2026-11-01):** waves 1–3 are built: wave 1 below, then [wave 2](roadmap-wave-2.md) after the MartechSignal pilot, then [wave 3](roadmap-wave-3.md) for install/upgrade, pilot correctness, the newsletter and measurement (through Phase 16, 0.2.10). Wave 4, [roadmap-wave-4.md](roadmap-wave-4.md), shipped Phases 17–22 (0.3.0–0.8.0); wave 5, [roadmap-wave-5.md](roadmap-wave-5.md), shipped Phases 23–28 (0.9.0–0.14.0). The current release is 0.14.15. The table below is wave 1 and is kept as history.
 
 Ordering principle: build the **foundations that are expensive to retrofit** first (command registry, tenancy, artifacts/versioning, consent, audit), then deliver one end-to-end vertical slice, then widen.
 
