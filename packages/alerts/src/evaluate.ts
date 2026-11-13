@@ -229,7 +229,11 @@ async function notifyFor(
   return mergeNotifications(existing, fresh);
 }
 
-async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, opts: EvaluateOptions) {
+/**
+ * The per-rule throttle, checked before any transaction starts. Returns the state to update after
+ * the rule's transaction commits, or null when this tick must skip the rule.
+ */
+function claimEvaluation(rule: RuleRow, now: Date, opts: EvaluateOptions): RuleEvaluationState | null {
   const key = `${rule.workspaceId}:${rule.id}`;
   const config = parseAlertConfig(rule.kind, rule.config);
   const interval = minimumIntervalMs(config);
@@ -238,32 +242,29 @@ async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, o
     // A rule that keeps failing backs off after a few retries, so a broken rule does not hammer
     // ClickHouse every five minutes; until then a failure is retried on the next tick.
     if (state.failures >= FAILURES_BEFORE_BACKOFF && state.lastAttemptAt !== undefined && now.getTime() - state.lastAttemptAt < interval)
-      return;
+      return null;
     // Only a successful measurement starts the minimum interval. Failures and skips retry next tick.
-    if (state.lastSuccessAt !== undefined && now.getTime() - state.lastSuccessAt < interval) return;
+    if (state.lastSuccessAt !== undefined && now.getTime() - state.lastSuccessAt < interval) return null;
   }
   state.lastAttemptAt = now.getTime();
   evaluationState.set(key, state);
+  return state;
+}
 
+/**
+ * One rule inside its own transaction. Returns whether the rule measured, so the caller records
+ * the success only after the transaction commits (a rolled-back decision must be retried).
+ * Measurement errors propagate: the transaction rolls back, and the caller counts the failure.
+ */
+async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date): Promise<boolean> {
   const workspace = await tx
     .select({ id: schema.workspaces.id, name: schema.workspaces.name })
     .from(schema.workspaces)
     .where(eq(schema.workspaces.id, rule.workspaceId));
-  if (!workspace[0]) return;
+  if (!workspace[0]) return false;
 
-  let measurement: EvaluatedMeasurement;
-  try {
-    measurement = await measureRule(deps, tx, rule, now);
-  } catch (err) {
-    state.failures++;
-    // Once per failure streak: the retries and the back-off are expected, not new incidents.
-    if (state.failures === 1)
-      logger.error({ err, rule: rule.id, workspaceId: rule.workspaceId }, 'alert evaluation failed; retrying on the next tick');
-    return;
-  }
-  state.failures = 0;
-  if (measurement.skip) return;
-  state.lastSuccessAt = now.getTime();
+  const measurement = await measureRule(deps, tx, rule, now);
+  if (measurement.skip) return false;
 
   const [open] = await tx
     .select()
@@ -280,7 +281,7 @@ async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, o
       const existing = await reconcileAlertNotifications(tx, open.notified);
       const notified = await notifyFor(tx, deps, rule, workspace[0], open.id, 'firing', measurement, existing, now);
       if (notified !== open.notified) await tx.update(schema.alertEvents).set({ notified }).where(eq(schema.alertEvents.id, open.id));
-      return;
+      return true;
     }
 
     // After a resolve, stay quiet for an hour so a flapping metric cannot storm.
@@ -290,7 +291,7 @@ async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, o
       .where(and(eq(schema.alertEvents.ruleId, rule.id), eq(schema.alertEvents.state, 'resolved')))
       .orderBy(desc(schema.alertEvents.resolvedAt))
       .limit(1);
-    if (resolved?.resolvedAt && now.getTime() - resolved.resolvedAt.getTime() < COOLDOWN_MS) return;
+    if (resolved?.resolvedAt && now.getTime() - resolved.resolvedAt.getTime() < COOLDOWN_MS) return true;
 
     const [created] = await tx
       .insert(schema.alertEvents)
@@ -307,13 +308,13 @@ async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, o
       })
       .onConflictDoNothing()
       .returning();
-    if (!created) return;
+    if (!created) return true;
     const notified = await notifyFor(tx, deps, rule, workspace[0], created.id, 'firing', measurement, [], now);
     await tx.update(schema.alertEvents).set({ notified }).where(eq(schema.alertEvents.id, created.id));
-    return;
+    return true;
   }
 
-  if (!open) return;
+  if (!open) return true;
   // Not firing any more: notify resolution once and keep the row as history. The firing ledger is
   // reconciled first so a delivery still in flight is reported truthfully even as the episode closes.
   const existing = await reconcileAlertNotifications(tx, open.notified);
@@ -329,11 +330,38 @@ async function evaluateRule(deps: AlertDeps, tx: Tx, rule: RuleRow, now: Date, o
       notified,
     })
     .where(eq(schema.alertEvents.id, open.id));
+  return true;
 }
 
-async function evaluateWorkspace(deps: AlertDeps, tx: Tx, now: Date, opts: EvaluateOptions) {
-  const rules = await tx.select().from(schema.alertRules).where(eq(schema.alertRules.enabled, true));
-  for (const rule of rules) await evaluateRule(deps, tx, rule, now, opts);
+/**
+ * Lists and evaluates one workspace's rules. Each rule commits in its own transaction: one rule
+ * whose episode or outbox write fails must not roll back the episodes of the rules that ran before
+ * it (#788), and the failure back-off stays per rule. The throttle state is process-local, so it is
+ * updated only after the transaction that measured the rule has committed.
+ */
+async function evaluateWorkspace(deps: AlertDeps, workspaceId: string, now: Date, opts: EvaluateOptions) {
+  const rules = await deps.db.withWorkspace(workspaceId, (tx) =>
+    tx
+      .select()
+      .from(schema.alertRules)
+      .where(eq(schema.alertRules.enabled, true))
+      // A stable order makes a tick reproducible and the failure log comparable between runs.
+      .orderBy(schema.alertRules.name),
+  );
+  for (const rule of rules) {
+    const state = claimEvaluation(rule, now, opts);
+    if (!state) continue;
+    try {
+      const measured = await deps.db.withWorkspace(workspaceId, (tx) => evaluateRule(deps, tx, rule, now));
+      state.failures = 0;
+      if (measured) state.lastSuccessAt = now.getTime();
+    } catch (err) {
+      state.failures++;
+      // Once per failure streak: the retries and the back-off are expected, not new incidents.
+      if (state.failures === 1)
+        logger.error({ err, rule: rule.id, workspaceId: rule.workspaceId }, 'alert evaluation failed; retrying on the next tick');
+    }
+  }
 }
 
 /**
@@ -384,7 +412,7 @@ export async function evaluateAlerts(deps: AlertDeps, opts: EvaluateOptions = {}
   );
   for (const { workspace_id: workspaceId } of rows) {
     try {
-      await deps.db.withWorkspace(workspaceId, (tx) => evaluateWorkspace(deps, tx, now, opts));
+      await evaluateWorkspace(deps, workspaceId, now, opts);
     } catch (err) {
       logger.error({ err, workspaceId }, 'alert workspace evaluation failed');
     }

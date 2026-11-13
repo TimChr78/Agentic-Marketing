@@ -10,7 +10,7 @@
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findPreviousVersion, releaseSection } from './prepare.mjs';
+import { assertCompleteHistory, findPreviousVersion, releaseSection } from './prepare.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -171,7 +171,10 @@ function fetchTags() {
 }
 
 /** Commit SHAs in v<previous>..v<version>, or the tag's history for the first release. */
-function commitsInRange(previous, version) {
+export function commitsInRange(root, previous, version) {
+  // A depth-1 checkout returns the commits above the graft and exit 0, so the range is refused
+  // before it is read rather than silently narrowed (#772).
+  assertCompleteHistory(root);
   const range = previous ? `${previous}..v${version}` : `v${version}`;
   return execFileSync('git', ['rev-list', range], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
 }
@@ -188,7 +191,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (!tags.includes(`v${options.version}`)) throw new Error(`tag v${options.version} is not in the local repository; fetch tags first`);
     const changelog = readChangelogAtTag(options.version);
     const previous = resolvePreviousTag({ tags, version: options.version, changelog, explicit: options.previous });
-    const commits = commitsInRange(previous, options.version);
+    const commits = commitsInRange(root, previous, options.version);
     const prs = JSON.parse(
       gh([
         'pr',

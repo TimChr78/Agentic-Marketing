@@ -2,6 +2,30 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.14] - 2026-11-13
+
+### Fixed
+
+- Alert evaluation commits one rule per transaction (#788): a rule whose episode or outbox write fails no longer rolls back the episodes of the rules that ran before it, and a rule's minimum interval starts only after its transaction commits, so a rolled-back decision is retried on the next tick instead of being suppressed for up to an hour. The bounded failure back-off is unchanged.
+- Release runs are serialised in one queue across all lines (every waiting release is kept, not replaced by a newer one), a manual release reserves its version tag before it pushes an image, and the floating `:<major>.<minor>` image tag is pushed only when the version is the newest release in its line (#773): an older patch finishing later can no longer move the tag backwards, and an unreadable tag list publishes the exact version alone. The `latest` image tag follows the same rule across all lines: it moves only for the newest stable release, never for a prerelease or a retried older release. A newer prerelease no longer holds the stable line tag back, and a tag that is not valid SemVer is ignored.
+- The Helm chart refuses to render when `config.PORT` is set and differs from the top-level `port` (#774), instead of producing a pod the probes and Service target on another port, which never passes readiness.
+- The release scripts refuse a shallow clone (#772): `prepare.mjs` and `close-issues.mjs` fail with `git fetch --unshallow --tags` instead of silently truncating the tag range, which skipped issues and rendered "Migrations: none." for a release that had migrations.
+- Unknown `/oauth/*` paths answer a JSON 404 instead of the admin SPA shell, `/metrics` is in the API path list, and the `/hooks`, `/oauth` and `/scim` JSON catch-alls are registered on every server role (#751), so an api-only or ingest-only pod answers JSON too.
+- `/scim` traffic is counted in the `api` route group and `/oauth` gets its own `oauth` group (#752), so an identity-provider outage no longer pages as an admin-UI regression; the group table in the metrics documentation is updated.
+- The backup documentation no longer says the scheduler does not verify its own backups (#783): since 0.14.3 it runs the read-back check after every scheduled backup, so the heartbeat and the verification age are real without a second container or host cron entry.
+- The architecture status pages are version surfaces again (#784): `prepare.mjs` bumps their release line and `check-versions.mjs` checks it, so they cannot pin an old release between releases. Prerelease versions (`1.0.0-rc.1`) are read back too. The release checks also require `docs/status/current.md` to call the version released in its "Now" section and to name it as the last release.
+- The release gates require `docs/status/current.md` to name the release being cut as released (#785): `prepare.mjs --check` and `check-notes.mjs` fail while the handoff still says it is in progress.
+
+### Upgrading from 0.14.13
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** the Helm chart refuses to render when `config.PORT` is set and differs from `port` (remove `config.PORT` and set `port`); unknown `/oauth/*` paths answer a JSON 404 instead of the admin app; the metrics `route_group` label counts `/scim` as `api` and `/oauth` as a new `oauth` group, so dashboards or alerts keyed on `ui` for those paths need updating.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.14.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.14 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.14` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.14). Run `docker compose exec app am doctor`.
+
+<!-- issues: 751, 752, 772, 773, 774, 783, 784, 785, 788 -->
+
 ## [0.14.13] - 2026-11-13
 
 ### Fixed

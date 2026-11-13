@@ -201,8 +201,10 @@ am backup --verify --dir /backups
 
 A corrupt or truncated file fails with the file name and the expected and actual SHA-256, and the
 command exits 1. A successful run writes `<BACKUP_DIR>/.verify-status.json` (`0600`, `{ verifiedAt,
-backup }`). Run it after every scheduled backup, and run a real restore drill (below) regularly; a
-hash check cannot prove that the schema and data still restore into a running app.
+backup }`). You do not have to run it by hand after a scheduled backup: since 0.14.3 the scheduler
+verifies each backup it writes (see [Scheduled backups](#scheduled-backups)). Run a real restore
+drill (below) regularly anyway; a hash check cannot prove that the schema and data still restore
+into a running app.
 
 `am backup --health` reads that file: it exits 1 when no verification has ever run, or when the last
 successful one is older than `BACKUP_VERIFY_MAX_AGE_DAYS` (default 30), in addition to the scheduler
@@ -242,10 +244,12 @@ am backup --health
 ```
 
 It exits 0 when the heartbeat is less than 2 minutes old, the last run did not fail, and the last
-successful `am backup --verify` is not older than `BACKUP_VERIFY_MAX_AGE_DAYS` (default 30);
-otherwise it exits 1 and prints one line saying why. The scheduler does not verify its own output:
-run `am backup --verify` after the scheduled run (a second one-off container or a host cron entry),
-so the heartbeat and the verification age are both real. A Compose healthcheck can use:
+successful verification is not older than `BACKUP_VERIFY_MAX_AGE_DAYS` (default 30); otherwise it
+exits 1 and prints one line saying why. The scheduler verifies its own output: after every successful
+scheduled backup it runs the same read-back check as `am backup --verify`, so a good run writes the
+verification record that `--health` requires and no second container or host cron entry is needed.
+A manual `am backup --verify` is still useful after a restore drill or for a backup directory the
+scheduler did not write. A Compose healthcheck can use:
 
 ```yaml
 healthcheck:

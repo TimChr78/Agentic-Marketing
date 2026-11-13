@@ -674,9 +674,14 @@ describe('Person detail (#510)', () => {
     expect(within(consent).getAllByText('Email: Allowed').length).toBeGreaterThan(0);
     expect(within(consent).getAllByText('SMS: Withdrawn').length).toBeGreaterThan(0);
     // The equal-timestamp grant/refusal resolves to the refusal, for the purpose and its channel.
-    const product = within(consent)
-      .getAllByRole('listitem')
-      .find((item) => item.textContent?.includes('Product updates'))!;
+    // The purpose's display name arrives with a separate read, so wait for its row.
+    const product = await waitFor(() => {
+      const row = within(consent)
+        .getAllByRole('listitem')
+        .find((item) => item.textContent?.includes('Product updates'));
+      if (!row) throw new Error('Product updates row not rendered yet');
+      return row;
+    });
     expect(within(product).getByText('Withdrawn')).toBeTruthy();
     expect(within(product).queryByText('Allowed')).toBeNull();
     expect(within(product).getByText('Email: Withdrawn')).toBeTruthy();
