@@ -139,10 +139,15 @@ describe('e-mail end to end', () => {
       data: { event: { properties: { sku: 'TENT-2' } } },
     });
     expect(sent).toMatchObject({ status: 'queued', duplicate: false });
-    expect(await api.call('messages.sendEmail', { profileId: ada, templateId, idempotencyKey: 'welcome-ada' })).toMatchObject({
-      messageId: sent.messageId,
-      duplicate: true,
-    });
+    // The retry repeats the whole request, variables included: a changed payload is a conflict.
+    expect(
+      await api.call('messages.sendEmail', {
+        profileId: ada,
+        templateId,
+        idempotencyKey: 'welcome-ada',
+        data: { event: { properties: { sku: 'TENT-2' } } },
+      }),
+    ).toMatchObject({ messageId: sent.messageId, duplicate: true });
 
     const mail = await eventually(
       async () => inbox.find((m) => m.to.includes('ada@example.com')),

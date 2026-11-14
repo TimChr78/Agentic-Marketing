@@ -578,11 +578,11 @@ export const messages = pgTable(
     /** The agent behind this message (#426): a direct send by an agent, or an agent-owned broadcast or journey. */
     agentId: text('agent_id'),
     /**
-     * The caller the input-level idempotency key is bound to (#926): a hash of the principal from
-     * `callerHash`, or `system` for journeys, forms and other internal sends. Null on rows written
-     * before this column; those match a key on their input alone.
+     * The immutable request fingerprint behind an input-level idempotency key (#926): caller and
+     * the request as supplied before any resolution. Null on rows written before this column; those
+     * fall back to comparing the recipient and template columns.
      */
-    requestedBy: text('requested_by'),
+    requestHash: text('request_hash'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },

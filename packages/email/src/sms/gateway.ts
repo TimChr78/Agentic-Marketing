@@ -7,7 +7,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Decision, EmailServices } from '../gateway';
-import { idempotencyKeyReused, sameSendRequest, topicSuppression } from '../gateway';
+import { idempotencyKeyReused, legacySameSend, lockSendKey, topicSuppression } from '../gateway';
 import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
 import { checkPolicy, isMarketing } from '../policy';
 import { firstLine } from '../render';
@@ -29,8 +29,8 @@ export interface SmsRequest {
   notBefore?: Date;
   /** The agent behind this message (#426): a direct send, or the owner of the journey. */
   agentId?: string | null;
-  /** The caller the input-level key belongs to (#926); see `EmailRequest.requestedBy`. */
-  requestedBy?: string;
+  /** The immutable request fingerprint (#926); see `sendRequestHash` in the e-mail gateway. */
+  requestHash: string;
 }
 
 type Verdict =
@@ -94,9 +94,11 @@ async function publishedSmsTemplate(tx: Tx, templateId: string, version?: number
 /** Records an SMS request and decides it, like requestEmail. */
 export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, events: EventStore, req: SmsRequest): Promise<Decision> {
   const key = req.idempotencyKey ?? newUuid();
+  if (req.idempotencyKey) await lockSendKey(tx, workspaceId, key);
   const [existing] = await tx.select().from(schema.messages).where(eq(schema.messages.idempotencyKey, key));
   if (existing) {
-    if (!sameSendRequest(existing, req)) throw idempotencyKeyReused('send');
+    const same = existing.requestHash === null ? legacySameSend(existing, req) : existing.requestHash === req.requestHash;
+    if (!same) throw idempotencyKeyReused('send');
     return { messageId: existing.id, status: existing.status, reason: existing.reason, duplicate: true };
   }
 
@@ -132,7 +134,7 @@ export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, e
       recipientHash,
       notBefore: req.notBefore ?? null,
       agentId: req.agentId ?? null,
-      requestedBy: req.requestedBy ?? null,
+      requestHash: req.requestHash,
       data: req.data ?? {},
     })
     .returning();

@@ -2,7 +2,7 @@ import { artifactTypes, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingl
 import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import { requestEmail, requestPush, requestSms, SYSTEM_SENDER } from '@agentic-marketing/email';
+import { requestEmail, requestPush, requestSms, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
 import { consentStateOf, currentConsent, purposeAllowed, type ResolvedEvent, refusedPurposes } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -447,6 +447,18 @@ async function applyEffect(
       .where(and(eq(schema.journeyParticipants.workspaceId, workspaceId), eq(schema.journeyParticipants.id, p.id)));
     return null;
   }
+  // A journey step's identity is its enrollment and node, never the rendered context: a worker
+  // retry after re-rendering must replay the message it already queued (#926).
+  const journeyHash = (channel: 'email' | 'sms' | 'push', template: string) =>
+    sendRequestHash(channel, {
+      caller: 'system:journey',
+      recipient: p.profileId,
+      template,
+      journey: p.journeyId,
+      enrollment: p.id,
+      step: eff.node,
+      sequence: eff.seq,
+    });
   if (eff.kind === 'email') {
     if (flags.control) return 'skipped: control';
     const d = await requestEmail(tx, workspaceId, deps.kp, deps.events, {
@@ -456,7 +468,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
-      requestedBy: SYSTEM_SENDER,
+      requestHash: journeyHash('email', eff.template),
     });
     return `e-mail ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
@@ -469,7 +481,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
-      requestedBy: SYSTEM_SENDER,
+      requestHash: journeyHash('sms', eff.template),
     });
     return `SMS ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
@@ -482,7 +494,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
-      requestedBy: SYSTEM_SENDER,
+      requestHash: journeyHash('push', eff.template),
     });
     return `push ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }

@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import type { Db, Tx } from '@agentic-marketing/db';
-import { type LinkSigner, requestEmail, SYSTEM_SENDER } from '@agentic-marketing/email';
+import { type LinkSigner, requestEmail, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
 import { type ConsentInput, consentStateOf, currentConsent, type ResolvedEvent, recordConsent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -79,7 +79,13 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
       profileId,
       templateId: form.def.confirmationTemplate,
       idempotencyKey: `doi:${e.messageId}`,
-      requestedBy: SYSTEM_SENDER,
+      // Stable identifiers only: a redelivery of the same submission replays the confirmation.
+      requestHash: sendRequestHash('email', {
+        caller: 'system:doi',
+        recipient: profileId,
+        template: form.def.confirmationTemplate,
+        submission: e.messageId,
+      }),
       data: { confirm_url: `${linksUrl}/f/confirm/${deps.links.sign(token)}` },
     });
     if (d.status !== 'queued') logger.warn({ form: p.form_id, status: d.status, reason: d.reason }, 'confirmation e-mail not queued');
@@ -110,19 +116,25 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
     const consent = Array.isArray(p.consent)
       ? (p.consent as { purpose: string; status: ConsentInput['status']; recordedAt?: string; proof?: object }[])
       : [];
+    // The import's own (server-assigned) time is the ceiling: a historical timestamp is kept as
+    // given, but a future-dated grant cannot outrank a withdrawal that happens after the import.
+    const importedAt = new Date(e.timestamp);
     return recordChanges(
       tx,
       ws,
       profileId,
-      consent.map((c) => ({
-        purpose: c.purpose,
-        status: c.status,
-        source: 'import' as const,
-        messageId: e.messageId,
-        recordedAt: c.recordedAt ? new Date(c.recordedAt) : new Date(e.timestamp),
-        recordedBy: typeof p.imported_by === 'string' ? p.imported_by : undefined,
-        proof: { ...(c.proof ?? {}), import_batch: e.sourceId, import_label: p.label },
-      })),
+      consent.map((c) => {
+        const given = c.recordedAt ? new Date(c.recordedAt) : importedAt;
+        return {
+          purpose: c.purpose,
+          status: c.status,
+          source: 'import' as const,
+          messageId: e.messageId,
+          recordedAt: given.getTime() > importedAt.getTime() ? importedAt : given,
+          recordedBy: typeof p.imported_by === 'string' ? p.imported_by : undefined,
+          proof: { ...(c.proof ?? {}), import_batch: e.sourceId, import_label: p.label },
+        };
+      }),
     );
   }
 }

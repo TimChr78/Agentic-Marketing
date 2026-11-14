@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type CampaignUtmCache, campaignUtmCampaign } from '@agentic-marketing/campaigns';
-import { AppError, newId, newUuid } from '@agentic-marketing/core';
+import { AppError, hashValue, newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore, MessageEvent } from '@agentic-marketing/events';
 import {
@@ -78,35 +78,63 @@ export interface EmailRequest {
   /** The agent behind this message (#426): a direct send, or the owner of the broadcast or journey. */
   agentId?: string | null;
   /**
-   * The caller the input-level `idempotencyKey` belongs to (#926), from `callerHash`; internal
-   * callers (journey steps, double opt-in, test sends) pass `SYSTEM_SENDER`. A message row from a
-   * version before this field has null and is matched on its input alone.
+   * The immutable request fingerprint (#926), from `sendRequestHash`. Required: an input-level
+   * `idempotencyKey` is bound to it, so a changed variable or another caller is a conflict, while
+   * a merged profile or a re-rendered payload still replays.
    */
-  requestedBy?: string;
+  requestHash: string;
 }
 
-/** The caller identity for the gateway's own sends: journeys, forms, broadcasts and test sends. */
-export const SYSTEM_SENDER = 'system';
+export type SendChannel = 'email' | 'sms' | 'push';
 
-/** The fields that make two send requests the same logical request for one idempotency key. */
-export interface SendIdentity {
-  profileId: string | null;
-  templateId: string | null;
-  journeyId?: string | null;
-  variant?: string | null;
-  requestedBy?: string | null;
+/**
+ * The request fingerprint behind an input-level send key (#926). It is computed once from the
+ * ORIGINAL request, before any resolution, and stored on the message:
+ *
+ * | source | fields |
+ * |---|---|
+ * | direct send | `caller` (principal hash), `recipient` (the profile id as supplied), `template`
+ * |             | (the template id as supplied), `data` (the variables as supplied) |
+ * | DOI | `caller: 'system:doi'`, `recipient`, `template`, `submission` (the event id) |
+ * | journey | `caller: 'system:journey'`, `recipient`, `template`, `journey`, `enrollment`,
+ * |         | `step`, `sequence` (never the rendered context) |
+ * | broadcast | `caller: 'system:broadcast'`, `recipient`, `template`, `broadcast`, `variant` |
+ * | holdout | `caller: 'system:broadcast_holdout'`, `recipient`, `template`, `broadcast`,
+ * |         | `campaign`, `variant` |
+ * | test send | `caller: 'system:test'`, `recipient` (address hash), `template` |
+ *
+ * Resolution (a merged profile id, the template's current purpose, a computed subject or send
+ * window) is deliberately absent: none of it changes what the caller asked for.
+ */
+export function sendRequestHash(channel: SendChannel, parts: Record<string, unknown>): string {
+  return hashValue({ version: 1, channel, ...parts });
 }
 
 /**
- * Whether a stored message answers this request for its input-level idempotency key (#926). The
- * recipient, template, journey and variant must match, and so must the caller when the row has one.
- * A row written before the caller was stored (null) matches on its input alone, as documented.
+ * Serialise one input-level send key before its lookup (#926 A3). Two concurrent requests for the
+ * same key take this transaction-scoped lock in turn, so the loser sees the winner's committed row
+ * and answers a replay or the 409 instead of a raw unique-constraint error.
+ *
+ * Order: the executor's command-level idempotency lock is taken before BEGIN; this is the first
+ * lock inside a send handler and precedes every message write. The delivery worker's
+ * `message-cap` lock is taken only for an existing message and never calls the request gateways,
+ * so the two cannot form a cycle.
  */
-export function sameSendRequest(existing: SendIdentity, req: SendIdentity): boolean {
-  if (existing.profileId !== req.profileId || existing.templateId !== req.templateId) return false;
-  if ((existing.journeyId ?? null) !== (req.journeyId ?? null) || (existing.variant ?? null) !== (req.variant ?? null)) return false;
-  if (existing.requestedBy === null || existing.requestedBy === undefined) return true;
-  return existing.requestedBy === (req.requestedBy ?? SYSTEM_SENDER);
+export async function lockSendKey(tx: Tx, workspaceId: string, key: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`send-idempotency:${workspaceId}:${key}`}, 0))`);
+}
+
+/** A pre-release row's fallback: compare the columns that were stored then, as documented (#926). */
+export function legacySameSend(
+  existing: typeof schema.messages.$inferSelect,
+  req: { profileId: string; templateId: string; journeyId?: string; variant?: string },
+): boolean {
+  return (
+    existing.profileId === req.profileId &&
+    existing.templateId === req.templateId &&
+    (existing.journeyId ?? null) === (req.journeyId ?? null) &&
+    (existing.variant ?? null) === (req.variant ?? null)
+  );
 }
 
 /** The one conflict answer for an input-level key reused by another caller or for another send. */
@@ -206,10 +234,13 @@ export async function checkRecipient(
  */
 export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider, events: EventStore, req: EmailRequest): Promise<Decision> {
   const key = req.idempotencyKey ?? newUuid();
+  if (req.idempotencyKey) await lockSendKey(tx, workspaceId, key);
   const [existing] = await tx.select().from(schema.messages).where(eq(schema.messages.idempotencyKey, key));
   if (existing) {
-    // The key dedupes per workspace, so it must also name the same caller and the same send (#926).
-    if (!sameSendRequest(existing, req)) throw idempotencyKeyReused('send');
+    // The key dedupes per workspace, so it must also name the same caller and the same request.
+    // Rows from before `request_hash` existed fall back to the columns stored then (#926).
+    const same = existing.requestHash === null ? legacySameSend(existing, req) : existing.requestHash === req.requestHash;
+    if (!same) throw idempotencyKeyReused('send');
     return { messageId: existing.id, status: existing.status, reason: existing.reason, duplicate: true };
   }
 
@@ -245,7 +276,7 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
       variant: req.variant ?? null,
       notBefore: req.notBefore ?? null,
       agentId: req.agentId ?? null,
-      requestedBy: req.requestedBy ?? null,
+      requestHash: req.requestHash,
       data: req.subject ? { ...(req.data ?? {}), __subject: req.subject } : (req.data ?? {}),
     })
     .returning();

@@ -11,6 +11,7 @@ import { schema } from '@agentic-marketing/db';
 import { profileForMessage } from '@agentic-marketing/profiles';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { sendRequestHash } from '../gateway';
 import { templateRenderError } from '../render';
 import { directSendImpact, directSendLedger } from '../sendTouches';
 import { topicProblems } from '../topicValidation';
@@ -48,7 +49,12 @@ export const sendPush = defineCommand({
     requestPush(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
-      requestedBy: callerHash(ctx.principal),
+      requestHash: sendRequestHash('push', {
+        caller: callerHash(ctx.principal),
+        recipient: input.profileId,
+        template: input.templateId,
+        data: input.data ?? null,
+      }),
     }),
 });
 

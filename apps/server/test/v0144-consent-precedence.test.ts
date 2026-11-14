@@ -298,6 +298,29 @@ describe('an async consent write carries the action time (#928)', () => {
     expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
   });
 
+  it('clamps a future-dated imported consent to the import time', async () => {
+    const email = `future-${randomBytes(6).toString('hex')}@example.com`;
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const imported = await api().call('profiles.import', {
+      label: 'Future consent',
+      rows: [{ email, consent: [{ purpose: 'marketing', status: 'granted', recordedAt: future }] }],
+    });
+    expect(imported.accepted).toBe(1);
+    const found = await eventually(
+      () => api().call('profiles.find', { type: 'email', value: email }),
+      (r) => !!r.profileId,
+    );
+    const profileId = found.profileId!;
+    const { records } = await eventually(
+      () => api().call('consent.history', { profileId }),
+      (r) => r.records.length > 0,
+    );
+    // Historical evidence is kept, but a date in the future cannot outrank a later withdrawal.
+    expect(new Date(records.find((r) => r.status === 'granted')!.recordedAt).getTime()).toBeLessThanOrEqual(Date.now());
+    await withdraw(profileId);
+    expect(await effective(profileId)).toMatchObject({ status: 'withdrawn', allowed: false });
+  });
+
   it('a provider unsubscribe callback records the provider event time, not the webhook time', async () => {
     const profileId = await newProfile();
     await api().call('consent.record', { profileId, purpose: 'marketing', status: 'granted', source: 'form' });

@@ -8,7 +8,7 @@ import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { MESSAGE_ID_HEADER, ProviderSendError } from './adapters';
 import { blockResolver } from './blocks';
-import { SYSTEM_SENDER } from './gateway';
+import { sendRequestHash } from './gateway';
 import { tagLinks, tagTextLinks } from './links';
 import { transportFor } from './providers';
 import { firstLine, renderTemplate, templateRenderError } from './render';
@@ -139,7 +139,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
             reason,
             recipientHash,
             test: true,
-            requestedBy: SYSTEM_SENDER,
+            requestHash: sendRequestHash('email', { caller: 'system:test', recipient: recipientHash, template: opts.templateId }),
           })
           .returning();
         skipped.push({ email, reason });
@@ -170,7 +170,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
           status: 'sending',
           recipientHash,
           test: true,
-          requestedBy: SYSTEM_SENDER,
+          requestHash: sendRequestHash('email', { caller: 'system:test', recipient: recipientHash, template: opts.templateId }),
         })
         .returning();
 

@@ -536,12 +536,20 @@ export const enrollSegment = defineCommand({
       existing.requestedById === requestedBy.id &&
       existing.journeyId === input.artifactId &&
       existing.segmentId === input.segmentId &&
-      (existing.limit ?? null) === (input.limit ?? null);
+      (existing.limit ?? null) === (input.limit ?? null) &&
+      // A job from before versions were recorded (#324) has no version to compare; any matches.
+      (existing.journeyVersion === null || existing.journeyVersion === journey.publishedVersion) &&
+      (existing.segmentVersion === null || existing.segmentVersion === segment.version);
     const reused = () =>
       new AppError('conflict', 'This idempotency key was already used for a different enrollment. Use a new key.', {
         reason: 'idempotency_key_reused',
       });
     if (input.idempotencyKey) {
+      // Serialise one input-level key before the lookup (#926 A3): a concurrent caller waits, then
+      // sees the winner's job and answers a replay or the 409 instead of racing the unique index.
+      // First lock in this handler, before any job write; the executor's locks are already held or
+      // were taken before BEGIN, and no other path takes this key in the opposite order.
+      await ctx.tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`enroll-idempotency:${ws}:${input.idempotencyKey}`}, 0))`);
       const [existing] = await ctx.tx
         .select()
         .from(schema.enrollmentJobs)
