@@ -466,7 +466,7 @@ function StepTable({ rows }: { rows: StepRow[] }) {
                 </span>
               </Td>
               <Td className={rowCellClass} data-label="Period reach" align="right">
-                {countText(row.period)}
+                {row.periodSuppressed ? 'Suppressed' : countText(row.period)}
               </Td>
               <Td className={rowCellClass} data-label="All-time reach" align="right">
                 {countText(row.allTime)}

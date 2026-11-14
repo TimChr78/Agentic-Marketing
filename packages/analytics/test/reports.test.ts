@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { analyticsCampaignSummary } from '../src/campaignSummary';
-import { analyticsReports, planJourneyFunnelSuppression } from '../src/reports';
+import { analyticsReports, buildJourneyFunnel, planJourneyFunnelSuppression } from '../src/reports';
 
 const CAMPAIGN = `cmp_${'a'.repeat(32)}`;
 
@@ -196,6 +196,36 @@ describe("journey funnel's subtree rule and headlines (#908 review round 5)", ()
     expect(reachedOf(result)).toEqual({ start: 100, a: 99, b: null });
   });
 
+  it('hides a primary row whose only parent is itself (disconnected self-loop) (#917 review round 6)', () => {
+    // trigger(100) -> end(100) plus a disconnected wait node h whose only parent is itself, h(3).
+    // `journeys.migrate` can move participants to h; the row must not print its own count.
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 100, exited: 0 },
+      steps: steps({ trigger: 100, end: 100, h: 3 }),
+      topology: [node('trigger', 'trigger', ['end']), node('end', 'exit'), node('h', 'wait', ['h'])],
+    });
+    expect(reachedOf(result)).toEqual({ trigger: 100, end: 100, h: null });
+    expect(result.hiddenNodes).toContain('h');
+    expect(result.totals).toEqual({ entered: null, goalReached: null, completed: null, exited: null });
+  });
+
+  it('prints every published step under a hidden parent, even without a row', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 0, exited: 0 },
+      steps: steps({ start: 100, small: 3 }),
+      topology: [
+        node('start', 'trigger', ['small', 'quiet']),
+        node('small', 'wait', ['deep']),
+        node('quiet', 'wait'),
+        node('deep', 'wait'),
+      ],
+    });
+    // `quiet` and `deep` have no events but are under the hidden parent start, so they are printed
+    // suppressed rather than missing (presence must not change with a participant's move).
+    expect(result.hiddenNodes).toEqual(expect.arrayContaining(['small', 'quiet', 'deep']));
+    expect(result.hiddenNodes).not.toContain('start');
+  });
+
   it('hides the subtree under every parent of a merged small step', () => {
     const result = plan({
       totals: { entered: 100, goalReached: 0, completed: 0, exited: 0 },
@@ -243,15 +273,25 @@ describe('journey funnel headlines are withheld when a step is hidden (#908 revi
   });
 });
 
-// The oracle for the round-5 rule is indistinguishability, not a relation model: move one
-// participant under the parent of a hidden step and the visible response must not change. It also
-// fails on the old per-relation planner (the negative control), so it has teeth.
+// The oracle for the round-5 rule is indistinguishability of the COMPLETE response, built by the
+// same pure function the command handler uses. Move one participant under the parent of a hidden
+// step and every visible field must stay equal while the hidden count differs. The negative
+// control runs the old per-relation planner and shows the oracle fails on Sol's graph.
 describe('journey funnel response is indistinguishable under one participant moved (#908 review round 5)', () => {
   type GraphNode = { id: string; kind: 'trigger' | 'wait' | 'email' | 'goal' | 'exit'; children: string[] };
   type Walk = { visited: string[]; converted: boolean };
   type Population = { nodes: GraphNode[]; walks: Walk[] };
-  type Plan = typeof planJourneyFunnelSuppression;
 
+  const meta = {
+    timeZone: 'UTC',
+    currency: null,
+    from: '2026-01-01T00:00:00.000Z',
+    to: '2026-01-31T00:00:00.000Z',
+    freshness: null,
+    suppressed: 0,
+    k: 5,
+    notes: [] as string[],
+  };
   const reachOf = (population: Population): Map<string, number> => {
     const reach = new Map<string, number>();
     for (const walk of population.walks) for (const id of new Set(walk.visited)) reach.set(id, (reach.get(id) ?? 0) + 1);
@@ -269,35 +309,38 @@ describe('journey funnel response is indistinguishable under one participant mov
       exited: 0,
     };
   };
-  /** What a caller sees: the plan, the drop-offs the handler derives, and the counts it reports. */
-  const response = (population: Population, plan: Plan) => {
+  const linearOf = (nodes: GraphNode[]) =>
+    nodes.every((node, index) =>
+      index === nodes.length - 1 ? node.children.length === 0 : node.children.length === 1 && node.children[0] === nodes[index + 1]?.id,
+    );
+  /** The two query results plus the published walk, the way the handler builds them. */
+  const response = (population: Population) => {
     const reach = reachOf(population);
-    // The handler prints steps in the published walk order, so the oracle does too.
-    const steps = population.nodes.filter((node) => reach.has(node.id)).map((node) => ({ step: node.id, reached: reach.get(node.id)! }));
-    const result = plan({ totals: totalsOf(population), steps, topology: population.nodes, k: 5 });
-    const entered = result.totals.entered;
-    let previous: number | null = entered;
-    let monotone = true;
-    for (const step of result.steps) {
-      if (step.reached === null) continue;
-      if (previous !== null && step.reached > previous) monotone = false;
-      previous = step.reached;
-    }
-    let previousReach: number | null = entered;
-    const derived = result.steps.map((step) => {
-      const dropOff = monotone && previousReach !== null && step.reached !== null ? previousReach - step.reached : null;
-      const dropOffRate = dropOff === null || previousReach === null || previousReach === 0 ? null : dropOff / previousReach;
-      previousReach = step.reached;
-      return { step: step.step, reached: step.reached, dropOff, dropOffRate };
-    });
-    return {
-      totals: result.totals,
-      steps: derived,
-      hiddenParents: result.hiddenParents,
-      allStepsHidden: result.allStepsHidden,
-      withheld: result.withheld,
-      suppressed: derived.filter((step) => step.reached === null).length + result.withheld.length,
-    };
+    const totals = totalsOf(population);
+    return buildJourneyFunnel(
+      {
+        journeyId: `jrn_${'a'.repeat(32)}`,
+        totals: {
+          columns: [
+            { name: 'journey.entered', kind: 'measure', unit: 'count' },
+            { name: 'journey.goal_reached', kind: 'measure', unit: 'count' },
+            { name: 'journey.completed', kind: 'measure', unit: 'count' },
+            { name: 'journey.exited', kind: 'measure', unit: 'count' },
+          ],
+          rows: [[totals.entered, totals.goalReached, totals.completed, totals.exited]],
+          meta: { ...meta },
+        },
+        steps: {
+          columns: [
+            { name: 'journey_step', kind: 'dimension' },
+            { name: 'journey.step_reached', kind: 'measure', unit: 'count' },
+          ],
+          rows: population.nodes.filter((node) => reach.has(node.id)).map((node) => [node.id, reach.get(node.id)!]),
+          meta: { ...meta },
+        },
+      },
+      { version: 1, order: population.nodes.map((node) => node.id), linear: linearOf(population.nodes), edges: population.nodes },
+    );
   };
 
   /** The path from `from` to `target` inside `allowed`, exclusive of `from`, inclusive of `target`. */
@@ -316,7 +359,6 @@ describe('journey funnel response is indistinguishable under one participant mov
     }
     return null;
   };
-  /** First-child descent from a node inside `allowed`, ending at a terminal, without revisiting. */
   const descend = (nodes: GraphNode[], from: string, allowed: Set<string>): string[] => {
     const out = [from];
     const seen = new Set([from]);
@@ -329,17 +371,13 @@ describe('journey funnel response is indistinguishable under one participant mov
       id = child;
     }
   };
-
   /**
    * Move one participant under `parent`: from another branch into `step`'s branch, from waiting at
-   * the parent into it, or (when everyone already takes that branch) out of it. Returns null when no
-   * safe move keeps the hidden step below k.
+   * the parent into it, or out of it. Null when no safe move keeps the step below k.
    */
   const reroute = (population: Population, step: string, parent: string): Population | null => {
     const reach = reachOf(population);
     const count = reach.get(step) ?? 0;
-    // Only move participants inside the parent's subtree: every row that changes is hidden by the
-    // rule, so a loop that could leave the subtree is not followed here.
     const allowed = new Set<string>();
     const queue = [...(population.nodes.find((node) => node.id === parent)?.children ?? [])];
     const seen = new Set([parent]);
@@ -354,7 +392,6 @@ describe('journey funnel response is indistinguishable under one participant mov
     if (!path) return null;
     const branch = path[0]!;
     const walks = population.walks.map((walk) => ({ ...walk, visited: [...walk.visited] }));
-    // Move a participant from another branch below the parent into the hidden step's branch.
     const fromOther = walks.findIndex((walk) => {
       const at = walk.visited.lastIndexOf(parent);
       return at >= 0 && walk.visited[at + 1] !== undefined && walk.visited[at + 1] !== branch;
@@ -365,14 +402,12 @@ describe('journey funnel response is indistinguishable under one participant mov
       walk.visited = [...walk.visited.slice(0, at + 1), ...path, ...descend(population.nodes, step, allowed).slice(1)];
       return { nodes: population.nodes, walks };
     }
-    // Move a participant who is waiting at the parent into the hidden step's branch.
     const waiting = walks.findIndex((walk) => walk.visited[walk.visited.length - 1] === parent);
     if (waiting >= 0 && count + 1 < 5) {
       const walk = walks[waiting]!;
       walk.visited = [...walk.visited, ...path, ...descend(population.nodes, step, allowed).slice(1)];
       return { nodes: population.nodes, walks };
     }
-    // Everyone already takes that branch: move one out, keeping the step below k.
     const inside = walks.findIndex((walk) => {
       const at = walk.visited.lastIndexOf(parent);
       return at >= 0 && walk.visited[at + 1] === branch && walk.visited.includes(step);
@@ -387,7 +422,6 @@ describe('journey funnel response is indistinguishable under one participant mov
     return null;
   };
 
-  /** A random graph with forks, nested forks, merges, a loop, e-mail nodes, waits and a goal split. */
   const randomPopulation = (random: () => number): Population => {
     const int = (max: number) => Math.floor(random() * max);
     const nodes: GraphNode[] = [{ id: 'n0', kind: 'trigger', children: [] }];
@@ -408,7 +442,7 @@ describe('journey funnel response is indistinguishable under one participant mov
           leaves.push(id);
         }
         leaves.splice(leaves.indexOf(parent), 1);
-      } else if (roll < 0.65 && leaves.length >= 2) {
+      } else if (roll < 0.6 && leaves.length >= 2) {
         const first = leaves[int(leaves.length)]!;
         leaves.splice(leaves.indexOf(first), 1);
         const second = leaves[int(leaves.length)]!;
@@ -416,6 +450,10 @@ describe('journey funnel response is indistinguishable under one participant mov
         const id = add();
         for (const parent of [first, second]) nodes.find((node) => node.id === parent)!.children.push(id);
         leaves.push(id);
+      } else if (roll < 0.7) {
+        // A self-loop on a connected wait node.
+        const node = nodes[1 + int(Math.max(1, nodes.length - 1))];
+        if (node && node.kind === 'wait' && !node.children.includes(node.id)) node.children.push(node.id);
       } else if (leaves.length) {
         const parent = leaves[int(leaves.length)]!;
         const id = add();
@@ -423,7 +461,6 @@ describe('journey funnel response is indistinguishable under one participant mov
         leaves.splice(leaves.indexOf(parent), 1, id);
       }
     }
-    // A goal with a matched and a timeout exit.
     if (leaves.length) {
       const parent = leaves[int(leaves.length)]!;
       const goal = add('goal');
@@ -433,23 +470,23 @@ describe('journey funnel response is indistinguishable under one participant mov
       nodes.find((node) => node.id === goal)!.children.push(matched, timeout);
       leaves.splice(leaves.indexOf(parent), 1, matched, timeout);
     }
-    // One loop back to an earlier non-trigger node.
-    if (nodes.length > 4) {
-      const from = nodes[3 + int(nodes.length - 4)]!;
-      const to = nodes[1 + int(3)]!;
-      if (from !== to && !from.children.includes(to.id) && from.kind !== 'exit') from.children.push(to.id);
-    }
+    // A disconnected self-loop that migration can move participants into, and one nobody reaches.
+    const migration = add('wait');
+    nodes.find((node) => node.id === migration)!.children.push(migration);
+    const ghost = add('wait');
+    nodes.find((node) => node.id === ghost)!.children.push(ghost);
 
     const walks: Walk[] = [];
+    const migrants = 1 + int(3);
     for (let person = 0; person < 40 + int(120); person++) {
-      let current: string | undefined = 'n0';
+      let current: string | undefined = person < migrants ? migration : 'n0';
       const visited: string[] = [];
       let converted = false;
       for (let guard = 0; current && guard < 250; guard++) {
         const node = nodes.find((entry) => entry.id === current);
         if (!node) break;
         visited.push(node.id);
-        if (node.kind === 'wait' && random() < 0.12) break; // still waiting here
+        if (node.kind === 'wait' && random() < 0.12) break;
         if (node.kind === 'goal') {
           const matched = random() < 0.5;
           if (matched) converted = true;
@@ -464,69 +501,76 @@ describe('journey funnel response is indistinguishable under one participant mov
     return { nodes, walks };
   };
 
-  /** The old per-relation planner, for the negative control only. */
-  const legacyPlan: Plan = (input) => {
-    const k = input.k ?? 5;
-    const steps = input.steps.map((step) => ({ ...step }));
-    const hidden = new Set(
-      steps.filter((step) => step.reached === null || (step.reached > 0 && step.reached < k)).map((step) => step.step),
-    );
-    const count = (id: string) => steps.find((step) => step.step === id)?.reached ?? 0;
-    let changed = true;
-    while (changed && input.topology) {
-      changed = false;
-      for (const node of input.topology) {
-        const relations: string[][] = [];
-        if (node.children.length >= 2) relations.push([node.id, ...node.children]);
-        const parents = input.topology.filter((parent) => parent.children.includes(node.id)).map((parent) => parent.id);
-        if (parents.length >= 2) relations.push([node.id, ...parents]);
-        for (const relation of relations) {
-          const terms = relation.filter((id) => steps.some((step) => step.step === id));
-          if (terms.filter((id) => hidden.has(id)).length !== 1) continue;
-          const visible = terms.filter((id) => !hidden.has(id) && count(id) > 0).sort((a, b) => count(a) - count(b));
-          if (!visible.length) continue;
-          hidden.add(visible[0]!);
-          changed = true;
-        }
-      }
-    }
-    let hiddenSteps = 0;
-    for (const step of steps)
-      if (hidden.has(step.step)) {
-        if (step.reached !== null) hiddenSteps += 1;
-        step.reached = null;
-      }
-    const totals = { ...input.totals };
-    for (const name of ['entered', 'goalReached', 'completed', 'exited'] as const)
-      if (totals[name] !== null && totals[name]! > 0 && totals[name]! < k) totals[name] = null;
-    if (steps.some((step) => step.reached === null))
-      for (const name of ['entered', 'goalReached', 'completed', 'exited'] as const) totals[name] = null;
-    return { totals, steps, withheld: [], hiddenSteps, hiddenParents: [], allStepsHidden: false };
-  };
-
-  it('keeps every visible field equal while a hidden step count changes', () => {
+  it('keeps the complete response equal while a hidden step count changes', () => {
     const random = seededRandom();
     let exercised = 0;
-    for (let run = 0; run < 300 && exercised < 60; run++) {
+    for (let run = 0; run < 400 && exercised < 80; run++) {
       const population = randomPopulation(random);
       const reach = reachOf(population);
-      const primary = [...reach].filter(([, value]) => value > 0 && value < 5);
-      for (const [step] of primary) {
-        const parents = population.nodes.filter((node) => node.children.includes(step)).map((node) => node.id);
-        if (!parents.length) continue;
+      const before = response(population);
+      // Any primary row (below k) withholds every headline.
+      if ([...reach.values()].some((count) => count > 0 && count < 5))
+        expect([before.entered, before.goalReached, before.completed, before.exited]).toEqual([null, null, null, null]);
+      for (const [step, count] of reach) {
+        if (!(count > 0 && count < 5)) continue;
+        const parents = population.nodes.filter((node) => node.id !== step && node.children.includes(step)).map((node) => node.id);
+        if (!parents.length) continue; // disconnected/self-loop: hidden itself, no move to make
         const rerouted = reroute(population, step, parents[0]!);
         if (!rerouted) continue;
-        const before = reachOf(population).get(step) ?? 0;
         const after = reachOf(rerouted).get(step) ?? 0;
-        if (before === after || after <= 0 || after >= 5) continue;
-        // A step row that no longer has participants would disappear from the response, which is a
-        // different topology of rows; compare populations with the same set of printed rows.
-        if ([...reachOf(rerouted).keys()].sort().join(',') !== [...reachOf(population).keys()].sort().join(',')) continue;
-        expect(response(rerouted, planJourneyFunnelSuppression)).toEqual(response(population, planJourneyFunnelSuppression));
+        if (after === count || after <= 0 || after >= 5) continue;
+        expect(response(rerouted)).toEqual(before);
         exercised += 1;
       }
     }
     expect(exercised).toBeGreaterThan(20);
+  });
+
+  it('keeps presence stable when a count moves between 0 and 1 under a hidden parent', () => {
+    const nodes: GraphNode[] = [
+      { id: 'start', kind: 'trigger', children: ['fork'] },
+      { id: 'fork', kind: 'wait', children: ['small', 'tiny', 'large'] },
+      { id: 'small', kind: 'wait', children: [] },
+      { id: 'tiny', kind: 'wait', children: [] },
+      { id: 'large', kind: 'wait', children: [] },
+    ];
+    const walk = (path: string[]): Walk => ({ visited: path, converted: false });
+    // Both small and tiny are below k under the hidden fork. Moving tiny's only participant into
+    // small leaves tiny with no events, but every published step under the hidden parent is still
+    // printed suppressed, so the response does not change.
+    const before: Population = {
+      nodes,
+      walks: [
+        ...Array.from({ length: 97 }, () => walk(['start', 'fork', 'large'])),
+        walk(['start', 'fork', 'small']),
+        walk(['start', 'fork', 'tiny']),
+      ],
+    };
+    const after: Population = {
+      nodes,
+      walks: [
+        ...Array.from({ length: 97 }, () => walk(['start', 'fork', 'large'])),
+        ...Array.from({ length: 2 }, () => walk(['start', 'fork', 'small'])),
+      ],
+    };
+    expect(response(before)).toEqual(response(after));
+    expect(response(after).steps.find((step) => step.step === 'tiny')).toMatchObject({ reached: null, suppressed: true });
+  });
+
+  it('hides a migration into a disconnected self-loop node', () => {
+    const nodes: GraphNode[] = [
+      { id: 'trigger', kind: 'trigger', children: ['end'] },
+      { id: 'end', kind: 'exit', children: [] },
+      { id: 'moved', kind: 'wait', children: ['moved'] },
+    ];
+    const walk = (path: string[]): Walk => ({ visited: path, converted: false });
+    const population: Population = {
+      nodes,
+      walks: [...Array.from({ length: 100 }, () => walk(['trigger', 'end'])), ...Array.from({ length: 3 }, () => walk(['moved']))],
+    };
+    const result = response(population);
+    expect(result.steps.find((step) => step.step === 'moved')).toMatchObject({ reached: null, suppressed: true });
+    expect([result.entered, result.goalReached, result.completed, result.exited]).toEqual([null, null, null, null]);
   });
 
   it('fails on the old per-relation planner (negative control), so the oracle has teeth', () => {
@@ -537,19 +581,40 @@ describe('journey funnel response is indistinguishable under one participant mov
       { id: 'small_exit', kind: 'exit', children: [] },
       { id: 'z_end', kind: 'exit', children: [] },
     ];
-    const walkOf = (path: string[]): Walk => ({ visited: path, converted: false });
+    const walk = (path: string[]): Walk => ({ visited: path, converted: false });
     const population: Population = {
       nodes,
-      walks: [
-        ...Array.from({ length: 99 }, () => walkOf(['trigger', 'fork', 'a_large', 'z_end'])),
-        walkOf(['trigger', 'fork', 'small_exit']),
-      ],
+      walks: [...Array.from({ length: 99 }, () => walk(['trigger', 'fork', 'a_large', 'z_end'])), walk(['trigger', 'fork', 'small_exit'])],
     };
     const rerouted = reroute(population, 'small_exit', 'fork');
     expect(rerouted).not.toBeNull();
     expect(reachOf(rerouted!).get('small_exit')).not.toBe(reachOf(population).get('small_exit'));
-    // The new rule is indistinguishable; the old planner's response changes with the population.
-    expect(response(rerouted!, planJourneyFunnelSuppression)).toEqual(response(population, planJourneyFunnelSuppression));
-    expect(response(rerouted!, legacyPlan)).not.toEqual(response(population, legacyPlan));
+    // The new rule is indistinguishable; the old planner's visible steps change with the population.
+    expect(response(rerouted!)).toEqual(response(population));
+    const legacy = (value: Population) => {
+      const reach = reachOf(value);
+      const steps = value.nodes.filter((node) => reach.has(node.id)).map((node) => ({ step: node.id, reached: reach.get(node.id)! }));
+      const hidden = new Set(steps.filter((step) => step.reached < 5).map((step) => step.step));
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const node of value.nodes) {
+          const relations: string[][] = [];
+          if (node.children.length >= 2) relations.push([node.id, ...node.children]);
+          const parents = value.nodes.filter((parent) => parent.children.includes(node.id)).map((parent) => parent.id);
+          if (parents.length >= 2) relations.push([node.id, ...parents]);
+          for (const relation of relations) {
+            const terms = relation.filter((id) => steps.some((step) => step.step === id));
+            if (terms.filter((id) => hidden.has(id)).length !== 1) continue;
+            const candidates = terms.filter((id) => !hidden.has(id)).sort((a, b) => (reach.get(a) ?? 0) - (reach.get(b) ?? 0));
+            if (!candidates.length) continue;
+            hidden.add(candidates[0]!);
+            changed = true;
+          }
+        }
+      }
+      return steps.map((step) => ({ step: step.step, reached: hidden.has(step.step) ? null : step.reached }));
+    };
+    expect(legacy(rerouted!)).not.toEqual(legacy(population));
   });
 });

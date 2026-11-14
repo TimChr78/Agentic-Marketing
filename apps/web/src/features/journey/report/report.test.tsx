@@ -154,9 +154,9 @@ const funnel = (overrides: Record<string, unknown> = {}) => ({
   completed: 560,
   exited: 30,
   steps: [
-    { step: 'n1', reached: 812, dropOff: 0, dropOffRate: 0 },
-    { step: 'n2', reached: 720, dropOff: 92, dropOffRate: 92 / 812 },
-    { step: 'n3', reached: 600, dropOff: 120, dropOffRate: 120 / 720 },
+    { step: 'n1', reached: 812, suppressed: false, dropOff: 0, dropOffRate: 0 },
+    { step: 'n2', reached: 720, suppressed: false, dropOff: 92, dropOffRate: 92 / 812 },
+    { step: 'n3', reached: 600, suppressed: false, dropOff: 120, dropOffRate: 120 / 720 },
   ],
   meta: {
     timeZone: 'UTC',
@@ -767,6 +767,23 @@ describe('journey report states (#507)', () => {
     expect(screen.getByText('0')).toBeTruthy();
     expect(screen.getByText(/Totals withheld because fewer than k=5/)).toBeTruthy();
     expect(screen.queryByRole('heading', { name: 'Zero recorded events does not prove no engagement.' })).toBeNull();
+  });
+
+  it('renders a hidden step row as Suppressed and a missing count as Unavailable (#917 review round 6)', async () => {
+    h.funnel = funnel({
+      steps: [
+        { step: 'n1', reached: 812, suppressed: false, dropOff: 0, dropOffRate: 0 },
+        { step: 'n2', reached: null, suppressed: true, dropOff: null, dropOffRate: null },
+        // A step the selected read did not return: missing data, not suppression.
+        { step: 'n3', reached: null, suppressed: false, dropOff: null, dropOffRate: null },
+      ],
+      meta: { ...funnel().meta, suppressed: 1 },
+    });
+    renderReport();
+    await screen.findByText('Entered in period');
+    const table = screen.getByRole('table', { name: 'Journey steps' });
+    expect(within(table).getAllByText('Suppressed').length).toBeGreaterThan(0);
+    expect(within(table).getAllByText('Unavailable').length).toBeGreaterThan(0);
   });
 
   it('formats the split card’s absolute lift and interval in percentage points, not percent (#916)', async () => {

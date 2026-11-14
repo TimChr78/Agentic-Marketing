@@ -4,7 +4,7 @@ import { isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { analyticsMeta, analyticsResult, K, type QueryInput, runAnalyticsQuery } from './query';
+import { type AnalyticsResult, analyticsMeta, analyticsResult, K, type QueryInput, runAnalyticsQuery } from './query';
 
 // Named reports are thin, stable wrappers over the same registry and query compiler. They exist so
 // an agent or a screen does not have to remember the list of measures, and so the shape of the
@@ -114,17 +114,21 @@ export function planJourneyFunnelSuppression(opts: {
   hiddenParents: string[];
   /** True when every step row was hidden (no graph, or a hidden step with no parent). */
   allStepsHidden: boolean;
+  /** Every hidden node id, including published nodes without a row (printed as suppressed). */
+  hiddenNodes: string[];
 } {
   const k = opts.k ?? K;
   const names: readonly TotalName[] = ['entered', 'goalReached', 'completed', 'exited'];
   const initial = { ...opts.totals };
   const totals = { ...opts.totals };
   const steps = opts.steps.map((step) => ({ ...step }));
-  const present = new Set(steps.map((step) => step.step));
 
   // A row with reached 0 is not below k; a null input row is already hidden.
   const primary = steps.filter((step) => step.reached === null || (step.reached > 0 && step.reached < k)).map((step) => step.step);
-  const hidden = new Set<string>();
+  // Primary rows are always hidden themselves, even when no parent can scope the change: a
+  // disconnected node or a node whose only parent is its own self-loop must not print its count
+  // (#917 review round 6).
+  const hidden = new Set<string>(primary);
   const hiddenParents = new Set<string>();
   let allStepsHidden = false;
 
@@ -140,7 +144,9 @@ export function planJourneyFunnelSuppression(opts: {
           allStepsHidden = true;
           break;
         }
-        for (const parent of parents) {
+        // A node whose only parent is itself is hidden above; its own cycle reveals no other term,
+        // so no further expansion is needed (the indistinguishability oracle covers this case).
+        for (const parent of parents.filter((id) => id !== step)) {
           hiddenParents.add(parent);
           // Every proper descendant of the parent; the parent itself seeds the visited set so a
           // loop back to it does not hide it.
@@ -150,7 +156,7 @@ export function planJourneyFunnelSuppression(opts: {
             const id = queue.shift()!;
             if (seen.has(id)) continue;
             seen.add(id);
-            if (present.has(id)) hidden.add(id);
+            hidden.add(id);
             queue.push(...(childrenOf.get(id) ?? []));
           }
         }
@@ -158,6 +164,8 @@ export function planJourneyFunnelSuppression(opts: {
     }
   }
   if (allStepsHidden) for (const step of steps) hidden.add(step.step);
+  // Without a topology there are no node ids to add; the rows themselves are the universe.
+  if (allStepsHidden && opts.topology) for (const node of opts.topology) hidden.add(node.id);
 
   let hiddenSteps = 0;
   for (const step of steps) {
@@ -191,7 +199,7 @@ export function planJourneyFunnelSuppression(opts: {
     (parent) => ![...hiddenParents].some((other) => other !== parent && descendantsOf(other).has(parent)),
   );
   const withheld = names.filter((name) => totals[name] === null && initial[name] !== null);
-  return { totals, steps, withheld, hiddenSteps, hiddenParents: roots.sort(), allStepsHidden };
+  return { totals, steps, withheld, hiddenSteps, hiddenParents: roots.sort(), hiddenNodes: [...hidden].sort(), allStepsHidden };
 }
 
 /**
@@ -274,7 +282,7 @@ function publishedWalk(content: unknown): JourneyWalk | null {
   return { order, linear, edges };
 }
 
-interface PublishedJourney extends JourneyWalk {
+export interface PublishedJourney extends JourneyWalk {
   version: number;
 }
 
@@ -305,41 +313,154 @@ async function publishedJourney(tx: Tx, workspaceId: string, journeyId: string):
   };
 }
 
+const journeyFunnelOutput = z.object({
+  journeyId: z.string(),
+  basis: z
+    .enum(['published', 'reach'])
+    .describe(
+      'published: a straight-line published topology with non-increasing counts, so drop-off is a chain; reach: no straight-line published topology (none, branching, loop or reconvergence) or counts that rise along the walk (people joining mid-journey, for example after a migration), so steps are reach without a chain',
+    ),
+  entered: z
+    .number()
+    .nullable()
+    .describe('People who entered in the period; null when the count is below k=5 or a hidden step could be derived from it'),
+  goalReached: z.number().nullable().describe('People who reached the journey goal; null when withheld by the k rule'),
+  completed: z.number().nullable().describe('People who completed; null when withheld by the k rule'),
+  exited: z.number().nullable().describe('People who exited; null when withheld by the k rule'),
+  steps: z.array(
+    z.object({
+      step: z.string(),
+      reached: z.number().nullable().describe('People who reached this step; null when the row is suppressed by the k rule'),
+      suppressed: z
+        .boolean()
+        .describe('True when the row was hidden (below k, or under the parent of such a step), so reached is null rather than missing'),
+      dropOff: z.number().nullable().describe('People lost against the previous visible step; null when a count it needs is withheld'),
+      dropOffRate: z.number().nullable().describe('dropOff divided by the previous step; null when a count it needs is withheld'),
+    }),
+  ),
+  meta: analyticsMeta,
+});
+
+export type JourneyFunnelOutput = z.infer<typeof journeyFunnelOutput>;
+
+/** Everything after the two query results, pure so tests can build the complete response. */
+export function buildJourneyFunnel(
+  query: { journeyId: string; totals: AnalyticsResult; steps: AnalyticsResult },
+  published: PublishedJourney | null,
+  extra: { notes?: readonly string[] } = {},
+): JourneyFunnelOutput {
+  const total = (measure: string): number | null => {
+    const index = query.totals.columns.findIndex((column) => column.name === measure);
+    const value = query.totals.rows[0]?.[index];
+    return typeof value === 'number' ? value : null;
+  };
+  const reachedByStep = new Map(query.steps.rows.map((row) => [String(row[0]), typeof row[1] === 'number' ? row[1] : null] as const));
+  // A published topology defines both the steps and their order; without one the event order is the
+  // only order there is, and it stays cross-version reach.
+  const stepIds = published ? published.order : query.steps.rows.map((row) => String(row[0]));
+  const presentSteps = stepIds.flatMap((step) => (reachedByStep.has(step) ? [{ step, reached: reachedByStep.get(step) ?? null }] : []));
+  const funnel = planJourneyFunnelSuppression({
+    totals: {
+      entered: total('journey.entered'),
+      goalReached: total('journey.goal_reached'),
+      completed: total('journey.completed'),
+      exited: total('journey.exited'),
+    },
+    steps: presentSteps,
+    topology: published ? published.edges : null,
+    k: K,
+  });
+  // Presence is stable under a hidden subtree: every published step below a hidden parent is
+  // printed with reached null and suppressed true, whether or not it has events, so moving one
+  // participant inside that subtree cannot change which rows exist (#917 review round 6).
+  const hidden = new Set(funnel.hiddenNodes);
+  const reachedSteps = stepIds.flatMap((step) => {
+    if (hidden.has(step)) return [{ step, reached: null, suppressed: true }];
+    if (!reachedByStep.has(step)) return [];
+    return [{ step, reached: reachedByStep.get(step) ?? null, suppressed: false }];
+  });
+
+  const entered = funnel.totals.entered;
+  // A drop-off chain needs one straight line: no fork, loop or reconvergence. It also needs its
+  // counts to fall along the walk. Migration moves a participant to the new version without a new
+  // entry (journeys.migrate), so a later step can outnumber the entry step; a negative drop-off is
+  // never clamped to zero, and the report falls back to reach instead (#591).
+  let previous: number | null = entered;
+  let monotone = true;
+  for (const { reached } of reachedSteps) {
+    if (reached === null) continue;
+    if (previous !== null && reached > previous) monotone = false;
+    previous = reached;
+  }
+  const chain = published?.linear === true && monotone;
+  let previousReach: number | null = entered;
+  const steps = reachedSteps.map(({ step, reached, suppressed }) => {
+    const dropOff = chain && previousReach !== null && reached !== null ? previousReach - reached : null;
+    const dropOffRate = dropOff === null || previousReach === null || previousReach === 0 ? null : dropOff / previousReach;
+    // A hidden step breaks the chain: the next step has no visible predecessor to compare with,
+    // so its drop-off is null rather than a comparison across a withheld count.
+    previousReach = reached;
+    return { step, reached, suppressed, dropOff, dropOffRate };
+  });
+
+  const suppressionNotes: string[] = [];
+  if (funnel.allStepsHidden)
+    suppressionNotes.push(
+      published
+        ? `Every step row is hidden because a step below k=${K} has no parent in the published graph.`
+        : `No published version is selected, and a step has fewer than k=${K} people, so every step row is hidden.`,
+    );
+  else if (funnel.hiddenParents.length > 0)
+    suppressionNotes.push(`Steps after ${funnel.hiddenParents.join(', ')} are hidden because one of them has fewer than k=${K} people.`);
+  if (steps.some((step) => step.reached === null))
+    suppressionNotes.push(
+      'All totals are withheld because a step row is hidden: a headline minus the visible steps could name the hidden count.',
+    );
+  else if (funnel.withheld.length > 0)
+    suppressionNotes.push(`Totals withheld because they are positive counts below k=${K}: ${funnel.withheld.join(', ')}.`);
+
+  const notes = [
+    ...new Set([
+      ...(extra.notes ?? []),
+      ...query.steps.meta.notes,
+      ...suppressionNotes,
+      published?.linear && !monotone
+        ? `People joined the published journey v${published.version} after a later step (for example after a version migration), so reach is not a drop-off chain. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted.`
+        : published?.linear
+          ? `Steps follow the published journey v${published.version}’s linear topology; drop-off compares each step with the previous visible one, and only entries recorded for v${published.version} are counted.`
+          : published
+            ? `The published journey v${published.version} is not a straight line (it branches, splits, waits with alternative exits or loops), so there is no sequential drop-off. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted. Drop-off is shown only for linear journeys.`
+            : 'No published version is selected, so steps are cross-version reach without a drop-off chain.',
+    ]),
+  ];
+  return {
+    journeyId: query.journeyId,
+    basis: chain ? 'published' : 'reach',
+    entered,
+    goalReached: funnel.totals.goalReached,
+    completed: funnel.totals.completed,
+    exited: funnel.totals.exited,
+    steps,
+    meta: {
+      ...query.steps.meta,
+      suppressed: steps.filter((step) => step.reached === null).length + funnel.withheld.length,
+      notes,
+    },
+  };
+}
+
 export const analyticsJourneyFunnel = defineCommand({
   name: 'analytics.journeyFunnel',
   title: 'Journey funnel',
   description:
-    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. A drop-off or rate that would be computed from a withheld count is null. Counts use only the published version when the journey has one. Step counts come from journey_events. A step row below k=5 hides the whole subtree under its parent in the published graph — every descendant, through forks, merges and loops — so moving one participant between branches under that parent cannot change anything the response still shows. A below-k entry step, or any below-k step when no published version is selected, hides every step row. Headlines are not modelled: if any step row is hidden, every headline total (entered, goalReached, completed, exited) is withheld (null), because a headline minus the visible steps could name the hidden count, and a positive headline below k is withheld regardless. A drop-off or rate with a hidden operand is null. A note names the hidden subtree’s parent, or says every step row was hidden.',
+    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. A drop-off or rate that would be computed from a withheld count is null. Counts use only the published version when the journey has one. Step counts come from journey_events. A step row below k=5 hides the whole subtree under its parent in the published graph — every descendant, through forks, merges and loops — and the primary row itself is hidden even when it has no parent to scope the change to (a disconnected node or a self-loop). Every published step under a hidden parent is returned with reached null and suppressed true, whether or not it has events, so a participant moving inside that subtree cannot change which rows exist. A below-k entry step, or any below-k step when no published version is selected, hides every step row. Headlines are not modelled: if any step row is hidden, every headline total (entered, goalReached, completed, exited) is withheld (null), and a positive headline below k is withheld regardless. A drop-off or rate with a hidden operand is null. A note names the hidden subtree’s parent, or says every step row was hidden.',
 
   input: z.object({
     journeyId: JourneyId,
     from: isoDateTime('from'),
     to: isoDateTime('to'),
   }),
-  output: z.object({
-    journeyId: z.string(),
-    basis: z
-      .enum(['published', 'reach'])
-      .describe(
-        'published: a straight-line published topology with non-increasing counts, so drop-off is a chain; reach: no straight-line published topology (none, branching, loop or reconvergence) or counts that rise along the walk (people joining mid-journey, for example after a migration), so steps are reach without a chain',
-      ),
-    entered: z
-      .number()
-      .nullable()
-      .describe('People who entered in the period; null when the count is below k=5 or a hidden step could be derived from it'),
-    goalReached: z.number().nullable().describe('People who reached the journey goal; null when withheld by the k rule'),
-    completed: z.number().nullable().describe('People who completed; null when withheld by the k rule'),
-    exited: z.number().nullable().describe('People who exited; null when withheld by the k rule'),
-    steps: z.array(
-      z.object({
-        step: z.string(),
-        reached: z.number().nullable().describe('People who reached this step; null when suppressed or hidden as a complement'),
-        dropOff: z.number().nullable().describe('People lost against the previous visible step; null when a count it needs is withheld'),
-        dropOffRate: z.number().nullable().describe('dropOff divided by the previous step; null when a count it needs is withheld'),
-      }),
-    ),
-    meta: analyticsMeta,
-  }),
+  output: journeyFunnelOutput,
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
@@ -358,111 +479,23 @@ export const analyticsJourneyFunnel = defineCommand({
       limit: 1,
       ...versionScope,
     });
-    const stepsResult = await runAnalyticsQuery(deps, {
-      measures: ['journey.step_reached'],
-      dimensions: ['journey_step'],
-      from: input.from,
-      to: input.to,
-      filters,
-      limit: 5000,
-      order: { by: 'journey_step', dir: 'asc' },
-      // Raw rows: this report applies its own subtree rule below (#917 review round 5).
-      suppress: false,
-      ...versionScope,
-    });
-
-    const total = (measure: string): number | null => {
-      const index = totals.columns.findIndex((c) => c.name === measure);
-      const value = totals.rows[0]?.[index];
-      return typeof value === 'number' ? value : null;
-    };
-    const reachedByStep = new Map(stepsResult.rows.map((row) => [String(row[0]), typeof row[1] === 'number' ? row[1] : null] as const));
-    // A published topology defines both the steps and their order; without one the event order
-    // is the only order there is, and it stays cross-version reach.
-    const stepIds = published ? published.order : stepsResult.rows.map((row) => String(row[0]));
-    const reachedSteps = stepIds.flatMap((step) => {
-      if (!reachedByStep.has(step)) return [];
-      return [{ step, reached: reachedByStep.get(step) ?? null }];
-    });
-    // #908: the totals are an undimensioned query the measure layer never suppressed, while the
-    // step rows beside them were. Apply the funnel's k rule before anything is derived from them.
-    const funnel = planJourneyFunnelSuppression({
-      totals: {
-        entered: total('journey.entered'),
-        goalReached: total('journey.goal_reached'),
-        completed: total('journey.completed'),
-        exited: total('journey.exited'),
+    // Raw rows in a private argument (never a caller field) and never through the shared cache:
+    // this report applies its own subtree rule in buildJourneyFunnel (#917 review rounds 5-6).
+    const steps = await runAnalyticsQuery(
+      deps,
+      {
+        measures: ['journey.step_reached'],
+        dimensions: ['journey_step'],
+        from: input.from,
+        to: input.to,
+        filters,
+        limit: 5000,
+        order: { by: 'journey_step', dir: 'asc' },
+        ...versionScope,
       },
-      steps: reachedSteps,
-      topology: published ? published.edges : null,
-      k: K,
-    });
-    const entered = funnel.totals.entered;
-    // A drop-off chain needs one straight line: no fork, loop or reconvergence. It also needs its
-    // counts to fall along the walk. Migration moves a participant to the new version without a new
-    // entry (journeys.migrate), so a later step can outnumber the entry step; a negative drop-off is
-    // never clamped to zero, and the report falls back to reach instead (#591).
-    let previous: number | null = entered;
-    let monotone = true;
-    for (const { reached } of funnel.steps) {
-      if (reached === null) continue;
-      if (previous !== null && reached > previous) monotone = false;
-      previous = reached;
-    }
-    const chain = published?.linear === true && monotone;
-    let previousReach: number | null = entered;
-    const steps = funnel.steps.map(({ step, reached }) => {
-      const dropOff = chain && previousReach !== null && reached !== null ? previousReach - reached : null;
-      const dropOffRate = dropOff === null || previousReach === null || previousReach === 0 ? null : dropOff / previousReach;
-      // A hidden step breaks the chain: the next step has no visible predecessor to compare with,
-      // so its drop-off is null rather than a comparison across a withheld count.
-      previousReach = reached;
-      return { step, reached, dropOff, dropOffRate };
-    });
-
-    const suppressionNotes: string[] = [];
-    if (funnel.allStepsHidden)
-      suppressionNotes.push(
-        published
-          ? `Every step row is hidden because a step below k=${K} has no parent in the published graph.`
-          : `No published version is selected, and a step has fewer than k=${K} people, so every step row is hidden.`,
-      );
-    else if (funnel.hiddenParents.length > 0)
-      suppressionNotes.push(`Steps after ${funnel.hiddenParents.join(', ')} are hidden because one of them has fewer than k=${K} people.`);
-    if (steps.some((step) => step.reached === null))
-      suppressionNotes.push(
-        'All totals are withheld because a step row is hidden: a headline minus the visible steps could name the hidden count.',
-      );
-    else if (funnel.withheld.length > 0)
-      suppressionNotes.push(`Totals withheld because they are positive counts below k=${K}: ${funnel.withheld.join(', ')}.`);
-
-    const notes = [
-      ...new Set([
-        ...stepsResult.meta.notes,
-        ...suppressionNotes,
-        published?.linear && !monotone
-          ? `People joined the published journey v${published.version} after a later step (for example after a version migration), so reach is not a drop-off chain. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted.`
-          : published?.linear
-            ? `Steps follow the published journey v${published.version}’s linear topology; drop-off compares each step with the previous visible one, and only entries recorded for v${published.version} are counted.`
-            : published
-              ? `The published journey v${published.version} is not a straight line (it branches, splits, waits with alternative exits or loops), so there is no sequential drop-off. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted. Drop-off is shown only for linear journeys.`
-              : 'No published version is selected, so steps are cross-version reach without a drop-off chain.',
-      ]),
-    ];
-    return {
-      journeyId: input.journeyId,
-      basis: chain ? ('published' as const) : ('reach' as const),
-      entered,
-      goalReached: funnel.totals.goalReached,
-      completed: funnel.totals.completed,
-      exited: funnel.totals.exited,
-      steps,
-      meta: {
-        ...stepsResult.meta,
-        suppressed: steps.filter((step) => step.reached === null).length + funnel.withheld.length,
-        notes,
-      },
-    };
+      { raw: true },
+    );
+    return buildJourneyFunnel({ journeyId: input.journeyId, totals, steps }, published);
   },
 });
 

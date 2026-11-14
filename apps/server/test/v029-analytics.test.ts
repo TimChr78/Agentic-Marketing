@@ -526,8 +526,11 @@ describe('named reports', () => {
     // A hidden step withholds every headline, including a recorded zero (#908 review round 4).
     expect(funnel.completed).toBeNull();
     expect(funnel.exited).toBeNull();
-    expect(funnel.steps.map((s) => s.reached)).toEqual([null]);
-    expect(funnel.steps.every((s) => s.dropOff === null && s.dropOffRate === null)).toBe(true);
+    // Every published step is printed suppressed when a step below k hides all rows (the goal has
+    // no events of its own but is still a published step), so presence does not depend on data.
+    expect(funnel.steps.map((s) => s.step)).toEqual(['trigger', 'goal']);
+    expect(funnel.steps.map((s) => s.reached)).toEqual([null, null]);
+    expect(funnel.steps.every((s) => s.suppressed && s.dropOff === null && s.dropOffRate === null)).toBe(true);
     expect(funnel.meta.suppressed).toBeGreaterThanOrEqual(3);
     expect(funnel.meta.notes.join(' ')).toContain('withheld');
     // Nothing in the result carries the hidden 3 or 2: no count, rate, drop-off or total.
@@ -817,6 +820,81 @@ describe('named reports', () => {
     expect(visible).not.toContain(99);
     expect(funnel.entered).toBeNull();
     expect(funnel.meta.notes.join(' ')).toContain('Steps after split are hidden');
+  });
+
+  it('never lets a raw funnel read reach the public query cache (#917 review round 6)', async () => {
+    const api = t.api(owner);
+    // No published version, so the funnel's internal journeyVersion scope is empty and its step
+    // query normalises to exactly the public query's cache key.
+    const journey = (
+      await api.call('artifacts.create', {
+        type: 'journey',
+        name: 'Unpublished cache probe',
+        content: {
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' }, next: [{ to: 'a' }] },
+            { id: 'a', kind: 'wait', label: 'A', config: { duration: 'P1D' }, next: [{ to: 'b' }] },
+            { id: 'b', kind: 'wait', label: 'B', config: { duration: 'P1D' } },
+          ],
+        },
+      })
+    ).artifactId;
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: journey,
+        version: 1,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    for (let i = 0; i < 100; i++) {
+      const p = person();
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'trigger', 'step', 1);
+      add(p, 'a', 'step', 2);
+      if (i < 3) add(p, 'b', 'step', 3);
+    }
+    await t.srv.events.insertJourneyEvents(events);
+
+    const range = { journeyId: journey, from: FROM, to: TO };
+    const query = {
+      measures: ['journey.step_reached' as const],
+      dimensions: ['journey_step' as const],
+      filters: { journey: [journey] },
+      from: FROM,
+      to: TO,
+      limit: 5000,
+      order: { by: 'journey_step', dir: 'asc' as const },
+    };
+    const cellFor = (result: { rows: (string | number | null)[][] }, step: string) => result.rows.find((row) => row[0] === step)?.[1];
+
+    // Funnel first: its raw read must not leave raw rows in the shared cache.
+    clearAnalyticsCache();
+    const funnelFirst = await api.call('analytics.journeyFunnel', range);
+    const queryAfter = await api.call('analytics.query', query);
+    expect(cellFor(queryAfter, 'b')).toBeNull();
+    expect(queryAfter.meta.suppressed).toBeGreaterThan(0);
+
+    // Public query first: its suppressed rows must not feed the funnel's raw-input rule.
+    clearAnalyticsCache();
+    const queryFirst = await api.call('analytics.query', query);
+    expect(cellFor(queryFirst, 'b')).toBeNull();
+    const funnelAfter = await api.call('analytics.journeyFunnel', range);
+    clearAnalyticsCache();
+    const cold = await api.call('analytics.journeyFunnel', range);
+    expect(funnelAfter).toEqual(cold);
+    expect(funnelFirst).toEqual(cold);
+    // With no published graph the below-k step hides every row and every headline.
+    expect(cold.entered).toBeNull();
+    expect(cold.steps.every((step) => step.reached === null && step.suppressed)).toBe(true);
   });
 
   it('computes the drop-off chain over the published version only (#591)', async () => {
