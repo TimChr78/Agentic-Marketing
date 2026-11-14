@@ -22,7 +22,12 @@ export interface ConsentInput {
   proof?: Record<string, unknown>;
   messageId?: string;
   recordedBy?: string;
-  recordedAt?: Date;
+  /**
+   * When the person acted, not when this row was written (#928). It is the precedence key every
+   * reader sorts on (ADR-0014), so an async writer (event hook, worker, provider webhook) must pass
+   * the action's time; only a synchronous command handler may pass `new Date()`.
+   */
+  recordedAt: Date;
 }
 
 /** The profile and every profile merged into it, directly or through earlier merges. */
@@ -134,7 +139,7 @@ export async function recordConsent(tx: Tx, workspaceId: string, profileId: stri
         proof: r.proof ?? {},
         messageId: r.messageId ?? null,
         recordedBy: r.recordedBy ?? null,
-        recordedAt: r.recordedAt ?? new Date(),
+        recordedAt: r.recordedAt,
       })),
     )
     .onConflictDoNothing()
@@ -153,7 +158,10 @@ export async function recomputeConsentState(tx: Tx, workspaceId: string, profile
     SELECT DISTINCT ON (purpose, channel) workspace_id, ${profileId}, purpose, channel, status, basis, source, recorded_at
     FROM consent_records
     WHERE workspace_id = ${workspaceId} AND ${inArray(schema.consentRecords.profileId, family)}
-    ORDER BY purpose, channel, recorded_at DESC, id DESC`);
+    -- Equal recorded_at times resolve to the refusal (ADR-0014): a withdrawal must never lose a
+    -- tie to a grant written in the same millisecond, whatever the insertion order was.
+    ORDER BY purpose, channel, recorded_at DESC,
+      (status IN ('withdrawn', 'objected', 'denied')) DESC, id DESC`);
   await exitRefusedJourneys(tx, workspaceId, profileId, purposes);
 }
 

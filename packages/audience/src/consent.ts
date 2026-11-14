@@ -36,6 +36,10 @@ async function recordChanges(tx: Tx, ws: string, profileId: string, records: Con
 async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent, deps: ConsentHookDeps) {
   const p = e.properties as Record<string, unknown>;
   const purposes = Array.isArray(p.purposes) ? (p.purposes as string[]) : [];
+  // The action time, never the worker's processing time (#928). Form and confirmation events set
+  // their timestamp server-side, and `correctedTimestamp` clamps it to the receive time, so a
+  // submitter cannot post-date a signup past a withdrawal that happened later.
+  const recordedAt = new Date(e.timestamp);
   if (e.sourceId.startsWith('frm_') && e.name === SUBMITTED) {
     const proof = {
       form_id: p.form_id,
@@ -50,7 +54,14 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
         tx,
         ws,
         profileId,
-        purposes.map((purpose) => ({ purpose, status: 'granted' as const, source: 'form' as const, proof, messageId: e.messageId })),
+        purposes.map((purpose) => ({
+          purpose,
+          status: 'granted' as const,
+          source: 'form' as const,
+          proof,
+          messageId: e.messageId,
+          recordedAt,
+        })),
       );
     const form = await publishedForm(tx, String(p.form_id), Number(p.form_version));
     if (!form?.def.confirmationTemplate) return;
@@ -83,6 +94,7 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
         status: 'granted' as const,
         source: 'form' as const,
         messageId: e.messageId,
+        recordedAt,
         proof: {
           form_id: p.form_id,
           form_version: p.form_version,

@@ -35,15 +35,24 @@ export function messageEvent(
   };
 }
 
-export async function withdraw(tx: Tx, m: Msg, source: 'unsubscribe', proof: Record<string, unknown>, kp: KeyProvider) {
+export async function withdraw(tx: Tx, m: Msg, source: 'unsubscribe', proof: Record<string, unknown>, kp: KeyProvider, recordedAt: Date) {
   if (!m.profileId) return;
   const person = await profileForMessage(tx, m.workspaceId, m.profileId, kp);
   if (!person) return;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const basis = purposes.find((p) => p.key === m.purpose)?.basis ?? 'consent';
   // Under legitimate interest an unsubscribe is an objection; under consent, a withdrawal.
+  // `recordedAt` is when the provider says the person unsubscribed (a webhook can be delayed or
+  // retried), never when this callback happened to be processed (#928).
   await recordConsent(tx, m.workspaceId, person.id, purposes, [
-    { purpose: m.purpose, channel: m.channel, status: basis === 'legitimate_interest' ? 'objected' : 'withdrawn', source, proof },
+    {
+      purpose: m.purpose,
+      channel: m.channel,
+      status: basis === 'legitimate_interest' ? 'objected' : 'withdrawn',
+      source,
+      proof,
+      recordedAt,
+    },
   ]);
 }
 
@@ -96,7 +105,11 @@ export async function applyDeliveryEvents(
       logger.warn({ provider, event: e.type, providerMessageId: e.providerMessageId }, 'delivery event for an unknown message');
       continue;
     }
-    const at = e.at && !Number.isNaN(Date.parse(e.at)) ? new Date(e.at).toISOString() : new Date().toISOString();
+    const atDate = e.at && !Number.isNaN(Date.parse(e.at)) ? new Date(e.at) : new Date();
+    const at = atDate.toISOString();
+    // The provider's own time, but never in the future: a callback cannot post-date a consent
+    // past a withdrawal that happened after the event (#928).
+    const actedAt = new Date(Math.min(atDate.getTime(), Date.now()));
     // Test sends never enter reporting or change consent. Their status and suppressions still count.
     if (!m.test)
       out.push(
@@ -151,7 +164,7 @@ export async function applyDeliveryEvents(
       if (changed?.updated && changed.reason === reason) escalations.push({ workspaceId: m.workspaceId, channel: m.channel, reason });
     }
     if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
-      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp);
+      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp, actedAt);
   }
   return { events: out, escalations };
 }

@@ -1,4 +1,9 @@
+import { randomBytes } from 'node:crypto';
+import { consentHook } from '@agentic-marketing/audience';
+import type { BusEvent } from '@agentic-marketing/events';
+import { recomputeConsentState } from '@agentic-marketing/profiles';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { applyDeliveryEvents } from '../../../packages/email/src/deliveryEvents';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // 0.14.4 (#592, #625, #593, #626): personal-data reads are audited, the person page shows the
@@ -209,6 +214,120 @@ describe('profiles.get reports the consent delivery enforces (#593)', () => {
     const tie = p.consentEffective.find((c) => c.purpose === 'tie')!;
     expect(tie).toMatchObject({ status: 'withdrawn', allowed: false });
     expect(tie.channels).toEqual([{ channel: 'email', status: 'withdrawn', allowed: false }]);
+  });
+});
+
+describe('an async consent write carries the action time (#928)', () => {
+  // recorded_at is the precedence key (ADR-0014). Every async writer must pass the time the person
+  // acted, not the time the worker, webhook or queue got to it.
+  let hook: ReturnType<typeof consentHook>;
+  const api = () => t.api(owner, ws);
+  const newProfile = async () => {
+    const id = `prf_${randomBytes(16).toString('hex')}`;
+    await t.srv.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [ws, id]);
+    return id;
+  };
+  const event = (profileId: string, name: string, timestamp: string, properties: Record<string, unknown>): BusEvent => ({
+    workspaceId: ws,
+    sourceId: 'frm_consent_time',
+    messageId: `msg_${randomBytes(12).toString('hex')}`,
+    type: 'track',
+    name,
+    anonymousId: '',
+    userId: profileId,
+    timestamp,
+    receivedAt: timestamp,
+    properties,
+    traits: {},
+    piiTraits: {},
+    context: {},
+    consent: {},
+  });
+  const handle = (profileId: string, e: BusEvent) => hook(ws, [{ event: e, profileId }]);
+  const history = async (profileId: string) => (await api().call('consent.history', { profileId })).records;
+  const effective = async (profileId: string) =>
+    (await api().call('profiles.get', { profileId })).consentEffective.find((c) => c.purpose === 'marketing')!;
+  const withdraw = async (profileId: string) =>
+    api().call('consent.record', { profileId, purpose: 'marketing', status: 'withdrawn', source: 'unsubscribe' });
+
+  beforeAll(() => {
+    hook = consentHook({
+      db: t.srv.db,
+      kp: t.srv.keyProvider,
+      events: t.srv.events,
+      links: t.srv.email.links,
+      linksUrl: t.srv.linksUrl,
+    });
+  });
+
+  it('a delayed form submission stays behind a later withdrawal', async () => {
+    const profileId = await newProfile();
+    await withdraw(profileId);
+    const submittedAt = new Date(Date.now() - 60_000).toISOString();
+    await handle(profileId, event(profileId, 'Form Submitted', submittedAt, { purposes: ['marketing'], double_opt_in: false }));
+    expect(await effective(profileId)).toMatchObject({ status: 'withdrawn', allowed: false });
+    expect((await history(profileId)).find((r) => r.status === 'granted')).toMatchObject({ recordedAt: submittedAt });
+  });
+
+  it('a delayed double-opt-in confirmation stays behind a later withdrawal', async () => {
+    const profileId = await newProfile();
+    await withdraw(profileId);
+    const confirmedAt = new Date(Date.now() - 60_000).toISOString();
+    await handle(profileId, event(profileId, 'Subscription Confirmed', confirmedAt, { purposes: ['marketing'], double_opt_in: true }));
+    expect(await effective(profileId)).toMatchObject({ status: 'withdrawn', allowed: false });
+    expect((await history(profileId)).find((r) => r.status === 'granted')).toMatchObject({ recordedAt: confirmedAt });
+  });
+
+  it('a redelivered form event creates no second record', async () => {
+    const profileId = await newProfile();
+    const submittedAt = new Date(Date.now() - 120_000).toISOString();
+    const submitted = event(profileId, 'Form Submitted', submittedAt, { purposes: ['marketing'], double_opt_in: false });
+    await handle(profileId, submitted);
+    await withdraw(profileId);
+    await handle(profileId, submitted);
+    const records = await history(profileId);
+    expect(records.filter((r) => r.status === 'granted')).toHaveLength(1);
+    expect(await effective(profileId)).toMatchObject({ status: 'withdrawn', allowed: false });
+  });
+
+  it('a normal signup after a withdrawal still restores consent (ADR-0014)', async () => {
+    const profileId = await newProfile();
+    await withdraw(profileId);
+    const submittedAt = new Date(Date.now() + 5).toISOString();
+    await handle(profileId, event(profileId, 'Form Submitted', submittedAt, { purposes: ['marketing'], double_opt_in: false }));
+    expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
+  });
+
+  it('a provider unsubscribe callback records the provider event time, not the webhook time', async () => {
+    const profileId = await newProfile();
+    await api().call('consent.record', { profileId, purpose: 'marketing', status: 'granted', source: 'form' });
+    const messageId = `msg_${randomBytes(12).toString('hex')}`;
+    await t.srv.db.admin.query(
+      `INSERT INTO messages (workspace_id, id, idempotency_key, channel, purpose, profile_id, status)
+       VALUES ($1, $2, $3, 'email', 'marketing', $4, 'sent')`,
+      [ws, messageId, `idem_${messageId}`, profileId],
+    );
+    const at = new Date(Date.now() - 60_000).toISOString();
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      applyDeliveryEvents(tx, [{ eventId: 'evt-1', type: 'unsubscribed', messageId, at }], 'test', t.srv.keyProvider),
+    );
+    expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
+    expect((await history(profileId)).find((r) => r.status === 'withdrawn')).toMatchObject({ recordedAt: at });
+  });
+
+  it('equal recorded_at times resolve a grant and a withdrawal to the withdrawal', async () => {
+    const profileId = await newProfile();
+    const at = '2026-10-01T10:00:00.000Z';
+    // Both writers saw the same action time: the refusal must win the tie in consent_state, even
+    // though the grant was written second (and so carries the higher id).
+    await t.srv.db.admin.query(
+      `INSERT INTO consent_records (workspace_id, profile_id, purpose, channel, status, basis, source, recorded_at)
+       VALUES ($1, $2, 'marketing', '', 'withdrawn', 'consent', 'unsubscribe', $3),
+              ($1, $2, 'marketing', '', 'granted', 'consent', 'form', $3)`,
+      [ws, profileId, at],
+    );
+    await t.srv.db.withWorkspace(ws, (tx) => recomputeConsentState(tx, ws, profileId));
+    expect(await effective(profileId)).toMatchObject({ status: 'withdrawn', allowed: false });
   });
 });
 
