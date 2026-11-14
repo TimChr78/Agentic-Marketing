@@ -213,4 +213,23 @@ describe('CSRF on cookie-authenticated writes (#838)', () => {
       await other.close();
     }
   });
+
+  it('refuses a domain that a digit-dot wildcard would otherwise match (#902)', async () => {
+    const pattern = 'https://192.168.*.*';
+    const other = await startTestServer('csrf_wildcard', testPort(2511), { TRUSTED_ORIGINS: pattern });
+    try {
+      const user = await other.signUp(`csrf-wildcard-${Date.now()}@example.com`);
+      const workspaceId = await other.workspaceWith([[user, 'owner']]);
+      const call = (origin: string) =>
+        postJson(other.base, '/v1/workspace.get', { origin, cookie: user.cookie, 'x-workspace-id': workspaceId }, {});
+
+      // A literal address in the range is trusted, exactly as the pattern reads.
+      expect((await call('https://192.168.1.5')).status).toBe(200);
+      // A hostname in the same digits-and-dots shape is not an address, so it is refused here. The
+      // parity test in packages/auth shows Better Auth refuses it for /api/auth/* too.
+      expect((await call('https://192.168.evil.com')).status).toBe(403);
+    } finally {
+      await other.close();
+    }
+  });
 });
