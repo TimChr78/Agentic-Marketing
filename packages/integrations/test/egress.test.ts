@@ -184,6 +184,38 @@ describe('SSRF guard gaps (#817)', () => {
     for (const a of ['', 'garbage', 'not-an-ip', '127.0.0.1:8080']) expect(isBlockedAddress(a, none), a).toBe(true);
   });
 
+  // #914: Teredo (2001:0000::/32) carries two IPv4 addresses — its server in bits 32-64, plain, and
+  // its client in bits 96-128, complemented. Either one naming a private target is a reason to
+  // refuse the address.
+  it('decodes the complemented Teredo client address and the plain server address', () => {
+    // Client 10.0.0.15, server 65.54.227.120.
+    expect(isBlockedAddress('2001:0:4136:e378:8000:63bf:f5ff:fff0', none)).toBe(true);
+    // Client 127.0.0.1 (complement 0x80ff:fffe), public server.
+    expect(isBlockedAddress('2001:0:4136:e378:8000:0:80ff:fffe', none)).toBe(true);
+    // A public client behind the loopback server: the server alone is enough to refuse it.
+    expect(isBlockedAddress('2001:0:7f00:1:8000:0:a247:27dd', none)).toBe(true);
+    // A public client and a public server are reachable.
+    expect(isBlockedAddress('2001:0:4136:e378:8000:63bf:a247:27dd', none)).toBe(false);
+    for (const url of ['http://[2001:0:4136:e378:8000:63bf:f5ff:fff0]/', 'http://[2001:0:7f00:1:8000:0:a247:27dd]/'])
+      expect(checkUrl(url, none), url).toContain('private address');
+  });
+
+  it('leaves other 2001: prefixes alone', () => {
+    // 2001:db8::/32 is documentation space, 2001:4860:: is Google: neither is Teredo.
+    expect(isBlockedAddress('2001:db8::1', none)).toBe(false);
+    expect(isBlockedAddress('2001:4860:4860::8888', none)).toBe(false);
+    expect(checkUrl('http://[2001:db8::1]/', none)).toBeNull();
+  });
+
+  it('lets an allow-listed private range cover the Teredo form', () => {
+    const allow = { allowedHosts: ['10.0.0.0/8'] };
+    expect(isBlockedAddress('2001:0:4136:e378:8000:63bf:f5ff:fff0', allow)).toBe(false);
+    // The same allow list does not admit a different private client.
+    expect(isBlockedAddress('2001:0:4136:e378:8000:0:80ff:fffe', allow)).toBe(true);
+    // 6to4 keeps behaving the same way.
+    expect(isBlockedAddress('2002:a00:f::', allow)).toBe(false);
+  });
+
   it('filters a resolved address list by the requested family, and handles all', async () => {
     const both: LookupAddress[] = [
       { address: '93.184.216.34', family: 4 },

@@ -537,8 +537,9 @@ describe('entry keys (#93)', () => {
         ],
       },
     });
+    // `entryKey` is an ordinary field, not a credential: the whole reason reaches the caller.
     await expect(api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' })).rejects.toThrow(
-      /property is required/,
+      /config\.entryKey: property is required when source is event_property/,
     );
   });
 });

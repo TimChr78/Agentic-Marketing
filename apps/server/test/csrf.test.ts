@@ -213,4 +213,38 @@ describe('CSRF on cookie-authenticated writes (#838)', () => {
       await other.close();
     }
   });
+
+  it('refuses a domain that a digit-dot wildcard would otherwise match (#902)', async () => {
+    const pattern = 'https://192.168.*.*';
+    const other = await startTestServer('csrf_wildcard', testPort(2511), { TRUSTED_ORIGINS: pattern });
+    try {
+      const user = await other.signUp(`csrf-wildcard-${Date.now()}@example.com`);
+      const workspaceId = await other.workspaceWith([[user, 'owner']]);
+      const call = (origin: string) =>
+        postJson(other.base, '/v1/workspace.get', { origin, cookie: user.cookie, 'x-workspace-id': workspaceId }, {});
+
+      // A literal address in the range is trusted, exactly as the pattern reads.
+      expect((await call('https://192.168.1.5')).status).toBe(200);
+      // A hostname in the same digits-and-dots shape is not an address, so it is refused here. The
+      // parity test in packages/auth shows Better Auth refuses it for /api/auth/* too.
+      expect((await call('https://192.168.evil.com')).status).toBe(403);
+    } finally {
+      await other.close();
+    }
+  });
+
+  it('matches an entry the way it is spelled: trailing slash, case and default port are normalised (#902)', async () => {
+    const other = await startTestServer('csrf_normalised', testPort(2513), { TRUSTED_ORIGINS: 'HTTPS://App.Example.Test/' });
+    try {
+      const user = await other.signUp(`csrf-normalised-${Date.now()}@example.com`);
+      const workspaceId = await other.workspaceWith([[user, 'owner']]);
+      const call = (origin: string) =>
+        postJson(other.base, '/v1/workspace.get', { origin, cookie: user.cookie, 'x-workspace-id': workspaceId }, {});
+      expect((await call('https://app.example.test')).status).toBe(200);
+      // The same normalisation does not admit a look-alike host.
+      expect((await call('https://app.example.test.evil.example')).status).toBe(403);
+    } finally {
+      await other.close();
+    }
+  });
 });

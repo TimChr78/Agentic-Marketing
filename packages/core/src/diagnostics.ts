@@ -52,9 +52,320 @@ const REDACTIONS: readonly (readonly [RegExp, string])[] = [
  * line that is about to become an AppError.
  */
 export function redactCredentials(text: string): string {
+  // A long camelCase credential key is replaced as a token by the rules below, after which its
+  // value can no longer be told from any other text. So the plain value of such a key is replaced
+  // first (#898); see redactLongKeyValues for why that cannot change what the rules below remove.
+  let out = applyRules(redactLongKeyValues(text));
+  // The two additions (#898, #920) work on what the rules produced and only ever replace more of
+  // it. They are repeated, together with the rules, until nothing changes, so a second call
+  // returns the same text: one replacement can complete a match for another rule
+  // (`token="authToken=\"`). Each round that changes the text turns ordinary characters into the
+  // marker, so it ends; the bound is a backstop.
+  for (let round = 0; round < 16; round += 1) {
+    const next = applyRules(redactCompoundKeys(redactUrlPasswords(out)));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+function applyRules(text: string): string {
   let out = text;
   for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
   return out;
+}
+
+/**
+ * The words that make a compound key a credential key when they are its LAST word (#898):
+ * `authToken`, `apiSecret`, `oauthToken`, `userPassword`. The rules above already cover the word on
+ * its own and after a separator (`auth_token`, `X-Auth-Token`); this covers camelCase and
+ * PascalCase, where no separator marks the word.
+ */
+const CREDENTIAL_LAST_WORDS = new Set([
+  'token',
+  'secret',
+  'password',
+  'passwd',
+  'authorization',
+  'auth',
+  'credential',
+  'credentials',
+  'signature',
+  'session',
+]);
+
+/**
+ * `key` is different: `entryKey`, `sortKey`, `idempotencyKey` and `primaryKey` are ordinary fields,
+ * and validation messages that name them must stay readable. A camelCase compound that ends in
+ * `Key` is a credential key only when one of its earlier words is a qualifier from this list
+ * (`secretKey`, `signingKey`, `sessionKey`, `shopifyKey`, `metaAdsKey`).
+ *
+ * The trade-off: a provider inventing a new spelling such as `tenantKey` is not caught by this rule.
+ * Its value is still subject to every other rule (a provider prefix, a JWT, a `Bearer` value, a URL
+ * password, a 24+ character bare token), and `tenant_key` / `x-tenant-key` are credential keys as
+ * they always were. The list is checked against the provider registries in
+ * `apps/server/test/redaction-providers.test.ts`, so a new adapter or connector without a
+ * qualifier fails that test. `public`, `publishable` and `log` are deliberately out: a published
+ * key is not a secret.
+ */
+const KEY_QUALIFIERS = new Set([
+  // Generic credential and security words.
+  'api',
+  'secret',
+  'private',
+  'signing',
+  'sign',
+  'access',
+  'auth',
+  'session',
+  'encryption',
+  'encrypt',
+  'decryption',
+  'master',
+  'client',
+  'license',
+  'licence',
+  'app',
+  'application',
+  'account',
+  'service',
+  'server',
+  'webhook',
+  'hmac',
+  'shared',
+  'consumer',
+  'subscription',
+  'storage',
+  'sas',
+  'ssh',
+  'pgp',
+  'gpg',
+  'jwt',
+  'token',
+  'bearer',
+  'password',
+  'credential',
+  'security',
+  'crypto',
+  'cipher',
+  'data',
+  'kms',
+  'vault',
+  'wrap',
+  'wrapping',
+  'root',
+  'admin',
+  'developer',
+  'dev',
+  'partner',
+  'merchant',
+  'restricted',
+  'live',
+  'test',
+  // Model providers (packages/ai: `openai-compatible`, `anthropic-compatible`).
+  'openai',
+  'anthropic',
+  // E-mail adapters (packages/email/src/adapters).
+  'smtp',
+  'ses',
+  'postmark',
+  'brevo',
+  'cloudflare',
+  // SMS and push adapters (packages/email/src/sms, packages/email/src/push).
+  'twilio',
+  'webpush',
+  'vapid',
+  'fcm',
+  'apns',
+  // Ad connectors (packages/ads).
+  'meta',
+  'google',
+  'microsoft',
+  'linkedin',
+  'tiktok',
+  'pinterest',
+  // Integrations connectors (packages/integrations/src/connectors) and the other services the
+  // platform talks to (stripe and the other prefixes the token rules know, GitHub, n8n, …).
+  'shopify',
+  'salesforce',
+  'slack',
+  'stripe',
+  'sendgrid',
+  'mailgun',
+  'github',
+  'n8n',
+  'hubspot',
+  'klaviyo',
+  'amazon',
+  'aws',
+  'azure',
+  's3',
+  'openbao',
+]);
+
+/**
+ * The redaction marker. A second pass must leave it exactly as it is (#919 round 2), so it is
+ * recognised before anything else that starts with `[`, and only when the value really ends there.
+ */
+
+const CAMEL_BOUNDARY = /(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/;
+
+/** The unambiguous credential words an all-capitals name can end in (`AUTHTOKEN`, `DBPASSWORD`). */
+const UPPER_SUFFIXES = ['token', 'secret', 'password', 'passwd', 'credential', 'credentials', 'signature'];
+
+/**
+ * An all-capitals name has no word boundaries, so only its ending can be read: an unambiguous
+ * credential word, or a qualifier directly before `KEY` (`SECRETKEY`, `ACCESSKEY`). `MONKEY` and
+ * `KEYBOARD` are neither.
+ */
+function isUpperCredentialKey(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (UPPER_SUFFIXES.some((word) => lower.length > word.length && lower.endsWith(word))) return true;
+  if (!lower.endsWith('key')) return false;
+  const stem = lower.slice(0, -3);
+  for (const qualifier of KEY_QUALIFIERS) if (stem.endsWith(qualifier)) return true;
+  return false;
+}
+
+/**
+ * Whether a name is a credential key the rules above do not already recognise: a camelCase or
+ * PascalCase compound (`authToken`, `AWSSecretKey`, `apiKey2`), also inside a longer name
+ * (`meta_adsKey`, `X-meta-adsKey`), an all-capitals name, or the plural `credentials`.
+ */
+function isCompoundCredentialKey(full: string): boolean {
+  let known = KEY_VERDICTS.get(full);
+  if (known === undefined) {
+    known = classifyCompoundKey(full);
+    // Bounded: a text of a million distinct names must not grow this without limit.
+    if (KEY_VERDICTS.size >= 2_000) KEY_VERDICTS.clear();
+    KEY_VERDICTS.set(full, known);
+  }
+  return known;
+}
+
+const KEY_VERDICTS = new Map<string, boolean>();
+
+function classifyCompoundKey(full: string): boolean {
+  // Cheap first: every name this rule adds has a capital letter or is the plural `credentials`.
+  if (!/[A-Z]|credentials[0-9]*$/.test(full)) return false;
+  const name = full.replace(/[0-9]+$/, '');
+  const parts = name.split(/[_.-]+/).filter(Boolean);
+  const lastPart = parts[parts.length - 1];
+  if (!lastPart) return false;
+  if (!/[a-z]/.test(lastPart)) return isUpperCredentialKey(lastPart);
+  const words = parts.flatMap((part) => part.split(CAMEL_BOUNDARY)).map((word) => word.toLowerCase());
+  const last = words[words.length - 1]!;
+  if (last === 'credentials') return true;
+  // A single word, or a word after a separator, is the first rule's business (`token`, `auth_token`).
+  if (lastPart.split(CAMEL_BOUNDARY).length < 2) return false;
+  if (CREDENTIAL_LAST_WORDS.has(last)) return true;
+  return (last === 'key' || last === 'keys') && words.slice(0, -1).some((word) => KEY_QUALIFIERS.has(word));
+}
+
+/**
+ * A name, with its `_`, `-` and `.` separators, that is directly followed by `:` or `=` (an
+ * optional closing quote in between). It can only start where a name starts, so a long run is
+ * read once.
+ */
+const COMPOUND_KEY = /(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
+
+/** A name long enough for the bare-token rule to replace it before its value is looked at. */
+const TOKEN_SHAPED = /[A-Za-z0-9+/_-]{24,}/;
+
+/** A plain value: one token, or a quoted string, with nothing a rule could read as a pair. */
+const PLAIN_BARE = /[A-Za-z0-9._~+/@%!$*#^-]+(?=$|[\s,;&}\]])/y;
+const PLAIN_QUOTED = /"[^"\\:=\r\n]*"|'[^'\\:=\r\n]*'/y;
+/** A separator after the value: the value is then a key itself and is left to the rules. */
+const SEPARATOR_AHEAD = /["']?\s*[:=]/y;
+const SCHEME_WORD = /\b(?:bearer|basic)\b/i;
+
+/**
+ * Replaces the value of a credential key that is itself token-shaped
+ * (`organizationSecondaryAuthToken=shortpw`), before the rules run.
+ *
+ * Only a plain value is taken: one token, or a quoted string, that contains no `:` or `=`, no
+ * quote, no Authorization scheme word, and is not followed by a separator. Such a value cannot be
+ * a key, a scheme or part of a pair for any rule, so replacing it with the marker changes nothing
+ * about what the rules remove elsewhere. Any other value is left as it is.
+ */
+function redactLongKeyValues(text: string): string {
+  let out = '';
+  let copied = 0;
+  COMPOUND_KEY.lastIndex = 0;
+  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
+    if (key[0].length < 24 || !TOKEN_SHAPED.test(key[0]) || !isCompoundCredentialKey(key[0])) continue;
+    const keyEnd = key.index + key[0].length;
+    PAIR_SEPARATOR.lastIndex = keyEnd;
+    const separator = PAIR_SEPARATOR.exec(text);
+    if (!separator) continue;
+    const start = keyEnd + separator[0].length;
+    PLAIN_QUOTED.lastIndex = start;
+    PLAIN_BARE.lastIndex = start;
+    const value = PLAIN_QUOTED.exec(text)?.[0] ?? PLAIN_BARE.exec(text)?.[0];
+    if (!value || SCHEME_WORD.test(value) || PLAIN_LITERAL.test(value)) continue;
+    SEPARATOR_AHEAD.lastIndex = start + value.length;
+    if (SEPARATOR_AHEAD.test(text)) continue;
+    out += `${text.slice(copied, start)}[redacted]`;
+    copied = start + value.length;
+    COMPOUND_KEY.lastIndex = copied;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/** What separates a key from its value, with an optional closing quote of the key before it. */
+const PAIR_SEPARATOR = /["']?\s*[:=]\s*/y;
+
+/**
+ * A value, in the grammar of the first rule above: a quoted string, or a bare value up to
+ * whitespace, a delimiter or a quote. A marker inside a bare value is part of it
+ * (`x.[redacted]`), so a value the rules replaced in part is replaced whole.
+ */
+const PAIR_VALUE = /"(?:[^"\\]|\\[\s\S])*"|'[^']*'|(?:\[redacted\]|[^\s,;&}\]"'])+/y;
+
+/** A flag, not a secret: `requiresAuth: true`, `hasPassword: false`, `session: null`. */
+const PLAIN_LITERAL = /^(?:true|false|null|undefined)$/;
+
+/** An Authorization value (`Bearer <token>`): the scheme rule above owns it and keeps the word. */
+const SCHEME_START = /(?:bearer|basic)\s/iy;
+
+/**
+ * Replaces the value of every camelCase credential key in text the rules above have already been
+ * through. Each character is read a bounded number of times.
+ */
+function redactCompoundKeys(text: string): string {
+  let out = '';
+  let copied = 0;
+  COMPOUND_KEY.lastIndex = 0;
+  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
+    const keyEnd = key.index + key[0].length;
+    if (!isCompoundCredentialKey(key[0])) continue;
+    PAIR_SEPARATOR.lastIndex = keyEnd;
+    const separator = PAIR_SEPARATOR.exec(text);
+    if (!separator) continue;
+    const start = keyEnd + separator[0].length;
+    SCHEME_START.lastIndex = start;
+    if (SCHEME_START.test(text)) continue;
+    PAIR_VALUE.lastIndex = start;
+    const value = PAIR_VALUE.exec(text);
+    if (!value) continue;
+    COMPOUND_KEY.lastIndex = start + value[0].length;
+    if (value[0] === '[redacted]' || PLAIN_LITERAL.test(value[0])) continue;
+    out += `${text.slice(copied, start)}[redacted]`;
+    copied = start + value[0].length;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/**
+ * The password in `scheme://user:password@host` (#920), for any scheme: a connection string a
+ * driver or a client echoes. The authority ends at the first `/`, `?`, `#` or whitespace, and its
+ * LAST `@` ends the userinfo, so a password that contains `@` is replaced whole. A URL without a
+ * password (`https://user@host`, `mailto:a@b.c`, `https://host/path?x=a:b@c`) is left alone.
+ */
+const URL_PASSWORD = /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#@:]*):[^\s/?#]*@/g;
+
+function redactUrlPasswords(text: string): string {
+  return text.replace(URL_PASSWORD, '$1:[redacted]@');
 }
 
 /**

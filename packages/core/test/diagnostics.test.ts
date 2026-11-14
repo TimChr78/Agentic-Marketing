@@ -152,6 +152,289 @@ describe('redactCredentials', () => {
   });
 });
 
+describe('camelCase and PascalCase credential keys (#898)', () => {
+  // Ten characters: below the 24-character bare-token rule, so only the key can identify it.
+  const SHORT = 'abc1234567';
+  const keys = [
+    'authToken',
+    'apiSecret',
+    'secretKey',
+    'signingKey',
+    'oauthToken',
+    'sessionKey',
+    'accessToken',
+    'clientSecret',
+    'apiKey',
+    'privateKey',
+    'refreshToken',
+    'AuthToken',
+    'PASSWORD',
+    'signing_key',
+    'X-Auth-Token',
+    'X-Api-Key',
+  ];
+
+  it('redacts the value of a key whose last word is a credential word', () => {
+    for (const key of keys) {
+      expect(redactCredentials(`${key}: ${SHORT}`), key).toBe(`${key}: [redacted]`);
+      expect(redactCredentials(`${key}=${SHORT}`), key).toBe(`${key}=[redacted]`);
+    }
+  });
+
+  it('redacts the JSON and single-quoted forms', () => {
+    for (const key of keys)
+      for (const [open, close] of [
+        ['"', '"'],
+        ["'", "'"],
+      ] as const) {
+        const text = `{${open}${key}${close}:${open}${SHORT}${close}}`;
+        expect(redactCredentials(text), text).not.toContain(SHORT);
+        expect(redactCredentials(text), text).toContain('[redacted]');
+      }
+  });
+
+  it('redacts an HTTP header and a URL query parameter', () => {
+    expect(redactCredentials(`X-Auth-Token: ${SHORT}`)).toBe('X-Auth-Token: [redacted]');
+    expect(redactCredentials(`https://api.example.com/v1/hook?apiSecret=${SHORT}&x=1`)).toBe(
+      'https://api.example.com/v1/hook?apiSecret=[redacted]&x=1',
+    );
+    expect(redactCredentials(`?sessionKey=${SHORT}`)).toBe('?sessionKey=[redacted]');
+  });
+
+  it('redacts only by the last word, not by a word that contains the letters', () => {
+    for (const key of ['monkey', 'keyboard', 'keynote', 'hockey', 'author', 'authority', 'tokenizer', 'tokens_count', 'sessions_count'])
+      expect(redactCredentials(`${key}=${SHORT}`), key).toBe(`${key}=${SHORT}`);
+    // A middle word does not decide: `count` and `sessions` are the last words here.
+    expect(redactCredentials(`token_count=${SHORT}`)).toBe(`token_count=${SHORT}`);
+    expect(redactCredentials(`tokenCount=${SHORT}`)).toBe(`tokenCount=${SHORT}`);
+    // A trailing number is not the word: `apiKey2` still ends in `key`.
+    expect(redactCredentials(`apiKey2=${SHORT}`)).toBe('apiKey2=[redacted]');
+    // The words are the singular spellings (and `credentials`): a plural is an ordinary noun, so a
+    // message that lists keys or tokens keeps its list.
+    expect(redactCredentials(`authTokens=${SHORT}`)).toBe(`authTokens=${SHORT}`);
+    expect(redactCredentials(`count_tokens=${SHORT}`)).toBe(`count_tokens=${SHORT}`);
+    expect(redactCredentials('Allowed keys: (none).')).toBe('Allowed keys: (none).');
+    expect(redactCredentials('expected tokens: 3')).toBe('expected tokens: 3');
+  });
+
+  it('redacts a credential pair nested in another value', () => {
+    // A provider message quoting its own field keeps the field name, which the scan reaches next.
+    expect(redactCredentials(`Invalid OAuth access token: access_token=${SHORT}`)).toBe(
+      'Invalid OAuth access token: access_token=[redacted]',
+    );
+    expect(redactCredentials(`hint: url=https://host/x?authToken=${SHORT}&y=1`)).toBe('hint: url=https://host/x?authToken=[redacted]&y=1');
+  });
+
+  it('keeps a provider error code and our own ids', () => {
+    expect(redactCredentials('INVALID_AUTHENTICATION_CREDENTIALS')).toBe('INVALID_AUTHENTICATION_CREDENTIALS');
+    expect(redactCredentials('error INVALID_AUTHENTICATION_CREDENTIALS happened')).toBe(
+      'error INVALID_AUTHENTICATION_CREDENTIALS happened',
+    );
+    expect(redactCredentials(`{"code":"INVALID_AUTHENTICATION_CREDENTIALS","message":"sign-in failed"}`)).toBe(
+      '{"code":"INVALID_AUTHENTICATION_CREDENTIALS","message":"sign-in failed"}',
+    );
+  });
+});
+
+describe('URL userinfo credentials (#920)', () => {
+  it('replaces the password of a connection string and keeps the rest of the URL', () => {
+    expect(redactCredentials('postgres://am:shortpw@db:5432/am')).toBe('postgres://am:[redacted]@db:5432/am');
+    expect(redactCredentials('http://user:pw@clickhouse:8123')).toBe('http://user:[redacted]@clickhouse:8123');
+    expect(redactCredentials('redis://:pw@valkey:6379/0')).toBe('redis://:[redacted]@valkey:6379/0');
+    expect(redactCredentials('mongodb+srv://app:pw@cluster.example.net/db?retryWrites=true')).toBe(
+      'mongodb+srv://app:[redacted]@cluster.example.net/db?retryWrites=true',
+    );
+    expect(redactCredentials('nats://nats:pw@nats:4222')).toBe('nats://nats:[redacted]@nats:4222');
+    expect(redactCredentials('amqp://guest:pw@rabbit:5672/%2f')).toBe('amqp://guest:[redacted]@rabbit:5672/%2f');
+  });
+
+  it('redacts a password that contains percent-escapes, a colon or is very long', () => {
+    expect(redactCredentials('postgres://u:p%40ss@db:5432/am')).toBe('postgres://u:[redacted]@db:5432/am');
+    expect(redactCredentials('postgres://u:pa%3Ass%2Fword@db/am')).toBe('postgres://u:[redacted]@db/am');
+    expect(redactCredentials('postgres://u:pa:ss@db/am')).toBe('postgres://u:[redacted]@db/am');
+    // No length limit: a long password is still the password.
+    const long = 'p'.repeat(4096);
+    expect(redactCredentials(`postgres://u:${long}@db/am`)).toBe('postgres://u:[redacted]@db/am');
+  });
+
+  it('leaves a URL without a password alone', () => {
+    const untouched = [
+      'https://user@host',
+      'mailto:a@b.c',
+      'https://host/path?x=a:b@c',
+      'https://host:8080/path',
+      'https://host/path#frag@ment',
+      'postgres://db:5432/am',
+    ];
+    for (const text of untouched) expect(redactCredentials(text), text).toBe(text);
+  });
+
+  it('does not redact an e-mail address or a clock time', () => {
+    expect(redactCredentials('write to ops@example.com at 12:30')).toBe('write to ops@example.com at 12:30');
+  });
+});
+
+describe('an ordinary field ending in Key keeps its text (#898 round 2)', () => {
+  it('does not treat a field name that merely ends in Key as a credential', () => {
+    const fields = [
+      'entryKey',
+      'idempotencyKey',
+      'sortKey',
+      'primaryKey',
+      'partitionKey',
+      'cacheKey',
+      'dedupeKey',
+      'foreignKey',
+      'groupKey',
+      'storeKey',
+      'messageKey',
+      'routingKey',
+      'keyId',
+    ];
+    for (const field of fields) {
+      expect(redactCredentials(`${field}: step "a" does not exist`), field).toBe(`${field}: step "a" does not exist`);
+      expect(redactCredentials(`${field}=ascending`), field).toBe(`${field}=ascending`);
+    }
+    expect(redactCredentials('Allowed keys: (none).')).toBe('Allowed keys: (none).');
+    expect(redactCredentials('publicKey: not a VAPID key')).toBe('publicKey: not a VAPID key');
+    expect(redactCredentials('publishableKey: not configured')).toBe('publishableKey: not configured');
+  });
+
+  it('still redacts a key qualified by a credential word', () => {
+    const keys = [
+      'key',
+      'api_key',
+      'api-key',
+      'x-api-key',
+      'X-Auth-Key',
+      'apiKey',
+      'apiKey2',
+      'API_KEY',
+      'secret_access_key',
+      'aws_secret_access_key',
+      'private-key',
+      'privateKey',
+      'signingKey',
+      'sessionKey',
+      'clientKey',
+      'consumer_key',
+      'encryptionKey',
+      'masterKey',
+      'hmacKey',
+      'jwtKey',
+      'vaultKey',
+      'kmsKey',
+      'shopifyKey',
+      'twilioKey',
+      'fcmKey',
+      'vapidKey',
+      'dataKey',
+      'rootKey',
+      'adminKey',
+      'serviceKey',
+      'storageKey',
+      'licenseKey',
+      'appKey',
+      'subscriptionKey',
+      'apiKeys',
+    ];
+    for (const key of keys) {
+      expect(redactCredentials(`${key}=abcdefghij`), key).toBe(`${key}=[redacted]`);
+      expect(redactCredentials(`{"${key}":"abcdefghij"}`), key).toBe(`{"${key}":[redacted]}`);
+    }
+  });
+
+  it('leaves the value of an ordinary Key field to every other rule', () => {
+    // A long opaque value is still a bare token, wherever it sits.
+    const token = 'A1b2C3d4E5f6G7h8I9j0K1l2';
+    expect(redactCredentials(`idempotencyKey=${token}`)).toBe('idempotencyKey=[redacted]');
+    // An ordinary key does not switch the provider prefix or URL rules off either.
+    expect(redactCredentials('entryKey=postgres://u:shortpw@db:5432/am')).toBe('entryKey=postgres://u:[redacted]@db:5432/am');
+    expect(redactCredentials('sortKey=shpat_0123456789abcdef')).toBe('sortKey=[redacted]');
+  });
+});
+
+describe('URL userinfo with an @ in the password (#920 round 2)', () => {
+  it('takes the last @ of the authority as the userinfo delimiter', () => {
+    expect(redactCredentials('http://u:pa@ss@host')).toBe('http://u:[redacted]@host');
+    expect(redactCredentials('postgres://u:p@ss@w0rd@db:5432/am')).toBe('postgres://u:[redacted]@db:5432/am');
+  });
+
+  it('handles an IPv6 host, an empty user and several URLs in one string', () => {
+    expect(redactCredentials('http://u:pw@[::1]:5432/db')).toBe('http://u:[redacted]@[::1]:5432/db');
+    expect(redactCredentials('redis://:pw@valkey:6379/0')).toBe('redis://:[redacted]@valkey:6379/0');
+    expect(redactCredentials('a postgres://u:pw@db/x and redis://n:q@cache:6379')).toBe(
+      'a postgres://u:[redacted]@db/x and redis://n:[redacted]@cache:6379',
+    );
+    expect(redactCredentials('http://[::1]:5432/path?x=a:b@c')).toBe('http://[::1]:5432/path?x=a:b@c');
+  });
+});
+
+describe('redaction is idempotent (#902 round 2)', () => {
+  const forms = [
+    'token=shortpw',
+    'authToken: Bearer abc',
+    'apiSecret=Basic ab',
+    '{"apiSecret":["shortpw","morepw"]}',
+    '{"apiSecret":{"value":"shortpw"}}',
+    'postgres://u:pw@db/am',
+    'http://u:pa@ss@host',
+    'X-Auth-Token: abc1234567',
+    'https://api.example.com/v1/hook?apiSecret=abc1234567&x=1',
+    'Invalid OAuth access token: access_token=probe-secret',
+    'password=-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
+    'sent with Bearer abcdef1234567890',
+    'nothing to redact here',
+  ];
+  for (const form of forms)
+    it(`repeats without changing: ${form.slice(0, 40)}`, () => {
+      const once = redactCredentials(form);
+      expect(redactCredentials(once)).toBe(once);
+      expect(redactCredentials(redactCredentials(once))).toBe(once);
+    });
+
+  it('does not add a bracket to a marker it already wrote', () => {
+    expect(redactCredentials('token=[redacted]')).toBe('token=[redacted]');
+    expect(redactCredentials('{"apiSecret":[redacted]}')).toBe('{"apiSecret":[redacted]}');
+    expect(redactCredentials('token: Bearer [redacted]')).toBe('token: Bearer [redacted]');
+  });
+});
+
+describe('the pair scan runs before the token passes (#902 round 4)', () => {
+  it('keeps a long credential key and its short value apart', () => {
+    expect(redactCredentials('X-Organization-Auth-Token: shortpw')).toBe('[redacted]: [redacted]');
+    expect(redactCredentials('x-organization-auth-token: shortpw')).toBe('[redacted]: [redacted]');
+    expect(redactCredentials('{"X-Organization-Auth-Token":"shortpw"}')).toBe('{"[redacted]":[redacted]}');
+    expect(redactCredentials("'X-Organization-Auth-Token': 'shortpw'")).toBe("'[redacted]': [redacted]");
+  });
+
+  it('redacts an all-caps programmatic name that ends in a credential word', () => {
+    const key = 'Zz9Qw8Er7Ty6Ui5Op4As3Df2Gh1JkAccountSecretKey';
+    expect(redactCredentials(`${key.toUpperCase()}: shortpw`)).toBe('[redacted]: [redacted]');
+    // A short word that merely ends in the letters is still not a credential.
+    expect(redactCredentials('MONKEY=zoo')).toBe('MONKEY=zoo');
+    expect(redactCredentials('KEYBOARD=us')).toBe('KEYBOARD=us');
+  });
+
+  it('redacts a long key that ends in a credential word, in every form', () => {
+    const key = 'aaaaaaaaaaaaaaaaaaaaaaaaaaAuthToken';
+    expect(key.length).toBeGreaterThanOrEqual(24);
+    expect(redactCredentials(`${key}: shortpw`)).toBe('[redacted]: [redacted]');
+    expect(redactCredentials(`{"${key}":"shortpw"}`)).toBe('{"[redacted]":[redacted]}');
+  });
+});
+
+describe('a quoted value spans lines, as in 0.14.20 (#902 round 5)', () => {
+  it('redacts a double-quoted value across a literal newline', () => {
+    expect(redactCredentials('password="first\nshortpw"')).toBe('password=[redacted]');
+    expect(redactCredentials('apiSecret: "first\nshortpw"\ntrailing')).toBe('apiSecret: [redacted]\ntrailing');
+  });
+
+  it('redacts a single-quoted value across a literal newline', () => {
+    expect(redactCredentials("password='first\nshortpw'")).toBe('password=[redacted]');
+  });
+});
+
 describe('safeErrorText (#885 round 5)', () => {
   const token = 'abcdef0123456789'.repeat(3);
 
@@ -180,5 +463,52 @@ describe('redactedText (#885 round 7)', () => {
 
   it('keeps every line of an ordinary text', () => {
     expect(redactedText('first line\nsecond line', 500)).toBe('first line\nsecond line');
+  });
+});
+
+// #923 round 6: the two added rules run on what the 0.14.20 rules produced, so they can only
+// replace more of it, and they are repeated until the text is settled.
+describe('the added rules never take less than 0.14.20 did (#898 round 6)', () => {
+  it('keeps a nested quoted secret redacted', () => {
+    const out = redactCredentials('authToken=token="first TOPSECRET last"');
+    expect(out).not.toContain('TOPSECRET');
+    expect(out).not.toContain('first');
+  });
+
+  it('keeps a scheme value after a compound key redacted', () => {
+    expect(redactCredentials('apiSecret://Basic TOPSECRET')).not.toContain('TOPSECRET');
+  });
+
+  it('is settled after one call when an inner pair sits in an outer quote', () => {
+    const once = redactCredentials('authToken="apiSecret=\\\nx"');
+    expect(redactCredentials(once)).toBe(once);
+  });
+
+  it('redacts the short value of a key long enough to be replaced as a token itself', () => {
+    const key = 'organizationSecondaryAuthToken';
+    for (const input of [`${key}=shortpw`, `${key}: shortpw`, `${key} = shortpw`, `{"${key}":"shortpw"}`, `${key}="shortpw"`]) {
+      const out = redactCredentials(input);
+      expect(out, input).not.toContain('shortpw');
+      expect(redactCredentials(out), input).toBe(out);
+    }
+  });
+
+  it('keeps unrelated diagnostics beside a long key readable', () => {
+    const out = redactCredentials('organizationSecondaryAuthToken=x; request 4d733ecbf150491b9d810c141270c088: ECONNREFUSED');
+    expect(out).toContain('ECONNREFUSED');
+    expect(out).not.toContain('=x');
+    const url = redactCredentials('organizationSecondaryAuthToken=x at https://user:pw@api.example.com/v1');
+    expect(url).toContain('@api.example.com/v1');
+    expect(url).not.toContain(':pw@');
+  });
+
+  it('is settled after one call when a replacement exposes a closing quote', () => {
+    const once = redactCredentials('token="authToken=\\"');
+    expect(redactCredentials(once)).toBe(once);
+  });
+
+  it('leaves a flag under a credential-looking name readable', () => {
+    expect(redactCredentials('requiresAuth: true, hasPassword: false')).toBe('requiresAuth: true, hasPassword: false');
+    expect(redactCredentials('{"userSession":null}')).toBe('{"userSession":null}');
   });
 });

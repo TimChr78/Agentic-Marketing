@@ -1,3 +1,4 @@
+import { MAX_ORIGIN_LENGTH, originPatternMatches } from '@agentic-marketing/core';
 import type { Context } from 'hono';
 
 // A session cookie is attached by the browser to a cross-site request whatever its content type, so
@@ -32,19 +33,13 @@ const originOf = (value: string): string | undefined => {
   }
 };
 
-const escapePattern = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-/** `TRUSTED_ORIGINS` entries may be exact origins or contain `*` (e.g. `https://*.example.com`). */
-function originMatches(origin: string, allowed: string): boolean {
-  const normalized = allowed.includes('*') ? allowed : (originOf(allowed) ?? allowed);
-  if (normalized === origin) return true;
-  if (!normalized.includes('*')) return false;
-  return new RegExp(`^${normalized.split('*').map(escapePattern).join('.*')}$`).test(origin);
-}
-
 function isAllowedOrigin(origin: string, policy: BrowserRequestPolicy): boolean {
+  // A header longer than any browser sends is refused before the list is walked (#902).
+  if (origin.length > MAX_ORIGIN_LENGTH) return false;
   const publicOrigin = originOf(policy.publicUrl);
-  return [...(publicOrigin ? [publicOrigin] : []), ...policy.trustedOrigins].some((allowed) => originMatches(origin, allowed));
+  // A `TRUSTED_ORIGINS` entry is matched by the same rules Better Auth applies to its own routes
+  // (#902): an exact origin, or a wildcard that never turns an IP range into a domain.
+  return [...(publicOrigin ? [publicOrigin] : []), ...policy.trustedOrigins].some((allowed) => originPatternMatches(origin, allowed));
 }
 
 const refusal = (status: 403 | 415, error: string, message: string) =>

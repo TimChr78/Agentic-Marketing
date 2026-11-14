@@ -7,4 +7,5 @@ export * from './hash';
 export * from './idempotency';
 export * from './ids';
 export * from './net';
+export * from './origin';
 export * from './personalData';
