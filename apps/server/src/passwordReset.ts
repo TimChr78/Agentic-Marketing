@@ -1,7 +1,7 @@
 import { hkdfSync } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
-import { type Auth, hashedResetTokenIdentifier, mintResetVerification } from '@agentic-marketing/auth';
+import { type Auth, hashedResetTokenIdentifier, inAuthTransaction, mintResetVerification } from '@agentic-marketing/auth';
 import { canonicalJson, newId, sha256 } from '@agentic-marketing/core';
 import { type Db, schema } from '@agentic-marketing/db';
 import { open, seal } from '@agentic-marketing/secrets';
@@ -678,9 +678,18 @@ export async function runPasswordResetDeliveries(
  * the token or the address. The audit log is per workspace, so the entry lands in the person's
  * oldest workspace; someone without one is only in the server log. The hash chain is kept like a
  * command's entry.
+ *
+ * `surface` says where the reset happened: `internal` for the web flow, `cli` for
+ * `am reset-password` (#913), which has no client IP.
  */ export async function recordPasswordResetAudit(
   db: Db,
-  entry: { userId: string | null; ip: string; command: 'auth.passwordResetRequest' | 'auth.passwordReset'; outcome: ResetOutcome },
+  entry: {
+    userId: string | null;
+    ip: string | null;
+    command: 'auth.passwordResetRequest' | 'auth.passwordReset';
+    outcome: ResetOutcome;
+    surface?: 'internal' | 'cli';
+  },
 ): Promise<void> {
   const userId = entry.userId;
   if (!userId) {
@@ -710,7 +719,7 @@ export async function runPasswordResetDeliveries(
         principalType: 'user',
         principalId: userId,
         clientId: null,
-        surface: 'internal',
+        surface: entry.surface ?? 'internal',
         command: entry.command,
         effect: 'write',
         target: userId,
@@ -727,4 +736,48 @@ export async function runPasswordResetDeliveries(
     // An audit write must never break the flow; the request outcome is already logged above.
     logger.warn({ err, command: entry.command, userId }, 'could not append the password reset audit entry');
   }
+}
+
+/** What an operator-initiated reset needs; the session revocation is a seam for tests. */
+export interface AdminResetDeps {
+  db: Db;
+  auth: Auth;
+  /** Deletes every session of the person. Defaults to Better Auth's internal adapter. */
+  revokeSessions?: (userId: string) => Promise<void>;
+}
+
+/**
+ * `am reset-password` (#913): set a new password and end every session of that person in **one**
+ * transaction, so a crash between the two cannot leave a stolen cookie valid behind a password the
+ * operator was told was updated. The order matches Better Auth's own reset (revoke, then write):
+ * on an adapter without transactions the old password still stands rather than a new one shipping
+ * next to live sessions. The audit entry is the one the web reset writes, marked `cli` because
+ * there is no request and no client IP.
+ */
+export async function resetPasswordForEmail(deps: AdminResetDeps, email: string, password: string): Promise<{ userId: string }> {
+  const context = await deps.auth.$context;
+  const found = await context.internalAdapter.findUserByEmail(email, { includeAccounts: true });
+  if (!found) throw new Error(`reset-password: no user with email ${email}`);
+  const hashed = await context.password.hash(password);
+  const credential = found.accounts.find((account) => account.providerId === 'credential');
+  const revokeSessions = deps.revokeSessions ?? ((userId: string) => context.internalAdapter.deleteUserSessions(userId));
+  await inAuthTransaction(deps.auth, async () => {
+    await revokeSessions(found.user.id);
+    if (credential) await context.internalAdapter.updateAccount(credential.id, { password: hashed });
+    else
+      await context.internalAdapter.linkAccount({
+        userId: found.user.id,
+        providerId: 'credential',
+        accountId: found.user.id,
+        password: hashed,
+      });
+  });
+  await recordPasswordResetAudit(deps.db, {
+    userId: found.user.id,
+    ip: null,
+    command: 'auth.passwordReset',
+    outcome: 'ok',
+    surface: 'cli',
+  });
+  return { userId: found.user.id };
 }
