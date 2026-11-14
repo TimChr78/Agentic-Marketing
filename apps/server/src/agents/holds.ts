@@ -5,6 +5,7 @@ import {
   coordinationFor,
   decide,
   IRREVERSIBLE,
+  isDeadlock,
   REACH_CLASSES,
   type Services,
 } from '@agentic-marketing/commands';
@@ -37,6 +38,16 @@ export async function runHoldsOnce(deps: { db: Db; services: Services }) {
       if (out.status !== 'not_due') ran++;
       logger.info({ workspace: ws, approval: id, ...out }, 'held agent change processed');
     } catch (err) {
+      // A deadlock means the whole transaction rolled back and nothing was written (#922). The
+      // request is still pending and still due, so the next round retries it; a 40P01 is not a
+      // reason to give up on a change that is only waiting for its veto window to end.
+      if (isDeadlock(err)) {
+        logger.info(
+          { err, workspace: ws, approval: id },
+          'held agent change deadlocked with another writer; nothing was written and it stays queued for the next round',
+        );
+        continue;
+      }
       logger.warn({ err, workspace: ws, approval: id }, 'held agent change failed');
     }
   }

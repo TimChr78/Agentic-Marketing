@@ -486,8 +486,13 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             async (tx) => {
               committed.length = 0;
               policy = undefined;
+              // The agent-policy lock comes first for every agent write (#922 A2): before a
+              // command's `impact`, which may lock artifacts for the independent check. Taking it
+              // later is what let a held run and a publish request deadlock on the same artifact.
+              // See lockAgentPolicy for the one global order.
+              if (agent && cmd.effect !== 'read') await lockAgentPolicy(tx, principal.workspaceId, agent.id);
               // The agent was resolved when the request (or a hosted run) began; a pause or revoke
-              // committed since then stops this command too (#275).
+              // committed since then stops this command too (#275). Read under the lock above.
               if (agent) {
                 const [current] = await tx
                   .select({ status: schema.agents.status, statusReason: schema.agents.statusReason })
@@ -717,8 +722,22 @@ export async function coordinationFor(
 
 /**
  * The per-agent transaction lock that serialises every decision about one agent's writes: the
- * policy engine, the guardian and the held-change runner all take it, so a pause, a cap or a
- * refusal committed by one is visible to the other and cannot interleave with it (#240, #907).
+ * policy engine, the guardian, the held-change runner and a person's pause/resume/revoke/clearGuard
+ * all take it, so a pause, a cap or a refusal committed by one is visible to the other and cannot
+ * interleave with it (#240, #907, #922).
+ *
+ * THE ONE LOCK ORDER on these paths, everywhere:
+ *   1. this agent-policy lock,
+ *   2. approval_requests rows (`lockApproval`),
+ *   3. artifact rows in id order (`lockArtifacts`, `coordinationFor`),
+ *   4. the mandate validator's `am.agent-mandate` lock (taken inside `publishVersion`).
+ * Take it before a command's `impact` (which may lock artifacts for the independent check, #283),
+ * before any status/guard read that gates a write, and before approval or artifact locks. The
+ * executor (agent writes), `approvals.approve` (an agent's request), `runHeldChange`, the guardian
+ * and `agents.pause`/`resume`/`revoke`/`clearGuard` all follow this order; a path that needs two of
+ * these locks must not take them the other way round or the held runner and a publish request can
+ * deadlock on the same artifact (#922 A2).
+ *
  * Transaction-scoped and reentrant; the key string must stay identical everywhere.
  */
 export async function lockAgentPolicy(tx: Tx, workspaceId: string, agentId: string) {

@@ -18,6 +18,7 @@ afterAll(() => t?.close());
 
 const note = (title: string) => ({ title, body: 'Written for the artifact integrity test.' });
 const inDays = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString();
+const stopped = (what: 'pause' | 'revoke') => (what === 'pause' ? 'paused' : 'revoked');
 
 const archive = (ws: string, id: string) =>
   t.srv.db.admin.query('UPDATE artifacts SET archived = true WHERE workspace_id = $1 AND id = $2', [ws, id]);
@@ -152,6 +153,51 @@ describe('no publish path accepts an archived artifact (#900)', () => {
     expect(row?.status).toBe('rejected');
     expect(row?.decision_note).toMatch(/archived/);
     expect(await versionRow(ws, created.artifactId, request.version)).toMatchObject({ state: 'rejected' });
+  });
+
+  // #922 A3: the archived check comes before the stopped-agent rule, so a request that can never
+  // publish is closed even when its requester was paused or revoked afterwards.
+  for (const stop of ['pause', 'revoke'] as const) {
+    it(`closes an archived request from a ${stopped(stop)} agent as rejected instead of leaving it pending`, async () => {
+      const s = await agentSetup();
+      const created = await s.agentCall('artifacts.create', {
+        type: 'note',
+        name: `Archived for a ${stop}`,
+        content: { title: 'Held', body: 'A request that names an artifact archived afterwards.' },
+      });
+      expect(created.status).toBe(200);
+      const held = await s.agentCall('artifacts.requestPublish', { artifactId: created.body.artifactId, note: 'Held publish' });
+      expect(held.body.status).toBe('on_hold');
+      await archive(s.ws, created.body.artifactId as string);
+      await s.api.call(stop === 'pause' ? 'agents.pause' : 'agents.revoke', { id: s.agentId, reason: `Stopped before review` });
+
+      const out = await s.api.call('approvals.approve', { approvalId: held.body.approvalId as string });
+      expect(out.status).toBe('rejected');
+      expect(out.reason).toMatch(/archived/);
+      expect(await artifactRow(s.ws, created.body.artifactId as string)).toMatchObject({ archived: true, published_version: null });
+      const row = await approvalRow(s.ws, held.body.approvalId as string);
+      expect(row?.status).toBe('rejected');
+      expect(row?.decision_note).toMatch(/archived/);
+      expect(await versionRow(s.ws, created.body.artifactId as string, held.body.version as number)).toMatchObject({ state: 'rejected' });
+    });
+  }
+
+  it('still refuses a paused agent’s request when its artifact is not archived', async () => {
+    const s = await agentSetup();
+    const created = await s.agentCall('artifacts.create', {
+      type: 'note',
+      name: 'Paused but publishable',
+      content: { title: 'Held', body: 'A publishable request from an agent paused afterwards.' },
+    });
+    const held = await s.agentCall('artifacts.requestPublish', { artifactId: created.body.artifactId, note: 'Held publish' });
+    expect(held.body.status).toBe('on_hold');
+    await s.api.call('agents.pause', { id: s.agentId, reason: 'Stopped before review' });
+
+    const err = await s.api.call('approvals.approve', { approvalId: held.body.approvalId as string }).catch((e) => e);
+    expect(err.code).toBe('conflict');
+    expect(err.message).toMatch(/paused/i);
+    const row = await approvalRow(s.ws, held.body.approvalId as string);
+    expect(row?.status).toBe('pending');
   });
 
   it('a held change whose artifact was archived does not run; the request ends rejected with the reason', async () => {

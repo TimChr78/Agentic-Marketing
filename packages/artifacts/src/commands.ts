@@ -1526,6 +1526,23 @@ export const getApproval = defineCommand({
 });
 
 /**
+ * Reads an approval request without locking it: who asked and which bundle it belongs to. Used to
+ * resolve the requesting agent so its policy lock can be taken before the request and artifact
+ * locks (the one order documented at `lockAgentPolicy`, #922).
+ */
+async function peekApproval(ctx: CommandContext, approvalId: string) {
+  const [r] = await ctx.tx
+    .select({
+      bundleId: schema.approvalRequests.bundleId,
+      requestedByType: schema.approvalRequests.requestedByType,
+      requestedByClient: schema.approvalRequests.requestedByClient,
+    })
+    .from(schema.approvalRequests)
+    .where(and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, approvalId)));
+  return r ?? null;
+}
+
+/**
  * Reads an approval request with its bundle's rows locked (in id order, so two deciders never
  * deadlock). A person's approval or veto and the hold runner both go through here, so whoever
  * locks first decides and the other sees the result (#263).
@@ -1612,8 +1629,14 @@ export const approve = defineCommand({
   humansOnly: true,
   target: (i) => i.approvalId,
   handler: async (input, ctx) => {
+    // The agent-policy lock first for an agent's request (#922 A2): it is the one order every
+    // path follows (see lockAgentPolicy), so this approval cannot deadlock with a held run or the
+    // guardian while it locks the request and its artifacts.
+    const requested = await peekApproval(ctx, input.approvalId);
+    const requestedAgentId = requested ? await requestingAgentId(ctx, requested) : null;
+    if (requestedAgentId) await lockAgentPolicy(ctx.tx, ctx.principal.workspaceId, requestedAgentId);
+
     const r = await decide(ctx, input.approvalId);
-    await refuseIfAgentStopped(ctx, r);
     const members = await bundleMembers(ctx, r);
     // All bundle members are locked before any version is published (#868), in id order (#871).
     await lockArtifacts(
@@ -1622,7 +1645,8 @@ export const approve = defineCommand({
     );
     // An archived artifact cannot be published (#900). The request is closed as rejected with the
     // reason instead of staying pending forever or publishing the dead duplicate migration 0092
-    // archived: nothing is live and the person sees why.
+    // archived: nothing is live and the person sees why. This comes before the stopped-agent rule:
+    // a paused or revoked requester must not keep an impossible request pending forever (#922 A3).
     const problems: string[] = [];
     for (const m of members) {
       const problem = await archiveProblem(ctx, await loadArtifact(ctx, m.artifactId));
@@ -1633,6 +1657,8 @@ export const approve = defineCommand({
       await closeRejected(ctx, members, reason);
       return { status: 'rejected' as const, artifactId: r.artifactId, version: r.version, published: [], reason };
     }
+    // A paused or revoked agent's still-publishable changes wait (ADR-0016, #213).
+    await refuseIfAgentStopped(ctx, r);
     for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
     await ctx.tx
       .update(schema.approvalRequests)
@@ -1849,16 +1875,12 @@ export async function runHeldChange(
   approvalId: string,
   check: (agentId: string, held: HeldAction | null) => Promise<HeldCheck>,
 ): Promise<{ status: 'published' | 'needs_person' | 'not_due' | 'waiting'; reason?: string }> {
-  // The per-agent lock first (#907): the guardian takes it before it suspends this agent's holds,
-  // so taking it before this agent's approval row keeps one order — agent-policy → approval →
-  // artifacts → the mandate validator's lock — and cannot deadlock with a guardian round. A pause
-  // or cap that commits first is visible to the checks below; one that commits after waits for
-  // this run.
-  const requestScope = and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, approvalId));
-  const [requestRow] = await ctx.tx
-    .select({ requestedByType: schema.approvalRequests.requestedByType, requestedByClient: schema.approvalRequests.requestedByClient })
-    .from(schema.approvalRequests)
-    .where(requestScope);
+  // The agent-policy lock first (#907, #922): the guardian takes it before it suspends this
+  // agent's holds and before a person's pause, so taking it before the approval row keeps the one
+  // order documented at `lockAgentPolicy` — agent-policy → approval → artifacts → mandate — and
+  // cannot deadlock with a guardian round or a publish request. A pause or cap that commits first
+  // is visible to the checks below; one that commits after waits for this run.
+  const requestRow = await peekApproval(ctx, approvalId);
   const heldAgentId = requestRow ? await requestingAgentId(ctx, requestRow) : null;
   if (heldAgentId) await lockAgentPolicy(ctx.tx, ctx.principal.workspaceId, heldAgentId);
   // Locked: a veto or an early approval that commits first wins, and a second runner sees it (#263).
