@@ -493,10 +493,18 @@ describe('the added rules never take less than 0.14.20 did (#898 round 6)', () =
     }
   });
 
-  it('does not take a neighbouring pair for the value of a replaced token', () => {
-    const token = 'abcdef0123456789'.repeat(2);
-    const input = `organizationSecondaryAuthToken=shortpw {"a":"${token}","b":"keep"}`;
-    expect(redactCredentials(input)).toBe('[redacted][redacted] {"a":"[redacted]","b":"keep"}');
+  it('keeps unrelated diagnostics beside a long key readable', () => {
+    const out = redactCredentials('organizationSecondaryAuthToken=x; request 4d733ecbf150491b9d810c141270c088: ECONNREFUSED');
+    expect(out).toContain('ECONNREFUSED');
+    expect(out).not.toContain('=x');
+    const url = redactCredentials('organizationSecondaryAuthToken=x at https://user:pw@api.example.com/v1');
+    expect(url).toContain('@api.example.com/v1');
+    expect(url).not.toContain(':pw@');
+  });
+
+  it('is settled after one call when a replacement exposes a closing quote', () => {
+    const once = redactCredentials('token="authToken=\\"');
+    expect(redactCredentials(once)).toBe(once);
   });
 
   it('leaves a flag under a credential-looking name readable', () => {

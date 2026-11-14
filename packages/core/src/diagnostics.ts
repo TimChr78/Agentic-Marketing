@@ -52,20 +52,26 @@ const REDACTIONS: readonly (readonly [RegExp, string])[] = [
  * line that is about to become an AppError.
  */
 export function redactCredentials(text: string): string {
-  let out = text;
-  for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
-  // The two additions (#898, #920) run on what the rules above produced and only ever replace
-  // more of it, so nothing those rules removed can come back, whatever the input looks like.
-  // They are repeated until neither changes anything, so the result is the same on a second
-  // call: one rule's marker can complete a match for the other (`a://key://x;u:p@h`). Each round
-  // that changes the text turns ordinary characters into the marker, so it ends; the bound is a
-  // backstop.
-  const markerKeys = hasLongCompoundKey(text);
-  for (let round = 0; round < 8; round += 1) {
-    const next = redactCompoundKeys(redactUrlPasswords(out), markerKeys);
+  // A long camelCase credential key is replaced as a token by the rules below, after which its
+  // value can no longer be told from any other text. So the plain value of such a key is replaced
+  // first (#898); see redactLongKeyValues for why that cannot change what the rules below remove.
+  let out = applyRules(redactLongKeyValues(text));
+  // The two additions (#898, #920) work on what the rules produced and only ever replace more of
+  // it. They are repeated, together with the rules, until nothing changes, so a second call
+  // returns the same text: one replacement can complete a match for another rule
+  // (`token="authToken=\"`). Each round that changes the text turns ordinary characters into the
+  // marker, so it ends; the bound is a backstop.
+  for (let round = 0; round < 16; round += 1) {
+    const next = applyRules(redactCompoundKeys(redactUrlPasswords(out)));
     if (next === out) break;
     out = next;
   }
+  return out;
+}
+
+function applyRules(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
   return out;
 }
 
@@ -263,37 +269,58 @@ function classifyCompoundKey(full: string): boolean {
  */
 const COMPOUND_KEY = /(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
 
-/**
- * The same, or the marker in a key's place: what the bare-token rule leaves of a long key. That
- * rule takes a trailing `=` with the key, so the marker can also stand directly before the value.
- */
-const KEY_OR_MARKER = /\[redacted\](?=["']?\s*[:=]|[^\s,;&}\][])|(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
-
 /** A name long enough for the bare-token rule to replace it before its value is looked at. */
 const TOKEN_SHAPED = /[A-Za-z0-9+/_-]{24,}/;
 
+/** A plain value: one token, or a quoted string, with nothing a rule could read as a pair. */
+const PLAIN_BARE = /[A-Za-z0-9._~+/@%!$*#^-]+(?=$|[\s,;&}\]])/y;
+const PLAIN_QUOTED = /"[^"\\:=\r\n]*"|'[^'\\:=\r\n]*'/y;
+/** A separator after the value: the value is then a key itself and is left to the rules. */
+const SEPARATOR_AHEAD = /["']?\s*[:=]/y;
+const SCHEME_WORD = /\b(?:bearer|basic)\b/i;
+
 /**
- * Whether the text has a compound credential key that is itself token-shaped
- * (`organizationSecondaryAuthToken=…`). The rules above replace such a key with the marker, so
- * afterwards only the marker in front of a separator shows where its value is.
+ * Replaces the value of a credential key that is itself token-shaped
+ * (`organizationSecondaryAuthToken=shortpw`), before the rules run.
+ *
+ * Only a plain value is taken: one token, or a quoted string, that contains no `:` or `=`, no
+ * quote, no Authorization scheme word, and is not followed by a separator. Such a value cannot be
+ * a key, a scheme or part of a pair for any rule, so replacing it with the marker changes nothing
+ * about what the rules remove elsewhere. Any other value is left as it is.
  */
-function hasLongCompoundKey(text: string): boolean {
+function redactLongKeyValues(text: string): string {
+  let out = '';
+  let copied = 0;
   COMPOUND_KEY.lastIndex = 0;
-  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text))
-    if (key[0].length >= 24 && TOKEN_SHAPED.test(key[0]) && isCompoundCredentialKey(key[0])) return true;
-  return false;
+  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
+    if (key[0].length < 24 || !TOKEN_SHAPED.test(key[0]) || !isCompoundCredentialKey(key[0])) continue;
+    const keyEnd = key.index + key[0].length;
+    PAIR_SEPARATOR.lastIndex = keyEnd;
+    const separator = PAIR_SEPARATOR.exec(text);
+    if (!separator) continue;
+    const start = keyEnd + separator[0].length;
+    PLAIN_QUOTED.lastIndex = start;
+    PLAIN_BARE.lastIndex = start;
+    const value = PLAIN_QUOTED.exec(text)?.[0] ?? PLAIN_BARE.exec(text)?.[0];
+    if (!value || SCHEME_WORD.test(value) || PLAIN_LITERAL.test(value)) continue;
+    SEPARATOR_AHEAD.lastIndex = start + value.length;
+    if (SEPARATOR_AHEAD.test(text)) continue;
+    out += `${text.slice(copied, start)}[redacted]`;
+    copied = start + value.length;
+    COMPOUND_KEY.lastIndex = copied;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
 }
 
 /** What separates a key from its value, with an optional closing quote of the key before it. */
 const PAIR_SEPARATOR = /["']?\s*[:=]\s*/y;
 
 /**
- * A value: a run of quoted strings, markers and bare characters up to whitespace or a delimiter.
- * It is the first rule's grammar (quoted, or bare) made greedy: text glued to a quoted string or
- * to a marker (`"a"b`, `x.[redacted]`) is part of the value, so what one pass leaves is not a
- * value the next pass would still replace.
+ * A value, in the grammar of the first rule above: a quoted string, or a bare value up to
+ * whitespace, a delimiter or a quote. A marker inside a bare value is part of it
+ * (`x.[redacted]`), so a value the rules replaced in part is replaced whole.
  */
-const PAIR_VALUE = /(?:"(?:[^"\\]|\\[\s\S])*"|'[^']*'|\[redacted\]|[^\s,;&}\]"'])+/y;
+const PAIR_VALUE = /"(?:[^"\\]|\\[\s\S])*"|'[^']*'|(?:\[redacted\]|[^\s,;&}\]"'])+/y;
 
 /** A flag, not a secret: `requiresAuth: true`, `hasPassword: false`, `session: null`. */
 const PLAIN_LITERAL = /^(?:true|false|null|undefined)$/;
@@ -303,29 +330,25 @@ const SCHEME_START = /(?:bearer|basic)\s/iy;
 
 /**
  * Replaces the value of every camelCase credential key in text the rules above have already been
- * through. With `markerKeys`, the marker in a key's place counts as a key too. Each character is
- * read a bounded number of times.
+ * through. Each character is read a bounded number of times.
  */
-function redactCompoundKeys(text: string, markerKeys: boolean): string {
+function redactCompoundKeys(text: string): string {
   let out = '';
   let copied = 0;
-  KEY_OR_MARKER.lastIndex = 0;
-  for (let key = KEY_OR_MARKER.exec(text); key; key = KEY_OR_MARKER.exec(text)) {
+  COMPOUND_KEY.lastIndex = 0;
+  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
     const keyEnd = key.index + key[0].length;
-    if (key[0] === '[redacted]' ? !markerKeys : !isCompoundCredentialKey(key[0])) continue;
+    if (!isCompoundCredentialKey(key[0])) continue;
     PAIR_SEPARATOR.lastIndex = keyEnd;
     const separator = PAIR_SEPARATOR.exec(text);
-    if (!separator && key[0] !== '[redacted]') continue;
-    // A marker with a quote right after it is a key only when it is not a quoted value itself
-    // (`"a":"[redacted]","b":…`): there the quote closes the string the marker stands in.
-    if (!separator && /["']/.test(text.charAt(keyEnd)) && /["']/.test(text.charAt(key.index - 1))) continue;
-    const start = keyEnd + (separator?.[0].length ?? 0);
+    if (!separator) continue;
+    const start = keyEnd + separator[0].length;
     SCHEME_START.lastIndex = start;
     if (SCHEME_START.test(text)) continue;
     PAIR_VALUE.lastIndex = start;
     const value = PAIR_VALUE.exec(text);
     if (!value) continue;
-    KEY_OR_MARKER.lastIndex = start + value[0].length;
+    COMPOUND_KEY.lastIndex = start + value[0].length;
     if (value[0] === '[redacted]' || PLAIN_LITERAL.test(value[0])) continue;
     out += `${text.slice(copied, start)}[redacted]`;
     copied = start + value[0].length;
