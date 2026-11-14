@@ -744,6 +744,31 @@ describe('journey report states (#507)', () => {
     expect(screen.getByText(/Groups smaller than k=5 are hidden/)).toBeTruthy();
   });
 
+  it('renders a null funnel total as Suppressed, never as zero (#908)', async () => {
+    h.funnel = funnel({
+      entered: null,
+      goalReached: null,
+      completed: 0,
+      exited: null,
+      steps: [{ step: 'n1', reached: null, dropOff: null, dropOffRate: null }],
+      meta: {
+        ...funnel().meta,
+        suppressed: 4,
+        notes: [
+          'Totals withheld because fewer than k=5 people or a hidden step’s count could be derived from them: entered, goalReached, exited.',
+        ],
+      },
+    });
+    renderReport();
+    await screen.findByText('Entered in period');
+
+    // Three withheld totals read "Suppressed"; a recorded zero stays a zero.
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText('0')).toBeTruthy();
+    expect(screen.getByText(/Totals withheld because fewer than k=5/)).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Zero recorded events does not prove no engagement.' })).toBeNull();
+  });
+
   it('formats the split card’s absolute lift and interval in percentage points, not percent (#916)', async () => {
     const splitNodes = (): JNode[] => [
       { id: 'n1', kind: 'trigger', label: 'Signed up', config: {}, next: [{ to: 'split' }] },

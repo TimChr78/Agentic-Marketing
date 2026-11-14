@@ -1,10 +1,10 @@
-import { artifactTypes } from '@agentic-marketing/artifacts';
+import { artifactTypes, planComplementarySuppression } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { analyticsMeta, analyticsResult, type QueryInput, runAnalyticsQuery } from './query';
+import { analyticsMeta, analyticsResult, K, type QueryInput, runAnalyticsQuery } from './query';
 
 // Named reports are thin, stable wrappers over the same registry and query compiler. They exist so
 // an agent or a screen does not have to remember the list of measures, and so the shape of the
@@ -54,6 +54,69 @@ export const analyticsEmailPerformance = defineCommand({
 });
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/, 'A journey id (jrn_…)');
+
+/** The funnel's four headline totals, each null when it is withheld. */
+export interface JourneyFunnelTotals {
+  entered: number | null;
+  goalReached: number | null;
+  completed: number | null;
+  exited: number | null;
+}
+
+export interface JourneyFunnelStep {
+  step: string;
+  reached: number | null;
+}
+
+/**
+ * The funnel's k rule (#908). The headline totals come from an undimensioned query, so the measure
+ * layer never suppressed them while it suppressed the step rows beside them. A positive total below
+ * k is withheld; when exactly one step row is hidden, the same complementary rule every other total
+ * uses hides the smallest visible step with a value too, so no total minus the visible rows can
+ * recover the hidden count. Withheld totals are named so the note can say which and why.
+ */
+export function planJourneyFunnelSuppression(opts: { totals: JourneyFunnelTotals; steps: readonly JourneyFunnelStep[]; k?: number }): {
+  totals: JourneyFunnelTotals;
+  steps: JourneyFunnelStep[];
+  withheld: string[];
+  hiddenSteps: number;
+  complementary: boolean;
+} {
+  const k = opts.k ?? K;
+  const names = ['entered', 'goalReached', 'completed', 'exited'] as const;
+  const totals = { ...opts.totals };
+  const steps = opts.steps.map((step) => ({ ...step }));
+  const hidden = steps.map((step) => step.reached === null);
+  const plan = planComplementarySuppression({
+    totals: [...names],
+    // Steps are their own population: the row's reached count is its group size. Every total is
+    // protected against the same contributors; a hidden step protects each one.
+    contributors: () => steps.map((step, id) => ({ id, group: step.reached ?? 0, value: step.reached ?? 0, hidden: hidden[id]! })),
+    hide: (_total, id) => {
+      const index = Number(id);
+      if (hidden[index]) return false;
+      hidden[index] = true;
+      return true;
+    },
+  });
+  let hiddenSteps = 0;
+  for (const [index, step] of steps.entries()) {
+    if (!hidden[index]) continue;
+    if (step.reached !== null) hiddenSteps += 1;
+    step.reached = null;
+  }
+
+  const withheld = new Set(plan.withheld);
+  for (const name of names) {
+    const value = totals[name];
+    // A positive count below k is itself a small group; zero is not and is never invented as one.
+    if (value !== null && value > 0 && value < k) {
+      totals[name] = null;
+      withheld.add(name);
+    }
+  }
+  return { totals, steps, withheld: [...withheld], hiddenSteps, complementary: hiddenSteps > 0 };
+}
 
 /**
  * Kinds that must name their edges: unlike the others, they never fall through to the next node.
@@ -162,7 +225,7 @@ export const analyticsJourneyFunnel = defineCommand({
   name: 'analytics.journeyFunnel',
   title: 'Journey funnel',
   description:
-    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. Counts use only the published version when the journey has one. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed.',
+    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. A drop-off or rate that would be computed from a withheld count is null. Counts use only the published version when the journey has one. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed, and a headline total below k is withheld (null), as is any total a hidden step could be recovered from; a note names every withheld total.',
   input: z.object({
     journeyId: JourneyId,
     from: isoDateTime('from'),
@@ -175,16 +238,19 @@ export const analyticsJourneyFunnel = defineCommand({
       .describe(
         'published: a straight-line published topology with non-increasing counts, so drop-off is a chain; reach: no straight-line published topology (none, branching, loop or reconvergence) or counts that rise along the walk (people joining mid-journey, for example after a migration), so steps are reach without a chain',
       ),
-    entered: z.number(),
-    goalReached: z.number(),
-    completed: z.number(),
-    exited: z.number(),
+    entered: z
+      .number()
+      .nullable()
+      .describe('People who entered in the period; null when the count is below k=5 or a hidden step could be derived from it'),
+    goalReached: z.number().nullable().describe('People who reached the journey goal; null when withheld by the k rule'),
+    completed: z.number().nullable().describe('People who completed; null when withheld by the k rule'),
+    exited: z.number().nullable().describe('People who exited; null when withheld by the k rule'),
     steps: z.array(
       z.object({
         step: z.string(),
-        reached: z.number().nullable(),
-        dropOff: z.number().nullable(),
-        dropOffRate: z.number().nullable(),
+        reached: z.number().nullable().describe('People who reached this step; null when suppressed or hidden as a complement'),
+        dropOff: z.number().nullable().describe('People lost against the previous visible step; null when a count it needs is withheld'),
+        dropOffRate: z.number().nullable().describe('dropOff divided by the previous step; null when a count it needs is withheld'),
       }),
     ),
     meta: analyticsMeta,
@@ -218,12 +284,11 @@ export const analyticsJourneyFunnel = defineCommand({
       ...versionScope,
     });
 
-    const total = (measure: string) => {
+    const total = (measure: string): number | null => {
       const index = totals.columns.findIndex((c) => c.name === measure);
       const value = totals.rows[0]?.[index];
-      return typeof value === 'number' ? value : 0;
+      return typeof value === 'number' ? value : null;
     };
-    const entered = total('journey.entered');
     const reachedByStep = new Map(stepsResult.rows.map((row) => [String(row[0]), typeof row[1] === 'number' ? row[1] : null] as const));
     // A published topology defines both the steps and their order; without one the event order
     // is the only order there is, and it stays cross-version reach.
@@ -232,33 +297,57 @@ export const analyticsJourneyFunnel = defineCommand({
       if (!reachedByStep.has(step)) return [];
       return [{ step, reached: reachedByStep.get(step) ?? null }];
     });
+    // #908: the totals are an undimensioned query the measure layer never suppressed, while the
+    // step rows beside them were. Apply the funnel's k rule before anything is derived from them.
+    const funnel = planJourneyFunnelSuppression({
+      totals: {
+        entered: total('journey.entered'),
+        goalReached: total('journey.goal_reached'),
+        completed: total('journey.completed'),
+        exited: total('journey.exited'),
+      },
+      steps: reachedSteps,
+      k: K,
+    });
+    const entered = funnel.totals.entered;
     // A drop-off chain needs one straight line: no fork, loop or reconvergence. It also needs its
     // counts to fall along the walk. Migration moves a participant to the new version without a new
     // entry (journeys.migrate), so a later step can outnumber the entry step; a negative drop-off is
     // never clamped to zero, and the report falls back to reach instead (#591).
     let previous: number | null = entered;
     let monotone = true;
-    for (const { reached } of reachedSteps) {
+    for (const { reached } of funnel.steps) {
       if (reached === null) continue;
       if (previous !== null && reached > previous) monotone = false;
       previous = reached;
     }
     const chain = published?.linear === true && monotone;
     let previousReach: number | null = entered;
-    const steps = reachedSteps.map(({ step, reached }) => {
+    const steps = funnel.steps.map(({ step, reached }) => {
       const dropOff = chain && previousReach !== null && reached !== null ? previousReach - reached : null;
       const dropOffRate = dropOff === null || previousReach === null || previousReach === 0 ? null : dropOff / previousReach;
-      if (reached !== null) previousReach = reached;
+      // A hidden step breaks the chain: the next step has no visible predecessor to compare with,
+      // so its drop-off is null rather than a comparison across a withheld count.
+      previousReach = reached;
       return { step, reached, dropOff, dropOffRate };
     });
+
+    const suppressionNotes: string[] = [];
+    if (funnel.hiddenSteps > 0)
+      suppressionNotes.push(`One further step row was suppressed so a step below k=${K} cannot be derived from the funnel totals.`);
+    if (funnel.withheld.length > 0)
+      suppressionNotes.push(
+        `Totals withheld because fewer than k=${K} people or a hidden step’s count could be derived from them: ${funnel.withheld.join(', ')}.`,
+      );
 
     const notes = [
       ...new Set([
         ...stepsResult.meta.notes,
+        ...suppressionNotes,
         published?.linear && !monotone
           ? `People joined the published journey v${published.version} after a later step (for example after a version migration), so reach is not a drop-off chain. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted.`
           : published?.linear
-            ? `Steps follow the published journey v${published.version}’s linear topology; drop-off compares each step with the previous one, and only entries recorded for v${published.version} are counted.`
+            ? `Steps follow the published journey v${published.version}’s linear topology; drop-off compares each step with the previous visible one, and only entries recorded for v${published.version} are counted.`
             : published
               ? `The published journey v${published.version} is not a straight line (it branches, splits, waits with alternative exits or loops), so there is no sequential drop-off. Steps are reach per node in breadth-first order from the entry, and only entries recorded for v${published.version} are counted. Drop-off is shown only for linear journeys.`
               : 'No published version is selected, so steps are cross-version reach without a drop-off chain.',
@@ -268,11 +357,15 @@ export const analyticsJourneyFunnel = defineCommand({
       journeyId: input.journeyId,
       basis: chain ? ('published' as const) : ('reach' as const),
       entered,
-      goalReached: total('journey.goal_reached'),
-      completed: total('journey.completed'),
-      exited: total('journey.exited'),
+      goalReached: funnel.totals.goalReached,
+      completed: funnel.totals.completed,
+      exited: funnel.totals.exited,
       steps,
-      meta: { ...stepsResult.meta, suppressed: totals.meta.suppressed + stepsResult.meta.suppressed, notes },
+      meta: {
+        ...stepsResult.meta,
+        suppressed: totals.meta.suppressed + stepsResult.meta.suppressed + funnel.hiddenSteps + funnel.withheld.length,
+        notes,
+      },
     };
   },
 });

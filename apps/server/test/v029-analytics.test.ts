@@ -465,16 +465,133 @@ describe('named reports', () => {
   it('journeyFunnel reports each step, drop-off, the goal and the exits', async () => {
     const funnel = await api().call('analytics.journeyFunnel', { journeyId: JOURNEY, from: FROM, to: TO });
     expect(funnel.entered).toBe(6);
-    expect(funnel.goalReached).toBe(4);
-    expect(funnel.completed).toBe(4);
-    expect(funnel.exited).toBe(1);
+    // #908: the goal reached 4 people, completed 4 and exited 1, all below k=5, so those totals are
+    // withheld instead of printing the counts the step rows hide.
+    expect(funnel.goalReached).toBeNull();
+    expect(funnel.completed).toBeNull();
+    expect(funnel.exited).toBeNull();
     expect(funnel.steps.map((s) => s.step)).toEqual(['s1', 's2']);
     expect(funnel.steps[0]).toMatchObject({ reached: 6, dropOff: 0, dropOffRate: 0 });
     expect(funnel.steps[1].reached).toBe(5);
     expect(funnel.steps[1].dropOff).toBe(1);
     expect(funnel.steps[1].dropOffRate).toBeCloseTo(1 / 6, 5);
-    expect(funnel.meta.suppressed).toBe(0);
+    expect(funnel.meta.suppressed).toBe(3);
+    expect(funnel.meta.notes.join(' ')).toContain('goalReached');
     expect(funnel.basis).toBe('published');
+  });
+
+  it('withholds every funnel total below k, so a three-person journey prints no count (#908)', async () => {
+    const api = t.api(owner);
+    const journey = (
+      await api.call('artifacts.create', {
+        type: 'journey',
+        name: 'Three entrants',
+        content: {
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+            { id: 'goal', kind: 'goal', label: 'Goal', config: { event: 'Order Completed', within: 'P7D' } },
+          ],
+        },
+      })
+    ).artifactId;
+    await api.call('artifacts.requestPublish', { artifactId: journey, note: 'three entrants' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: journey,
+        version: 1,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // Three entrants, two of whom reach the goal: every count is below k=5.
+    for (let i = 0; i < 3; i++) {
+      const p = person();
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'trigger', 'step', 1);
+      if (i < 2) add(p, 'goal', 'converted', 2);
+    }
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: journey, from: FROM, to: TO });
+    expect(funnel.entered).toBeNull();
+    expect(funnel.goalReached).toBeNull();
+    expect(funnel.completed).toBe(0);
+    expect(funnel.exited).toBe(0);
+    expect(funnel.steps.map((s) => s.reached)).toEqual([null]);
+    expect(funnel.steps.every((s) => s.dropOff === null && s.dropOffRate === null)).toBe(true);
+    expect(funnel.meta.suppressed).toBeGreaterThanOrEqual(3);
+    expect(funnel.meta.notes.join(' ')).toContain('withheld');
+    // Nothing in the result carries the hidden 3 or 2: no count, rate, drop-off or total.
+    const numbers = [
+      funnel.entered,
+      funnel.goalReached,
+      funnel.completed,
+      funnel.exited,
+      ...funnel.steps.flatMap((s) => [s.reached, s.dropOff, s.dropOffRate]),
+    ];
+    expect(numbers).not.toContain(2);
+    expect(numbers).not.toContain(3);
+  });
+
+  it('hides a small step row and leaves no figure from which its count could be derived (#908)', async () => {
+    const api = t.api(owner);
+    const journey = (
+      await api.call('artifacts.create', {
+        type: 'journey',
+        name: 'One small step',
+        content: {
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'a_trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' } },
+            { id: 'b_small', kind: 'wait', label: 'Small', config: { duration: 'P1D' } },
+            { id: 'c_rest', kind: 'wait', label: 'Rest', config: { duration: 'P1D' } },
+            { id: 'd_done', kind: 'exit', label: 'Done', config: {} },
+          ],
+        },
+      })
+    ).artifactId;
+    await api.call('artifacts.requestPublish', { artifactId: journey, note: 'one small step' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: journey,
+        version: 1,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // 100 people enter and reach the last step, but only three reached the middle step.
+    for (let i = 0; i < 100; i++) {
+      const p = person();
+      add(p, 'a_trigger', 'entered', 0);
+      add(p, 'a_trigger', 'step', 1);
+      if (i < 3) add(p, 'b_small', 'step', 2);
+      add(p, 'c_rest', 'step', 3);
+    }
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: journey, from: FROM, to: TO });
+    const reached = funnel.steps.map((s) => s.reached);
+    expect(reached).toContain(null);
+    expect(reached).not.toContain(3);
+    expect(funnel.entered).toBe(100);
+    expect(funnel.steps.every((s) => s.reached !== 3 && s.dropOff !== 3)).toBe(true);
+    expect(funnel.meta.suppressed).toBeGreaterThanOrEqual(2);
+    expect(funnel.meta.notes.join(' ')).toContain('suppressed');
   });
 
   it('computes the drop-off chain over the published version only (#591)', async () => {
