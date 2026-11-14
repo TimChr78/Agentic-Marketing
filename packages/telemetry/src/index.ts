@@ -124,13 +124,23 @@ function tracesEndpointUrl(specific: string | undefined, generic: string): strin
   return new URL(`${generic.endsWith('/') ? generic : `${generic}/`}v1/traces`).toString();
 }
 
-/** Whether OTEL_EXPORTER_OTLP[_TRACES]_HEADERS already sets Authorization (case-insensitive). */
+/** Whether OTEL_EXPORTER_OTLP[_TRACES]_HEADERS already sets Authorization (decoded, case-insensitive). */
 function envHasAuthorization(): boolean {
   const names = [process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS, process.env.OTEL_EXPORTER_OTLP_HEADERS]
     .flatMap((raw) => (raw ?? '').split(','))
-    .map((pair) => pair.split('=')[0]?.trim().toLowerCase())
+    .map((pair) => decodedHeaderName(pair.split('=')[0] ?? ''))
     .filter(Boolean);
   return names.includes('authorization');
+}
+
+/** A header name as the SDK reads it: percent-decoded (`%61uthorization`), trimmed, lower-cased. */
+function decodedHeaderName(raw: string): string {
+  const name = raw.trim();
+  try {
+    return decodeURIComponent(name).trim().toLowerCase();
+  } catch {
+    return name.toLowerCase();
+  }
 }
 
 export async function shutdownTelemetry() {

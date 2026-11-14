@@ -116,4 +116,21 @@ describe('the real OTLP exporter (#931 A2/A3)', () => {
     });
     expect(sent[0]!.headers.authorization).toBe('Bearer trace-token');
   });
+
+  // Round 3: the SDK percent-decodes header names, so `%61uthorization` is Authorization too.
+  it('lets an env Authorization with a percent-encoded name win over URL userinfo', async () => {
+    const sent = await exportOnce({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `http://alice:p%40ss@${new URL(base).host}`,
+      OTEL_EXPORTER_OTLP_HEADERS: '%61uthorization=Bearer%20env-token',
+    });
+    expect(sent[0]!.headers.authorization).toBe('Bearer env-token');
+  });
+
+  it('lets a trace-specific env Authorization with a percent-encoded name win too', async () => {
+    const sent = await exportOnce({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `http://alice:p%40ss@${new URL(base).host}`,
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: '%41uthorization=Bearer%20trace-token',
+    });
+    expect(sent[0]!.headers.authorization).toBe('Bearer trace-token');
+  });
 });
