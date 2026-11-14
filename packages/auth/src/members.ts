@@ -71,7 +71,7 @@ export function authDirectory(db: Db): Directory {
                FROM artifacts a
                JOIN artifact_versions v
                  ON v.workspace_id = a.workspace_id AND v.artifact_id = a.id AND v.number = a.published_version
-              WHERE a.workspace_id = w.id AND a.type = 'brand' AND a.published_version IS NOT NULL
+              WHERE a.workspace_id = w.id AND a.type = 'brand' AND a.archived = false AND a.published_version IS NOT NULL
               ORDER BY a.updated_at DESC
               LIMIT 1
            ) b ON true
