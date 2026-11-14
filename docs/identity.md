@@ -8,12 +8,14 @@ Owners and admins set up a provider with the auth endpoints (signed in, in the b
 
 ```bash
 # OIDC: issuer and client credentials from the identity provider; endpoints come from its discovery document.
-curl -X POST https://marketing.example.com/api/auth/sso/register -H 'content-type: application/json' -b cookies.txt -d '{
+curl -X POST https://marketing.example.com/api/auth/sso/register -H 'content-type: application/json' -H 'Origin: https://marketing.example.com' -b cookies.txt -d '{
   "providerId": "acme-okta", "issuer": "https://acme.okta.com", "domain": "acme.com",
   "workspaceId": "<workspace id>", "defaultRole": "marketer",
   "oidcConfig": { "clientId": "…", "clientSecret": "…", "pkce": true }
 }'
 ```
+
+A command-line call that sends the session cookie must also send an `Origin` header matching `PUBLIC_URL` (or one listed in `TRUSTED_ORIGINS`): the CSRF check refuses a cookie-authenticated write without one with `403 MISSING_OR_NULL_ORIGIN`. A browser sends it automatically; a script must add it as above. Bearer-token calls need no `Origin`.
 
 - Register `https://marketing.example.com/api/auth/sso/callback/<providerId>` as the redirect URI at the identity provider.
 - SAML: pass `samlConfig` (the IdP's `entryPoint`, `cert`, or its metadata XML) instead of `oidcConfig`; the service provider metadata is at `/api/auth/sso/saml2/sp/metadata?providerId=<providerId>` and the assertion consumer service at `/api/auth/sso/saml2/sp/acs/<providerId>`.
