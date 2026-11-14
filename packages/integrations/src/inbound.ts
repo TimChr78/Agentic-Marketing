@@ -81,10 +81,17 @@ export function trackHeaderReads(headers: Record<string, string>): { proxy: Reco
  *   same headers with the same values, and a header that made two outputs differ was read by at
  *   least one of those runs. Differences caused only by the clock or randomness dedupe as replays.
  * - A header the mapping never reads cannot make a replay look new: neither an extra header added
- *   to a signed body nor a provider's per-attempt signature, timestamp or forwarding header.
+ *   to a signed body nor, when the mapping does not read them, a provider's per-attempt signature,
+ *   timestamp or forwarding header.
+ * - A mapping that enumerates or copies the whole object (`*`, `**`, `$spread`, `$string(headers)`,
+ *   embedding `headers`) reads every header, so the per-attempt values a proxy or sender changes
+ *   on each retry (`date`, `cf-ray`, `x-request-id`, signatures) enter the identity too. Such a
+ *   mapping does not dedupe retries behind a proxy and may publish once per retry; it never loses
+ *   an event.
  * - Accepted residual: a mapping whose choice of which headers to read depends on the clock or on
  *   randomness can give an identical retry another identity, so it may publish twice; it never
- *   loses an event. Standard Webhooks avoids it: its signed `webhook-id` is the replay key.
+ *   loses an event. Standard Webhooks avoids both residuals: its signed `webhook-id` is the replay
+ *   key.
  */
 export function headerIdentity(headers: Record<string, string>, reads: HeaderReads, connectorHeaders?: readonly string[]): string {
   const keys = connectorHeaders ? connectorHeaders.map((h) => h.toLowerCase()) : reads.all ? Object.keys(headers) : [...reads.names];
