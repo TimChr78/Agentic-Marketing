@@ -11,15 +11,12 @@ import { adPerformance, googleSpend, metaSpend } from '../src/spend';
 const OLD_CAP = 100_000;
 const CONVERSION_COUNT = OLD_CAP + 1;
 
-/** The smallest tx shape publishedSingleton's conversion-map lookup uses, plus ad connections. */
-const commandTx = (
-  rules: { event: string; value?: string }[],
-  connections: { connector: string; settings?: Record<string, unknown>; spendState?: unknown }[] = [],
-) =>
+/** The smallest tx shape publishedSingleton's conversion-map lookup and the spend gaps read use. */
+const commandTx = (rules: { event: string; value?: string }[], gaps: { platform: string; fromDate: string; toDate: string }[] = []) =>
   ({
     select: () => ({
       from: () => ({
-        where: async () => connections,
+        where: async () => gaps,
         innerJoin: () => ({
           where: async () => [{ content: { rules } }],
         }),
@@ -27,7 +24,7 @@ const commandTx = (
     }),
   }) as never;
 
-const context = (connections: { connector: string; settings: Record<string, unknown> }[] = []): CommandContext => {
+const context = (gaps: { platform: string; fromDate: string; toDate: string }[] = []): CommandContext => {
   const paged = Array.from({ length: CONVERSION_COUNT }, (_, i) => ({
     profileId: '',
     anonymousId: '',
@@ -75,7 +72,7 @@ const context = (connections: { connector: string; settings: Record<string, unkn
   };
   return {
     principal: { workspaceId: 'ws_test' },
-    tx: commandTx([{ event: 'Order Completed', value: 'total' }], connections),
+    tx: commandTx([{ event: 'Order Completed', value: 'total' }], gaps),
     services: { events },
   } as unknown as CommandContext;
 };
@@ -275,6 +272,8 @@ describe('spend read truncation (#917)', () => {
       } as never;
       const read = await metaSpend(conn, { accessToken: 't'.repeat(30) }, '2026-01-01', '2026-01-02', egress);
       expect(read.rows).toHaveLength(1);
+      // The account identity the ad_spend rows carry; the gap key uses the same value.
+      expect(read.account).toBe('act_1234567890');
       expect(read.truncated).toBe(false);
     } finally {
       await provider.close();
@@ -332,25 +331,26 @@ describe('spend read truncation (#917)', () => {
       const secrets = { clientId: 'c', clientSecret: 's', developerToken: 'd'.repeat(20), __oauth: { accessToken: 't'.repeat(30) } };
       const read = await googleSpend(conn, secrets, '2026-01-01', '2026-01-02', egress);
       expect(read.rows).toHaveLength(1);
+      expect(read.account).toBe('1234567890');
       expect(read.truncated).toBe(false);
     } finally {
       await provider.close();
     }
   });
 
-  it('only reports truncation for a stored incomplete range that overlaps the report', async () => {
+  it('only reports truncation for a stored range that overlaps the report', async () => {
     const { incompleteSpendFor } = await import('../src/spendState');
-    const connection = (from: string, to: string) => ({
-      connector: 'meta_ads',
-      spendState: { incomplete: [{ from, to }] },
-    });
-    expect(incompleteSpendFor([connection('2025-12-01', '2026-01-31')], { since: '2026-01-01', until: '2026-01-10' })).toHaveLength(1);
-    expect(incompleteSpendFor([connection('2025-10-01', '2025-10-31')], { since: '2026-01-01', until: '2026-01-10' })).toEqual([]);
-    expect(incompleteSpendFor([connection('2025-12-01', '2026-01-31')], { since: '2026-02-01', until: '2026-02-10' })).toEqual([]);
+    const gap = (platform: 'meta' | 'google', from: string, to: string) => ({ platform, from, to });
+    expect(incompleteSpendFor([gap('meta', '2025-12-01', '2026-01-31')], { since: '2026-01-01', until: '2026-01-10' })).toHaveLength(1);
+    expect(incompleteSpendFor([gap('meta', '2025-10-01', '2025-10-31')], { since: '2026-01-01', until: '2026-01-10' })).toEqual([]);
+    expect(incompleteSpendFor([gap('meta', '2025-12-01', '2026-01-31')], { since: '2026-02-01', until: '2026-02-10' })).toEqual([]);
     // A Meta-only report ignores a truncated Google import, and vice versa.
-    const google = { connector: 'google_ads', spendState: { incomplete: [{ from: '2026-01-01', to: '2026-01-10' }] } };
-    expect(incompleteSpendFor([google], { since: '2026-01-01', until: '2026-01-10', platform: 'meta' })).toEqual([]);
-    expect(incompleteSpendFor([google], { since: '2026-01-01', until: '2026-01-10', platform: 'google' })).toHaveLength(1);
+    expect(
+      incompleteSpendFor([gap('google', '2026-01-01', '2026-01-10')], { since: '2026-01-01', until: '2026-01-10', platform: 'meta' }),
+    ).toEqual([]);
+    expect(
+      incompleteSpendFor([gap('google', '2026-01-01', '2026-01-10')], { since: '2026-01-01', until: '2026-01-10', platform: 'google' }),
+    ).toHaveLength(1);
   });
 });
 
@@ -358,7 +358,7 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
   const attributionContext = (opts: {
     spend: Record<string, unknown>[];
     touch: string | null;
-    connections?: { connector: string; spendState: unknown }[];
+    gaps?: { platform: string; fromDate: string; toDate: string }[];
   }) => {
     const conversions = [
       {
@@ -397,7 +397,7 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
     };
     return {
       principal: { workspaceId: 'ws_test' },
-      tx: commandTx([{ event: 'Order Completed', value: 'total' }], opts.connections ?? []),
+      tx: commandTx([{ event: 'Order Completed', value: 'total' }], opts.gaps ?? []),
       services: { events },
     } as unknown as CommandContext;
   };
@@ -439,7 +439,7 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
     const ctx = attributionContext({
       spend,
       touch: 'Spring',
-      connections: [{ connector: 'meta_ads', spendState: { incomplete: [{ from: '2026-01-01', to: '2026-01-31' }] } }],
+      gaps: [{ platform: 'meta', fromDate: '2026-01-01', toDate: '2026-01-31' }],
     });
     const result = await adPerformance.handler({ since: '2026-01-01', until: '2026-01-10', windowDays: 30 }, ctx);
     expect(result.spendTruncated).toBe(true);
@@ -451,7 +451,7 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
     const ctx = attributionContext({
       spend,
       touch: 'Spring',
-      connections: [{ connector: 'meta_ads', spendState: { incomplete: [{ from: '2026-01-05', to: '2026-01-09' }] } }],
+      gaps: [{ platform: 'meta', fromDate: '2026-01-05', toDate: '2026-01-09' }],
     });
     const result = await adPerformance.handler({ since: '2026-02-01', until: '2026-02-10', windowDays: 30 }, ctx);
     expect(result.spendTruncated).toBe(false);

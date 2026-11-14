@@ -1124,12 +1124,6 @@ export const connections = pgTable(
     connector: text('connector').notNull(),
     name: text('name').notNull(),
     settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
-    /**
-     * Server-owned spend import completeness (#917). Date ranges a spend import could not fetch
-     * completely, written only by the import and read by ads.performance. Kept out of `settings` so
-     * a rename or settings edit cannot drop it and a caller cannot set it.
-     */
-    spendState: jsonb('spend_state').$type<{ incomplete?: { from: string; to: string }[] }>().notNull().default({}),
     secrets: bytea('secrets'),
     secretsKeyId: text('secrets_key_id'),
     tokenHash: text('token_hash'),
@@ -1156,6 +1150,24 @@ export const connections = pgTable(
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
+);
+
+/**
+ * Date ranges a spend import could not fetch completely (#917). Keyed by the same identity an
+ * `ad_spend` row carries (workspace, platform, account), so the state stays with the spend when a
+ * connection is renamed, re-pointed or deleted. Written only by the import, under an advisory lock.
+ */
+export const adSpendGaps = pgTable(
+  'ad_spend_gaps',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    platform: text('platform').$type<'meta' | 'google'>().notNull(),
+    account: text('account').notNull(),
+    fromDate: date('from_date', { mode: 'string' }).notNull(),
+    toDate: date('to_date', { mode: 'string' }).notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.platform, t.account, t.fromDate] })],
 );
 
 export type DeliveryStatus = 'pending' | 'running' | 'done' | 'failed' | 'dead';

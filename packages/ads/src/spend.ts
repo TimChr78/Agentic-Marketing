@@ -6,9 +6,10 @@ import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, EgressError, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { eq, inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { z } from 'zod';
-import { addIncomplete, completeInterval, incompleteSpendFor, incompleteSpendNote, parseSpendState } from './spendState';
+import { readSpendGapsForReport, recordSpendGaps } from './spendGaps';
+import { incompleteSpendFor, incompleteSpendNote } from './spendState';
 
 /**
  * Bounds on last-touch attribution work in ClickHouse (0.14.12 review round 4). Memory is bounded
@@ -74,9 +75,11 @@ const day = (d: Date) => d.toISOString().slice(0, 10);
  */
 export const SPEND_LIMITS = { metaPages: 200, googlePages: 50 };
 
-/** Spend rows plus whether the provider had more pages when the read stopped. */
+/** Spend rows, the ad account they belong to, and whether the provider had more pages. */
 export interface SpendRead {
   rows: SpendRow[];
+  /** The account identity an `ad_spend` row carries (Meta `act_…`, Google customer id). */
+  account: string;
   truncated: boolean;
 }
 
@@ -152,7 +155,7 @@ export async function metaSpend(
       });
     url = body.paging?.next;
   }
-  return { rows, truncated };
+  return { rows, account, truncated };
 }
 
 /** Google Ads API (v25) GAQL report: campaign cost, impressions, clicks and conversions per day. */
@@ -217,7 +220,7 @@ export async function googleSpend(
     pageToken = body.nextPageToken;
     if (!pageToken) break;
   }
-  return { rows, truncated };
+  return { rows, account: s.customerId, truncated };
 }
 
 /** Imports the last `days` days of spend for one connection into ClickHouse. */
@@ -266,22 +269,18 @@ export async function importSpend(
       })),
     });
   }
-  // Persist the completeness of this read for `ads.performance`, in the server-owned
-  // `connections.spend_state` column rather than `settings` (#917 review round 2): settings are
-  // re-validated by the connector schema on any connections.update, which would strip an undeclared
-  // key, and a rename must never switch the warning off. The provider does not promise page order,
-  // so a truncated read marks the whole requested window as incomplete; a complete read removes
-  // exactly the days it covered.
-  await db.withWorkspace(ws, async (tx) => {
-    const [row] = await tx
-      .select({ spendState: schema.connections.spendState })
-      .from(schema.connections)
-      .where(eq(schema.connections.id, connectionId));
-    if (!row) return;
-    const state = parseSpendState(row.spendState);
-    const next = truncated ? addIncomplete(state, { from: since, to: until }) : completeInterval(state, { from: since, to: until });
-    await tx.update(schema.connections).set({ spendState: next }).where(eq(schema.connections.id, connectionId));
-  });
+  // Persist the completeness of this read for `ads.performance`, keyed by the account the spend rows
+  // carry (#917 review rounds 2-3): the state follows the stored spend, so renaming the connection,
+  // pointing it at another account or deleting it can never clear an older gap, and concurrent
+  // imports serialise on that key. The provider does not promise page order, so a truncated read
+  // marks the whole requested window as incomplete; a complete read removes exactly the days it
+  // covered, for this account only.
+  await recordSpendGaps(
+    db,
+    ws,
+    { platform: conn.connector === metaAdsConnector.id ? 'meta' : 'google', account: read.account },
+    truncated ? { incomplete: { from: since, to: until } } : { complete: { from: since, to: until } },
+  );
   return { rows: rows.length, since, until, truncated };
 }
 
@@ -423,12 +422,10 @@ export const adPerformance = defineCommand({
     const until = input.until ?? day(new Date());
     const since = input.since ?? day(new Date(Date.now() - 29 * 86_400_000));
     // An incomplete spend read is never silent (#917): the import records the date ranges it could
-    // not complete, and the report says so when one overlaps this window.
-    const adConnections = await ctx.tx
-      .select({ connector: schema.connections.connector, spendState: schema.connections.spendState })
-      .from(schema.connections)
-      .where(inArray(schema.connections.connector, ['meta_ads', 'google_ads']));
-    const incompleteSpend = incompleteSpendFor(adConnections, { since, until, ...(input.platform ? { platform: input.platform } : {}) });
+    // not complete against the account whose spend it wrote, and the report says so when one
+    // overlaps this window, whether or not that connection still exists.
+    const gaps = await readSpendGapsForReport(ctx.tx, { since, until, ...(input.platform ? { platform: input.platform } : {}) });
+    const incompleteSpend = incompleteSpendFor(gaps, { since, until, ...(input.platform ? { platform: input.platform } : {}) });
     const spendTruncated = incompleteSpend.length > 0;
     const ch = ctx.services.events.client;
     const clickhouse_settings = await ctx.services.events.settingsFor(ws);
