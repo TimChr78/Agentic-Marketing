@@ -40,7 +40,6 @@ export class TemplateError extends Error {
   }
 }
 
-/** The first line of a message: library errors append a stack or an excerpt after it. */
 /**
  * The longest first line a render or check problem keeps. A caller that stores or returns text from
  * an exception may not rely on the exception being short: `firstLine` bounds every one of them, so
