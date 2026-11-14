@@ -1,5 +1,5 @@
 import { type Auth, assertWorkspaceHeader, principalFromApiToken, principalFromSession } from '@agentic-marketing/auth';
-import type { Executor, Principal } from '@agentic-marketing/commands';
+import { type Executor, IDEMPOTENCY_KEY_MAX, type Principal } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
@@ -68,6 +68,12 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       'x-permission': cmd.permission,
       'x-humans-only': cmd.humansOnly ?? false,
       request: {
+        headers: z.object({
+          'idempotency-key': z.string().min(1).max(IDEMPOTENCY_KEY_MAX).optional().openapi({
+            description:
+              'Optional. A retry of the same logical request must reuse its key: the first response is replayed and the command runs once. A key reused for a different command or input answers 409 (details.reason "idempotency_key_reused"). A 409 whose details.reason is "idempotency_in_progress" means the first request is still running after ten seconds: retry with this same key shortly; a new key would run it again.',
+          }),
+        }),
         body: { required: true, content: { 'application/json': { schema: jsonSchema(api, cmd.input, cmd.name, 'input') as never } } },
       },
       responses: {
@@ -118,7 +124,10 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       // a workspace only for a session (#187).
       assertWorkspaceHeader(principal, c.req.raw.headers);
       const body = await c.req.json().catch(() => ({}));
-      const out = await deps.executor.execute(cmd, body, principal, { surface: 'rest', idempotencyKey: c.req.header('idempotency-key') });
+      const idempotencyKey = c.req.header('idempotency-key');
+      if (idempotencyKey !== undefined && (idempotencyKey.length < 1 || idempotencyKey.length > IDEMPOTENCY_KEY_MAX))
+        throw new AppError('invalid_input', `The idempotency-key header must be 1 to ${IDEMPOTENCY_KEY_MAX} characters.`);
+      const out = await deps.executor.execute(cmd, body, principal, { surface: 'rest', idempotencyKey });
       return c.json(out as object, 200);
     });
   }

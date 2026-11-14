@@ -235,6 +235,9 @@ export class PolicyDeniedError extends AppError {
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous command lists
 export type AnyCommand = CommandDef<any, any, string>;
 
+/** The longest idempotency key accepted from the REST header or an MCP write tool (#906). */
+export const IDEMPOTENCY_KEY_MAX = 200;
+
 export interface ExecuteOptions {
   surface: Surface;
   idempotencyKey?: string;

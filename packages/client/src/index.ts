@@ -29,27 +29,91 @@ export interface ClientOptions {
   credentials?: RequestCredentials;
 }
 
+export interface CallOptions {
+  /** Reuse one key across retries of one logical call; a fresh one per attempt would run it twice. */
+  idempotencyKey?: string;
+}
+
+/** The machine-readable sub-code of a 409, e.g. `idempotency_in_progress` (#906). */
+export function conflictReason(err: unknown): string | undefined {
+  if (!(err instanceof ApiError) || err.status !== 409) return undefined;
+  const details = err.details;
+  if (!details || typeof details !== 'object' || !('reason' in details)) return undefined;
+  const reason = (details as { reason?: unknown }).reason;
+  return typeof reason === 'string' ? reason : undefined;
+}
+
+/** A 409 saying the winner is still running: retrying with the same key is the contract. */
+export function isIdempotencyInProgress(err: unknown): boolean {
+  return conflictReason(err) === 'idempotency_in_progress';
+}
+
+/**
+ * Delays between attempts of {@link createClient}'s `callWithRetry`, measured from the end of the
+ * failed attempt. Five attempts in total and about 12 s of waiting, well under a minute.
+ */
+const RETRY_DELAYS_MS = [250, 1_000, 3_000, 8_000];
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const newIdempotencyKey = () => globalThis.crypto.randomUUID();
+
 export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOptions = {}) {
   const f = opts.fetch ?? fetch;
+
+  async function once<N extends Cmds[number]['name']>(
+    name: N,
+    input: CommandInput<Cmds, N>,
+    callOpts: CallOptions,
+  ): Promise<CommandOutput<Cmds, N>> {
+    const res = await f(`${opts.baseUrl ?? ''}/v1/${name}`, {
+      method: 'POST',
+      credentials: opts.credentials,
+      headers: {
+        'content-type': 'application/json',
+        ...opts.headers,
+        ...(callOpts.idempotencyKey ? { 'idempotency-key': callOpts.idempotencyKey } : {}),
+      },
+      body: JSON.stringify(input ?? {}),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(res.status, body.error ?? 'error', body.message ?? res.statusText, body.details);
+    return body as CommandOutput<Cmds, N>;
+  }
+
   return {
-    async call<N extends Cmds[number]['name']>(
+    /** One attempt. A retry must pass the same `idempotencyKey`; see `callWithRetry`. */
+    call<N extends Cmds[number]['name']>(
       name: N,
       input: CommandInput<Cmds, N>,
-      callOpts: { idempotencyKey?: string } = {},
+      callOpts: CallOptions = {},
     ): Promise<CommandOutput<Cmds, N>> {
-      const res = await f(`${opts.baseUrl ?? ''}/v1/${name}`, {
-        method: 'POST',
-        credentials: opts.credentials,
-        headers: {
-          'content-type': 'application/json',
-          ...opts.headers,
-          ...(callOpts.idempotencyKey ? { 'idempotency-key': callOpts.idempotencyKey } : {}),
-        },
-        body: JSON.stringify(input ?? {}),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new ApiError(res.status, body.error ?? 'error', body.message ?? res.statusText, body.details);
-      return body as CommandOutput<Cmds, N>;
+      return once(name, input, callOpts);
+    },
+    /**
+     * A logical call with safe retries (#906). It mints one idempotency key (or uses the one you
+     * pass) and keeps it across every attempt, so a retry after a lost answer replays the first
+     * result instead of running the command again.
+     *
+     * It retries a network failure and the `409 conflict` that says the first request is still in
+     * progress, with bounded backoff. It never retries the other conflict ("already used for a
+     * different request") or any other 4xx: those are answers, not races.
+     */
+    async callWithRetry<N extends Cmds[number]['name']>(
+      name: N,
+      input: CommandInput<Cmds, N>,
+      callOpts: CallOptions = {},
+    ): Promise<CommandOutput<Cmds, N>> {
+      const idempotencyKey = callOpts.idempotencyKey ?? newIdempotencyKey();
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await once(name, input, { idempotencyKey });
+        } catch (err) {
+          const retryable = err instanceof ApiError ? isIdempotencyInProgress(err) : true;
+          if (!retryable || attempt >= RETRY_DELAYS_MS.length) throw err;
+          await sleep(RETRY_DELAYS_MS[attempt]!);
+        }
+      }
     },
   };
 }

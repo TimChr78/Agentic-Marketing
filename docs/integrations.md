@@ -11,6 +11,16 @@ How other systems talk to the platform and back. Design: [ADR-0013](architecture
 - An agent cannot run humans-only commands (approving, members, secrets, settings). Revoked or expired tokens, or tokens of someone who left the workspace, stop working at once.
 - Every call is in the audit log as `token:<id>`, under the token's workspace; creating, editing and revoking a token records the token id as the audit target.
 
+### Idempotency (safe retries)
+
+`POST /v1/<command>` accepts an optional `idempotency-key` header, 1 to 200 characters, scoped to the workspace. Two requests with the same key are serialised:
+
+- The second returns the first request's stored response and does not run the command again. The key is remembered for the life of the workspace (the row is not expired), so a retry hours later still replays.
+- A key reused for a different command or a different input answers `409` with `details.reason: "idempotency_key_reused"`; use a new key for the new request.
+- If the first request is still running after ten seconds (a heavy import, a command with an LLM check inside its transaction), the second answers `409` with `details.reason: "idempotency_in_progress"`. **Retry with the same key** after a short delay: a new key would run the operation again, and the first one may still complete.
+
+Generate one key per logical operation, not per HTTP attempt, and reuse it for every retry. The typed client's `callWithRetry` does that (see `packages/client/README.md`), and MCP write tools accept the same key as an optional `idempotencyKey` argument. Commands whose own input already has an `idempotencyKey` (a send, a bulk enrollment) keep that field's meaning: it is the repeat-safe key for the handler and not stripped.
+
 For OAuth/MCP connections, the consent page asks which brand the client acts in when the person belongs to several; the grant and its access tokens are bound to that brand. See [identity.md](identity.md#one-brand-per-token-or-connection-187).
 
 ```sh
