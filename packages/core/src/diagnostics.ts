@@ -210,6 +210,32 @@ const KEY_QUALIFIERS = new Set([
 
 const CAMEL_BOUNDARY = /(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/;
 
+/** `apiKey2` → `apiKey`. A loop, not a pattern: an end-anchored `+` is quadratic on a long run. */
+function withoutTrailingDigits(name: string): string {
+  let end = name.length;
+  while (end > 0 && name.charCodeAt(end - 1) >= 48 && name.charCodeAt(end - 1) <= 57) end -= 1;
+  return end === name.length ? name : name.slice(0, end);
+}
+
+const isSpace = (char: string): boolean => char !== '' && /\s/.test(char);
+
+/**
+ * Where a separator that starts at `pos` ends, or -1: an optional closing quote of the key,
+ * whitespace, `:` or `=`, and (with `trailing`) the whitespace after it. Read by hand so the work
+ * is plainly one pass over the characters it consumes.
+ */
+function separatorEnd(text: string, pos: number, trailing: boolean): number {
+  let index = pos;
+  const quote = text.charAt(index);
+  if (quote === '"' || quote === "'") index += 1;
+  while (isSpace(text.charAt(index))) index += 1;
+  const mark = text.charAt(index);
+  if (mark !== ':' && mark !== '=') return -1;
+  index += 1;
+  if (trailing) while (isSpace(text.charAt(index))) index += 1;
+  return index;
+}
+
 /** The unambiguous credential words an all-capitals name can end in (`AUTHTOKEN`, `DBPASSWORD`). */
 const UPPER_SUFFIXES = ['token', 'secret', 'password', 'passwd', 'credential', 'credentials', 'signature'];
 
@@ -247,8 +273,8 @@ const KEY_VERDICTS = new Map<string, boolean>();
 
 function classifyCompoundKey(full: string): boolean {
   // Cheap first: every name this rule adds has a capital letter or is the plural `credentials`.
-  if (!/[A-Z]|credentials[0-9]*$/.test(full)) return false;
-  const name = full.replace(/[0-9]+$/, '');
+  if (!/[A-Z]/.test(full) && !withoutTrailingDigits(full).endsWith('credentials')) return false;
+  const name = withoutTrailingDigits(full);
   const parts = name.split(/[_.-]+/).filter(Boolean);
   const lastPart = parts[parts.length - 1];
   if (!lastPart) return false;
@@ -273,10 +299,18 @@ const COMPOUND_KEY = /(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])
 const TOKEN_SHAPED = /[A-Za-z0-9+/_-]{24,}/;
 
 /** A plain value: one token, or a quoted string, with nothing a rule could read as a pair. */
-const PLAIN_BARE = /[A-Za-z0-9._~+/@%!$*#^-]+(?=$|[\s,;&}\]])/y;
+const PLAIN_CHAR = /[A-Za-z0-9._~+/@%!$*#^-]/;
 const PLAIN_QUOTED = /"[^"'\\:=\r\n]+"|'[^"'\\:=\r\n]+'/y;
-/** A separator after the value: the value is then a key itself and is left to the rules. */
-const SEPARATOR_AHEAD = /["']?\s*[:=]/y;
+
+/** The end of a plain bare token at `pos` (followed by the end, whitespace or a delimiter), or -1. */
+function plainBareEnd(text: string, pos: number): number {
+  let index = pos;
+  while (index < text.length && PLAIN_CHAR.test(text.charAt(index))) index += 1;
+  if (index === pos) return -1;
+  const next = text.charAt(index);
+  return next === '' || isSpace(next) || ',;&}]'.includes(next) ? index : -1;
+}
+
 const SCHEME_WORD = /\b(?:bearer|basic)\b/i;
 
 /**
@@ -296,17 +330,15 @@ function redactLongKeyValues(text: string): string {
   for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
     if (key[0].length < 24 || !TOKEN_SHAPED.test(key[0]) || !isCompoundCredentialKey(key[0])) continue;
     const keyEnd = key.index + key[0].length;
-    PAIR_SEPARATOR.lastIndex = keyEnd;
-    const separator = PAIR_SEPARATOR.exec(text);
-    if (!separator) continue;
-    const start = keyEnd + separator[0].length;
+    const start = separatorEnd(text, keyEnd, true);
+    if (start < 0) continue;
     PLAIN_QUOTED.lastIndex = start;
-    PLAIN_BARE.lastIndex = start;
     const quoted = PLAIN_QUOTED.exec(text)?.[0];
-    const value = quoted ?? PLAIN_BARE.exec(text)?.[0];
+    const bareEnd = quoted ? -1 : plainBareEnd(text, start);
+    const value = quoted ?? (bareEnd < 0 ? undefined : text.slice(start, bareEnd));
     if (!value || SCHEME_WORD.test(value) || PLAIN_LITERAL.test(value)) continue;
-    SEPARATOR_AHEAD.lastIndex = start + value.length;
-    if (SEPARATOR_AHEAD.test(text)) continue;
+    // A separator after the value: the value is then a key itself and is left to the rules.
+    if (separatorEnd(text, start + value.length, false) >= 0) continue;
     // A quoted value keeps its quotes: either may also delimit a string around this pair
     // (`token="… longAuthToken="x"`), and the rules must still see it.
     const inset = quoted ? 1 : 0;
@@ -316,9 +348,6 @@ function redactLongKeyValues(text: string): string {
   }
   return copied === 0 ? text : out + text.slice(copied);
 }
-
-/** What separates a key from its value, with an optional closing quote of the key before it. */
-const PAIR_SEPARATOR = /["']?\s*[:=]\s*/y;
 
 /**
  * A value, in the grammar of the first rule above: a quoted string, or a bare value up to
@@ -344,10 +373,8 @@ function redactCompoundKeys(text: string): string {
   for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
     const keyEnd = key.index + key[0].length;
     if (!isCompoundCredentialKey(key[0])) continue;
-    PAIR_SEPARATOR.lastIndex = keyEnd;
-    const separator = PAIR_SEPARATOR.exec(text);
-    if (!separator) continue;
-    const start = keyEnd + separator[0].length;
+    const start = separatorEnd(text, keyEnd, true);
+    if (start < 0) continue;
     SCHEME_START.lastIndex = start;
     if (SCHEME_START.test(text)) continue;
     PAIR_VALUE.lastIndex = start;
