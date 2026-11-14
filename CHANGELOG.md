@@ -2,6 +2,39 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.22] - 2026-11-14
+
+### Fixed
+
+- The input-level idempotency key of a direct send (`messages.sendEmail`, `messages.sendSms`, `messages.sendPush`) and of `journeys.enrollSegment` is bound to an immutable request fingerprint: the caller plus the recipient, template and template variables as supplied (or the journey, segment, versions and limit). A different caller, recipient, template or data answers `409` with `details.reason: "idempotency_key_reused"` and never receives the first caller's message decision or job.
+- The fingerprint is taken before any resolution, so an identical retry that still names a profile id since merged into another person replays the message that was queued.
+- Journey steps, broadcasts, double opt-in confirmations and other internal sends fingerprint only immutable identifiers (submission event id and form, journey and enrollment and node, broadcast and recipient row, test address, alert), never a resolved profile id, a template version or an assigned subject variant, so a worker retry, a redelivery after a profile merge, or a re-rendered subject still replays one message. Concurrent requests with one input-level key serialise before the lookup: one message, a replay for the same request and a `409` for a different one, never a database error.
+- Message rows written before the fingerprint was stored match a key on their stored recipient and template columns, as documented; no existing row is rewritten.
+- Form signups and double opt-in confirmations now record the time the person submitted or confirmed, not the time the queue worker got to the event, so a delayed or redelivered signup can no longer outrank a later unsubscribe. Provider unsubscribe and complaint callbacks and SMS STOP texts record their own action time too.
+- An imported consent timestamp is kept as the historical evidence it is, but a future date is clamped to the original import event's server time when the ledger row is written, so a post-dated import cannot outrank a later withdrawal, and an identical re-import is still deduplicated to the same event.
+- Consent records are unchanged for rows written before this fix: the ledger stays append-only, and the new timestamps apply to new writes only.
+- When two consent records share the exact same recorded time, a withdrawal, objection or denial now wins the tie over a grant, as the consent precedence rule already said.
+- The SSO-registration `curl` example in `docs/identity.md` now sends `Origin: https://marketing.example.com` and says why: a cookie-authenticated write on the command line is refused with `403 MISSING_OR_NULL_ORIGIN` unless its `Origin` matches `PUBLIC_URL` or `TRUSTED_ORIGINS`. Bearer-token examples need no `Origin`.
+- An idempotent retry of an agent write now returns the original response without running the policy engine, the daily counters or the billed independent check again. The retry is no longer refused when the first action filled a daily limit, and it is not charged a second model call.
+- Authentication, permissions, input validation and the agent's current status still run before a replay: a paused or revoked agent gets the same refusal as any other request, and a key reused for a different request still answers 409 before policy runs.
+- A replayed agent write still leaves one ledger row and one audit row, as before.
+- Changing a starter’s parameters on the Recipes page now clears the previous parameters’ prerequisite check, readiness text and drafts list, and disables “Create drafts” until a new check runs. A check or install started before the edit can no longer land under the new parameters, and two overlapping checks keep only the latest result.
+
+### Security
+
+- The MCP-disabled startup warning logs `PUBLIC_URL` as its origin and path only, so basic-auth userinfo and a token in its query string no longer reach the logs. `OPENBAO_ADDR`, `CLICKHOUSE_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `VALKEY_URL`, `NATS_URL` and provider API bases with credentials keep authenticating (as an `Authorization` header, or the client's own options where it has them) and their failures are reported as origin plus cause code, so neither the thrown error, the startup log, a command span nor `am doctor` output contains the userinfo or query token.
+- The generic `/api/auth/*` catch-all now refuses a request body over 256 KiB with a JSON `payload_too_large` 413 before Better Auth reads it. Sign-in, sign-up, OAuth token and SSO registration were previously buffered whole, so an unauthenticated caller could exhaust the server's heap with an oversized or endless chunked body. The SAML ACS and SLO callbacks keep their own larger ceiling, derived from the 262,144-byte `SAMLResponse` limit and worst-case form encoding, so a valid maximum-size response still works. The shared body guard now counts actual bytes for every request, including one whose `Content-Length` understates the body, and a route sweep fails CI when a body-accepting route has no limit.
+
+### Upgrading from 0.14.21
+
+- **Migrations:** `packages/db/migrations/0096_message_request_identity.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** a retry of `messages.sendEmail`, `messages.sendSms`, `messages.sendPush` or `journeys.enrollSegment` with an input-level `idempotencyKey` must repeat the whole request, template variables included: a different caller, recipient, template or `data` answers `409` with `details.reason: idempotency_key_reused` instead of the first result. Request bodies on `/api/auth/*` are limited to 256 KiB (SAML callbacks have their own, larger limit) and larger ones answer `413`. `AWS_KMS_ENDPOINT` may no longer carry a username or password in the URL; the server refuses to start with one. When two consent records have exactly the same time, the withdrawal now wins.
+- **Manual steps:** none. Form and double opt-in consents recorded before this release keep the time the worker processed them; only new records carry the submission time.
+- **Upgrade:** download `agentic-marketing-compose-0.14.22.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.22 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.22` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.22). Run `docker compose exec app am doctor`.
+
+<!-- issues: 926, 928, 929, 930, 931, 932, 933 -->
+
 ## [0.14.21] - 2026-11-14
 
 ### Changed
