@@ -143,22 +143,14 @@ const KEY_QUALIFIERS = new Set([
  */
 const MARKER = '[redacted]';
 
-/** How much of a text is scanned at all. Longer input is cut first and marked (dropping is safe). */
-export const MAX_REDACT_LENGTH = 64 * 1024;
-/** Appended to a text that was cut at `MAX_REDACT_LENGTH`. */
-export const TRUNCATED_MARKER = '[truncated]';
-
-/**
- * The placeholders a redacted value may consist of. Both are kept when they make up the whole value,
- * so a second pass changes nothing (`token=[redacted][truncated]` stays as it is).
- */
-const PLACEHOLDERS: readonly string[] = [MARKER, TRUNCATED_MARKER];
-
-/** How much of the text before the cap is examined for a boundary when cutting (#902 round 4). */
-const FRAGMENT_WINDOW = 4 * 1024;
-
-/** The longest value structure (`[…]`, `{…}`) or PEM block walked before it is cut at the line end. */
+/** The longest value structure (`[…]`, `{…}`) walked before it is treated as unbalanced. */
 const STRUCTURE_MAX = 4_096;
+/**
+ * How much work failed structure probes may do, as a multiple of the text length. A probe that
+ * succeeds is charged to the text it consumes, so only failures need a bound: without one, a text
+ * of many unterminated `[` values would scan `STRUCTURE_MAX` characters per line (#902 round 5).
+ */
+const STRUCTURE_BUDGET = 8;
 /** Nesting depth a value structure may have before it is treated as unbalanced. */
 const STRUCTURE_DEPTH = 8;
 /** The longest PEM block (`-----BEGIN …-----` to `-----END …-----`) consumed in one value. */
@@ -330,41 +322,63 @@ function lineEnd(text: string, start: number): number {
   return text.length;
 }
 
+/** What the scan remembers between values, so a repeated search cannot re-read the same text. */
+interface ScanState {
+  /**
+   * Per closing quote, the next unescaped closer found from `from`: `closer` is its index, or -1
+   * when there is none to the end of the text. A later query at a position inside
+   * `[from, closer)` reuses the answer, so an unclosed quote costs one scan in total (#902 round 5).
+   */
+  quotes: Map<string, { from: number; closer: number }>;
+  /** Characters failed structure probes may still scan (see `STRUCTURE_BUDGET`). */
+  structureBudget: number;
+}
+
 /**
- * The end of a quoted string, escapes honoured, or null when the quote is not closed by `limit`.
- * `limit` is always the end of the value's line, so a quoted value never extends past its line: an
- * opening quote without a closer costs one line, not the rest of the text (#902 round 4).
+ * The end of the quoted string at `start`, escapes honoured, or null when the quote is never closed.
+ *
+ * A quoted value extends to its closing quote across lines, as 0.14.20's `"(?:[^"\\]|\\.)*"` did
+ * (#902 round 5). The search is memoised per closing quote: the first query scans forward once, and
+ * a later query at a position before the closer it found reuses that answer, so a text of unclosed
+ * quotes is scanned once in total rather than once per quote.
  */
-function quotedEnd(text: string, start: number, limit: number): number | null {
+function quotedEnd(text: string, start: number, state: ScanState): number | null {
   const closer = QUOTE_PAIRS.get(text[start]!);
   if (closer === undefined) return null;
+  const memo = state.quotes.get(closer);
+  if (memo && start >= memo.from && (memo.closer === -1 || start < memo.closer)) return memo.closer === -1 ? null : memo.closer + 1;
   let index = start + 1;
-  while (index < limit) {
+  while (index < text.length) {
     const char = text[index]!;
     if (char === '\\') {
       index += 2;
       continue;
     }
-    if (char === closer) return index + 1;
+    if (char === closer) {
+      state.quotes.set(closer, { from: start, closer: index });
+      return index + 1;
+    }
     index += 1;
   }
+  state.quotes.set(closer, { from: start, closer: -1 });
   return null;
 }
 
 /**
- * The end of the `[`/`{` structure at `start`, string- and escape-aware, or null when it is
- * unbalanced, nested deeper than `STRUCTURE_DEPTH`, longer than `STRUCTURE_MAX`, or not closed on
- * the value's line (`limit`). A failed search is followed by a redaction to the end of that line,
- * so the work is charged to text that is then consumed.
+ * The end of the `[`/`{` structure at `start`: string- and escape-aware, balanced across lines,
+ * nested no deeper than `STRUCTURE_DEPTH` and no longer than `STRUCTURE_MAX`, or null when it is
+ * unbalanced (#902 round 5). Quotes inside it are skipped through the memoised quote search, and a
+ * failed probe spends the scan's structure budget, so a text of unterminated structures stays linear.
  */
-function structureEnd(text: string, start: number, limit: number): number | null {
+function structureEnd(text: string, start: number, state: ScanState): number | null {
   const expected: string[] = [];
-  const stop = Math.min(limit, start + STRUCTURE_MAX);
   let index = start;
-  while (index < stop) {
+  while (index < text.length && index - start <= STRUCTURE_MAX) {
+    if (state.structureBudget <= 0) return null;
+    state.structureBudget -= 1;
     const char = text[index]!;
     if (isQuoteChar(char)) {
-      const end = quotedEnd(text, index, stop);
+      const end = quotedEnd(text, index, state);
       if (end === null) return null;
       index = end;
       continue;
@@ -391,51 +405,28 @@ function indexOfWithin(text: string, needle: string, from: number, limit: number
   return -1;
 }
 
-/**
- * What the scan remembers between values, so a repeated failed search cannot re-read the same text:
- * `pemSearchedTo` is a position before which no `-----END ` occurred when the last probe stopped.
- */
-interface ScanState {
-  pemSearchedTo: number;
-  /** A remembered line: no line break in `[lineFrom, lineEnd)`, which is where the line ends. */
-  lineFrom: number;
-  lineEnd: number;
+interface PemProbe {
+  /** Where the block ends (the text length when it is not closed). */
+  end: number;
+  /** Whether a `-----END …-----` line was found. */
+  closed: boolean;
 }
 
 /**
- * The end of the line that holds `start`, remembered between values. Without the memory a text with
- * no line break at all would scan the rest of itself for every value (#902 round 4); with it, each
- * line is walked once.
+ * The PEM block that starts at `start`, or null when this is not one. A block is the one value that
+ * may span lines, and its `END` is searched up to `PEM_MAX` characters ahead. A `BEGIN` without an
+ * `END` is reported as unclosed, and the caller redacts from it to the end of the text: the body is
+ * a private key, so nothing of it may survive (#902 round 5).
  */
-function lineLimit(text: string, start: number, state: ScanState): number {
-  if (start >= state.lineFrom && start < state.lineEnd) return state.lineEnd;
-  const end = lineEnd(text, start);
-  state.lineFrom = start;
-  state.lineEnd = end;
-  return end;
-}
-
-/**
- * The end of a PEM block (`-----BEGIN …-----` to `-----END …-----`), or null when it is not one. A
- * PEM block is the one value that must be allowed to span lines (that is what a PEM block is), so
- * the `END` search is bounded by `PEM_MAX` and, on failure, resumes where the last probe stopped:
- * the text between probes is searched once, which keeps the scan linear (#902 round 4).
- */
-function pemEnd(text: string, start: number, state: ScanState): number | null {
+function pemEnd(text: string, start: number): PemProbe | null {
   const begin = '-----BEGIN ';
   if (!text.startsWith(begin, start)) return null;
   const beginClose = indexOfWithin(text, '-----', start + begin.length, 80);
   if (beginClose === -1) return null;
-  const from = Math.max(beginClose + 5, state.pemSearchedTo);
-  const to = Math.min(text.length, beginClose + 5 + PEM_MAX);
-  if (from >= to) return null;
-  const end = indexOfWithin(text, '-----END ', from, to - from);
-  if (end === -1) {
-    state.pemSearchedTo = Math.max(state.pemSearchedTo, to);
-    return null;
-  }
+  const end = indexOfWithin(text, '-----END ', beginClose + 5, PEM_MAX);
+  if (end === -1) return { end: text.length, closed: false };
   const endClose = indexOfWithin(text, '-----', end + 9, 80);
-  return endClose === -1 ? null : endClose + 5;
+  return endClose === -1 ? { end: text.length, closed: false } : { end: endClose + 5, closed: true };
 }
 
 /** A value that starts a credential pair of its own (`token: access_token=…`). */
@@ -469,104 +460,116 @@ interface ValueRead {
 }
 
 /**
- * The redaction of one credential value: what to emit and where the value ends (#902 round 4).
+ * The redaction of one credential value: what to emit and where the value ends (#902 round 5).
  *
  * A value is a run of atoms — a placeholder, a quoted string, a balanced structure, a PEM block or a
  * plain token — and every atom is consumed where it is read, so the loop is bounded by the value.
- * The value never extends past its line, so every search inside it is charged to text that the
- * value either consumes or a failed search then consumes to the end of the line.
+ * A value may span lines; only an atom that cannot be delimited is cut at the end of its line, and
+ * the searches that decide that are memoised or budgeted (see `quotedEnd`, `structureEnd`).
  *
- * A leading run of `Bearer`/`Basic` words is consumed iteratively (no recursion); a value that
- * carries a scheme is a header value and is redacted whole, to the end of the line, because
- * `Bearer Bearer shortpw` is one credential rather than a scheme followed by a word. A value made
- * only of placeholders is kept, which is what makes redaction idempotent. A nested credential pair
- * is left for the scan to redact field by field.
+ * A leading run of `Bearer`/`Basic` words is consumed iteratively (no recursion), then exactly one
+ * credential token is redacted and one scheme word is kept, so a provider's explanation after the
+ * value survives: `Authorization: Bearer abcdefgh was rejected (HTTP 401)` keeps its tail. A value
+ * that is already the marker is kept, which is what makes redaction idempotent. A nested credential
+ * pair is left for the scan to redact field by field.
  */
 function readValue(text: string, start: number, state: ScanState): ValueRead | null {
   if (start >= text.length) return null;
-  const limit = lineLimit(text, start, state);
   let index = start;
   let scheme: string | null = null;
   for (;;) {
     const wordEnd = authSchemeAt(text, index);
-    if (wordEnd === null || wordEnd >= limit) break;
-    scheme = text.slice(index, wordEnd);
+    if (wordEnd === null) break;
+    scheme ??= text.slice(index, wordEnd);
     index = wordEnd;
-    while (index < limit && isSpaceChar(text[index]!)) index += 1;
+    while (index < text.length && isSpaceChar(text[index]!)) index += 1;
   }
-  if (scheme === null && nestedPairAt(text, index)) return null;
+  if (scheme !== null) return readSchemeValue(text, start, index, scheme, state);
+  if (nestedPairAt(text, index)) return null;
   let end = index;
   let atoms = 0;
-  let onlyPlaceholders = true;
-  while (end < limit) {
+  let onlyMarkers = true;
+  while (end < text.length) {
     const char = text[end]!;
     if (isHardStop(char)) break;
-    const placeholder = PLACEHOLDERS.find((candidate) => text.startsWith(candidate, end));
-    if (placeholder !== undefined) {
-      end += placeholder.length;
+    if (text.startsWith(MARKER, end)) {
+      end += MARKER.length;
       atoms += 1;
       continue;
     }
-    onlyPlaceholders = false;
+    onlyMarkers = false;
     if (isQuoteChar(char)) {
-      const quoted = quotedEnd(text, end, limit);
+      const quoted = quotedEnd(text, end, state);
       if (quoted === null) return toLineEnd(text, end);
       end = quoted;
       atoms += 1;
       continue;
     }
     if (char === '[' || char === '{') {
-      const structure = structureEnd(text, end, limit);
+      const structure = structureEnd(text, end, state);
       if (structure === null) return toLineEnd(text, end);
       end = structure;
       atoms += 1;
       continue;
     }
     if (text.startsWith('-----BEGIN ', end)) {
-      const pem = pemEnd(text, end, state);
+      const pem = pemEnd(text, end);
       if (pem === null) return toLineEnd(text, end);
-      end = pem;
+      // An unterminated block is a private key body: redact from it to the end of the text.
+      if (!pem.closed) return { end: text.length, text: MARKER };
+      end = pem.end;
       atoms += 1;
       continue;
     }
     const token = tokenEnd(text, end);
     if (token === end) break;
-    end = Math.min(token, limit);
+    end = token;
     atoms += 1;
   }
-  // Nothing consumable after the scheme: the value is the scheme itself (`token=Bearer` at a line end).
-  if (atoms === 0) return scheme === null ? null : { end: limit, text: `${scheme} ${MARKER}` };
-  // Already redacted: keep the placeholders exactly as they are, scheme and spacing included.
-  if (onlyPlaceholders) return { end, text: text.slice(start, end) };
-  // A header value with a scheme is one credential: redact the rest of the line.
-  if (scheme !== null) return { end: limit, text: `${scheme} ${MARKER}` };
+  if (atoms === 0) return null;
+  // Already redacted: keep the marker exactly as it is, so a second pass changes nothing.
+  if (onlyMarkers) return { end, text: text.slice(start, end) };
   return { end, text: MARKER };
 }
 
 /**
- * The URL whose userinfo starts after a `://` that ends at `schemeEnd`: the index where the password
- * begins and the end of the userinfo (`@`), or null. The authority runs to the first `/`, `?`, `#` or
- * whitespace, and the **last** `@` in it delimits the userinfo (a password may contain `@`); IPv6
- * hosts (`[::1]:5432`) and an empty user (`://:pw@host`) work the same way (#920).
+ * A credential value that starts with an auth scheme (`Bearer`, `Basic`, repeated or mixed). Exactly
+ * one token after the scheme words is the credential; one scheme word is kept in front of the
+ * marker and everything after the token is left alone (#902 round 5).
  */
-function urlAuthorityAt(text: string, schemeEnd: number): { match: { passwordStart: number; end: number } | null; resume: number } {
+function readSchemeValue(text: string, start: number, index: number, scheme: string, state: ScanState): ValueRead {
+  if (text.startsWith(MARKER, index)) return { end: index + MARKER.length, text: text.slice(start, index + MARKER.length) };
+  if (isQuoteChar(text[index] ?? '')) {
+    const quoted = quotedEnd(text, index, state);
+    if (quoted === null) return toLineEnd(text, index);
+    return { end: quoted, text: `${scheme} ${MARKER}` };
+  }
+  const token = tokenEnd(text, index);
+  return { end: Math.max(token, index), text: `${scheme} ${MARKER}` };
+}
+
+/**
+ * The password of the URL whose `://` ends at `schemeEnd`: where it starts and where the userinfo
+ * ends (`@`), or null when the URL has no password to redact. The authority runs to the first `/`,
+ * `?`, `#` or whitespace, and the **last** `@` in it delimits the userinfo (a password may contain
+ * `@`); IPv6 hosts (`[::1]:5432`) and an empty user (`://:pw@host`) work the same way (#920).
+ */
+function urlPasswordAt(text: string, schemeEnd: number): { passwordStart: number; end: number } | null {
   const authorityStart = schemeEnd + 3;
   let authorityEnd = authorityStart;
   while (authorityEnd < text.length && !isAuthorityStop(text[authorityEnd]!)) authorityEnd += 1;
   let at = -1;
   for (let scan = authorityStart; scan < authorityEnd; scan += 1) if (text[scan] === '@') at = scan;
-  if (at >= 0) {
-    let colon = -1;
-    for (let scan = authorityStart; scan < at; scan += 1)
-      if (text[scan] === ':') {
-        colon = scan;
-        break;
-      }
-    // No user, or an empty password: nothing to redact.
-    if (colon >= 0 && colon + 1 !== at) return { match: { passwordStart: colon + 1, end: at + 1 }, resume: at + 1 };
-  }
-  // Nothing to redact: resume after the `://` and let the scan walk the rest as ordinary text.
-  return { match: null, resume: authorityStart };
+  if (at < 0) return null;
+  let colon = -1;
+  for (let scan = authorityStart; scan < at; scan += 1)
+    if (text[scan] === ':') {
+      colon = scan;
+      break;
+    }
+  // No user, or an empty password: nothing to redact.
+  if (colon < 0 || colon + 1 === at) return null;
+  return { passwordStart: colon + 1, end: at + 1 };
 }
 
 /**
@@ -580,19 +583,20 @@ function urlAuthorityAt(text: string, schemeEnd: number): { match: { passwordSta
  *   url         := scheme "://" authority        — the password between the userinfo's first `:`
  *                                                  and the authority's last `@` is redacted
  *   pair        := KEY quote? space* (":" | "=" | "=>") space* value
- *   value       := [scheme-word space]* atom+              — nothing crosses a line
- *   atom        := placeholder | quoted | structure | pem | token
- *   placeholder := "[redacted]" | "[truncated]"  — kept when they are the whole value
- *   quoted      := "…" | '…' | “…” | ‘…’         (backslash escapes honoured)
- *   structure   := balanced `[…]`/`{…}`, strings escape-aware, depth ≤ 8, ≤ 4 KiB
- *   pem         := "-----BEGIN …-----" … "-----END …-----" (≤ 8 KiB, may span lines)
+ *   value       := [scheme-word space]* [scheme-word space] token   — one token after a scheme
+ *                | atom+
+ *   atom        := marker | quoted | structure | pem | token
+ *   marker      := "[redacted]"                  — kept when it is the whole value
+ *   quoted      := "…" | '…' | “…” | ‘…’         (backslash escapes honoured, may span lines)
+ *   structure   := balanced `[…]`/`{…}`, strings escape-aware, depth ≤ 8, ≤ 4 KiB, may span lines
+ *   pem         := "-----BEGIN …-----" … "-----END …-----" (≤ 8 KiB; no `END` → to the end)
  *   token       := any run up to whitespace, `,`, `;`, `&`, `}`, `]` or a quote
  *
- * A value never extends past its line, so a quoted string, array or object that is not closed on
- * that line is redacted to the end of the line; only a PEM block may span lines, and its `END`
- * search resumes where the previous one stopped.
+ * A quoted string, an array/object and a PEM block may span lines. Only a value that cannot be
+ * delimited at all is cut at the end of its line (an unclosed quote or structure, or text that is
+ * not a PEM block).
  *
- * Work is linear in the length of the text, and here is why for each lookahead the scan performs:
+ * Work is linear in the length of the text, and here is why:
  *
  * - a scheme-character run is measured once and remembered for every position inside it, so a
  *   string of `a+a+a+…` is walked once rather than once per character;
@@ -600,11 +604,12 @@ function urlAuthorityAt(text: string, schemeEnd: number): { match: { passwordSta
  *   inside it, so a key run is examined once plus at most once by `nestedPairAt`;
  * - the separator lookahead (`quote? space* (:|=>)`) reads at most the characters that the pair
  *   prefix then consumes, and a pair that does not form resumes at the key run's end;
- * - markers (10 characters), quotes, structures (≤ 4 KiB), PEM blocks (≤ 8 KiB) and tokens are each
- *   consumed where they are read, so the value loop is bounded by the value's length;
- * - a failed quote or structure search is charged to the line it then redacts, so each line is
- *   searched once; a failed PEM probe resumes the `END` search where the last one stopped, so the
- *   text between probes is read once; and the input is capped at `MAX_REDACT_LENGTH`;
+ * - a marker, a quote, a structure, a PEM block or a token is consumed where it is read, so the
+ *   value loop is bounded by the value's length;
+ * - a quote search is memoised per closing quote, so a text of unclosed quotes is scanned once in
+ *   total; a structure probe that fails spends a budget proportional to the text, so unterminated
+ *   structures cannot re-scan the same text per line; a PEM probe is bounded by `PEM_MAX` and an
+ *   unterminated block consumes the rest of the text;
  * - no path recurses: scheme words, values, atoms and structures are loops with explicit limits.
  */
 function redactScan(text: string): string {
@@ -615,7 +620,7 @@ function redactScan(text: string): string {
   // The end of the scheme-character run that covers `index`, once measured. A run is measured once
   // and reused for every position inside it, so `a+a+a+…` is walked once, not once per character.
   let schemeEnd = 0;
-  const state: ScanState = { pemSearchedTo: 0, lineFrom: 0, lineEnd: 0 };
+  const state: ScanState = { quotes: new Map(), structureBudget: STRUCTURE_BUDGET * length };
   while (index < length) {
     // A URL can only start at a word boundary with a letter.
     if (isAlpha(text[index]!) && (index === 0 || !isWordChar(text[index - 1]!))) {
@@ -624,16 +629,16 @@ function redactScan(text: string): string {
         while (schemeEnd < length && isSchemeChar(text[schemeEnd]!)) schemeEnd += 1;
       }
       if (text[schemeEnd] === ':' && text[schemeEnd + 1] === '/' && text[schemeEnd + 2] === '/') {
-        const attempt = urlAuthorityAt(text, schemeEnd);
-        if (attempt.match) {
+        const password = urlPasswordAt(text, schemeEnd);
+        if (password) {
           // The password, then the `@` that ends the userinfo (the emit runs up to it, not past it).
-          out += `${text.slice(copied, attempt.match.passwordStart)}${MARKER}@`;
-          copied = attempt.match.end;
-          index = attempt.match.end;
-        } else {
-          index = attempt.resume;
+          out += `${text.slice(copied, password.passwordStart)}${MARKER}@`;
+          copied = password.end;
+          index = password.end;
+          continue;
         }
-        continue;
+        // No userinfo to redact: fall through, so `token://value` is still seen as a credential pair
+        // rather than as a URL scheme (0.14.20 redacted the value).
       }
       // No `://` at the end of this run, so nothing inside it can start a URL: fall through to the
       // key rule, which examines this position and moves on.
@@ -697,43 +702,24 @@ const REDACTIONS: readonly (readonly [RegExp, string])[] = [
  *
  * The credential pairs are recognised first, on the text as it is: a key long enough to look like a
  * token (`X-Organization-Auth-Token`) must be seen as a key with a value, not eaten by the
- * token-shaped passes before its short value can be found (#902 round 4). Only then do the
- * token-shaped passes run, and the pair scan runs once more so that anything those passes leave
- * beside a delimiter is settled in the same call. That last pass is what keeps a second application
- * a no-op, which every test asserts.
+ * token-shaped passes before its short value can be found. Only then do the token-shaped passes run,
+ * and the pair scan runs once more so that anything those passes leave beside a delimiter is settled
+ * in the same call. That last pass is what keeps a second application a no-op.
  *
- * The text is cut to `MAX_REDACT_LENGTH` first, at a boundary, so that no credential is split by
- * the cut (see `cutForScan`). Nothing here throws: a scan that fails for any reason returns the
- * bare marker, so a broken redactor can never turn an error path into an exception and never
- * echoes the input.
+ * The whole text is scanned, whatever its length: callers cut *after* redaction (`safeErrorText`,
+ * `redactedText`, `providerDiagnostic`, `failureText`), so a credential that straddles a cut is
+ * redacted here rather than exposed there. The scan is linear in the length of the text, and the
+ * property tests hold it to that with 10 MB inputs.
+ *
+ * Nothing here throws: a scan that fails for any reason returns the bare marker, so a broken
+ * redactor can never turn an error path into an exception and never echoes the input.
  */
 export function redactCredentials(text: string): string {
-  const input = String(text);
   try {
-    if (input.length <= MAX_REDACT_LENGTH) return redactOnce(input);
-    // Cut at a boundary, redact, then mark. The marker is appended after redaction so nothing can
-    // consume it, and it is a placeholder the pair scan keeps, so a second pass leaves it alone.
-    let out = redactOnce(input.slice(0, cutForScan(input, MAX_REDACT_LENGTH)));
-    const budget = MAX_REDACT_LENGTH - TRUNCATED_MARKER.length;
-    // Redaction can grow the text (a short value becomes a longer marker): bound the result too.
-    if (out.length > budget) out = boundRedacted(out, budget);
-    return `${out}${TRUNCATED_MARKER}`;
+    return redactOnce(String(text));
   } catch {
     return MARKER;
   }
-}
-
-/**
- * Cuts an already-redacted text to `budget`. Nothing in it is a secret any more, so the tail can be
- * dropped; the cut goes to a boundary and a trailing separator, opening quote, backslash or partial
- * placeholder is dropped with it, so nothing at the end reads as the start of a value on a second
- * pass (which is what keeps a truncated text a fixed point of `redactCredentials`).
- */
-function boundRedacted(text: string, budget: number): string {
-  return text
-    .slice(0, cutForScan(text, budget))
-    .replace(/[\s:=>"'\u201c\u201d\u2018\u2019[{(\\]+$/u, '')
-    .replace(/\[[A-Za-z]*$/u, '');
 }
 
 /** The pipeline: pairs first, then the token-shaped passes, then pairs once more (see above). */
@@ -741,45 +727,6 @@ function redactOnce(text: string): string {
   let out = redactScan(text);
   for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
   return redactScan(out);
-}
-
-/**
- * Where to cut a text that is longer than `cap`, so that the cut can never split a credential
- * (#902 round 4). The first `cap` characters are kept, then a trailing fragment is discarded: the
- * cut backs up to the last line terminator or whitespace within `FRAGMENT_WINDOW`, and if there is
- * none the whole window is dropped. A surrogate pair is never split.
- *
- * Why nothing lexically cut can survive:
- *
- * - a partial token at the end is dropped with the fragment, because the cut lands on whitespace (or
- *   drops 4 KiB) rather than in the middle of a run. A token *run* longer than the window (a 10 KiB
- *   token straddling the cut) still has at least 24 characters left in the kept text, which is what
- *   the bare-token rule needs to redact it;
- * - a URL authority cannot be cut open: the fragment drop removes the whole area around the cut, so
- *   either the authority is complete in the kept text (and redacted by the pair or URL rule) or it
- *   is gone;
- * - an unclosed quote, structure or PEM at the end cannot hide anything: the value scan redacts an
- *   unclosed value to the end of its line (or to the end of the text), so the remainder of the kept
- *   text is covered by a marker.
- */
-function cutForScan(text: string, cap: number): number {
-  const cut = safeCut(text, Math.min(cap, text.length));
-  const from = Math.max(0, cut - FRAGMENT_WINDOW);
-  for (let index = cut - 1; index >= from; index -= 1) {
-    const char = text[index]!;
-    if (LINE_BREAKS.has(char) || isSpaceChar(char)) return index;
-  }
-  return safeCut(text, from);
-}
-
-/** `index`, moved back by one when it would land between a high and a low surrogate. */
-function safeCut(text: string, index: number): number {
-  if (index <= 0) return 0;
-  if (index >= text.length) return text.length;
-  const before = text.charCodeAt(index - 1);
-  const after = text.charCodeAt(index);
-  const splits = before >= 0xd800 && before <= 0xdbff && after >= 0xdc00 && after <= 0xdfff;
-  return splits ? index - 1 : index;
 }
 
 /**

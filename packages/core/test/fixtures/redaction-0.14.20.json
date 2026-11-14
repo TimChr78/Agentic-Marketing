@@ -486,6 +486,12 @@
     "{{JWT}}",
     "token={{JWT}}",
     "the gateway rejected {{SHOPIFY}} for that shop",
+    "password=\"first\nshortpw\"",
+    "password='first\nshortpw'",
+    "password=“first\nshortpw”",
+    "{\"privateKey\": {\n  \"kty\": \"EC\",\n  \"d\": \"shortpw\"\n}}",
+    "token://shortpw",
+    "Authorization: Bearer shortpw was rejected by the upstream (HTTP 401)",
     "token=\"probe-secret\nrest\""
   ]
 }

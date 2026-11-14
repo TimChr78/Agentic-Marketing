@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { expectLinear } from '../../../test-support/linear';
-import { MAX_REDACT_LENGTH, redactCredentials } from '../src/diagnostics';
+import { redactCredentials } from '../src/diagnostics';
 
 // #898/#902/#920 round 2: the credential redaction is one scan over the text, so it has properties
 // a table of examples cannot show: no planted secret survives whatever form the value takes, a
@@ -220,6 +220,26 @@ describe('the scanner is linear for every special shape (#902 round 4)', () => {
     expect(slow).toHaveLength(0);
   }, 180_000);
 
+  it('finishes every shape at a large size without a per-shape budget', () => {
+    const slow: string[] = [];
+    for (const prefix of PREFIXES) {
+      for (const opener of OPENERS) {
+        for (const filler of FILLERS) {
+          for (const terminator of TERMINATORS) {
+            const unit = `${prefix}${opener}${filler}${terminator}`;
+            const large = unit.repeat(4_000);
+            measure(large);
+            const elapsed = measure(large);
+            // A linear scan of tens of kilobytes is milliseconds; a quadratic one is not.
+            if (elapsed > 500) slow.push(`${JSON.stringify(unit)} ${elapsed.toFixed(0)}ms`);
+          }
+        }
+      }
+    }
+    expect(slow.slice(0, 10)).toEqual([]);
+    expect(slow).toHaveLength(0);
+  }, 300_000);
+
   it('does not rescan the text for an unclosed Unicode quote', () => {
     const started = performance.now();
     const out = redactCredentials('token=\u201cabc\n'.repeat(5_900));
@@ -228,45 +248,41 @@ describe('the scanner is linear for every special shape (#902 round 4)', () => {
   }, 60_000);
 });
 
-describe('a credential straddling the cut never survives (#902 round 4)', () => {
-  const cap = MAX_REDACT_LENGTH;
-  // No 4-gram here is an ordinary word, so a surviving 4-gram is a real leak.
-  const SECRET = 'q7Xk2Zp9Lm4Rt8Vw6Yb3Sd5Nf1Gh4Jk';
-  const cases: [string, (secret: string) => string][] = [
-    ['a bare token', (secret) => secret],
-    ['a key=value pair', (secret) => `token=${secret}`],
-    ['a quoted value', (secret) => `apiSecret="${secret}"`],
-    ['a URL userinfo', (secret) => `postgres://u:${secret}@host`],
-    ['a Bearer value', (secret) => `Authorization: Bearer ${secret}`],
-    ['a JSON pair', (secret) => `{"apiSecret":"${secret}"}`],
-    ['a PEM block', (secret) => `secret=-----BEGIN PRIVATE KEY-----\n${secret}\n-----END PRIVATE KEY-----`],
-  ];
-  const grams = (text: string): string[] => {
-    const out: string[] = [];
-    for (let index = 0; index + 4 <= text.length; index += 1) out.push(text.slice(index, index + 4));
-    return out;
-  };
+describe('the scanner stays linear on very large input (#902 round 5)', () => {
+  const MB = 1024 * 1024;
+  const repeatTo = (unit: string, bytes: number): string => unit.repeat(Math.ceil(bytes / unit.length));
 
-  // Each case is a 64 KiB input, so this stays at the offsets that straddle the cut: the secret's
-  // own length plus a margin either side, and both paddings for the shapes where the cut can land
-  // between words.
-  it('leaves no 4-character part of the secret at any offset around the cap', () => {
-    const leaks: string[] = [];
-    const test = (name: string, wrap: (secret: string) => string, pad: string): void => {
-      for (let delta = -12; delta <= 12; delta += 1) {
-        const unit = wrap(SECRET);
-        const start = Math.max(0, cap - SECRET.length - delta);
-        const input = `${pad.repeat(Math.ceil(start / pad.length)).slice(0, start)}${unit}${pad.repeat(cap)}`;
-        if (input.length <= cap) continue;
-        const out = redactCredentials(input);
-        for (const gram of grams(SECRET)) if (out.includes(gram)) leaks.push(`${name} ${delta} ${JSON.stringify(pad)}: ${gram}`);
-      }
-    };
-    for (const [name, wrap] of cases) test(name, wrap, 'x');
-    for (const [name, wrap] of cases.filter(([name]) => name === 'a bearer value' || name === 'a PEM block')) test(name, wrap, 'x ');
-    expect(leaks.slice(0, 5)).toEqual([]);
-    expect(leaks).toHaveLength(0);
-  }, 180_000);
+  it('finishes an ordinary 10 MB text', () => {
+    const text = repeatTo('the gateway said the request failed and it was retried; ', 10 * MB);
+    const started = performance.now();
+    const out = redactCredentials(text);
+    expect(performance.now() - started).toBeLessThan(20_000);
+    expect(out).toBe(text);
+  }, 120_000);
+
+  it('finishes an adversarial 10 MB text', () => {
+    // Every lookahead the scanner has, at a size where a quadratic path cannot hide: unclosed
+    // quotes and structures, repeated pairs, markers, PEM beginnings, scheme words, long tokens and
+    // one single-line text with no whitespace at all.
+    const text = [
+      repeatTo('token="abc\n', MB),
+      repeatTo('apiSecret=[xyz\n', MB),
+      repeatTo('password={"a":1\n', MB),
+      repeatTo('key=', MB),
+      repeatTo('[redacted] ', MB),
+      repeatTo('-----BEGIN X\n', MB),
+      repeatTo('Bearer ', MB),
+      repeatTo('token=Bearer Bearer ', MB),
+      repeatTo('a+b.c-d', MB),
+      repeatTo('secret=', MB),
+      repeatTo('Zz9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk', MB),
+    ].join('');
+    const started = performance.now();
+    const out = redactCredentials(text);
+    const elapsed = performance.now() - started;
+    expect(out.length).toBeGreaterThan(0);
+    expect(elapsed).toBeLessThan(45_000);
+  }, 120_000);
 });
 
 describe('random input never breaks the scanner (#902 round 3)', () => {
