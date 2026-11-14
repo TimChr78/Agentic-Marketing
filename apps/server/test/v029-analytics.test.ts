@@ -523,8 +523,9 @@ describe('named reports', () => {
     const funnel = await api.call('analytics.journeyFunnel', { journeyId: journey, from: FROM, to: TO });
     expect(funnel.entered).toBeNull();
     expect(funnel.goalReached).toBeNull();
-    expect(funnel.completed).toBe(0);
-    expect(funnel.exited).toBe(0);
+    // A hidden step withholds every headline, including a recorded zero (#908 review round 4).
+    expect(funnel.completed).toBeNull();
+    expect(funnel.exited).toBeNull();
     expect(funnel.steps.map((s) => s.reached)).toEqual([null]);
     expect(funnel.steps.every((s) => s.dropOff === null && s.dropOffRate === null)).toBe(true);
     expect(funnel.meta.suppressed).toBeGreaterThanOrEqual(3);
@@ -649,10 +650,10 @@ describe('named reports', () => {
     expect(reached.trigger).toBe(100);
     expect(reached.split).toBe(100);
     // B (3) was suppressed by the query layer; A (97), its only visible sibling, is hidden with it,
-    // so the fork total cannot hand B back as 100 − 97.
+    // so the fork total cannot hand B back as 100 − 97. Every headline is withheld as well.
     expect(reached.b).toBeNull();
     expect(reached.a).toBeNull();
-    expect(funnel.entered).toBe(100);
+    expect(funnel.entered).toBeNull();
     const visible = [
       ...funnel.steps.flatMap((step) => (step.reached === null ? [] : [step.reached])),
       ...Object.values({
@@ -665,6 +666,74 @@ describe('named reports', () => {
     const differences = visible.flatMap((a) => visible.filter((b) => b !== a).map((b) => Math.abs(a - b)));
     expect(differences).not.toContain(3);
     expect(funnel.meta.notes.join(' ')).toContain('branch');
+  });
+
+  it('withholds every headline for a goal match/timeout split (#908 review round 4)', async () => {
+    const api = t.api(owner);
+    const journey = (
+      await api.call('artifacts.create', {
+        type: 'journey',
+        name: 'Goal match and timeout',
+        content: {
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' }, next: [{ to: 'goal' }] },
+            {
+              id: 'goal',
+              kind: 'goal',
+              label: 'Goal',
+              config: { event: 'Order Completed', within: 'P7D', matched: 'matched_exit', timeout: 'timeout_exit' },
+              next: [{ to: 'matched_exit' }, { to: 'timeout_exit' }],
+            },
+            { id: 'matched_exit', kind: 'exit', label: 'Matched', config: {} },
+            { id: 'timeout_exit', kind: 'exit', label: 'Timed out', config: {} },
+          ],
+        },
+      })
+    ).artifactId;
+    await api.call('artifacts.requestPublish', { artifactId: journey, note: 'goal split' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: journey,
+        version: 1,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // 100 reach the goal step; 97 match it and 3 time out. goalReached counts matches only, while
+    // the goal step's reach counts everyone who arrived.
+    for (let i = 0; i < 100; i++) {
+      const p = person();
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'trigger', 'step', 1);
+      add(p, 'goal', 'step', 2);
+      if (i < 97) {
+        add(p, 'goal', 'converted', 3);
+        add(p, 'matched_exit', 'step', 4);
+        add(p, 'matched_exit', 'completed', 5);
+      } else {
+        add(p, 'timeout_exit', 'step', 4);
+        add(p, 'timeout_exit', 'completed', 5);
+      }
+    }
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: journey, from: FROM, to: TO });
+    expect(funnel.entered).toBeNull();
+    expect(funnel.goalReached).toBeNull();
+    expect(funnel.completed).toBeNull();
+    expect(funnel.exited).toBeNull();
+    const visible = funnel.steps.flatMap((step) => (step.reached === null ? [] : [step.reached]));
+    const differences = visible.flatMap((x) => visible.filter((y) => y !== x).map((y) => Math.abs(x - y)));
+    expect(differences).not.toContain(3);
+    expect(funnel.meta.notes.join(' ')).toContain('All totals are withheld');
   });
 
   it('computes the drop-off chain over the published version only (#591)', async () => {

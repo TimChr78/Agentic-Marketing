@@ -79,30 +79,22 @@ export interface JourneyFunnelNode {
 type TotalName = 'entered' | 'goalReached' | 'completed' | 'exited';
 
 /**
- * The funnel's k rule (#908, #917 review round 2).
+ * The funnel's k rule (#908, #917 review rounds 2-4).
  *
- * The headline totals come from an undimensioned query, so the measure layer never suppressed them
- * while it suppressed the step rows beside them. Steps are not independent, though: they nest and
- * fork, and a hidden branch can be recovered as the difference between a visible parent or merge and
- * its other visible parts. So the protection follows the published topology. A *relation* is a set
- * of printed counts that add up (or, for a headline, name the same people):
+ * Step rows are protected along the published topology. A relation between STEPS is a set of counts
+ * that add up: a fork's children to their parent, and a reconvergence's parents to the node. When
+ * exactly one term of a relation is hidden, the smallest visible term of that SAME relation is hidden
+ * too (or the parent/node when that is the only other term), and the shared
+ * {@link planComplementarySuppression} repeats to a fixed point. A step in an unrelated branch is
+ * never a complement.
  *
- *  - a fork: reach(parent) = reach(child A) + reach(child B) + … (plus anyone still at the parent,
- *    which this response does not print, so the relation is treated as if all of them moved on — the
- *    conservative reading);
- *  - a merge (reconvergence): reach(child) = reach(parent A) + reach(parent B) + …;
- *  - a headline: entered = the entry step's reach, goalReached = the goal step's reach, completed =
- *    the single exit step's reach.
- *
- * For each relation, if exactly one term is hidden and the rest are visible, hide one more term of
- * THAT relation — the smallest visible sibling, or the parent/merge node (or the headline total) when
- * that is the only other term. The shared {@link planComplementarySuppression} runs over all
- * relations and repeats to a fixed point, because hiding a term can leave another relation with one
- * hidden term. A step in an unrelated branch is never a complement.
- *
- * A positive total below k is withheld on its own. A drop-off or rate with a hidden operand is null
- * in the handler. Without a published topology the relations are unknown, so every step protects
- * every total (the flat rule) and the caller notes that.
+ * Headlines are not modelled. How a headline relates to the steps cannot be known in general:
+ * `goalReached` counts participants who matched the goal, not the goal step's reach (a timeout still
+ * reaches the step), `completed` can be recorded at several nodes, and `exited` anywhere. So once any
+ * step row is hidden — below k or as a complementary row — every headline total is withheld (null):
+ * a headline minus the visible steps could otherwise name the hidden count. A positive headline that
+ * is itself below k is withheld regardless. A drop-off or rate with a hidden operand is null in the
+ * handler. Over-suppression is deliberate; the note says a hidden step withheld the totals.
  */
 export function planJourneyFunnelSuppression(opts: {
   totals: JourneyFunnelTotals;
@@ -125,27 +117,17 @@ export function planJourneyFunnelSuppression(opts: {
   const present = new Set(steps.map((step) => step.step));
   const reached = new Map(steps.map((step) => [step.step, step.reached ?? 0]));
   const hidden = new Map(steps.map((step) => [step.step, step.reached === null]));
-
   const hideStep = (id: string): boolean => {
     if (hidden.get(id) !== false) return false;
     hidden.set(id, true);
-    return true;
-  };
-  const hideTotal = (name: TotalName): boolean => {
-    if (totals[name] === null) return false;
-    totals[name] = null;
     return true;
   };
 
   interface Relation {
     name: string;
     steps: readonly string[];
-    totals: readonly TotalName[];
     /** Hidden when the relation has one hidden term and nothing visible to hide in its place. */
     withheldStep?: string;
-    withheldTotal?: TotalName;
-    /** Headline relations never hide their visible step to protect their own total. */
-    hideSteps: boolean;
   }
   const relations: Relation[] = [];
   if (opts.topology) {
@@ -159,65 +141,25 @@ export function planJourneyFunnelSuppression(opts: {
         relations.push({
           name: `fork:${node.id}`,
           steps: [...(present.has(node.id) ? [node.id] : []), ...kids],
-          totals: [],
           ...(present.has(node.id) ? { withheldStep: node.id } : {}),
-          hideSteps: true,
         });
       const from = (parents.get(node.id) ?? []).filter((id) => present.has(id));
       if (from.length >= 2)
         relations.push({
           name: `merge:${node.id}`,
           steps: [...(present.has(node.id) ? [node.id] : []), ...from],
-          totals: [],
           ...(present.has(node.id) ? { withheldStep: node.id } : {}),
-          hideSteps: true,
         });
     }
-    // Every headline is the sum of the steps that produce its event in the interpreter:
-    //   entered      = every trigger's reach (a journey normally has one),
-    //   goalReached  = every goal node's reach (the 'converted' event is recorded at the goal),
-    //   completed    = every terminal step's reach (an exit node, or a node with no outgoing edge;
-    //                  the interpreter records 'completed' at the node where the walk ends).
-    // Each is a relation `total = Σ contributors`, so a hidden contributor hides its smallest
-    // visible sibling or the headline itself — a second exit can no longer leak through `completed`.
-    const headlineSets: { name: TotalName; steps: string[] }[] = [
-      { name: 'entered', steps: opts.topology.filter((node) => node.kind === 'trigger').map((node) => node.id) },
-      { name: 'goalReached', steps: opts.topology.filter((node) => node.kind === 'goal').map((node) => node.id) },
-      { name: 'completed', steps: opts.topology.filter((node) => node.children.length === 0).map((node) => node.id) },
-    ];
-    for (const headline of headlineSets) {
-      const contributors = headline.steps.filter((id) => present.has(id));
-      // A zero headline cannot be the sum of positive steps and reveals nothing about one; a
-      // withheld headline is already hidden. Only a positive, visible headline forms a relation.
-      if (!contributors.length || totals[headline.name] === null || !(totals[headline.name]! > 0)) continue;
-      relations.push({
-        name: `headline:${headline.name}`,
-        steps: contributors,
-        totals: [headline.name],
-        withheldTotal: headline.name,
-        hideSteps: true,
-      });
-    }
-  } else {
-    // No topology: relations are unknown, so keep the flat rule — any step protects any total.
-    for (const name of names)
-      relations.push({ name: `flat:${name}`, steps: steps.map((step) => step.step), totals: [], withheldTotal: name, hideSteps: true });
   }
   const byName = new Map(relations.map((relation) => [relation.name, relation]));
-  const termsOf = (relation: Relation) => [
-    ...relation.steps.map((id) => ({
+  const termsOf = (relation: Relation) =>
+    relation.steps.map((id) => ({
       id: `s:${id}`,
       group: reached.get(id) ?? 0,
       value: reached.get(id) ?? 0,
       hidden: hidden.get(id) === true,
-    })),
-    ...relation.totals.map((name) => ({
-      id: `t:${name}`,
-      group: totals[name] ?? 0,
-      value: totals[name] ?? 0,
-      hidden: totals[name] === null,
-    })),
-  ];
+    }));
 
   for (let round = 0; round <= relations.length + steps.length + 2; round++) {
     const plan = planComplementarySuppression({
@@ -225,17 +167,14 @@ export function planJourneyFunnelSuppression(opts: {
       contributors: (name) => termsOf(byName.get(name)!),
       hide: (name, id) => {
         const relation = byName.get(name);
-        if (!relation) return false;
-        const [kind, key] = String(id).split(':');
-        if (kind === 's') return relation.hideSteps && relation.steps.includes(key ?? '') ? hideStep(key ?? '') : false;
-        return relation.totals.includes(key as TotalName) ? hideTotal(key as TotalName) : false;
+        const key = String(id).replace(/^s:/, '');
+        return Boolean(relation && relation.steps.includes(key)) && hideStep(key);
       },
     });
     let changed = false;
     for (const name of plan.withheld) {
-      const relation = byName.get(name)!;
-      if (relation.withheldStep !== undefined && hideStep(relation.withheldStep)) changed = true;
-      if (relation.withheldTotal !== undefined && hideTotal(relation.withheldTotal)) changed = true;
+      const step = byName.get(name)?.withheldStep;
+      if (step !== undefined && hideStep(step)) changed = true;
     }
     if (!changed) break;
   }
@@ -246,23 +185,17 @@ export function planJourneyFunnelSuppression(opts: {
     if (step.reached !== null) hiddenSteps += 1;
     step.reached = null;
   }
-  // A headline that cannot be expressed as a sum of printed steps has no relation to protect it.
-  // `exited` is recorded wherever a participant withdraws consent or a wait ends, and a headline
-  // whose contributor step has no row cannot be tied to one either: with any step hidden, the
-  // headline could name that step's people, so it is withheld (the conservative fallback).
-  if (opts.topology && hiddenSteps > 0) {
-    const expressible = new Set(relations.flatMap((relation) => relation.totals));
-    for (const name of names) {
-      if (expressible.has(name)) continue;
-      if (totals[name] !== null && totals[name]! > 0) hideTotal(name);
-    }
-  }
 
+  // A positive headline below k is a small group of its own; zero is not invented as one.
   for (const name of names) {
     const value = totals[name];
-    // A positive count below k is itself a small group; zero is not and is never invented as one.
     if (value !== null && value > 0 && value < k) totals[name] = null;
   }
+  // A hidden step can be recovered as a headline minus the visible steps, so with any hidden step
+  // every headline goes. This holds without a published topology too: no relations, but the same
+  // conservative rule.
+  if (steps.some((step) => step.reached === null)) for (const name of names) totals[name] = null;
+
   const withheld = names.filter((name) => totals[name] === null && initial[name] !== null);
   return { totals, steps, withheld, hiddenSteps, complementary: hiddenSteps > 0 };
 }
@@ -382,7 +315,7 @@ export const analyticsJourneyFunnel = defineCommand({
   name: 'analytics.journeyFunnel',
   title: 'Journey funnel',
   description:
-    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. A drop-off or rate that would be computed from a withheld count is null. Counts use only the published version when the journey has one. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed, and a headline total below k is withheld (null). The protection follows the published topology: a fork’s branches add up to their parent and a reconvergence’s parents to the node, so when exactly one term of such a relation is hidden the smallest visible term of that relation (or the parent/node when it is the only other term) is hidden too; a hidden entry, goal or single exit step withholds its headline total. Without a published version every step protects every total. A note names every withheld total and every branch complement.',
+    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. A drop-off or rate that would be computed from a withheld count is null. Counts use only the published version when the journey has one. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed. Step rows are protected along the published topology: a fork’s branches add up to their parent and a reconvergence’s parents to the node, so when exactly one term of such a relation is hidden the smallest visible term of that same relation (or the parent/node when it is the only other term) is hidden too. Headlines are not modelled: if any step row is hidden, every headline total (entered, goalReached, completed, exited) is withheld (null), because a headline minus the visible steps could name the hidden count, and a positive headline below k is withheld regardless. Without a published version the step relations are unknown and no complementary step is hidden, but the same headline rule applies. A note says which totals were withheld and why.',
   input: z.object({
     journeyId: JourneyId,
     from: isoDateTime('from'),
@@ -492,17 +425,13 @@ export const analyticsJourneyFunnel = defineCommand({
 
     const suppressionNotes: string[] = [];
     if (funnel.hiddenSteps > 0)
+      suppressionNotes.push(`One further step row was suppressed so a step below k=${K} cannot be derived from its branch.`);
+    if (steps.some((step) => step.reached === null))
       suppressionNotes.push(
-        `One further step row was suppressed so a step below k=${K} cannot be derived from the funnel totals or a branch.`,
+        'All totals are withheld because a step row is hidden: a headline minus the visible steps could name the hidden count.',
       );
-    if (!published && funnel.complementary)
-      suppressionNotes.push(
-        'No published version is selected, so the journey’s branch relations are unknown: the totals are protected against every step row together, not along the branch that hid one.',
-      );
-    if (funnel.withheld.length > 0)
-      suppressionNotes.push(
-        `Totals withheld because fewer than k=${K} people or a hidden step’s count could be derived from them: ${funnel.withheld.join(', ')}.`,
-      );
+    else if (funnel.withheld.length > 0)
+      suppressionNotes.push(`Totals withheld because they are positive counts below k=${K}: ${funnel.withheld.join(', ')}.`);
 
     const notes = [
       ...new Set([
