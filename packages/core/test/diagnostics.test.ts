@@ -207,10 +207,14 @@ describe('camelCase and PascalCase credential keys (#898)', () => {
     // A middle word does not decide: `count` and `sessions` are the last words here.
     expect(redactCredentials(`token_count=${SHORT}`)).toBe(`token_count=${SHORT}`);
     expect(redactCredentials(`tokenCount=${SHORT}`)).toBe(`tokenCount=${SHORT}`);
-    // A trailing number is not the word: `apiKey2` still ends in `key`, `authTokens` in `tokens`.
+    // A trailing number is not the word: `apiKey2` still ends in `key`.
     expect(redactCredentials(`apiKey2=${SHORT}`)).toBe('apiKey2=[redacted]');
-    expect(redactCredentials(`authTokens=${SHORT}`)).toBe('authTokens=[redacted]');
-    expect(redactCredentials(`count_tokens=${SHORT}`)).toBe('count_tokens=[redacted]');
+    // The words are the singular spellings (and `credentials`): a plural is an ordinary noun, so a
+    // message that lists keys or tokens keeps its list.
+    expect(redactCredentials(`authTokens=${SHORT}`)).toBe(`authTokens=${SHORT}`);
+    expect(redactCredentials(`count_tokens=${SHORT}`)).toBe(`count_tokens=${SHORT}`);
+    expect(redactCredentials('Allowed keys: (none).')).toBe('Allowed keys: (none).');
+    expect(redactCredentials('expected tokens: 3')).toBe('expected tokens: 3');
   });
 
   it('redacts a credential pair nested in another value', () => {
@@ -267,6 +271,95 @@ describe('URL userinfo credentials (#920)', () => {
 
   it('does not redact an e-mail address or a clock time', () => {
     expect(redactCredentials('write to ops@example.com at 12:30')).toBe('write to ops@example.com at 12:30');
+  });
+});
+
+describe('a structured value under a credential key (#902 round 2)', () => {
+  it('consumes the whole balanced array or object', () => {
+    expect(redactCredentials('{"apiSecret":["shortpw","morepw"]}')).toBe('{"apiSecret":[redacted]}');
+    expect(redactCredentials('{"apiSecret":{"value":"shortpw"}}')).toBe('{"apiSecret":[redacted]}');
+    expect(redactCredentials('token=[1, 2, 3]')).toBe('token=[redacted]');
+    expect(redactCredentials('token={"a":{"b":{"c":1}}}')).toBe('token=[redacted]');
+    // A bracket or an escaped quote inside a string does not end the structure early.
+    expect(redactCredentials('token=["a]b", {"c": "d\\"e"}]')).toBe('token=[redacted]');
+  });
+
+  it('cuts an unbalanced or too deeply nested structure at the end of its line', () => {
+    const deep = '['.repeat(12) + 'shortpw' + ']'.repeat(12);
+    expect(redactCredentials(`apiSecret=${deep}`)).toBe('apiSecret=[redacted]');
+    expect(redactCredentials('authToken={"value":"shortpw"\nnext line')).toBe('authToken=[redacted]\nnext line');
+    expect(redactCredentials('secret=["unterminated\nnext line')).toBe('secret=[redacted]\nnext line');
+  });
+});
+
+describe('an Authorization value under a credential key (#902 round 2)', () => {
+  it('redacts a short Bearer or Basic value of any length', () => {
+    expect(redactCredentials('authToken=Bearer abc')).toBe('authToken=Bearer [redacted]');
+    expect(redactCredentials('apiSecret=Basic ab')).toBe('apiSecret=Basic [redacted]');
+    expect(redactCredentials('Authorization: bearer x')).toBe('Authorization: bearer [redacted]');
+    expect(redactCredentials('token: Bearer a')).toBe('token: Bearer [redacted]');
+  });
+});
+
+describe('URL userinfo with an @ in the password (#920 round 2)', () => {
+  it('takes the last @ of the authority as the userinfo delimiter', () => {
+    expect(redactCredentials('http://u:pa@ss@host')).toBe('http://u:[redacted]@host');
+    expect(redactCredentials('postgres://u:p@ss@w0rd@db:5432/am')).toBe('postgres://u:[redacted]@db:5432/am');
+  });
+
+  it('handles an IPv6 host, an empty user and several URLs in one string', () => {
+    expect(redactCredentials('http://u:pw@[::1]:5432/db')).toBe('http://u:[redacted]@[::1]:5432/db');
+    expect(redactCredentials('redis://:pw@valkey:6379/0')).toBe('redis://:[redacted]@valkey:6379/0');
+    expect(redactCredentials('a postgres://u:pw@db/x and redis://n:q@cache:6379')).toBe(
+      'a postgres://u:[redacted]@db/x and redis://n:[redacted]@cache:6379',
+    );
+    expect(redactCredentials('http://[::1]:5432/path?x=a:b@c')).toBe('http://[::1]:5432/path?x=a:b@c');
+  });
+});
+
+describe('a multi-line PEM block (#885 round 2)', () => {
+  const pem = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\nhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----';
+
+  it('consumes the whole block under a credential key', () => {
+    expect(redactCredentials(`password=${pem}`)).toBe('password=[redacted]');
+    expect(redactCredentials(`secret: ${pem}\ntrailing`)).toBe('secret: [redacted]\ntrailing');
+    // A quoted value keeps the shape redaction has always produced: the value, quotes included,
+    // becomes the marker.
+    expect(redactCredentials(`{"privateKey":"${pem.replaceAll('\n', '\\n')}"}`)).toBe('{"privateKey":[redacted]}');
+  });
+
+  it('cuts an unterminated block at the end of its line', () => {
+    expect(redactCredentials('password=-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n')).toBe('password=[redacted]\nMIIEvQIBADANBgkq\n');
+  });
+});
+
+describe('redaction is idempotent (#902 round 2)', () => {
+  const forms = [
+    'token=shortpw',
+    'authToken: Bearer abc',
+    'apiSecret=Basic ab',
+    '{"apiSecret":["shortpw","morepw"]}',
+    '{"apiSecret":{"value":"shortpw"}}',
+    'postgres://u:pw@db/am',
+    'http://u:pa@ss@host',
+    'X-Auth-Token: abc1234567',
+    'https://api.example.com/v1/hook?apiSecret=abc1234567&x=1',
+    'Invalid OAuth access token: access_token=probe-secret',
+    'password=-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----',
+    'sent with Bearer abcdef1234567890',
+    'nothing to redact here',
+  ];
+  for (const form of forms)
+    it(`repeats without changing: ${form.slice(0, 40)}`, () => {
+      const once = redactCredentials(form);
+      expect(redactCredentials(once)).toBe(once);
+      expect(redactCredentials(redactCredentials(once))).toBe(once);
+    });
+
+  it('does not add a bracket to a marker it already wrote', () => {
+    expect(redactCredentials('token=[redacted]')).toBe('token=[redacted]');
+    expect(redactCredentials('{"apiSecret":[redacted]}')).toBe('{"apiSecret":[redacted]}');
+    expect(redactCredentials('token: Bearer [redacted]')).toBe('token: Bearer [redacted]');
   });
 });
 

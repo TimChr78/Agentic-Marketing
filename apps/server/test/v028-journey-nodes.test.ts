@@ -537,8 +537,10 @@ describe('entry keys (#93)', () => {
         ],
       },
     });
+    // The field name `config.entryKey` ends in a credential word, so the redactor replaces its
+    // value ("property") before the message reaches the caller; the rest of the reason survives.
     await expect(api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' })).rejects.toThrow(
-      /property is required/,
+      /config\.entryKey: \[redacted\] is required when source is event_property/,
     );
   });
 });
