@@ -2,7 +2,7 @@
 
 Durable handoff for the agent working on this repository. Update it when a long run starts, when work lands, and at every handoff. A new session should be able to resume from this file alone.
 
-_Last updated: 2026-11-12_
+_Last updated: 2026-11-14_
 
 ## Now
 
@@ -42,6 +42,12 @@ _Last updated: 2026-11-12_
   - **0.14.18** (packaging hardening: #870) is released and verified: Sol approved (admin port on loopback by default via `AM_BIND`, empty template database passwords, role-aware healthcheck, per-run smoke ports, digest-pinned images).
   - **0.14.19** (privacy and test reliability: #692, #820, #828, #830, #831, #840) is released and verified: Sol approved after four rounds (complementary suppression per total, e-mail totals protected by any member with in-window e-mail activity, per-variant k floor in experiment results).
   - **0.14.20** (error-text sweep and reliability: #885, #877, #892, #893) is released: Sol approved after ten rounds (one redaction rule, redact before cut, applied at the executor for every AppError, at policy-reason creation and at each stored error column; Docker-assigned smoke ports; a deterministic linear-helper self-test; uuid pinned to 11.1.1). This completes the 2026-11-13 plan.
+- **The 2026-11-14 re-audit plan runs as patch releases 0.14.21 to 0.14.24.** The re-audit of v0.14.20 filed 23 issues (#898–#920); all 23 were confirmed against the code. Plan: https://claude.ai/artifact/CDenbTFevFfh33DCMtJUrN
+  - **0.14.21** (security hardening: #898, #902, #913, #914, #919, #920) is in progress on `fix/01421-security`.
+  - **0.14.22** (artifact and agent integrity: #899, #900, #907, #911, #912; migrations 0093 and 0094) is in progress on `fix/01422-integrity`.
+  - **0.14.23** (privacy and reporting correctness: #901, #903, #908, #909, #916, #917) is next.
+  - **0.14.24** (audit trail, idempotency, small fixes and docs: #904, #905, #906, #910, #915, #918) is next.
+  - Decisions taken with the recommended options: #906 documents the same-key retry rule and adds an optional key to MCP tools; #904 documents the header-copying limit; #917 keeps `unattributed` and adds `unmatched` and `spendTruncated`; #911 archives the older of two active mandates; #900 hides archived artifacts from `artifacts.list` unless `includeArchived` is set.
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
 ## Owner sign-off (Wave 5 done criteria that cannot be automated)
@@ -87,4 +93,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.20, released from `main`; v0.14.19 is verified.
+- The last release is v0.14.20, released from `main`; v0.14.20 is verified.
