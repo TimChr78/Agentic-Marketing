@@ -167,10 +167,13 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
     if (!ok) return;
     try {
       await api.call('copilot.deleteConversation', { id });
+      // A read for the deleted conversation must not land afterwards and restore its transcript.
+      readSeq.current++;
       loadPast();
       if (id === conversationId) {
         setItems([]);
         setConversationId(undefined);
+        setConversationAgent(null);
         setTokens(0);
       }
     } catch (e) {

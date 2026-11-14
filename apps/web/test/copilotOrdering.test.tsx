@@ -24,6 +24,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
       call: vi.fn(async (name: string, input?: unknown) => {
         if (name === 'copilot.conversations') return { conversations: h.conversations };
         if (name === 'agents.list') return { agents: [] };
+        if (name === 'copilot.deleteConversation') return { ok: true };
         if (name === 'copilot.conversation')
           return new Promise((resolve, reject) => h.pending.set((input as { id: string }).id, { resolve, reject }));
         throw new Error(`unexpected command ${name}`);
@@ -98,6 +99,27 @@ describe('copilot conversation switching keeps the latest click (#918)', () => {
     });
     expect(screen.queryByText('The earlier conversation failed to load')).toBeNull();
     expect(screen.getByText('B answer')).toBeTruthy();
+  });
+
+  it('drops a read that completes after its conversation was deleted', async () => {
+    render(<CopilotDrawer open onClose={() => {}} />);
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Conversation B' }));
+    h.pending.get(B.id)!.resolve(answer('B', 'B answer', 50, B.id));
+    expect(await screen.findByText('B answer')).toBeTruthy();
+
+    // A is still loading when the person deletes it.
+    await userEvent.click(screen.getByRole('button', { name: 'Conversation A' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete conversation Conversation A' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Delete conversation' }));
+
+    await act(async () => {
+      h.pending.get(A.id)!.resolve(answer('A', 'A answer', 99, A.id));
+    });
+    expect(screen.queryByText('A answer')).toBeNull();
+    expect(screen.getByText('B answer')).toBeTruthy();
+    expect(screen.getByText('50 tokens used in this session')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Conversation B' }).getAttribute('aria-current')).toBe('true');
   });
 
   it('drops a read that was in flight when the person started a new chat', async () => {
