@@ -9,7 +9,7 @@ import {
   publishValidators,
 } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
-import { defineCommand } from '@agentic-marketing/commands';
+import { callerIdentity, defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId, newUuid, personalDataInText, safeErrorText } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
@@ -524,18 +524,30 @@ export const enrollSegment = defineCommand({
     if (journey?.type !== 'journey' || !journey.publishedVersion)
       throw new AppError('not_found', `Journey ${input.artifactId} has no published version.`);
 
+    // The caller this job's key is bound to (#926): a person is their user id, an agent its record.
+    const caller = callerIdentity(ctx.principal);
     const requestedBy = {
-      type: ctx.principal.type,
-      id: ctx.principal.type === 'agent' ? (ctx.principal.agent?.id ?? ctx.principal.userId) : ctx.principal.userId,
+      type: caller.kind === 'user' ? ('user' as const) : ('agent' as const),
+      id: caller.kind === 'user' ? caller.userId : caller.kind === 'agent' ? caller.agentId : (caller.userId ?? ''),
     };
+    /** Whether a stored job is this caller's answer for this key and the same enrollment. */
+    const replayOf = (existing: typeof schema.enrollmentJobs.$inferSelect) =>
+      existing.requestedByType === requestedBy.type &&
+      existing.requestedById === requestedBy.id &&
+      existing.journeyId === input.artifactId &&
+      existing.segmentId === input.segmentId &&
+      (existing.limit ?? null) === (input.limit ?? null);
+    const reused = () =>
+      new AppError('conflict', 'This idempotency key was already used for a different enrollment. Use a new key.', {
+        reason: 'idempotency_key_reused',
+      });
     if (input.idempotencyKey) {
       const [existing] = await ctx.tx
         .select()
         .from(schema.enrollmentJobs)
         .where(and(eq(schema.enrollmentJobs.workspaceId, ws), eq(schema.enrollmentJobs.idempotencyKey, input.idempotencyKey)));
       if (existing) {
-        if (existing.journeyId !== input.artifactId || existing.segmentId !== input.segmentId)
-          throw new AppError('conflict', 'This idempotency key was already used for a different enrollment. Use a new key.');
+        if (!replayOf(existing)) throw reused();
         return { jobId: existing.id, status: existing.status, people: existing.people, duplicate: true };
       }
     }
@@ -561,12 +573,14 @@ export const enrollSegment = defineCommand({
       .onConflictDoNothing()
       .returning();
     if (!created) {
-      // A concurrent call with the same key won the unique index: return its job.
+      // A concurrent call with the same key won the unique index: answer like the sequential path,
+      // so another caller or another enrollment never receives that job (#926).
       const [existing] = await ctx.tx
         .select()
         .from(schema.enrollmentJobs)
         .where(and(eq(schema.enrollmentJobs.workspaceId, ws), eq(schema.enrollmentJobs.idempotencyKey, input.idempotencyKey ?? '')));
       if (!existing) throw new AppError('conflict', 'This enrollment could not be created. Try again.');
+      if (!replayOf(existing)) throw reused();
       return { jobId: existing.id, status: existing.status, people: existing.people, duplicate: true };
     }
     return { jobId: created.id, status: created.status, people: created.people, duplicate: false };

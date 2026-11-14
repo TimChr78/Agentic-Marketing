@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import type { Db, Tx } from '@agentic-marketing/db';
-import { type LinkSigner, requestEmail } from '@agentic-marketing/email';
+import { type LinkSigner, requestEmail, SYSTEM_SENDER } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
 import { type ConsentInput, consentStateOf, currentConsent, type ResolvedEvent, recordConsent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -79,6 +79,7 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
       profileId,
       templateId: form.def.confirmationTemplate,
       idempotencyKey: `doi:${e.messageId}`,
+      requestedBy: SYSTEM_SENDER,
       data: { confirm_url: `${linksUrl}/f/confirm/${deps.links.sign(token)}` },
     });
     if (d.status !== 'queued') logger.warn({ form: p.form_id, status: d.status, reason: d.reason }, 'confirmation e-mail not queued');

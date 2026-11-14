@@ -7,7 +7,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Decision, EmailServices } from '../gateway';
-import { topicSuppression } from '../gateway';
+import { idempotencyKeyReused, sameSendRequest, topicSuppression } from '../gateway';
 import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
 import { checkPolicy, isMarketing } from '../policy';
 import { firstLine } from '../render';
@@ -29,6 +29,8 @@ export interface SmsRequest {
   notBefore?: Date;
   /** The agent behind this message (#426): a direct send, or the owner of the journey. */
   agentId?: string | null;
+  /** The caller the input-level key belongs to (#926); see `EmailRequest.requestedBy`. */
+  requestedBy?: string;
 }
 
 type Verdict =
@@ -93,7 +95,10 @@ async function publishedSmsTemplate(tx: Tx, templateId: string, version?: number
 export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, events: EventStore, req: SmsRequest): Promise<Decision> {
   const key = req.idempotencyKey ?? newUuid();
   const [existing] = await tx.select().from(schema.messages).where(eq(schema.messages.idempotencyKey, key));
-  if (existing) return { messageId: existing.id, status: existing.status, reason: existing.reason, duplicate: true };
+  if (existing) {
+    if (!sameSendRequest(existing, req)) throw idempotencyKeyReused('send');
+    return { messageId: existing.id, status: existing.status, reason: existing.reason, duplicate: true };
+  }
 
   const tpl = await publishedSmsTemplate(tx, req.templateId);
   const purpose = tpl?.template?.purpose ?? 'unknown';
@@ -127,6 +132,7 @@ export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, e
       recipientHash,
       notBefore: req.notBefore ?? null,
       agentId: req.agentId ?? null,
+      requestedBy: req.requestedBy ?? null,
       data: req.data ?? {},
     })
     .returning();

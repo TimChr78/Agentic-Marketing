@@ -1,4 +1,4 @@
-import { defineCommand } from '@agentic-marketing/commands';
+import { callerHash, defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
@@ -51,6 +51,7 @@ export const sendEmail = defineCommand({
     requestEmail(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
+      requestedBy: callerHash(ctx.principal),
     }),
 });
 

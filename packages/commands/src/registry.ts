@@ -454,12 +454,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             // Named fields, never one joined string: an unregistered agent's client id and user
             // id are separate values, so `{userId: 'alice'}` cannot hash like
             // `{clientId: 'alice', userId: 'bob'}` (#906 review round 3).
-            principal:
-              principal.type === 'user'
-                ? { kind: 'user', userId: principal.userId }
-                : agent
-                  ? { kind: 'agent', agentId: agent.id }
-                  : { kind: 'agent-unregistered', clientId: principal.clientId ?? null, userId: principal.userId ?? null },
+            principal: callerIdentity(principal),
             input: inputHash,
           })
         : inputHash;
@@ -777,6 +772,28 @@ export async function coordinationFor(
     conflicts.push(`${label} already has ${what} from agent ${row.agent_name}.`);
   }
   return { ownership, conflicts };
+}
+
+/**
+ * The caller an idempotency key belongs to (#906): a person is their user id (the same across
+ * sessions); an agent is its agent record, and an API token or OAuth connection is its own agent.
+ * A read from an agent without a record (supported, #811) is named by its client id and user id.
+ * The executor hashes this with the input; commands that keep their own input-level key (a direct
+ * send, a bulk enrollment) bind it to the same identity (#926).
+ */
+export function callerIdentity(principal: Principal) {
+  if (principal.type === 'user') return { kind: 'user' as const, userId: principal.userId };
+  // A surface may build an agent principal without its record (the executor refuses its writes but
+  // supports its reads, #811), which the union does not model; read the fields defensively.
+  const agent = principal.agent as { id: string } | undefined;
+  if (agent) return { kind: 'agent' as const, agentId: agent.id };
+  const unregistered = principal as { clientId?: string; userId?: string };
+  return { kind: 'agent-unregistered' as const, clientId: unregistered.clientId ?? null, userId: unregistered.userId ?? null };
+}
+
+/** A stable, non-reversible name for the caller of one request (#926). */
+export function callerHash(principal: Principal): string {
+  return hashValue(callerIdentity(principal));
 }
 
 /**

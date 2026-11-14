@@ -2,7 +2,7 @@ import { artifactTypes, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingl
 import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import { requestEmail, requestPush, requestSms } from '@agentic-marketing/email';
+import { requestEmail, requestPush, requestSms, SYSTEM_SENDER } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
 import { consentStateOf, currentConsent, purposeAllowed, type ResolvedEvent, refusedPurposes } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -456,6 +456,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
+      requestedBy: SYSTEM_SENDER,
     });
     return `e-mail ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
@@ -468,6 +469,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
+      requestedBy: SYSTEM_SENDER,
     });
     return `SMS ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
@@ -480,6 +482,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
+      requestedBy: SYSTEM_SENDER,
     });
     return `push ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }

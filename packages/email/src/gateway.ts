@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type CampaignUtmCache, campaignUtmCampaign } from '@agentic-marketing/campaigns';
-import { newId, newUuid } from '@agentic-marketing/core';
+import { AppError, newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore, MessageEvent } from '@agentic-marketing/events';
 import {
@@ -77,6 +77,43 @@ export interface EmailRequest {
   notBefore?: Date;
   /** The agent behind this message (#426): a direct send, or the owner of the broadcast or journey. */
   agentId?: string | null;
+  /**
+   * The caller the input-level `idempotencyKey` belongs to (#926), from `callerHash`; internal
+   * callers (journey steps, double opt-in, test sends) pass `SYSTEM_SENDER`. A message row from a
+   * version before this field has null and is matched on its input alone.
+   */
+  requestedBy?: string;
+}
+
+/** The caller identity for the gateway's own sends: journeys, forms, broadcasts and test sends. */
+export const SYSTEM_SENDER = 'system';
+
+/** The fields that make two send requests the same logical request for one idempotency key. */
+export interface SendIdentity {
+  profileId: string | null;
+  templateId: string | null;
+  journeyId?: string | null;
+  variant?: string | null;
+  requestedBy?: string | null;
+}
+
+/**
+ * Whether a stored message answers this request for its input-level idempotency key (#926). The
+ * recipient, template, journey and variant must match, and so must the caller when the row has one.
+ * A row written before the caller was stored (null) matches on its input alone, as documented.
+ */
+export function sameSendRequest(existing: SendIdentity, req: SendIdentity): boolean {
+  if (existing.profileId !== req.profileId || existing.templateId !== req.templateId) return false;
+  if ((existing.journeyId ?? null) !== (req.journeyId ?? null) || (existing.variant ?? null) !== (req.variant ?? null)) return false;
+  if (existing.requestedBy === null || existing.requestedBy === undefined) return true;
+  return existing.requestedBy === (req.requestedBy ?? SYSTEM_SENDER);
+}
+
+/** The one conflict answer for an input-level key reused by another caller or for another send. */
+export function idempotencyKeyReused(what: 'send' | 'enrollment'): AppError {
+  return new AppError('conflict', `This idempotency key was already used for a different ${what}. Use a new key.`, {
+    reason: 'idempotency_key_reused',
+  });
 }
 
 export interface Decision {
@@ -170,7 +207,11 @@ export async function checkRecipient(
 export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider, events: EventStore, req: EmailRequest): Promise<Decision> {
   const key = req.idempotencyKey ?? newUuid();
   const [existing] = await tx.select().from(schema.messages).where(eq(schema.messages.idempotencyKey, key));
-  if (existing) return { messageId: existing.id, status: existing.status, reason: existing.reason, duplicate: true };
+  if (existing) {
+    // The key dedupes per workspace, so it must also name the same caller and the same send (#926).
+    if (!sameSendRequest(existing, req)) throw idempotencyKeyReused('send');
+    return { messageId: existing.id, status: existing.status, reason: existing.reason, duplicate: true };
+  }
 
   const tpl = await publishedTemplate(tx, req.templateId);
   const purpose = tpl?.template?.purpose ?? 'unknown';
@@ -204,6 +245,7 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
       variant: req.variant ?? null,
       notBefore: req.notBefore ?? null,
       agentId: req.agentId ?? null,
+      requestedBy: req.requestedBy ?? null,
       data: req.subject ? { ...(req.data ?? {}), __subject: req.subject } : (req.data ?? {}),
     })
     .returning();

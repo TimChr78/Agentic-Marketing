@@ -5,7 +5,7 @@ import {
   publishedSingleton,
   publishValidators,
 } from '@agentic-marketing/artifacts';
-import { defineCommand } from '@agentic-marketing/commands';
+import { callerHash, defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { profileForMessage } from '@agentic-marketing/profiles';
@@ -48,6 +48,7 @@ export const sendPush = defineCommand({
     requestPush(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
+      requestedBy: callerHash(ctx.principal),
     }),
 });
 

@@ -1,7 +1,8 @@
 import { defineCommand, userPrincipal } from '@agentic-marketing/commands';
+import { requestEmail, SYSTEM_SENDER } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { startTestServer, testPort, type User } from './harness';
+import { eventually, startTestServer, testPort, type User } from './harness';
 
 // #906 review round 2 (A1): an idempotency key is scoped to the caller as well as the workspace.
 // Before, the lookup keyed only on (workspace, key), so a different principal presenting the same
@@ -143,5 +144,172 @@ describe('an idempotency key is bound to its principal (A1)', () => {
     expect(rejected).toMatchObject({ status: 'rejected', reason: { code: 'conflict', details: { reason: 'idempotency_key_reused' } } });
     expect(runs).toBe(1);
     expect(externalEffects).toEqual(['v:1']);
+  });
+});
+
+// #926: a command that keeps its own input-level key (a direct send, a bulk enrollment) dedupes
+// per workspace and key, so another caller presenting that key received the first caller's message
+// decision or job. The key is now bound to the caller identity the executor uses and to the
+// meaningful input, and a different caller or input answers the usual 409.
+describe('an input-level idempotency key is bound to its caller (#926)', () => {
+  let sender: User;
+  let other: User;
+  let templateId = '';
+  let journeyId = '';
+  let otherJourneyId = '';
+  let segmentId = '';
+  let otherSegmentId = '';
+  const people = new Map<string, string>();
+
+  const as = (u: User) => ({ cookie: u.cookie, origin: t.base, 'x-workspace-id': ws });
+  const invoke = (u: User, command: string, body: unknown, key?: string): Promise<{ status: number; body: any }> =>
+    fetch(`${t.base}/v1/${command}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...as(u), ...(key === undefined ? {} : { 'idempotency-key': key }) },
+      body: JSON.stringify(body),
+    }).then(async (res) => ({ status: res.status, body: await res.json() }));
+
+  const sendAs = (u: User, key: string | undefined, profileId: string) =>
+    invoke(u, 'messages.sendEmail', { profileId, templateId, idempotencyKey: key }, undefined);
+  const enrollAs = (u: User, key: string, journey: string, segment: string) =>
+    invoke(u, 'journeys.enrollSegment', { artifactId: journey, segmentId: segment, reason: 'Backfill', idempotencyKey: key }, undefined);
+
+  const makeJourney = async (name: string, event: string) => {
+    const a = await t.api(owner, ws).call('artifacts.create', {
+      type: 'journey',
+      name,
+      content: { purpose: 'marketing_email', nodes: [{ id: 'start', kind: 'trigger', label: 'Started', config: { event } }] },
+    });
+    await t.api(owner, ws).call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' });
+    return a.artifactId;
+  };
+  const makeSegment = async (name: string) => {
+    const a = await t.api(owner, ws).call('artifacts.create', {
+      type: 'segment',
+      name,
+      content: { condition: { consent: 'marketing_email' } },
+    });
+    await t.api(owner, ws).call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'test' });
+    return a.artifactId;
+  };
+
+  beforeAll(async () => {
+    sender = await t.signUp(`key-sender-${Date.now()}@example.com`);
+    other = await t.signUp(`key-other-${Date.now()}@example.com`);
+    await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3), ($1, $4, $3)', [
+      ws,
+      sender.id,
+      'marketer',
+      other.id,
+    ]);
+    const api = t.api(owner, ws);
+    await api.call('emailProviders.create', { name: 'Outbox', adapter: 'log', fromEmail: 'news@example.com', useFor: ['marketing'] });
+    const tpl = await api.call('artifacts.create', {
+      type: 'email_template',
+      name: 'Issue',
+      content: {
+        purpose: 'marketing_email',
+        subject: 'This week',
+        mjml: '<mjml><mj-body><mj-section><mj-column><mj-text>Hi</mj-text><mj-text><a href="{{ unsubscribe_url | raw }}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>',
+      },
+    });
+    await api.call('artifacts.requestPublish', { artifactId: tpl.artifactId, note: 'test' });
+    templateId = tpl.artifactId;
+
+    await api.call('profiles.import', {
+      label: 'Caller-bound keys',
+      rows: ['one', 'two'].map((name) => ({
+        email: `${name}@example.com`,
+        consent: [{ purpose: 'marketing_email', status: 'granted' as const }],
+      })),
+    });
+    for (const name of ['one', 'two']) {
+      const found = await eventually(
+        () => api.call('profiles.find', { type: 'email', value: `${name}@example.com` }),
+        (r) => !!r.profileId,
+      );
+      people.set(name, found.profileId!);
+      await eventually(
+        () => api.call('profiles.get', { profileId: found.profileId! }),
+        (p) => p.consentEffective.some((c) => c.purpose === 'marketing_email' && c.status === 'granted'),
+      );
+    }
+    journeyId = await makeJourney('Caller keys', 'Caller Keys Started');
+    otherJourneyId = await makeJourney('Caller keys other', 'Caller Keys Other');
+    segmentId = await makeSegment('Caller keys segment');
+    otherSegmentId = await makeSegment('Caller keys other segment');
+  }, 90_000);
+
+  it('replays a send for the same caller and refuses another caller without leaking the message', async () => {
+    const first = await sendAs(sender, 'shared-send', people.get('one')!);
+    expect(first.status).toBe(200);
+    expect(first.body.status).toBe('queued');
+
+    const replay = await sendAs(sender, 'shared-send', people.get('one')!);
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ messageId: first.body.messageId, duplicate: true });
+
+    const stolen = await sendAs(other, 'shared-send', people.get('one')!);
+    expect(stolen.status).toBe(409);
+    expect(stolen.body.details?.reason).toBe('idempotency_key_reused');
+    expect(JSON.stringify(stolen.body)).not.toContain(first.body.messageId);
+  });
+
+  it('refuses the same caller reusing a send key for another recipient', async () => {
+    const first = await sendAs(sender, 'send-other-input', people.get('one')!);
+    expect(first.status).toBe(200);
+    const reused = await sendAs(sender, 'send-other-input', people.get('two')!);
+    expect(reused.status).toBe(409);
+    expect(reused.body.details?.reason).toBe('idempotency_key_reused');
+    expect(JSON.stringify(reused.body)).not.toContain(first.body.messageId);
+  });
+
+  it('keeps an internal system send replayable and separate from a person', async () => {
+    const system = (key: string) =>
+      t.srv.db.withWorkspace(ws, (tx) =>
+        requestEmail(tx, ws, t.srv.keyProvider, t.srv.events, {
+          profileId: people.get('one')!,
+          templateId,
+          idempotencyKey: key,
+          requestedBy: SYSTEM_SENDER,
+        }),
+      );
+    const first = await system('jrn:caller-keys:1');
+    const replay = await system('jrn:caller-keys:1');
+    expect(replay).toMatchObject({ messageId: first.messageId, duplicate: true });
+
+    const person = await sendAs(sender, 'jrn:caller-keys:1', people.get('one')!);
+    expect(person.status).toBe(409);
+    expect(person.body.details?.reason).toBe('idempotency_key_reused');
+    expect(JSON.stringify(person.body)).not.toContain(first.messageId);
+  });
+
+  it('replays an enrollment for the same caller and refuses another caller without leaking the job', async () => {
+    const first = await enrollAs(sender, 'shared-enroll', journeyId, segmentId);
+    expect(first.status).toBe(200);
+    expect(first.body.duplicate).toBe(false);
+
+    const replay = await enrollAs(sender, 'shared-enroll', journeyId, segmentId);
+    expect(replay.status).toBe(200);
+    expect(replay.body).toMatchObject({ jobId: first.body.jobId, duplicate: true });
+
+    const stolen = await enrollAs(other, 'shared-enroll', journeyId, segmentId);
+    expect(stolen.status).toBe(409);
+    expect(stolen.body.details?.reason).toBe('idempotency_key_reused');
+    expect(JSON.stringify(stolen.body)).not.toContain(first.body.jobId);
+  });
+
+  it('refuses the same caller reusing an enrollment key for another journey, segment or limit', async () => {
+    const first = await enrollAs(sender, 'enroll-other-input', journeyId, segmentId);
+    expect(first.status).toBe(200);
+    for (const [journey, segment] of [
+      [otherJourneyId, segmentId],
+      [journeyId, otherSegmentId],
+    ] as const) {
+      const reused = await enrollAs(sender, 'enroll-other-input', journey, segment);
+      expect(reused.status).toBe(409);
+      expect(reused.body.details?.reason).toBe('idempotency_key_reused');
+      expect(JSON.stringify(reused.body)).not.toContain(first.body.jobId);
+    }
   });
 });
