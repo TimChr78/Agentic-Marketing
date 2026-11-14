@@ -651,7 +651,11 @@ describe('spend and ROAS', () => {
     }
     // Within the budget the same report attributes every conversion.
     const result = await report();
-    expect(result.unattributed).toEqual({ conversions: 10, revenue: 100 });
+    // The touches name "Budget", a campaign with no spend row: they had a touch, so they are
+    // unmatched, not unattributed (#917).
+    expect(result.unattributed).toEqual({ conversions: 0, revenue: 0 });
+    expect(result.unmatched).toEqual({ conversions: 10, revenue: 100 });
+    expect(result.notes.join(' ')).toContain('matches no spend row');
   });
 
   it('breaks a same-time touch tie deterministically by event id (#786)', async () => {

@@ -6,7 +6,7 @@ import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, EgressError, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 
 /**
@@ -66,6 +66,19 @@ type Conn = typeof schema.connections.$inferSelect;
 const day = (d: Date) => d.toISOString().slice(0, 10);
 
 /**
+ * Page ceilings for a spend read. Meta answers 500 campaign-days per page and Google Ads up to
+ * 10,000 rows, so these bound a runaway report while staying far above a normal 90-day account.
+ * A read that runs into its ceiling is reported as truncated, never silently cut (#917).
+ */
+export const SPEND_LIMITS = { metaPages: 200, googlePages: 50 } as const;
+
+/** Spend rows plus whether the provider had more pages when the read stopped. */
+export interface SpendRead {
+  rows: SpendRow[];
+  truncated: boolean;
+}
+
+/**
  * A platform refusing a report is the caller's to fix (account, permissions, token scope), so it is
  * an AppError, but only its own error code and message are copied into the message (#885): the raw
  * body can echo the access token it was called with.
@@ -82,7 +95,7 @@ export async function metaSpend(
   since: string,
   until: string,
   egress: EgressPolicy,
-): Promise<SpendRow[]> {
+): Promise<SpendRead> {
   const s = metaAdsConnector.settings.parse(conn.settings);
   if (!s.adAccountId) throw new AppError('invalid_input', 'Set adAccountId on the Meta connection to import spend.');
   const account = s.adAccountId.startsWith('act_') ? s.adAccountId : `act_${s.adAccountId}`;
@@ -97,7 +110,12 @@ export async function metaSpend(
   });
   let url: string | undefined = `${s.apiBase.replace(/\/$/, '')}/${s.apiVersion}/${account}/insights?${q}`;
   const rows: SpendRow[] = [];
-  for (let page = 0; url && page < 50; page++) {
+  let truncated = false;
+  for (let page = 0; url; page++) {
+    if (page >= SPEND_LIMITS.metaPages) {
+      truncated = true;
+      break;
+    }
     const res = await safeRequest(url, { method: 'GET', headers: { accept: 'application/json' } }, egress);
     // A provider refusal is expected and its documented code is the caller's diagnostic; the body
     // itself is not (#885): it can echo the access token in this URL back.
@@ -132,7 +150,7 @@ export async function metaSpend(
       });
     url = body.paging?.next;
   }
-  return rows;
+  return { rows, truncated };
 }
 
 /** Google Ads API (v25) GAQL report: campaign cost, impressions, clicks and conversions per day. */
@@ -142,7 +160,7 @@ export async function googleSpend(
   since: string,
   until: string,
   egress: EgressPolicy,
-): Promise<SpendRow[]> {
+): Promise<SpendRead> {
   const s = googleAdsConnector.settings.parse(conn.settings);
   const k = googleAdsConnector.secrets.parse(secrets);
   const token = conn.oauthStatus === 'connected' ? accessTokenOf(secrets) : undefined;
@@ -151,7 +169,12 @@ export async function googleSpend(
   const query = `SELECT campaign.id, campaign.name, segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, customer.currency_code FROM campaign WHERE segments.date BETWEEN '${since}' AND '${until}'`;
   const rows: SpendRow[] = [];
   let pageToken: string | undefined;
-  for (let page = 0; page < 50; page++) {
+  let truncated = false;
+  for (let page = 0; ; page++) {
+    if (page >= SPEND_LIMITS.googlePages) {
+      truncated = Boolean(pageToken);
+      break;
+    }
     const res = await safeRequest(
       `${s.reportingBase.replace(/\/$/, '')}/v25/customers/${s.customerId}/googleAds:search`,
       {
@@ -192,7 +215,7 @@ export async function googleSpend(
     pageToken = body.nextPageToken;
     if (!pageToken) break;
   }
-  return rows;
+  return { rows, truncated };
 }
 
 /** Imports the last `days` days of spend for one connection into ClickHouse. */
@@ -211,7 +234,7 @@ export async function importSpend(
   if (!conn) throw new AppError('not_found', `No connection ${connectionId}.`);
   const until = day(new Date());
   const since = day(new Date(Date.now() - (days - 1) * 86_400_000));
-  const rows =
+  const read: SpendRead =
     conn.connector === metaAdsConnector.id
       ? await metaSpend(conn, secrets, since, until, deps.egress)
       : conn.connector === googleAdsConnector.id
@@ -219,6 +242,7 @@ export async function importSpend(
         : (() => {
             throw new AppError('invalid_input', `${conn.connector} has no spend reports.`);
           })();
+  const { rows, truncated } = read;
   if (rows.length) {
     const updatedAt = new Date().toISOString().replace('Z', '');
     await events.client.insert({
@@ -240,7 +264,22 @@ export async function importSpend(
       })),
     });
   }
-  return { rows: rows.length, since, until };
+  // Persist the completeness of this read for `ads.performance`, in the connection's existing JSON
+  // settings rather than a migration (#917): the report covers a stored window and can only know
+  // whether cost is complete if the import that wrote it kept the flag. A namespaced key keeps it
+  // out of the connector's own settings schema.
+  await db.withWorkspace(ws, async (tx) => {
+    const [row] = await tx
+      .select({ settings: schema.connections.settings })
+      .from(schema.connections)
+      .where(eq(schema.connections.id, connectionId));
+    if (!row) return;
+    await tx
+      .update(schema.connections)
+      .set({ settings: { ...row.settings, spendImport: { truncated, since, until, at: new Date().toISOString() } } })
+      .where(eq(schema.connections.id, connectionId));
+  });
+  return { rows: rows.length, since, until, truncated };
 }
 
 /** Scheduler role: re-imports the last 3 days (late-arriving cost) of every ad account, every 6 hours. */
@@ -280,9 +319,18 @@ export const importSpendCommand = defineCommand({
   name: 'ads.importSpend',
   title: 'Import ad spend now',
   description:
-    'Fetches daily cost, impressions, clicks and platform conversions per campaign for the last N days from Meta or Google Ads (it also runs every 6 hours for the last 3 days).',
+    'Fetches daily cost, impressions, clicks and platform conversions per campaign for the last N days from Meta or Google Ads (it also runs every 6 hours for the last 3 days). Each read has a page ceiling; truncated is true when the provider had more pages, so the stored cost for that window is incomplete and ads.performance reports it.',
   input: z.object({ connection: z.string().regex(/^con_[0-9a-f]{32}$/), days: z.number().int().min(1).max(90).default(30) }),
-  output: z.object({ rows: z.number(), since: z.string(), until: z.string() }),
+  output: z.object({
+    rows: z.number(),
+    since: z.string(),
+    until: z.string(),
+    truncated: z
+      .boolean()
+      .describe(
+        'True when the provider had more pages than the import read, so some cost for this window was not stored; re-import a narrower date range',
+      ),
+  }),
   permission: 'artifacts:write',
   effect: 'write',
   actionClass: 'data.write',
@@ -327,11 +375,32 @@ const Row = z.object({
   roas: z.number().nullable(),
 });
 
+/**
+ * Whether a spend import that fed this report window was cut at its page ceiling (#917). Only the
+ * latest import per connection is recorded; its window must overlap the report's. A connection
+ * without a recorded import cannot claim completeness, but it also cannot claim truncation, so it
+ * contributes false.
+ */
+export function spendTruncatedFor(
+  connections: readonly { connector: string; settings: Record<string, unknown> }[],
+  window: { since: string; until: string; platform?: 'meta' | 'google' },
+): boolean {
+  const connectors = window.platform === 'meta' ? ['meta_ads'] : window.platform === 'google' ? ['google_ads'] : ['meta_ads', 'google_ads'];
+  return connections.some((connection) => {
+    if (!connectors.includes(connection.connector)) return false;
+    const state = connection.settings.spendImport as { truncated?: unknown; since?: unknown; until?: unknown } | undefined;
+    if (!state || state.truncated !== true) return false;
+    // Without usable dates, assume the recorded read could have covered the window.
+    if (typeof state.since !== 'string' || typeof state.until !== 'string') return true;
+    return state.since <= window.until && state.until >= window.since;
+  });
+}
+
 export const adPerformance = defineCommand({
   name: 'ads.performance',
   title: 'Ad spend, conversions and ROAS per campaign',
   description:
-    "Cost, impressions, clicks and the platform's own conversions per campaign, next to our conversions and revenue (events in the conversion map) attributed by last utm_campaign touch (campaign id or name) within the window, with CPA and ROAS. Revenue is summed as is; keep one currency per workspace.",
+    "Cost, impressions, clicks and the platform's own conversions per campaign, next to our conversions and revenue (events in the conversion map) attributed by last utm_campaign touch (campaign id or name) within the window, with CPA and ROAS. Revenue is summed as is; keep one currency per workspace. A conversion with no campaign touch is in unattributed; one whose last touch names a campaign with no spend row is in unmatched, and totals are the campaign rows only. spendTruncated is true when a spend import covering this window stopped at its page ceiling, so cost is incomplete and CPA is understated while ROAS is overstated (see notes).",
   input: z.object({
     since: z.iso.date().optional().describe('Default: 30 days ago'),
     until: z.iso.date().optional(),
@@ -342,8 +411,28 @@ export const adPerformance = defineCommand({
     since: z.string(),
     until: z.string(),
     campaigns: z.array(Row),
-    unattributed: z.object({ conversions: z.number(), revenue: z.number() }).describe('Conversions with no campaign touch in the window'),
-    totals: z.object({ cost: z.number(), conversions: z.number(), revenue: z.number(), roas: z.number().nullable() }),
+    unattributed: z
+      .object({ conversions: z.number(), revenue: z.number() })
+      .describe('Conversions with no campaign touch in the window at all; they are not in totals'),
+    unmatched: z
+      .object({ conversions: z.number(), revenue: z.number() })
+      .describe(
+        'Conversions whose last campaign touch names a campaign with no spend row (unknown campaign, different platform) for the window; they are neither attributed to a campaign row nor in unattributed',
+      ),
+    spendTruncated: z
+      .boolean()
+      .describe(
+        'True when any spend read covering this window was cut at its provider page ceiling, so cost is incomplete: CPA is understated and ROAS overstated',
+      ),
+    totals: z
+      .object({
+        cost: z.number(),
+        conversions: z.number().describe('Sum of the campaign rows on the conversions measure, not including unattributed or unmatched'),
+        revenue: z.number().describe('Sum of the campaign rows on the revenue measure, not including unattributed or unmatched'),
+        roas: z.number().nullable(),
+      })
+      .describe('Sum of the campaign rows only; unattributed and unmatched conversions are reported beside it, never added'),
+    notes: z.array(z.string()).describe('Completeness notes, such as a truncated spend read'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -351,6 +440,13 @@ export const adPerformance = defineCommand({
     const ws = ctx.principal.workspaceId;
     const until = input.until ?? day(new Date());
     const since = input.since ?? day(new Date(Date.now() - 29 * 86_400_000));
+    // An incomplete spend read is never silent (#917): imports record whether they hit the page
+    // ceiling, and the report says so when that import covers this window.
+    const adConnections = await ctx.tx
+      .select({ connector: schema.connections.connector, settings: schema.connections.settings })
+      .from(schema.connections)
+      .where(inArray(schema.connections.connector, ['meta_ads', 'google_ads']));
+    const spendTruncated = spendTruncatedFor(adConnections, { since, until, ...(input.platform ? { platform: input.platform } : {}) });
     const ch = ctx.services.events.client;
     const clickhouse_settings = await ctx.services.events.settingsFor(ws);
     const spend = await (
@@ -389,6 +485,9 @@ export const adPerformance = defineCommand({
       lookup.set(key('*', r.campaignName), r);
     }
     const unattributed = { conversions: 0, revenue: 0 };
+    // A touch that names a campaign with no spend row is not "no touch": it is a campaign we cannot
+    // cost, so it gets its own figure and stays out of unattributed (#917).
+    const unmatched = { conversions: 0, revenue: 0 };
     const windowMs = input.windowDays * 86_400_000;
 
     // Our conversions: events of the conversion map in the period, with their values. The shared
@@ -554,6 +653,9 @@ export const adPerformance = defineCommand({
         if (row) {
           row.conversions++;
           row.revenue += value;
+        } else if (touch) {
+          unmatched.conversions++;
+          unmatched.revenue += value;
         } else {
           unattributed.conversions++;
           unattributed.revenue += value;
@@ -576,17 +678,29 @@ export const adPerformance = defineCommand({
     }
     const cost = rows.reduce((n, r) => n + r.cost, 0);
     const revenue = rows.reduce((n, r) => n + r.revenue, 0);
+    const notes: string[] = [];
+    if (spendTruncated)
+      notes.push(
+        'A spend import covering this window stopped at the provider page limit, so cost is incomplete: CPA is understated and ROAS is overstated. Import a narrower date range to fill the gap.',
+      );
+    if (unmatched.conversions > 0)
+      notes.push(
+        `${unmatched.conversions.toLocaleString('en-US')} conversion${unmatched.conversions === 1 ? '' : 's'} had a campaign touch that matches no spend row; they are in unmatched, not in unattributed or the totals.`,
+      );
     return {
       since,
       until,
       campaigns: rows,
       unattributed,
+      unmatched,
+      spendTruncated,
       totals: {
         cost,
         conversions: rows.reduce((n, r) => n + r.conversions, 0),
         revenue,
         roas: cost ? Math.round((revenue / cost) * 100) / 100 : null,
       },
+      notes,
     };
   },
 });

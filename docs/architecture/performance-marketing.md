@@ -68,7 +68,7 @@ Both artifacts can be published by an agent, but only inside a mandate that gran
 3. **Spend import** (scheduler, daily plus intraday refresh):
    - per account and campaign, ad group and day, store cost, impressions, clicks and platform conversions in ClickHouse (`ad_spend`);
    - our attribution (last non-direct touch by click id or UTM within a configurable window, plus "platform-reported" side by side) joins our conversions and revenue;
-   - result: CPA, ROAS and conversion lag by campaign and channel.
+   - result: CPA, ROAS and conversion lag by campaign and channel. `ads.performance` keeps three conversion figures apart: the campaign rows (which are what `totals` sums), `unattributed` (no campaign touch in the window) and `unmatched` (a last touch naming a campaign with no spend row). A spend read that hits its provider page ceiling is reported as `spendTruncated`, so a short cost never silently understates CPA or overstates ROAS.
 4. **Agents (MCP):**
    - read tools: `ads.performance`, `ads.audiences`, `ads.conversions.status`;
    - drafts: conversion maps and audience syncs (approval required);
