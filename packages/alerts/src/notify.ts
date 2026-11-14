@@ -1,6 +1,6 @@
 import { newId, redactCredentials } from '@agentic-marketing/core';
 import { type AlertChannel, type AlertKind, type AlertNotification, type DeliveryStatus, schema, type Tx } from '@agentic-marketing/db';
-import { MESSAGE_ID_HEADER, transportFor } from '@agentic-marketing/email';
+import { MESSAGE_ID_HEADER, SYSTEM_SENDER, transportFor } from '@agentic-marketing/email';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import type { NotifyDeps } from './deps';
@@ -395,6 +395,7 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
           providerId: provider.id,
           status: 'sending',
           data: email.data ?? {},
+          requestedBy: SYSTEM_SENDER,
         });
       try {
         const { providerMessageId } = await transport.send({

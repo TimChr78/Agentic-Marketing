@@ -31,6 +31,7 @@ import {
   requestEmail,
   requestPush,
   requestSms,
+  SYSTEM_SENDER,
   sendTestMessages,
   testRecipientsInput,
   testSendOutput,
@@ -311,6 +312,7 @@ async function suppressForControl(
       reason,
       variant: variant ?? null,
       agentId,
+      requestedBy: SYSTEM_SENDER,
     })
     .onConflictDoNothing()
     .returning({ id: schema.messages.id });
@@ -1456,6 +1458,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         subject,
         notBefore,
         agentId: artifact.ownerAgentId,
+        requestedBy: SYSTEM_SENDER,
       });
       if (test?.state === 'sampling' && d.status === 'queued' && !windowSkip) {
         const at = notBefore ?? now;
