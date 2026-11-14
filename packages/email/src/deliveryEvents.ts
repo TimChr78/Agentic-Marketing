@@ -4,7 +4,7 @@ import type { MessageEvent } from '@agentic-marketing/events';
 import { profileForMessage, recordConsent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { DeliveryEvent } from './adapters';
 
 // What providers report about messages (webhooks, or the send response itself): the message log,
@@ -84,24 +84,40 @@ export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provi
         .update(schema.messages)
         .set({ status: next, reason: e.reason ?? m.reason, sentAt: m.sentAt ?? new Date(at), updatedAt: new Date() })
         .where(eq(schema.messages.id, m.id));
-    if (m.recipientHash && ((e.type === 'bounced' && e.bounce === 'hard') || e.type === 'complained'))
+    if (m.recipientHash && ((e.type === 'bounced' && e.bounce === 'hard') || e.type === 'complained')) {
+      const reason = e.type === 'complained' ? 'complaint' : 'hard_bounce';
+      const atTime = new Date(at);
+      const key = and(
+        eq(schema.suppressions.workspaceId, m.workspaceId),
+        eq(schema.suppressions.channel, m.channel),
+        eq(schema.suppressions.valueHash, m.recipientHash),
+      );
+      // Only a `stop` row may escalate (#750). Read it first so the transition can be logged once,
+      // and lock it so two simultaneous events report it once.
+      const [existing] = await tx.select({ reason: schema.suppressions.reason }).from(schema.suppressions).where(key).for('update');
       await tx
         .insert(schema.suppressions)
         .values({
           workspaceId: m.workspaceId,
           channel: m.channel,
           valueHash: m.recipientHash,
-          reason: e.type === 'complained' ? 'complaint' : 'hard_bounce',
+          reason,
+          at: atTime,
         })
         // A delivery fact outranks an SMS STOP: STOP can be lifted by START, a bounce or complaint
-        // cannot. When the stop row already holds the key, escalate it; never downgrade a stronger
-        // row back to stop (#750). SMS STOP itself inserts with DO NOTHING, so it cannot overwrite
+        // cannot. When the stop row already holds the key, escalate it and move `at` to the
+        // delivery's own time, so the row records when the bounce arrived rather than when the STOP
+        // did (#910). `setWhere` keeps a second bounce from moving either; a stronger row is never
+        // downgraded back to stop. SMS STOP itself inserts with DO NOTHING, so it cannot overwrite
         // a bounce or complaint either.
         .onConflictDoUpdate({
           target: [schema.suppressions.workspaceId, schema.suppressions.channel, schema.suppressions.valueHash],
-          set: { reason: e.type === 'complained' ? 'complaint' : 'hard_bounce' },
+          set: { reason, at: atTime },
           setWhere: sql`${schema.suppressions.reason} = 'stop'`,
         });
+      if (existing?.reason === 'stop')
+        logger.info({ workspace: m.workspaceId, channel: m.channel, previous: 'stop', reason }, `suppression escalated from stop to ${reason}`);
+    }
     if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
       await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp);
   }
