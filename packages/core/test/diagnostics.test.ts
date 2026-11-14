@@ -152,6 +152,86 @@ describe('redactCredentials', () => {
   });
 });
 
+describe('camelCase and PascalCase credential keys (#898)', () => {
+  // Ten characters: below the 24-character bare-token rule, so only the key can identify it.
+  const SHORT = 'abc1234567';
+  const keys = [
+    'authToken',
+    'apiSecret',
+    'secretKey',
+    'signingKey',
+    'oauthToken',
+    'sessionKey',
+    'accessToken',
+    'clientSecret',
+    'apiKey',
+    'privateKey',
+    'refreshToken',
+    'AuthToken',
+    'PASSWORD',
+    'signing_key',
+    'X-Auth-Token',
+    'X-Api-Key',
+  ];
+
+  it('redacts the value of a key whose last word is a credential word', () => {
+    for (const key of keys) {
+      expect(redactCredentials(`${key}: ${SHORT}`), key).toBe(`${key}: [redacted]`);
+      expect(redactCredentials(`${key}=${SHORT}`), key).toBe(`${key}=[redacted]`);
+    }
+  });
+
+  it('redacts the JSON and single-quoted forms', () => {
+    for (const key of keys)
+      for (const [open, close] of [
+        ['"', '"'],
+        ["'", "'"],
+      ] as const) {
+        const text = `{${open}${key}${close}:${open}${SHORT}${close}}`;
+        expect(redactCredentials(text), text).not.toContain(SHORT);
+        expect(redactCredentials(text), text).toContain('[redacted]');
+      }
+  });
+
+  it('redacts an HTTP header and a URL query parameter', () => {
+    expect(redactCredentials(`X-Auth-Token: ${SHORT}`)).toBe('X-Auth-Token: [redacted]');
+    expect(redactCredentials(`https://api.example.com/v1/hook?apiSecret=${SHORT}&x=1`)).toBe(
+      'https://api.example.com/v1/hook?apiSecret=[redacted]&x=1',
+    );
+    expect(redactCredentials(`?sessionKey=${SHORT}`)).toBe('?sessionKey=[redacted]');
+  });
+
+  it('redacts only by the last word, not by a word that contains the letters', () => {
+    for (const key of ['monkey', 'keyboard', 'keynote', 'hockey', 'author', 'authority', 'tokenizer', 'tokens_count', 'sessions_count'])
+      expect(redactCredentials(`${key}=${SHORT}`), key).toBe(`${key}=${SHORT}`);
+    // A middle word does not decide: `count` and `sessions` are the last words here.
+    expect(redactCredentials(`token_count=${SHORT}`)).toBe(`token_count=${SHORT}`);
+    expect(redactCredentials(`tokenCount=${SHORT}`)).toBe(`tokenCount=${SHORT}`);
+    // A trailing number is not the word: `apiKey2` still ends in `key`, `authTokens` in `tokens`.
+    expect(redactCredentials(`apiKey2=${SHORT}`)).toBe('apiKey2=[redacted]');
+    expect(redactCredentials(`authTokens=${SHORT}`)).toBe('authTokens=[redacted]');
+    expect(redactCredentials(`count_tokens=${SHORT}`)).toBe('count_tokens=[redacted]');
+  });
+
+  it('redacts a credential pair nested in another value', () => {
+    // A provider message quoting its own field keeps the field name, which the scan reaches next.
+    expect(redactCredentials(`Invalid OAuth access token: access_token=${SHORT}`)).toBe(
+      'Invalid OAuth access token: access_token=[redacted]',
+    );
+    expect(redactCredentials(`hint: url=https://host/x?authToken=${SHORT}&y=1`)).toBe('hint: url=https://host/x?authToken=[redacted]&y=1');
+  });
+
+  it('keeps a provider error code and our own ids', () => {
+    expect(redactCredentials('INVALID_AUTHENTICATION_CREDENTIALS')).toBe('INVALID_AUTHENTICATION_CREDENTIALS');
+    expect(redactCredentials('error INVALID_AUTHENTICATION_CREDENTIALS happened')).toBe(
+      'error INVALID_AUTHENTICATION_CREDENTIALS happened',
+    );
+    expect(redactCredentials(`{"code":"INVALID_AUTHENTICATION_CREDENTIALS","message":"sign-in failed"}`)).toBe(
+      '{"code":"INVALID_AUTHENTICATION_CREDENTIALS","message":"sign-in failed"}',
+    );
+  });
+});
+
 describe('safeErrorText (#885 round 5)', () => {
   const token = 'abcdef0123456789'.repeat(3);
 

@@ -5,36 +5,94 @@
 
 /**
  * Anything whose value is a credential: the key is kept (it says what failed), the value is not.
- * The key may be a word on its own (`token`, `key`, `session`) or end in one after a separator
- * (`access_token`, `x-api-key`, `client-secret`); an alphanumeric neighbour (`monkey`) is not a key.
+ * A key is a credential key when its last word — after splitting on camelCase/PascalCase
+ * boundaries, `_`, `-` and `.` — is a credential word (#898). So `token`, `access_token`,
+ * `x-api-key`, `authToken`, `apiSecret`, `secretKey`, `signingKey`, `oauthToken`, `sessionKey` and
+ * `X-Auth-Token` all match, while `monkey`, `keyboard`, `author`, `authority`, `tokenizer` and
+ * `sessions_count` do not: a word that merely contains the letters is not a credential word, and
+ * only the last word decides.
  */
-const COMPOUND_CREDENTIAL_KEY =
-  'access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|developer[_-]?token|' +
-  'client[_-]?secret|app[_-]?secret|private[_-]?key|api[_-]?key';
-const CREDENTIAL_KEY =
-  `(?<![A-Za-z0-9])(?:${COMPOUND_CREDENTIAL_KEY}|` +
-  'token|secret|password|passwd|key|authorization|auth|credential|signature|session)(?![A-Za-z0-9])';
+const CREDENTIAL_WORD = /^(?:tokens?|secrets?|passwords?|passwds?|keys?|authorizations?|auth|credentials?|signatures?|sessions?)$/;
+
+/** The words of a key: `X-Auth-Token` → X, Auth, Token; `authToken` → auth, Token. */
+function keyWords(key: string): string[] {
+  return key
+    .split(/[^A-Za-z0-9]+/)
+    .flatMap((part) => part.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/))
+    .filter((word) => word !== '');
+}
+
+/** Whether a key names a credential. A trailing number is not a word: `apiKey2` still ends in `key`. */
+function isCredentialKey(key: string): boolean {
+  const words = keyWords(key);
+  for (let index = words.length - 1; index >= 0; index -= 1) {
+    const word = words[index]!.replace(/[0-9]+$/, '');
+    if (!word) continue;
+    return CREDENTIAL_WORD.test(word.toLowerCase());
+  }
+  return false;
+}
+
+/**
+ * A `key: value`, `key=value`, JSON pair or header, with the key, an optional closing quote, the
+ * separator and the value in separate groups. The character classes do not overlap, so the pattern
+ * cannot backtrack across a value (CodeQL's polynomial-regex rule).
+ */
+const KEY_VALUE_PAIR = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)(["']?)(\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}\]"']+)/g;
+
+/**
+ * A value that is itself a credential pair (`token: access_token=…`): the outer key keeps its own
+ * value, which the next step of the scan redacts in place.
+ */
+const NESTED_PAIR = /^([A-Za-z0-9_.-]+)(["']?)\s*[:=]/;
+
+/** `Bearer`/`Basic` at a position, read without copying the rest of the text. */
+const AUTH_SCHEME = /(?:bearer|basic)\s/iy;
+
+/**
+ * Replaces the value of every credential key. A pair whose key is not a credential is left alone and
+ * the scan continues inside its value, so a credential pair nested in a URL or a JSON string is
+ * still found (`url=https://host?token=…`).
+ */
+function redactKeyValuePairs(text: string): string {
+  let out = '';
+  let cursor = 0;
+  KEY_VALUE_PAIR.lastIndex = 0;
+  let match = KEY_VALUE_PAIR.exec(text);
+  while (match) {
+    const [pair, key = '', quote = '', separator = '', value = ''] = match;
+    const valueStart = match.index + key.length + quote.length + separator.length;
+    // A `Bearer`/`Basic` value is left to the scheme rule below, which keeps the scheme word, and a
+    // value that is already `[redacted]` is not written twice. A nested credential pair is redacted
+    // by its own key instead of swallowing the key's text.
+    AUTH_SCHEME.lastIndex = valueStart;
+    const nested = NESTED_PAIR.exec(value);
+    const keep =
+      value.startsWith('[redacted]') ||
+      AUTH_SCHEME.test(text) ||
+      (nested !== null && isCredentialKey(nested[1] ?? '')) ||
+      !isCredentialKey(key);
+    if (keep) {
+      KEY_VALUE_PAIR.lastIndex = valueStart;
+    } else {
+      out += text.slice(cursor, match.index) + `${key}${quote}${separator}[redacted]`;
+      cursor = match.index + pair.length;
+      KEY_VALUE_PAIR.lastIndex = cursor;
+    }
+    match = KEY_VALUE_PAIR.exec(text);
+  }
+  return out + text.slice(cursor);
+}
 
 /** Our own external ids (`mnd_…`, `eml_…`): identifiers, never credentials. */
 const ID_LIKE = '(?:[a-z]{2,5})_[0-9a-f]{32}';
 
 /**
- * Token-shaped values, in the order they must be applied: a named credential (`access_token=…`,
- * `"developer-token": "…"`), a provider's own prefix (`shpat_…`, `sk_live_…`, a JWT), an
- * Authorization value (`Bearer …`), then a bare long token (base64, base64url or hex), which is
- * what a gateway echoing a header leaves behind.
+ * Token-shaped values, in the order they must be applied on top of the key rule: a provider's own
+ * prefix (`shpat_…`, `sk_live_…`, a JWT), an Authorization value (`Bearer …`), then a bare long
+ * token (base64, base64url or hex), which is what a gateway echoing a header leaves behind.
  */
 const REDACTIONS: readonly (readonly [RegExp, string])[] = [
-  [
-    // A quoted or bare value, unless it is an Authorization value (`Bearer <token>`, which the scheme
-    // rule below redacts while keeping the scheme word). Only a scheme word followed by whitespace
-    // counts: `Bearer-probe-secret` is a credential value, not a scheme (#885 round 3).
-    new RegExp(
-      `(${CREDENTIAL_KEY})(["']?)(\\s*[:=]\\s*)(?!(?:Bearer|Basic)\\s|\\[redacted\\]|(?:${COMPOUND_CREDENTIAL_KEY})\\s*[:=])("(?:[^"\\\\]|\\\\.)*"|'[^']*'|[^\\s,;&}\\]"']+)`,
-      'gi',
-    ),
-    '$1$2$3[redacted]',
-  ],
   // The prefixes Shopify, Stripe, Slack, GitHub, AWS, Google and JWT issuers use.
   [/\b(?:shpat_|shpss_|shpca_|sk_live_|sk_test_|rk_|xox[abposr]-|ghp_|gho_|github_pat_|ya29\.)[A-Za-z0-9._-]{4,}/gi, '[redacted]'],
   [/\bAKIA[A-Z0-9]{16}\b/g, '[redacted]'],
@@ -52,7 +110,7 @@ const REDACTIONS: readonly (readonly [RegExp, string])[] = [
  * line that is about to become an AppError.
  */
 export function redactCredentials(text: string): string {
-  let out = text;
+  let out = redactKeyValuePairs(text);
   for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
   return out;
 }
