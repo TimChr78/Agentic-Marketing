@@ -44,6 +44,18 @@ describe('configuration', () => {
     expect((error as Error).message).toContain('openssl rand -hex 32');
   });
 
+  // #902: wildcard entries are matched by a bounded glob, so an entry that would cost too much to
+  // match is refused at start-up with its own name in the message.
+  it('refuses a TRUSTED_ORIGINS wildcard entry that would be too expensive to match (#902)', () => {
+    expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*a*a*a*a*a.example.com' })).toThrow(
+      /TRUSTED_ORIGINS entry "https:\/\/\*a\*a\*a\*a\*a\.example\.com" has more than 4 wildcards/,
+    );
+    expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: `https://${'a'.repeat(600)}.example.com` })).toThrow(/longer than 512 characters/);
+    expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*.example.com,http://localhost:5173' })).not.toThrow();
+    // A trailing comma or a blank element is ignored, as it always was.
+    expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*.example.com, ,' })).not.toThrow();
+  });
+
   it('accepts a percent-encoded password in DATABASE_URL (#647)', () => {
     const c = loadConfig({ ...base, DATABASE_URL: 'postgres://am:abc%2Fdef@postgres:5432/am' });
     // The app role replaces the owner credentials, and the URL setter encodes them.

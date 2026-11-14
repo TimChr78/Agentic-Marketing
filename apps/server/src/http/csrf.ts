@@ -1,4 +1,4 @@
-import { originPatternMatches } from '@agentic-marketing/core';
+import { MAX_ORIGIN_LENGTH, originPatternMatches } from '@agentic-marketing/core';
 import type { Context } from 'hono';
 
 // A session cookie is attached by the browser to a cross-site request whatever its content type, so
@@ -34,6 +34,8 @@ const originOf = (value: string): string | undefined => {
 };
 
 function isAllowedOrigin(origin: string, policy: BrowserRequestPolicy): boolean {
+  // A header longer than any browser sends is refused before the list is walked (#902).
+  if (origin.length > MAX_ORIGIN_LENGTH) return false;
   const publicOrigin = originOf(policy.publicUrl);
   // A `TRUSTED_ORIGINS` entry is matched by the same rules Better Auth applies to its own routes
   // (#902): an exact origin, or a wildcard that never turns an IP range into a domain.

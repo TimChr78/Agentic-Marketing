@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { isIpOrCidr } from '@agentic-marketing/core';
+import { isIpOrCidr, originPatternProblem } from '@agentic-marketing/core';
 import { z } from 'zod';
 
 // The runtime roles a process can take. `ROLE` is a comma-separated list of these; any other value
@@ -314,6 +314,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         ? [...missing(['OPENBAO_ADDR']), ...(e.OPENBAO_TOKEN || e.OPENBAO_TOKEN_FILE ? [] : ['OPENBAO_TOKEN or OPENBAO_TOKEN_FILE'])]
         : missing(['AWS_KMS_KEY_ID', 'AWS_REGION', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
   if (needed.length) throw new ConfigError(`Configuration is incomplete: KEY_PROVIDER=${e.KEY_PROVIDER} needs ${needed.join(', ')}`);
+  // A wildcard entry is matched by a bounded glob (#902): the limits are checked here so a pattern
+  // that would cost too much to match fails at start-up, naming the entry, not at the first request.
+  // An empty element (a trailing comma, a stray blank) is ignored, as it always was.
+  const trustedOrigins = (e.TRUSTED_ORIGINS?.split(',') ?? []).map((o) => o.trim()).filter(Boolean);
+  for (const entry of trustedOrigins) {
+    const problem = originPatternProblem(entry);
+    if (problem) throw new ConfigError(`Configuration is incomplete: TRUSTED_ORIGINS entry "${entry}" ${problem}`);
+  }
   const appUrl = databaseUrl(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;
   appUrl.password = e.APP_DB_PASSWORD;
@@ -398,7 +406,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       windowSeconds: e.STEP_UP_WINDOW_SECONDS,
       lockoutSeconds: e.STEP_UP_LOCKOUT_SECONDS,
     },
-    trustedOrigins: e.TRUSTED_ORIGINS?.split(',').map((o) => o.trim()) ?? [],
+    trustedOrigins,
     metricsToken: e.METRICS_TOKEN,
     sso: { domainVerification: e.SSO_DOMAIN_VERIFICATION === 'true' },
   };

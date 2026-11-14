@@ -232,4 +232,19 @@ describe('CSRF on cookie-authenticated writes (#838)', () => {
       await other.close();
     }
   });
+
+  it('matches an entry the way it is spelled: trailing slash, case and default port are normalised (#902)', async () => {
+    const other = await startTestServer('csrf_normalised', testPort(2513), { TRUSTED_ORIGINS: 'HTTPS://App.Example.Test/' });
+    try {
+      const user = await other.signUp(`csrf-normalised-${Date.now()}@example.com`);
+      const workspaceId = await other.workspaceWith([[user, 'owner']]);
+      const call = (origin: string) =>
+        postJson(other.base, '/v1/workspace.get', { origin, cookie: user.cookie, 'x-workspace-id': workspaceId }, {});
+      expect((await call('https://app.example.test')).status).toBe(200);
+      // The same normalisation does not admit a look-alike host.
+      expect((await call('https://app.example.test.evil.example')).status).toBe(403);
+    } finally {
+      await other.close();
+    }
+  });
 });
