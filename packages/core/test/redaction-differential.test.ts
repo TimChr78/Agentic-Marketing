@@ -130,8 +130,100 @@ function* random(): Generator<Generated> {
   }
 }
 
+/**
+ * One pair inside another: the new compound-key rule runs before the old rules, so it must never
+ * take less than they would have (round 6: `authToken=token="first TOPSECRET last"`,
+ * `apiSecret://Basic TOPSECRET`, a backslash before a line break inside an outer quote).
+ */
+const OUTER_KEYS = [
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaAuthToken',
+  'organizationSecondarySigningKey',
+  'authToken',
+  'apiSecret',
+  'secretKey',
+  'sessionKey',
+  'oauthToken',
+  'AUTHTOKEN',
+  'credentials',
+  'meta_adsKey',
+];
+const INNER_KEYS = ['token', 'password', 'api_key', 'apiSecret', 'authToken', 'secret', 'x-api-key', 'Authorization'];
+const NEST_SEPARATORS = ['=', ': ', '://', ' = ', '":"', "='", '="'];
+const INNER_VALUES: ((secret: string) => string)[] = [
+  (secret) => `"first ${secret} last"`,
+  (secret) => `"first\n${secret} last"`,
+  (secret) => `'first ${secret} last'`,
+  (secret) => `Basic ${secret}`,
+  (secret) => `Bearer ${secret}`,
+  (secret) => `\\\n${secret}`,
+  (secret) => `${secret}`,
+  (secret) => `"${secret}`,
+];
+
+function* nested(): Generator<Generated> {
+  for (const outer of OUTER_KEYS)
+    for (const outerSeparator of NEST_SEPARATORS)
+      for (const inner of INNER_KEYS)
+        for (const innerSeparator of ['=', ': ', '://'])
+          for (const value of INNER_VALUES)
+            for (const close of ['', '"', "'"]) {
+              const input = `${outer}${outerSeparator}${inner}${innerSeparator}${value('TOPSECRET')}${close} ${sentinel()}`;
+              yield { input, name: `nested ${JSON.stringify(input)}` };
+            }
+}
+
+/**
+ * Random compositions of keys (old and new), separators, quotes, schemes, markers and secrets:
+ * the interactions nobody thought to write down.
+ */
+const PIECES = [
+  ...OUTER_KEYS,
+  ...INNER_KEYS,
+  'entryKey',
+  'note',
+  '=',
+  ':',
+  ': ',
+  ' = ',
+  '://',
+  '"',
+  "'",
+  ' ',
+  '\n',
+  '\\',
+  ',',
+  ';',
+  '&',
+  '{',
+  '}',
+  '[',
+  ']',
+  'Bearer ',
+  'Basic ',
+  'bearer ',
+  '[redacted]',
+  'TOPSECRET',
+  'Sh0rtPw',
+  'user:Sh0rtPw@host',
+  'https://',
+  '?',
+  '/',
+];
+
+function* randomPairs(): Generator<Generated> {
+  const random = seededRandom();
+  for (let count = 0; count < 6_000; count += 1) {
+    let input = '';
+    const length = 2 + Math.floor(random() * 9);
+    for (let part = 0; part < length; part += 1) input += PIECES[Math.floor(random() * PIECES.length)]!;
+    yield { input: `${input} ${sentinel()}`, name: `pairs ${JSON.stringify(input)}` };
+  }
+}
+
 function* generated(): Generator<Generated> {
   yield* structured();
+  yield* nested();
+  yield* randomPairs();
   yield* random();
 }
 
@@ -140,7 +232,8 @@ describe('the new redactor never keeps what 0.14.20 removed (#902 round 5)', () 
     const leaks: string[] = [];
     for (const { input, name } of generated()) {
       const before = redact01420(input);
-      const after = redactCredentials(input);
+      // Markers are taken out before the comparison: `key:[redacted]` must not count as the run `:[`.
+      const after = redactCredentials(input).replaceAll('[redacted]', '\u0000');
       for (const run of runs(input)) {
         if (run.startsWith('tail') && /^tail\d+$/u.test(run)) continue;
         if (before.includes(run)) continue;

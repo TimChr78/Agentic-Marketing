@@ -52,14 +52,21 @@ const REDACTIONS: readonly (readonly [RegExp, string])[] = [
  * line that is about to become an AppError.
  */
 export function redactCredentials(text: string): string {
-  // The compound-key rule (#898) runs first, while its keys are still readable: a long camelCase
-  // key is itself token-shaped, and the bare-token rule below would replace it and leave its short
-  // value behind. It only ever replaces a value with the marker, which every later rule skips.
-  let out = redactCompoundKeys(text);
+  let out = text;
   for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
-  // The URL rule (#920) runs last, on what the rules above left: `token://value` is a credential
-  // pair first, and a long password is already the marker by now.
-  return redactUrlPasswords(out);
+  // The two additions (#898, #920) run on what the rules above produced and only ever replace
+  // more of it, so nothing those rules removed can come back, whatever the input looks like.
+  // They are repeated until neither changes anything, so the result is the same on a second
+  // call: one rule's marker can complete a match for the other (`a://key://x;u:p@h`). Each round
+  // that changes the text turns ordinary characters into the marker, so it ends; the bound is a
+  // backstop.
+  const markerKeys = hasLongCompoundKey(text);
+  for (let round = 0; round < 8; round += 1) {
+    const next = redactCompoundKeys(redactUrlPasswords(out), markerKeys);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 /**
@@ -220,6 +227,19 @@ function isUpperCredentialKey(name: string): boolean {
  * (`meta_adsKey`, `X-meta-adsKey`), an all-capitals name, or the plural `credentials`.
  */
 function isCompoundCredentialKey(full: string): boolean {
+  let known = KEY_VERDICTS.get(full);
+  if (known === undefined) {
+    known = classifyCompoundKey(full);
+    // Bounded: a text of a million distinct names must not grow this without limit.
+    if (KEY_VERDICTS.size >= 2_000) KEY_VERDICTS.clear();
+    KEY_VERDICTS.set(full, known);
+  }
+  return known;
+}
+
+const KEY_VERDICTS = new Map<string, boolean>();
+
+function classifyCompoundKey(full: string): boolean {
   // Cheap first: every name this rule adds has a capital letter or is the plural `credentials`.
   if (!/[A-Z]|credentials[0-9]*$/.test(full)) return false;
   const name = full.replace(/[0-9]+$/, '');
@@ -244,30 +264,68 @@ function isCompoundCredentialKey(full: string): boolean {
 const COMPOUND_KEY = /(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
 
 /**
- * The value after such a key, in the same grammar as the first rule above: a quoted or a bare
- * value, left alone when it is already redacted.
+ * The same, or the marker in a key's place: what the bare-token rule leaves of a long key. That
+ * rule takes a trailing `=` with the key, so the marker can also stand directly before the value.
  */
-const COMPOUND_VALUE = /(["']?\s*[:=]\s*)(?!\[redacted\])("(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}\]"']+)/y;
+const KEY_OR_MARKER = /\[redacted\](?=["']?\s*[:=]|[^\s,;&}\]"'[])|(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
 
-/** An Authorization value (`Bearer <token>`): the scheme rule redacts it and keeps the scheme word. */
-const SCHEME_VALUE = /["']?\s*[:=]\s*(?:bearer|basic)\s/iy;
+/** A name long enough for the bare-token rule to replace it before its value is looked at. */
+const TOKEN_SHAPED = /[A-Za-z0-9+/_-]{24,}/;
 
-/** Replaces the value of every camelCase credential key. Each character is read a bounded number of times. */
-function redactCompoundKeys(text: string): string {
+/**
+ * Whether the text has a compound credential key that is itself token-shaped
+ * (`organizationSecondaryAuthToken=…`). The rules above replace such a key with the marker, so
+ * afterwards only the marker in front of a separator shows where its value is.
+ */
+function hasLongCompoundKey(text: string): boolean {
+  COMPOUND_KEY.lastIndex = 0;
+  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text))
+    if (key[0].length >= 24 && TOKEN_SHAPED.test(key[0]) && isCompoundCredentialKey(key[0])) return true;
+  return false;
+}
+
+/** What separates a key from its value, with an optional closing quote of the key before it. */
+const PAIR_SEPARATOR = /["']?\s*[:=]\s*/y;
+
+/**
+ * A value: a run of quoted strings, markers and bare characters up to whitespace or a delimiter.
+ * It is the first rule's grammar (quoted, or bare) made greedy: text glued to a quoted string or
+ * to a marker (`"a"b`, `x.[redacted]`) is part of the value, so what one pass leaves is not a
+ * value the next pass would still replace.
+ */
+const PAIR_VALUE = /(?:"(?:[^"\\]|\\[\s\S])*"|'[^']*'|\[redacted\]|[^\s,;&}\]"'])+/y;
+
+/** A flag, not a secret: `requiresAuth: true`, `hasPassword: false`, `session: null`. */
+const PLAIN_LITERAL = /^(?:true|false|null|undefined)$/;
+
+/** An Authorization value (`Bearer <token>`): the scheme rule above owns it and keeps the word. */
+const SCHEME_START = /(?:bearer|basic)\s/iy;
+
+/**
+ * Replaces the value of every camelCase credential key in text the rules above have already been
+ * through. With `markerKeys`, the marker in a key's place counts as a key too. Each character is
+ * read a bounded number of times.
+ */
+function redactCompoundKeys(text: string, markerKeys: boolean): string {
   let out = '';
   let copied = 0;
-  COMPOUND_KEY.lastIndex = 0;
-  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
-    const end = key.index + key[0].length;
-    if (!isCompoundCredentialKey(key[0])) continue;
-    SCHEME_VALUE.lastIndex = end;
-    if (SCHEME_VALUE.test(text)) continue;
-    COMPOUND_VALUE.lastIndex = end;
-    const value = COMPOUND_VALUE.exec(text);
+  KEY_OR_MARKER.lastIndex = 0;
+  for (let key = KEY_OR_MARKER.exec(text); key; key = KEY_OR_MARKER.exec(text)) {
+    const keyEnd = key.index + key[0].length;
+    if (key[0] === '[redacted]' ? !markerKeys : !isCompoundCredentialKey(key[0])) continue;
+    PAIR_SEPARATOR.lastIndex = keyEnd;
+    const separator = PAIR_SEPARATOR.exec(text);
+    if (!separator && key[0] !== '[redacted]') continue;
+    const start = keyEnd + (separator?.[0].length ?? 0);
+    SCHEME_START.lastIndex = start;
+    if (SCHEME_START.test(text)) continue;
+    PAIR_VALUE.lastIndex = start;
+    const value = PAIR_VALUE.exec(text);
     if (!value) continue;
-    out += `${text.slice(copied, end)}${value[1]}[redacted]`;
-    copied = end + value[0].length;
-    COMPOUND_KEY.lastIndex = copied;
+    KEY_OR_MARKER.lastIndex = start + value[0].length;
+    if (value[0] === '[redacted]' || PLAIN_LITERAL.test(value[0])) continue;
+    out += `${text.slice(copied, start)}[redacted]`;
+    copied = start + value[0].length;
   }
   return copied === 0 ? text : out + text.slice(copied);
 }

@@ -465,3 +465,36 @@ describe('redactedText (#885 round 7)', () => {
     expect(redactedText('first line\nsecond line', 500)).toBe('first line\nsecond line');
   });
 });
+
+// #923 round 6: the two added rules run on what the 0.14.20 rules produced, so they can only
+// replace more of it, and they are repeated until the text is settled.
+describe('the added rules never take less than 0.14.20 did (#898 round 6)', () => {
+  it('keeps a nested quoted secret redacted', () => {
+    const out = redactCredentials('authToken=token="first TOPSECRET last"');
+    expect(out).not.toContain('TOPSECRET');
+    expect(out).not.toContain('first');
+  });
+
+  it('keeps a scheme value after a compound key redacted', () => {
+    expect(redactCredentials('apiSecret://Basic TOPSECRET')).not.toContain('TOPSECRET');
+  });
+
+  it('is settled after one call when an inner pair sits in an outer quote', () => {
+    const once = redactCredentials('authToken="apiSecret=\\\nx"');
+    expect(redactCredentials(once)).toBe(once);
+  });
+
+  it('redacts the short value of a key long enough to be replaced as a token itself', () => {
+    const key = 'organizationSecondaryAuthToken';
+    for (const input of [`${key}=shortpw`, `${key}: shortpw`, `${key} = shortpw`, `{"${key}":"shortpw"}`, `${key}="shortpw"`]) {
+      const out = redactCredentials(input);
+      expect(out, input).not.toContain('shortpw');
+      expect(redactCredentials(out), input).toBe(out);
+    }
+  });
+
+  it('leaves a flag under a credential-looking name readable', () => {
+    expect(redactCredentials('requiresAuth: true, hasPassword: false')).toBe('requiresAuth: true, hasPassword: false');
+    expect(redactCredentials('{"userSession":null}')).toBe('{"userSession":null}');
+  });
+});
