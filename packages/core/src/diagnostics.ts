@@ -48,7 +48,7 @@ const VALUE = /"(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}\]"']+/y;
  * string fails (#920). Any scheme: `postgres`, `http`, `redis`, `nats`, `amqp`, `mongodb+srv`. The
  * user is kept, the password is not, whatever its length and whether it is percent-escaped.
  */
-const URL_USERINFO = /\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^/?#@:\s]{0,128}):([^@/\s]{1,256})@/gi;
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)([^/?#@:\s]*):([^@/\s]+)@/gi;
 
 /**
  * A value that is itself a credential pair (`token: access_token=…`): the outer key keeps its own

@@ -244,10 +244,13 @@ describe('URL userinfo credentials (#920)', () => {
     expect(redactCredentials('amqp://guest:pw@rabbit:5672/%2f')).toBe('amqp://guest:[redacted]@rabbit:5672/%2f');
   });
 
-  it('redacts a password that contains percent-escapes or a colon', () => {
+  it('redacts a password that contains percent-escapes, a colon or is very long', () => {
     expect(redactCredentials('postgres://u:p%40ss@db:5432/am')).toBe('postgres://u:[redacted]@db:5432/am');
     expect(redactCredentials('postgres://u:pa%3Ass%2Fword@db/am')).toBe('postgres://u:[redacted]@db/am');
     expect(redactCredentials('postgres://u:pa:ss@db/am')).toBe('postgres://u:[redacted]@db/am');
+    // No length limit: a long password is still the password.
+    const long = 'p'.repeat(4096);
+    expect(redactCredentials(`postgres://u:${long}@db/am`)).toBe('postgres://u:[redacted]@db/am');
   });
 
   it('leaves a URL without a password alone', () => {
