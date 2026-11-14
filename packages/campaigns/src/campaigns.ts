@@ -350,7 +350,7 @@ export const campaignHoldoutResult = defineCommand({
   name: 'campaigns.holdoutResult',
   title: 'Campaign uplift against its control group',
   description:
-    "Per arm (control, treatment): people assigned, people who did the campaign goal within the attribution window after their assignment, conversion rate, revenue per currency and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. The campaign's control group covers every sending member. When either arm holds fewer than k=5 people, every count, rate, revenue figure and lift is null or empty, suppressed is true and k is reported.",
+    "Per arm (control, treatment): people assigned, people who did the campaign goal within the attribution window after their assignment, conversion rate, revenue per currency and e-mail unsubscribes. Reports absolute and relative lift, Newcombe's 95% interval for the difference of proportions, whether the minimum sample size is met in both arms, and a verdict. Verdicts other than not_enough_data need both samples and an interval that excludes zero. The campaign's control group covers every sending member. When either arm holds fewer than k=5 people, every count, rate, revenue figure and lift is null or empty, suppressed is true and k is reported. A currency whose distinct converters in an arm are below k=5 keeps its key with a null amount, counted in suppressedRevenue and named in the note; the measure layer and the campaign summary apply the same per-currency floor.",
   input: z.object({
     campaignId: CampaignId,
     from: isoDateTime('from').optional().describe('Count assignments at or after this time'),
@@ -379,7 +379,11 @@ export const campaignHoldoutResult = defineCommand({
         .describe('E-mail unsubscribes among the campaign’s sends, the guardrail; null when the holdout is suppressed'),
       conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
       unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
-      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map; empty when suppressed'),
+      revenue: z
+        .record(z.string(), z.number().nullable())
+        .describe(
+          'Revenue per currency, from the conversion map; a currency with fewer than k converters keeps its key with a null amount, and it is empty when the whole holdout is suppressed',
+        ),
     }),
     treatment: z.object({
       entered: z.number().int().nullable().describe('People assigned to the arm; null when the holdout is suppressed'),
@@ -391,7 +395,11 @@ export const campaignHoldoutResult = defineCommand({
         .describe('E-mail unsubscribes among the campaign’s sends, the guardrail; null when the holdout is suppressed'),
       conversionRate: z.number().nullable().describe('Converted divided by entered; null when the holdout is suppressed'),
       unsubscribeRate: z.number().nullable().describe('Unsubscribed divided by entered; null when the holdout is suppressed'),
-      revenue: z.record(z.string(), z.number()).describe('Revenue per currency, from the conversion map; empty when suppressed'),
+      revenue: z
+        .record(z.string(), z.number().nullable())
+        .describe(
+          'Revenue per currency, from the conversion map; a currency with fewer than k converters keeps its key with a null amount, and it is empty when the whole holdout is suppressed',
+        ),
     }),
     absoluteLift: z.number().nullable().describe('Treatment conversion rate minus control; null when the holdout is suppressed'),
     relativeLift: z.number().nullable().describe('Absolute lift divided by the control rate; null when control never converted'),
@@ -400,6 +408,10 @@ export const campaignHoldoutResult = defineCommand({
     verdict: z.enum(['not_enough_data', 'no_clear_difference', 'treatment_better', 'treatment_worse']),
     note: z.string(),
     suppressed: z.boolean().describe('True when an arm held fewer than k people, so counts, rates, revenue and lift are hidden'),
+    suppressedRevenue: z
+      .number()
+      .int()
+      .describe('Currency amounts left null because fewer than k people converted in that currency in that arm'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -454,7 +466,11 @@ export const campaignHoldoutResult = defineCommand({
       control: { entered: 0, converted: 0, unsubscribed: 0 },
       treatment: { entered: 0, converted: 0, unsubscribed: 0 },
     };
-    const revenue: Record<'control' | 'treatment', Record<string, number>> = { control: {}, treatment: {} };
+    const revenue: Record<'control' | 'treatment', Record<string, number | null>> = { control: {}, treatment: {} };
+    // Distinct converters per arm per currency, the same population the measure layer keys its
+    // revenue k floor on (k_revenue_group): a currency with fewer than k buyers has its amount
+    // suppressed even when the arm itself clears k (#901).
+    const converters: Record<'control' | 'treatment', Map<string, Set<string>>> = { control: new Map(), treatment: new Map() };
     const people = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date }>();
     for (const r of assignments) {
       counts[r.arm].entered++;
@@ -555,6 +571,9 @@ export const campaignHoldoutResult = defineCommand({
               '';
             const code = currency || 'UNKNOWN';
             revenue[person.arm][code] = (revenue[person.arm][code] ?? 0) + value;
+            const buyers = converters[person.arm].get(code) ?? new Set<string>();
+            buyers.add(profileId);
+            converters[person.arm].set(code, buyers);
           }
         }
       } else {
@@ -578,6 +597,19 @@ export const campaignHoldoutResult = defineCommand({
       for (const [profileId, person] of people) if (unsubscribed.has(profileId)) counts[person.arm].unsubscribed++;
     }
 
+    // The revenue floor is per currency, not per arm (#901): one buyer in EUR must never have their
+    // spend published just because the arm has twenty people. The currency key stays so the reader
+    // knows it exists; no other figure in this result (there is no arm revenue total, no revenue per
+    // recipient) lets the amount be recovered by subtraction.
+    const suppressedRevenue: string[] = [];
+    for (const arm of ['control', 'treatment'] as const) {
+      for (const currency of Object.keys(revenue[arm])) {
+        if ((converters[arm].get(currency)?.size ?? 0) >= K) continue;
+        revenue[arm][currency] = null;
+        suppressedRevenue.push(`${currency} in ${arm}`);
+      }
+    }
+
     // The same k floor as the journey holdout and the summary (#590): an arm below k hides every
     // count, rate, revenue figure and lift, so MCP cannot expose a control group the cards hide.
     if (holdoutBelowK(counts)) {
@@ -594,6 +626,7 @@ export const campaignHoldoutResult = defineCommand({
         ...hidden,
         control: { ...hidden.control, revenue: {} },
         treatment: { ...hidden.treatment, revenue: {} },
+        suppressedRevenue: 0,
       };
     }
 
@@ -608,7 +641,12 @@ export const campaignHoldoutResult = defineCommand({
             : 'Treatment converted at a lower rate and the 95% interval excludes zero; the campaign looks harmful.';
     // The same note the headline shows when the campaign's map is over its bound, so the two
     // surfaces always explain an unresolved result the same way (#590).
-    const note = identityLimit === null ? verdictNote : `${verdictNote} ${identityUnresolvedNote(identityLimit)}`;
+    const revenueNote = suppressedRevenue.length
+      ? `Revenue for ${suppressedRevenue.join(', ')} is suppressed because fewer than k=${K} people converted in that currency.`
+      : '';
+    const note = [identityLimit === null ? verdictNote : `${verdictNote} ${identityUnresolvedNote(identityLimit)}`, revenueNote]
+      .filter(Boolean)
+      .join(' ');
     return {
       campaignId: input.campaignId,
       goal: { kind: c.goal.kind, event: c.goal.event ?? null, attributionDays: c.goal.attributionDays },
@@ -625,6 +663,7 @@ export const campaignHoldoutResult = defineCommand({
       verdict: analysis.verdict,
       note,
       suppressed: false,
+      suppressedRevenue: suppressedRevenue.length,
     };
   },
 });

@@ -121,6 +121,15 @@ export function money(amount: number | null | undefined, currency: string): stri
   }
 }
 
+/**
+ * A revenue amount the API withheld for k is null, not zero (#901, #909). It reads as suppressed;
+ * a missing currency row (undefined) stays a dash.
+ */
+export function revenueText(amount: number | null | undefined, currency: string): string {
+  if (amount === null) return 'Suppressed';
+  return money(amount, currency);
+}
+
 /** The latest event is event freshness, never a fetch time and never an epoch date. */
 export function latestEventText(freshness: string | null | undefined, zone: string): string {
   if (!isRealInstant(freshness)) return 'Unavailable';

@@ -269,12 +269,17 @@ export function signedPercent(value: number | null | undefined): string {
   return `${amount > 0 ? '+' : amount < 0 ? '−' : ''}${Math.abs(amount).toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
 }
 
-/** Revenue is a currency→amount map; each returned currency keeps its own amount and is never summed. */
-export function moneyMap(revenue: Record<string, number> | undefined): string {
-  const entries = Object.entries(revenue ?? {}).filter(([, amount]) => Number.isFinite(amount));
+/**
+ * Revenue is a currency→amount map; each returned currency keeps its own amount and is never
+ * summed. A null amount was suppressed by the per-currency converter floor (#901), never zero.
+ */
+export function moneyMap(revenue: Record<string, number | null> | undefined): string {
+  const entries = Object.entries(revenue ?? {});
   if (!entries.length) return 'Unavailable';
   return entries
     .map(([currency, amount]) => {
+      if (amount === null) return `${currency} suppressed`;
+      if (!Number.isFinite(amount)) return `${currency} unavailable`;
       try {
         return new Intl.NumberFormat('en', { style: 'currency', currency, maximumFractionDigits: 2 }).format(amount);
       } catch {

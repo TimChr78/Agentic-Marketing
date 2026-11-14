@@ -1,5 +1,5 @@
 import { Alert, Meta, StatusPill } from '../../../ui';
-import { holdoutVerdict, int, money, pointsText, rateText, signedPercentText } from './model';
+import { holdoutVerdict, int, pointsText, rateText, revenueText, signedPercentText } from './model';
 
 // One holdout, campaign-wide or per journey (#511). The two are never merged: the title and the
 // closing note say which cohort this is, and every returned currency keeps its own amount.
@@ -10,7 +10,11 @@ export type HoldoutArm = {
   unsubscribed: number | null;
   conversionRate: number | null;
   unsubscribeRate: number | null;
-  revenue?: Record<string, number>;
+  /**
+   * Revenue per currency (#901). A currency whose distinct converters in this arm are below k keeps
+   * its key with a null amount, which renders as suppressed, never as zero.
+   */
+  revenue?: Record<string, number | null>;
 };
 
 export interface HoldoutPanelProps {
@@ -125,9 +129,9 @@ export function HoldoutPanel(props: HoldoutPanelProps) {
                     <p className="text-[12px] leading-[18px] font-medium">{currency}</p>
                     <dl className="mt-1 grid grid-cols-[minmax(104px,max-content)_minmax(0,1fr)] gap-x-4 gap-y-1 text-[12px] leading-[18px]">
                       <dt className="text-muted">Control · {currency}</dt>
-                      <dd className="text-right tabular-nums">{typeof control === 'number' ? money(control, currency) : '—'}</dd>
+                      <dd className="text-right tabular-nums">{control === undefined ? '—' : revenueText(control, currency)}</dd>
                       <dt className="text-muted">Treatment · {currency}</dt>
-                      <dd className="text-right tabular-nums">{typeof treatment === 'number' ? money(treatment, currency) : '—'}</dd>
+                      <dd className="text-right tabular-nums">{treatment === undefined ? '—' : revenueText(treatment, currency)}</dd>
                     </dl>
                   </li>
                 );
