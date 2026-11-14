@@ -744,6 +744,59 @@ describe('journey report states (#507)', () => {
     expect(screen.getByText(/Groups smaller than k=5 are hidden/)).toBeTruthy();
   });
 
+  it('formats the split card’s absolute lift and interval in percentage points, not percent (#916)', async () => {
+    const splitNodes = (): JNode[] => [
+      { id: 'n1', kind: 'trigger', label: 'Signed up', config: {}, next: [{ to: 'split' }] },
+      {
+        id: 'split',
+        kind: 'split',
+        label: 'A/B',
+        config: { weights: [50, 50] },
+        next: [{ to: 'a' }, { to: 'b' }],
+      },
+      { id: 'a', kind: 'email', label: 'Path A mail', config: {}, next: [] },
+      { id: 'b', kind: 'email', label: 'Path B mail', config: {}, next: [] },
+    ];
+    h.artifact = artifact({
+      version: {
+        number: 1,
+        state: 'published',
+        content: { purpose: 'marketing', goal: 'Signup', nodes: splitNodes() },
+      },
+    });
+    h.split = {
+      journeyId,
+      node: 'split',
+      k: 5,
+      suppressed: false,
+      arms: [
+        { arm: 0, weight: 50, entered: 100, converted: 10, unsubscribed: 1, conversionRate: 0.1, unsubscribeRate: 0.01, suppressed: false },
+        {
+          arm: 1,
+          weight: 50,
+          entered: 100,
+          converted: 15,
+          unsubscribed: 1,
+          conversionRate: 0.15,
+          unsubscribeRate: 0.01,
+          suppressed: false,
+        },
+      ],
+      comparisons: [{ arm: 1, absoluteLift: 0.05, relativeLift: 0.5, ci95: [0.01, 0.09], verdict: 'treatment_better' }],
+      note: 'Both arms have at least k=5 people.',
+    };
+    renderReport();
+    await screen.findByText('Entered in period');
+    await waitFor(() => expect(calls('journeys.splitResult')).toHaveLength(1));
+
+    // 10% vs 15% is a five percentage-point lift; the interval is in the same unit and stays signed.
+    const lift = await screen.findByText('+5.0 pp');
+    const line = lift.closest('p')!;
+    expect(line.textContent).toContain('95% CI +1.0 pp to +9.0 pp');
+    expect(line.textContent).toContain('50% relative');
+    expect(screen.queryByText('5%')).toBeNull();
+  });
+
   it('shows a split arm below k as Suppressed and withholds its comparison (#757)', async () => {
     const splitNodes = (): JNode[] => [
       { id: 'n1', kind: 'trigger', label: 'Signed up', config: {}, next: [{ to: 'split' }] },

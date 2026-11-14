@@ -1,11 +1,15 @@
 import { api, type Out } from '../../../app/api';
 import { useKeyedApi } from '../../../app/useApi';
 import { Alert, ListSkeleton, StatusPill, Table, TableFrame, Td, THead, Th, Tr } from '../../../ui';
+import { pointsText } from '../../campaigns/phase26/model';
 import type { JNode } from '../model';
 
 // Split results (#313) with the shared k floor (#757). An arm below k is null and says so; when
 // any arm is below k the server withholds every comparison, so the card never renders a hidden
 // arm as zero or a verdict from a hidden baseline.
+//
+// Rates are percentages, but absoluteLift and both ends of ci95 are rate differences: the same
+// quantity every holdout surface prints as percentage points (#916).
 
 type SplitResult = Out<'journeys.splitResult'>;
 
@@ -85,9 +89,10 @@ export function SplitResultsCard({ journeyId, node, from, to }: { journeyId: str
             const verdict = VERDICT[comparison.verdict];
             return (
               <p key={comparison.arm} className="text-[12px] text-fg-2">
-                Path {String.fromCharCode(65 + comparison.arm)} against A: lift <strong>{pct(comparison.absoluteLift)}</strong> absolute
+                Path {String.fromCharCode(65 + comparison.arm)} against A: lift <strong>{pointsText(comparison.absoluteLift)}</strong>{' '}
+                absolute
                 {comparison.relativeLift !== null ? ` (${pct(comparison.relativeLift)} relative)` : ''}
-                {comparison.ci95 ? ` · 95% CI ${pct(comparison.ci95[0])} to ${pct(comparison.ci95[1])}` : ''} ·{' '}
+                {comparison.ci95 ? ` · 95% CI ${pointsText(comparison.ci95[0])} to ${pointsText(comparison.ci95[1])}` : ''} ·{' '}
                 <StatusPill tone={verdict.tone}>{verdict.label}</StatusPill>
               </p>
             );
