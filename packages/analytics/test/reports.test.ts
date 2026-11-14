@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { seededRandom } from '../../../test-support/index';
 import { analyticsCampaignSummary } from '../src/campaignSummary';
 import { analyticsReports, planJourneyFunnelSuppression } from '../src/reports';
 
@@ -220,5 +221,192 @@ describe('journey funnel suppression follows the published topology (#908 review
     expect(result.totals).toEqual({ entered: 0, goalReached: 0, completed: 0, exited: 0 });
     expect(result.steps).toEqual([]);
     expect(result.withheld).toEqual([]);
+  });
+});
+
+// #917 review round 3: a headline that sums steps must be in the same relation set, or a hidden
+// term leaks through it. A graph with two exits made `completed = 100` and one exit's reach visible
+// beside the other hidden exit. The same class is caught here for random small topologies: the test
+// runs a solver over every published additive relation (and chains of them) and fails if any hidden
+// count below k becomes derivable.
+describe('journey funnel suppression cannot be bypassed by a headline (#908 review round 3)', () => {
+  type Node = { id: string; kind: string; children: string[] };
+  type Graph = { nodes: Node[]; counts: Map<string, number>; goal?: string; terminal: string[] };
+
+  const makeGraph = (random: () => number): Graph => {
+    const int = (max: number) => Math.floor(random() * max);
+    const nodes: Node[] = [{ id: 'n0', kind: 'trigger', children: [] }];
+    const counts = new Map<string, number>([['n0', 60 + int(140)]]);
+    const leaves = ['n0'];
+    const split = (total: number, parts: number): number[] => {
+      const out = Array.from({ length: parts }, () => 1);
+      let left = total - parts;
+      while (left > 0) {
+        out[int(parts)]! += 1;
+        left -= 1;
+      }
+      return out;
+    };
+    let next = 1;
+    const add = (kind = 'wait') => {
+      const id = `n${next++}`;
+      nodes.push({ id, kind, children: [] });
+      return id;
+    };
+    for (let step = 0; step < 7 + int(6); step++) {
+      const roll = random();
+      if (roll < 0.4 && leaves.length) {
+        const parent = leaves[int(leaves.length)]!;
+        const total = counts.get(parent)!;
+        const parts = total >= 3 ? 2 + int(2) : 1;
+        const shares = split(total, parts);
+        const children = shares.map((share) => {
+          const id = add();
+          nodes.find((node) => node.id === parent)!.children.push(id);
+          counts.set(id, share);
+          return id;
+        });
+        leaves.splice(leaves.indexOf(parent), 1, ...children);
+      } else if (roll < 0.65 && leaves.length >= 2) {
+        // A merge whose parents each feed only it, so `node = sum(parents)` stays exact.
+        const first = leaves[int(leaves.length)]!;
+        leaves.splice(leaves.indexOf(first), 1);
+        const second = leaves[int(leaves.length)]!;
+        leaves.splice(leaves.indexOf(second), 1);
+        const id = add();
+        for (const parent of [first, second]) {
+          nodes.find((node) => node.id === parent)!.children.push(id);
+          counts.set(parent, counts.get(parent)!);
+        }
+        counts.set(id, counts.get(first)! + counts.get(second)!);
+        leaves.push(id);
+      } else if (leaves.length) {
+        const parent = leaves[int(leaves.length)]!;
+        const id = add();
+        nodes.find((node) => node.id === parent)!.children.push(id);
+        counts.set(id, counts.get(parent)!);
+        leaves.splice(leaves.indexOf(parent), 1, id);
+      }
+    }
+    for (const leaf of leaves) {
+      if (random() < 0.5) {
+        nodes.find((node) => node.id === leaf)!.kind = 'goal';
+        break;
+      }
+    }
+    const goal = nodes.find((node) => node.kind === 'goal')?.id;
+    return { nodes, counts, ...(goal ? { goal } : {}), terminal: leaves };
+  };
+
+  /** Relations the response publishes: forks, merges and the headline sums. */
+  const relationsOf = (graph: Graph): { name: string; terms: (string | null)[] }[] => {
+    const value = (id: string) => graph.counts.get(id) ?? 0;
+    const out: { name: string; terms: (string | null)[] }[] = [];
+    for (const node of graph.nodes) {
+      if (node.children.length >= 2) out.push({ name: `fork:${node.id}`, terms: [node.id, ...node.children] });
+      const parents = graph.nodes.filter((parent) => parent.children.includes(node.id));
+      if (parents.length >= 2) out.push({ name: `merge:${node.id}`, terms: [node.id, ...parents.map((parent) => parent.id)] });
+    }
+    out.push({
+      name: 'headline:entered',
+      terms: ['entered', ...graph.nodes.filter((node) => node.kind === 'trigger').map((node) => node.id)],
+    });
+    if (graph.goal) out.push({ name: 'headline:goalReached', terms: ['goalReached', graph.goal] });
+    const completed = graph.terminal.reduce((sum, id) => sum + value(id), 0);
+    if (completed > 0) out.push({ name: 'headline:completed', terms: ['completed', ...graph.terminal] });
+    return out;
+  };
+
+  const derive = (relations: { terms: (string | null)[] }[], known: Map<string, number>): Set<string> => {
+    const derived = new Set<string>();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const relation of relations) {
+        const terms = relation.terms.filter((term): term is string => term !== null);
+        const unknown = terms.filter((term) => !known.has(term) && !derived.has(term));
+        if (unknown.length !== 1 || terms.length < 2) continue;
+        const target = unknown[0]!;
+        const others = terms.filter((term) => term !== target);
+        if (!others.every((term) => known.has(term))) continue;
+        const total = known.get(terms[0]!) ?? 0;
+        known.set(target, total - others.reduce((sum, term) => sum + (known.get(term) ?? 0), 0));
+        derived.add(target);
+        changed = true;
+      }
+    }
+    return derived;
+  };
+
+  it('never derives a hidden count below k in random chains, forks, merges and exits', () => {
+    const random = seededRandom();
+    let withHidden = 0;
+    for (let run = 0; run < 120; run++) {
+      const graph = makeGraph(random);
+      const value = (id: string) => graph.counts.get(id) ?? 0;
+      const hidden = new Set(graph.nodes.filter((node) => value(node.id) < 5 && random() < 0.6).map((node) => node.id));
+      if (!hidden.size) continue;
+      withHidden += 1;
+      const steps = graph.nodes.map((node) => ({ step: node.id, reached: hidden.has(node.id) ? null : value(node.id) }));
+      const totals = {
+        entered: value('n0'),
+        goalReached: graph.goal ? value(graph.goal) : 0,
+        completed: graph.terminal.reduce((sum, id) => sum + value(id), 0),
+        exited: 0,
+      };
+      const result = planJourneyFunnelSuppression({ totals, steps, topology: graph.nodes, k: 5 });
+      // The planner may have hidden more; the solver sees only what the response prints.
+      const known = new Map<string, number>();
+      for (const step of result.steps) if (step.reached !== null) known.set(step.step, step.reached);
+      for (const [name, count] of Object.entries(result.totals)) if (count !== null) known.set(name, count);
+      const derived = derive(relationsOf(graph), known);
+      for (const id of hidden) {
+        if (value(id) >= 5) continue;
+        expect(derived.has(id), `run ${run}: hidden ${id}=${value(id)} was derived`).toBe(false);
+      }
+    }
+    // The property is only meaningful if the generator actually produced hidden steps.
+    expect(withHidden).toBeGreaterThan(10);
+  });
+
+  it('keeps two exits from leaking through completed, as a named regression', () => {
+    // trigger → fork → A → exitA / B → exitB; all 100 complete, A and exitA reach 97, B and exitB 3.
+    const graph = {
+      nodes: [
+        { id: 'trigger', kind: 'trigger', children: ['fork'] },
+        { id: 'fork', kind: 'split', children: ['a', 'b'] },
+        { id: 'a', kind: 'wait', children: ['exitA'] },
+        { id: 'b', kind: 'wait', children: ['exitB'] },
+        { id: 'exitA', kind: 'exit', children: [] },
+        { id: 'exitB', kind: 'exit', children: [] },
+      ],
+      counts: new Map([
+        ['trigger', 100],
+        ['fork', 100],
+        ['a', 97],
+        ['b', 3],
+        ['exitA', 97],
+        ['exitB', 3],
+      ]),
+      terminal: ['exitA', 'exitB'],
+    };
+    const hidden = new Set(['b', 'exitB']);
+    const steps = graph.nodes.map((node) => ({ step: node.id, reached: hidden.has(node.id) ? null : graph.counts.get(node.id)! }));
+    const result = planJourneyFunnelSuppression({
+      totals: { entered: 100, goalReached: 0, completed: 100, exited: 0 },
+      steps,
+      topology: graph.nodes,
+      k: 5,
+    });
+    // The exit relation hides the visible exit with the hidden one, and the fork hides A with B.
+    expect(result.steps.find((step) => step.step === 'exitA')?.reached).toBeNull();
+    expect(result.steps.find((step) => step.step === 'a')?.reached).toBeNull();
+    expect(result.totals.completed).toBe(100);
+    const visible = [
+      ...result.steps.flatMap((step) => (step.reached === null ? [] : [step.reached])),
+      ...Object.values(result.totals).flatMap((count) => (count === null ? [] : [count])),
+    ];
+    const differences = visible.flatMap((x) => visible.filter((y) => y !== x).map((y) => Math.abs(x - y)));
+    expect(differences).not.toContain(3);
   });
 });

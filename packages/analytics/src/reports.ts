@@ -173,35 +173,31 @@ export function planJourneyFunnelSuppression(opts: {
           hideSteps: true,
         });
     }
-    const entry = opts.topology.find((node) => node.kind === 'trigger');
-    if (entry && present.has(entry.id))
+    // Every headline is the sum of the steps that produce its event in the interpreter:
+    //   entered      = every trigger's reach (a journey normally has one),
+    //   goalReached  = every goal node's reach (the 'converted' event is recorded at the goal),
+    //   completed    = every terminal step's reach (an exit node, or a node with no outgoing edge;
+    //                  the interpreter records 'completed' at the node where the walk ends).
+    // Each is a relation `total = Σ contributors`, so a hidden contributor hides its smallest
+    // visible sibling or the headline itself — a second exit can no longer leak through `completed`.
+    const headlineSets: { name: TotalName; steps: string[] }[] = [
+      { name: 'entered', steps: opts.topology.filter((node) => node.kind === 'trigger').map((node) => node.id) },
+      { name: 'goalReached', steps: opts.topology.filter((node) => node.kind === 'goal').map((node) => node.id) },
+      { name: 'completed', steps: opts.topology.filter((node) => node.children.length === 0).map((node) => node.id) },
+    ];
+    for (const headline of headlineSets) {
+      const contributors = headline.steps.filter((id) => present.has(id));
+      // A zero headline cannot be the sum of positive steps and reveals nothing about one; a
+      // withheld headline is already hidden. Only a positive, visible headline forms a relation.
+      if (!contributors.length || totals[headline.name] === null || !(totals[headline.name]! > 0)) continue;
       relations.push({
-        name: 'headline:entered',
-        steps: [entry.id],
-        totals: ['entered'],
-        withheldTotal: 'entered',
-        hideSteps: false,
+        name: `headline:${headline.name}`,
+        steps: contributors,
+        totals: [headline.name],
+        withheldTotal: headline.name,
+        hideSteps: true,
       });
-    const goals = opts.topology.filter((node) => node.kind === 'goal');
-    const goal = goals.length === 1 ? goals[0] : undefined;
-    if (goal && present.has(goal.id))
-      relations.push({
-        name: 'headline:goalReached',
-        steps: [goal.id],
-        totals: ['goalReached'],
-        withheldTotal: 'goalReached',
-        hideSteps: false,
-      });
-    const exits = opts.topology.filter((node) => node.kind === 'exit');
-    const exit = exits.length === 1 ? exits[0] : undefined;
-    if (exit && present.has(exit.id))
-      relations.push({
-        name: 'headline:completed',
-        steps: [exit.id],
-        totals: ['completed'],
-        withheldTotal: 'completed',
-        hideSteps: false,
-      });
+    }
   } else {
     // No topology: relations are unknown, so keep the flat rule — any step protects any total.
     for (const name of names)
@@ -249,6 +245,17 @@ export function planJourneyFunnelSuppression(opts: {
     if (hidden.get(step.step) !== true) continue;
     if (step.reached !== null) hiddenSteps += 1;
     step.reached = null;
+  }
+  // A headline that cannot be expressed as a sum of printed steps has no relation to protect it.
+  // `exited` is recorded wherever a participant withdraws consent or a wait ends, and a headline
+  // whose contributor step has no row cannot be tied to one either: with any step hidden, the
+  // headline could name that step's people, so it is withheld (the conservative fallback).
+  if (opts.topology && hiddenSteps > 0) {
+    const expressible = new Set(relations.flatMap((relation) => relation.totals));
+    for (const name of names) {
+      if (expressible.has(name)) continue;
+      if (totals[name] !== null && totals[name]! > 0) hideTotal(name);
+    }
   }
 
   for (const name of names) {
