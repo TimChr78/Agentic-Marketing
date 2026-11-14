@@ -588,10 +588,83 @@ describe('named reports', () => {
     const reached = funnel.steps.map((s) => s.reached);
     expect(reached).toContain(null);
     expect(reached).not.toContain(3);
-    expect(funnel.entered).toBe(100);
+    // The query layer's complementary row hid the entry step (100 is the smallest visible row in
+    // its order), and entered equals the entry step's count: the review requires them hidden
+    // together, so entering is withheld rather than republished beside the hidden step.
+    expect(funnel.entered).toBeNull();
     expect(funnel.steps.every((s) => s.reached !== 3 && s.dropOff !== 3)).toBe(true);
-    expect(funnel.meta.suppressed).toBeGreaterThanOrEqual(2);
+    expect(funnel.meta.suppressed).toBeGreaterThanOrEqual(3);
     expect(funnel.meta.notes.join(' ')).toContain('suppressed');
+  });
+
+  it('protects a hidden branch from the fork total, not with an unrelated step (#908 review)', async () => {
+    const api = t.api(owner);
+    const journey = (
+      await api.call('artifacts.create', {
+        type: 'journey',
+        name: 'Fork with a small branch',
+        content: {
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' }, next: [{ to: 'split' }] },
+            { id: 'split', kind: 'split', label: 'A/B', config: { weights: [50, 50] }, next: [{ to: 'a' }, { to: 'b' }] },
+            { id: 'a', kind: 'wait', label: 'A', config: { duration: 'P1D' }, next: [{ to: 'a_down' }] },
+            { id: 'a_down', kind: 'wait', label: 'A downstream', config: { duration: 'P1D' } },
+            { id: 'b', kind: 'wait', label: 'B', config: { duration: 'P1D' } },
+          ],
+        },
+      })
+    ).artifactId;
+    await api.call('artifacts.requestPublish', { artifactId: journey, note: 'fork suppression' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: journey,
+        version: 1,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // 100 reach the fork, 97 take A and 5 of them reach A's downstream step, 3 take B.
+    for (let i = 0; i < 100; i++) {
+      const p = person();
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'trigger', 'step', 1);
+      add(p, 'split', 'step', 2);
+      if (i < 97) {
+        add(p, 'a', 'step', 3);
+        if (i < 5) add(p, 'a_down', 'step', 4);
+      } else add(p, 'b', 'step', 3);
+    }
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: journey, from: FROM, to: TO });
+    const reached = Object.fromEntries(funnel.steps.map((step) => [step.step, step.reached]));
+    expect(reached.trigger).toBe(100);
+    expect(reached.split).toBe(100);
+    // B (3) was suppressed by the query layer; A (97), its only visible sibling, is hidden with it,
+    // so the fork total cannot hand B back as 100 − 97.
+    expect(reached.b).toBeNull();
+    expect(reached.a).toBeNull();
+    expect(funnel.entered).toBe(100);
+    const visible = [
+      ...funnel.steps.flatMap((step) => (step.reached === null ? [] : [step.reached])),
+      ...Object.values({
+        entered: funnel.entered,
+        goalReached: funnel.goalReached,
+        completed: funnel.completed,
+        exited: funnel.exited,
+      }).flatMap((value) => (value === null ? [] : [value])),
+    ];
+    const differences = visible.flatMap((a) => visible.filter((b) => b !== a).map((b) => Math.abs(a - b)));
+    expect(differences).not.toContain(3);
+    expect(funnel.meta.notes.join(' ')).toContain('branch');
   });
 
   it('computes the drop-off chain over the published version only (#591)', async () => {

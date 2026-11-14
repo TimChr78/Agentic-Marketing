@@ -52,6 +52,7 @@ describe('journey funnel totals follow the k floor (#908)', () => {
         { step: 'trigger', reached: null },
         { step: 'goal', reached: null },
       ],
+      topology: null,
     });
     expect(result.totals).toEqual({ entered: null, goalReached: null, completed: 0, exited: null });
     expect(result.withheld).toEqual(['entered', 'goalReached', 'exited']);
@@ -65,6 +66,7 @@ describe('journey funnel totals follow the k floor (#908)', () => {
         { step: 'a', reached: 100 },
         { step: 'b', reached: 60 },
       ],
+      topology: null,
     });
     expect(result.totals).toEqual({ entered: 100, goalReached: 60, completed: 50, exited: 10 });
     expect(result.steps.map((step) => step.reached)).toEqual([100, 60]);
@@ -72,7 +74,7 @@ describe('journey funnel totals follow the k floor (#908)', () => {
     expect(result.complementary).toBe(false);
   });
 
-  it('hides the smallest visible step when exactly one step row is hidden', () => {
+  it('hides the smallest visible step when exactly one step row is hidden (no topology)', () => {
     const result = plan({
       totals: { entered: 100, goalReached: 60, completed: 50, exited: 10 },
       steps: [
@@ -81,6 +83,7 @@ describe('journey funnel totals follow the k floor (#908)', () => {
         { step: 'c', reached: 40 },
         { step: 'd', reached: 60 },
       ],
+      topology: null,
     });
     // c is the smallest visible contributor with a value; only a sum of hidden values is derivable.
     expect(result.steps.map((step) => step.reached)).toEqual([100, null, null, 60]);
@@ -96,9 +99,126 @@ describe('journey funnel totals follow the k floor (#908)', () => {
         { step: 'b', reached: null },
         { step: 'c', reached: 100 },
       ],
+      topology: null,
     });
     expect(result.steps.map((step) => step.reached)).toEqual([null, null, 100]);
     expect(result.complementary).toBe(false);
+    expect(result.withheld).toEqual([]);
+  });
+});
+
+// #917 review round 2: a hidden branch can be recovered from its parent or merge, so the complement
+// must be a sibling in the same relation — never an unrelated step.
+describe('journey funnel suppression follows the published topology (#908 review)', () => {
+  const plan = (input: Parameters<typeof planJourneyFunnelSuppression>[0]) => planJourneyFunnelSuppression({ k: 5, ...input });
+  const node = (id: string, kind: string, children: string[] = []) => ({ id, kind, children });
+  const steps = (values: Record<string, number | null>) => Object.entries(values).map(([step, reached]) => ({ step, reached }));
+  /** Every arithmetic difference between visible numbers in the response. */
+  const differences = (result: ReturnType<typeof plan>): number[] => {
+    const visible = [
+      ...result.steps.flatMap((step) => (step.reached === null ? [] : [step.reached])),
+      ...Object.values(result.totals).flatMap((value) => (value === null ? [] : [value])),
+    ];
+    const out: number[] = [];
+    for (const a of visible) for (const b of visible) if (a !== b) out.push(Math.abs(a - b));
+    return out;
+  };
+  /** The count a relation with exactly one hidden term would hand back. */
+  const derivable = (values: (number | null)[]): number | null => {
+    const hidden = values.filter((value) => value === null).length;
+    if (hidden !== 1) return null;
+    const total = values[0]!;
+    return total - values.slice(1).reduce((sum: number, value) => sum + (value ?? 0), 0);
+  };
+
+  it('protects the branch Sol reported: 100 fork, A 97, A downstream 5, B 3', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 0, exited: 0 },
+      steps: steps({ start: 100, a: 97, a_down: 5, b: null }),
+      topology: [node('start', 'trigger', ['a', 'b']), node('a', 'wait', ['a_down']), node('a_down', 'wait'), node('b', 'wait')],
+    });
+    // B was hidden; A is the only visible sibling, so hiding an unrelated downstream step is not
+    // enough. A is hidden with it, and no arithmetic on the visible numbers gives 3.
+    expect(result.steps.map((step) => step.reached)).toEqual([100, null, 5, null]);
+    expect(derivable([100, result.steps[1]!.reached, result.steps[3]!.reached])).toBeNull();
+    expect(differences(result)).not.toContain(3);
+    expect(result.complementary).toBe(true);
+  });
+
+  it('hides the smallest visible sibling in a two-way fork 97/3', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 0, exited: 0 },
+      steps: steps({ start: 100, a: 97, b: null }),
+      topology: [node('start', 'trigger', ['a', 'b']), node('a', 'wait'), node('b', 'wait')],
+    });
+    expect(result.steps.map((step) => step.reached)).toEqual([100, null, null]);
+    expect(differences(result)).not.toContain(3);
+  });
+
+  it('hides the smallest visible sibling in a three-way fork with one hidden branch', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 0, exited: 0 },
+      steps: steps({ start: 100, a: 60, b: 30, c: null }),
+      topology: [node('start', 'trigger', ['a', 'b', 'c']), node('a', 'wait'), node('b', 'wait'), node('c', 'wait')],
+    });
+    // b (30) is the smallest visible sibling of the hidden c (4); a stays visible.
+    expect(result.steps.map((step) => step.reached)).toEqual([100, 60, null, null]);
+    expect(differences(result)).not.toContain(4);
+  });
+
+  it('leaves a linear chain alone but nulls drop-offs around the hidden step', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 0, exited: 0 },
+      steps: steps({ start: 100, s1: 60, s2: null, s3: 55 }),
+      topology: [node('start', 'trigger', ['s1']), node('s1', 'wait', ['s2']), node('s2', 'wait', ['s3']), node('s3', 'wait')],
+    });
+    // A single hidden step on a line has no sibling to hide; the handler nulls the drop-offs.
+    expect(result.steps.map((step) => step.reached)).toEqual([100, 60, null, 55]);
+    expect(result.complementary).toBe(false);
+    expect(result.withheld).toEqual([]);
+  });
+
+  it('hides nothing more when two siblings are already hidden', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 0, exited: 0 },
+      steps: steps({ start: 100, a: null, b: null }),
+      topology: [node('start', 'trigger', ['a', 'b']), node('a', 'wait'), node('b', 'wait')],
+    });
+    expect(result.steps.map((step) => step.reached)).toEqual([100, null, null]);
+    expect(result.complementary).toBe(false);
+  });
+
+  it('protects a reconvergence: join 100, arm A 97, arm B 3', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 0, exited: 0 },
+      steps: steps({ start: 100, a: 97, b: null, join: 100 }),
+      topology: [node('start', 'trigger', ['a', 'b']), node('a', 'wait', ['join']), node('b', 'wait', ['join']), node('join', 'wait')],
+    });
+    // The fork a/b has one hidden term, so its smallest visible sibling is hidden. The merge into
+    // join then has two hidden terms, so the visible join is not a way back to 3.
+    expect(result.steps.find((step) => step.step === 'a')?.reached).toBeNull();
+    expect(result.steps.find((step) => step.step === 'join')?.reached).toBe(100);
+    expect(differences(result)).not.toContain(3);
+  });
+
+  it('withholds a visible headline goalReached when its goal step row is hidden', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 50, completed: 0, exited: 0 },
+      steps: steps({ start: 100, goal: null }),
+      topology: [node('start', 'trigger', ['goal']), node('goal', 'goal', ['done']), node('done', 'exit')],
+    });
+    expect(result.totals.goalReached).toBeNull();
+    expect(result.withheld).toEqual(['goalReached']);
+  });
+
+  it('returns zero rows unchanged', () => {
+    const result = plan({
+      totals: { entered: 0, goalReached: 0, completed: 0, exited: 0 },
+      steps: [],
+      topology: [node('start', 'trigger', ['a']), node('a', 'wait')],
+    });
+    expect(result.totals).toEqual({ entered: 0, goalReached: 0, completed: 0, exited: 0 });
+    expect(result.steps).toEqual([]);
     expect(result.withheld).toEqual([]);
   });
 });
