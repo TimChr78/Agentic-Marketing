@@ -4,7 +4,7 @@ The typed REST client. Input and output types are inferred from the command regi
 command change breaks callers at compile time.
 
 ```ts
-import { createClient } from '@agentic-marketing/client';
+import { callWithRetry, createClient } from '@agentic-marketing/client';
 import type { Commands } from '@agentic-marketing/server/src/registry';
 
 const api = createClient<Commands>({ baseUrl: 'https://am.example.com', headers: { authorization: `Bearer ${token}` } });
@@ -18,7 +18,7 @@ runs it a second time. `callWithRetry` does that for you: it mints one key per l
 uses the `idempotencyKey` you pass) and keeps it across every attempt.
 
 ```ts
-const sent = await api.callWithRetry('messages.sendEmail', { profileId, templateId }, { idempotencyKey: 'welcome-ada' });
+const sent = await callWithRetry(api, 'messages.sendEmail', { profileId, templateId }, { idempotencyKey: 'welcome-ada' });
 ```
 
 - It retries a **network failure** and the `409 conflict` whose `details.reason` is

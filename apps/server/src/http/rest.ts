@@ -1,5 +1,5 @@
 import { type Auth, assertWorkspaceHeader, principalFromApiToken, principalFromSession } from '@agentic-marketing/auth';
-import { type Executor, IDEMPOTENCY_KEY_MAX, isValidIdempotencyKey, type Principal } from '@agentic-marketing/commands';
+import type { Executor, Principal } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
@@ -69,9 +69,9 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       'x-humans-only': cmd.humansOnly ?? false,
       request: {
         headers: z.object({
-          'idempotency-key': z.string().min(1).max(IDEMPOTENCY_KEY_MAX).optional().openapi({
+          'idempotency-key': z.string().min(1).optional().openapi({
             description:
-              'Optional. A retry of the same logical request must reuse its key: the first response is replayed and the command runs once. A key reused for a different command or input answers 409 (details.reason "idempotency_key_reused"). A 409 whose details.reason is "idempotency_in_progress" means the first request is still running after ten seconds: retry with this same key shortly; a new key would run it again.',
+              'Optional, non-empty. Values of up to 200 printable characters without spaces are recommended; values with spaces, non-ASCII characters or more than 200 characters keep working for compatibility. A retry of the same logical request must reuse its key: the first response is replayed and the command runs once. A key reused for a different command, input or caller answers 409 (details.reason "idempotency_key_reused"). A 409 whose details.reason is "idempotency_in_progress" means the first request is still running after ten seconds: retry with this same key shortly; a new key would run it again. An empty header answers 400.',
           }),
         }),
         body: { required: true, content: { 'application/json': { schema: jsonSchema(api, cmd.input, cmd.name, 'input') as never } } },
@@ -125,13 +125,12 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       assertWorkspaceHeader(principal, c.req.raw.headers);
       const body = await c.req.json().catch(() => ({}));
       const idempotencyKey = c.req.header('idempotency-key');
-      // An empty header is present but means nothing: refuse it instead of silently running
-      // without a key, or a retry could execute twice (#906 review round 2).
-      if (idempotencyKey !== undefined && !isValidIdempotencyKey(idempotencyKey))
-        throw new AppError(
-          'invalid_input',
-          `The idempotency-key header must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`,
-        );
+      // Compatibility (#906 review round 3): before 0.14.24 every non-empty header value was used
+      // for dedupe, so spaces, non-ASCII and long values must keep working. The one change is an
+      // empty header, which used to mean "no key" and is now refused instead of silently running
+      // the request without one.
+      if (idempotencyKey === '')
+        throw new AppError('invalid_input', 'The idempotency-key header must not be empty. Omit it or send a value.');
       const out = await deps.executor.execute(cmd, body, principal, { surface: 'rest', idempotencyKey });
       return c.json(out as object, 200);
     });

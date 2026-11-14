@@ -1,7 +1,8 @@
 /**
- * The idempotency key rule shared by the command executor, the REST header, an MCP write tool and
- * the typed client (#906 review round 2): 1 to 200 printable ASCII characters, no spaces. A key
- * that fails it is refused rather than silently treated as "no key".
+ * The strict idempotency key rule for the new surfaces — an MCP write tool's argument and a
+ * caller-supplied typed-client key (#906): 1 to 200 printable ASCII characters, no spaces. The
+ * REST header keeps accepting every non-empty value it accepted before 0.14.24 (spaces, non-ASCII,
+ * longer values) for compatibility; only an empty header is new-invalid there.
  */
 export const IDEMPOTENCY_KEY_MAX = 200;
 

@@ -1,7 +1,7 @@
 import { defineCommand } from '@agentic-marketing/commands';
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { ApiError, createClient, isIdempotencyInProgress } from '../src';
+import { ApiError, callWithRetry, createClient, isIdempotencyInProgress } from '../src';
 
 // #906: the idempotency contract says a 409 "still in progress" is retried with the SAME key and
 // every other conflict is a final answer. `callWithRetry` is that loop; a fresh key per attempt
@@ -40,7 +40,7 @@ describe('the typed client retries an idempotent call (#906)', () => {
     });
     const api = createClient<Commands>({ fetch: fetch as unknown as typeof globalThis.fetch });
 
-    expect(await api.callWithRetry('test.write', { value: 'a' })).toEqual({ id: 'note_1' });
+    expect(await callWithRetry(api, 'test.write', { value: 'a' })).toEqual({ id: 'note_1' });
     expect(calls).toHaveLength(2);
     expect(keyOf(calls[0])).toBeTruthy();
     expect(keyOf(calls[1])).toBe(keyOf(calls[0]));
@@ -55,7 +55,7 @@ describe('the typed client retries an idempotent call (#906)', () => {
     });
     const api = createClient<Commands>({ fetch: fetch as unknown as typeof globalThis.fetch });
 
-    await api.callWithRetry('test.write', { value: 'a' }, { idempotencyKey: 'logical-call-1' });
+    await callWithRetry(api, 'test.write', { value: 'a' }, { idempotencyKey: 'logical-call-1' });
     expect(calls.map(keyOf)).toEqual(['logical-call-1', 'logical-call-1']);
   });
 
@@ -68,7 +68,7 @@ describe('the typed client retries an idempotent call (#906)', () => {
     });
     const api = createClient<Commands>({ fetch: fetch as unknown as typeof globalThis.fetch });
 
-    expect(await api.callWithRetry('test.write', { value: 'a' })).toEqual({ id: 'note_1' });
+    expect(await callWithRetry(api, 'test.write', { value: 'a' })).toEqual({ id: 'note_1' });
     expect(calls).toHaveLength(2);
     expect(keyOf(calls[1])).toBe(keyOf(calls[0]));
   });
@@ -78,14 +78,14 @@ describe('the typed client retries an idempotent call (#906)', () => {
       respond(409, { error: 'conflict', message: 'already used', details: { reason: 'idempotency_key_reused' } }),
     );
     const api = createClient<Commands>({ fetch: reused as unknown as typeof globalThis.fetch });
-    const err = await api.callWithRetry('test.write', { value: 'a' }).catch((e) => e);
+    const err = await callWithRetry(api, 'test.write', { value: 'a' }).catch((e) => e);
     expect(err).toMatchObject({ status: 409, code: 'conflict' });
     expect(isIdempotencyInProgress(err)).toBe(false);
     expect(reused).toHaveBeenCalledTimes(1);
 
     const refused = vi.fn(async () => respond(403, { error: 'forbidden', message: 'no' }));
     const api2 = createClient<Commands>({ fetch: refused as unknown as typeof globalThis.fetch });
-    await expect(api2.callWithRetry('test.write', { value: 'a' })).rejects.toMatchObject({ status: 403 });
+    await expect(callWithRetry(api2, 'test.write', { value: 'a' })).rejects.toMatchObject({ status: 403 });
     expect(refused).toHaveBeenCalledTimes(1);
   });
 
@@ -100,13 +100,13 @@ describe('the typed client retries an idempotent call (#906)', () => {
     const fetch = vi.fn(async () => respond(200, { id: 'note_1' }));
     const api = createClient<Commands>({ fetch: fetch as unknown as typeof globalThis.fetch });
 
-    await expect(api.callWithRetry('test.write', { value: 'a' }, { idempotencyKey: '' })).rejects.toThrow(
+    await expect(callWithRetry(api, 'test.write', { value: 'a' }, { idempotencyKey: '' })).rejects.toThrow(
       'idempotency key must be 1 to 200 printable characters',
     );
     expect(() => api.call('test.write', { value: 'a' }, { idempotencyKey: 'not a key' })).toThrow(
       'idempotency key must be 1 to 200 printable characters',
     );
-    await expect(api.callWithRetry('test.write', { value: 'a' }, { idempotencyKey: 'k'.repeat(201) })).rejects.toThrow(
+    await expect(callWithRetry(api, 'test.write', { value: 'a' }, { idempotencyKey: 'k'.repeat(201) })).rejects.toThrow(
       'idempotency key must be 1 to 200 printable characters',
     );
     expect(fetch).not.toHaveBeenCalled();
@@ -130,7 +130,7 @@ describe('the typed client retries an idempotent call (#906)', () => {
     });
     const api = createClient<Commands>({ fetch: fetch as unknown as typeof globalThis.fetch });
 
-    expect(await api.callWithRetry('test.write', { value: 'a' })).toEqual({ id: 'note_1' });
+    expect(await callWithRetry(api, 'test.write', { value: 'a' })).toEqual({ id: 'note_1' });
     expect(runs).toBe(1);
     expect(calls).toHaveLength(2);
   });

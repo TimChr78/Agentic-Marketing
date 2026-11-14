@@ -67,7 +67,12 @@ function checkIdempotencyKey(key: string | undefined): void {
     throw new Error(`An idempotency key must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`);
 }
 
-export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOptions = {}) {
+export interface Client<Cmds extends readonly AnyCommand[]> {
+  /** One attempt. A retry must pass the same `idempotencyKey`; see `callWithRetry`. */
+  call<N extends Cmds[number]['name']>(name: N, input: CommandInput<Cmds, N>, callOpts?: CallOptions): Promise<CommandOutput<Cmds, N>>;
+}
+
+export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOptions = {}): Client<Cmds> {
   const f = opts.fetch ?? fetch;
 
   async function once<N extends Cmds[number]['name']>(
@@ -92,7 +97,6 @@ export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOpt
   }
 
   return {
-    /** One attempt. A retry must pass the same `idempotencyKey`; see `callWithRetry`. */
     call<N extends Cmds[number]['name']>(
       name: N,
       input: CommandInput<Cmds, N>,
@@ -101,31 +105,36 @@ export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOpt
       checkIdempotencyKey(callOpts.idempotencyKey);
       return once(name, input, callOpts);
     },
-    /**
-     * A logical call with safe retries (#906). It mints one idempotency key (or uses the one you
-     * pass) and keeps it across every attempt, so a retry after a lost answer replays the first
-     * result instead of running the command again.
-     *
-     * It retries a network failure and the `409 conflict` that says the first request is still in
-     * progress, with bounded backoff. It never retries the other conflict ("already used for a
-     * different request") or any other 4xx: those are answers, not races.
-     */
-    async callWithRetry<N extends Cmds[number]['name']>(
-      name: N,
-      input: CommandInput<Cmds, N>,
-      callOpts: CallOptions = {},
-    ): Promise<CommandOutput<Cmds, N>> {
-      checkIdempotencyKey(callOpts.idempotencyKey);
-      const idempotencyKey = callOpts.idempotencyKey ?? newIdempotencyKey();
-      for (let attempt = 0; ; attempt++) {
-        try {
-          return await once(name, input, { idempotencyKey });
-        } catch (err) {
-          const retryable = err instanceof ApiError ? isIdempotencyInProgress(err) : true;
-          if (!retryable || attempt >= RETRY_DELAYS_MS.length) throw err;
-          await sleep(RETRY_DELAYS_MS[attempt]!);
-        }
-      }
-    },
   };
+}
+
+/**
+ * A logical call with safe retries (#906). It mints one idempotency key (or uses the one you pass)
+ * and keeps it across every attempt, so a retry after a lost answer replays the first result
+ * instead of running the command again.
+ *
+ * It retries a network failure and the `409 conflict` that says the first request is still in
+ * progress, with bounded backoff. It never retries the other conflict ("already used for a
+ * different request") or any other 4xx: those are answers, not races.
+ *
+ * A free function, not a client method, so a browser app that only calls `call` does not carry the
+ * retry loop in its bundle.
+ */
+export async function callWithRetry<Cmds extends readonly AnyCommand[], N extends Cmds[number]['name']>(
+  client: Client<Cmds>,
+  name: N,
+  input: CommandInput<Cmds, N>,
+  callOpts: CallOptions = {},
+): Promise<CommandOutput<Cmds, N>> {
+  checkIdempotencyKey(callOpts.idempotencyKey);
+  const idempotencyKey = callOpts.idempotencyKey ?? newIdempotencyKey();
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await client.call(name, input, { idempotencyKey });
+    } catch (err) {
+      const retryable = err instanceof ApiError ? isIdempotencyInProgress(err) : true;
+      if (!retryable || attempt >= RETRY_DELAYS_MS.length) throw err;
+      await sleep(RETRY_DELAYS_MS[attempt]!);
+    }
+  }
 }

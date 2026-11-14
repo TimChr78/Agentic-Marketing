@@ -13,16 +13,16 @@ How other systems talk to the platform and back. Design: [ADR-0013](architecture
 
 ### Idempotency (safe retries)
 
-`POST /v1/<command>` accepts an optional `idempotency-key` header, 1 to 200 printable characters without spaces. The key is scoped to the workspace **and to the caller**; two requests from the same caller with the same key are serialised:
+`POST /v1/<command>` accepts an optional `idempotency-key` header. Every non-empty value keeps working, including values with spaces, non-ASCII characters or more than 200 characters (those were accepted before 0.14.24 and still dedupe); 1 to 200 printable characters without spaces is the recommended shape. The key is scoped to the workspace **and to the caller**; every caller presenting one key serialises on the same lock, and two requests from the same caller with the same key reuse the response:
 
 - The second returns the first request's stored response and does not run the command again. The key is remembered for the life of the workspace (the row is not expired), so a retry hours later still replays.
-- A key reused for a different command, a different input, or a **different caller** answers `409` with `details.reason: "idempotency_key_reused"`; use a new key for the new request. Another caller never receives someone else's stored response.
-- An empty or malformed key is refused with `400 invalid_input`, not treated as "no key".
+- A key reused for a different command, a different input, or a **different caller** answers `409` with `details.reason: "idempotency_key_reused"`; use a new key for the new request. Another caller never receives someone else's stored response, and because the lock is taken before the handler, a cross-caller loser does not run the handler (so it leaves no external side effect behind).
+- An **empty** header is refused with `400 invalid_input` instead of meaning "no key"; that is the only header behaviour that changed in 0.14.24.
 - If the first request is still running after ten seconds (a heavy import, a command with an LLM check inside its transaction), the second answers `409` with `details.reason: "idempotency_in_progress"`. **Retry with the same key** after a short delay: a new key would run the operation again, and the first one may still complete.
 
 "The caller" is the person's user id (the same across all their sessions), or one agent record: every API token and every OAuth connection is its own agent, so two tokens presenting one key conflict even when the same person created both. Keys written before 0.14.24 carry the old caller-agnostic hash; a retry that spans the upgrade answers `409 idempotency_key_reused`, which is expected — use a new key.
 
-Generate one key per logical operation, not per HTTP attempt, and reuse it for every retry. The typed client's `callWithRetry` does that (see `packages/client/README.md`), and MCP write tools accept the same key as an optional `idempotencyKey` argument. Commands whose own input already has an `idempotencyKey` (a send, a bulk enrollment) keep that field's meaning: it is the repeat-safe key for the handler and not stripped.
+Generate one key per logical operation, not per HTTP attempt, and reuse it for every retry. The typed client's `callWithRetry(client, command, input)` does that (see `packages/client/README.md`), and MCP write tools accept the same key as an optional `idempotencyKey` argument. Both new surfaces use the strict rule — 1 to 200 printable ASCII characters without spaces — and the client's generated keys satisfy it; a caller-supplied key that breaks the rule is refused before a request is sent (client) or with `400 invalid_input` (MCP). Commands whose own input already has an `idempotencyKey` (a send, a bulk enrollment) keep that field's meaning: it is the repeat-safe key for the handler and not stripped.
 
 For OAuth/MCP connections, the consent page asks which brand the client acts in when the person belongs to several; the grant and its access tokens are bound to that brand. See [identity.md](identity.md#one-brand-per-token-or-connection-187).
 

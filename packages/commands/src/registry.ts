@@ -1,14 +1,4 @@
-import {
-  AppError,
-  canonicalJson,
-  hashValue,
-  IDEMPOTENCY_KEY_MAX,
-  isValidIdempotencyKey,
-  redactCredentials,
-  redactedText,
-  safeErrorText,
-  sha256,
-} from '@agentic-marketing/core';
+import { AppError, canonicalJson, hashValue, redactCredentials, redactedText, safeErrorText, sha256 } from '@agentic-marketing/core';
 import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
@@ -246,7 +236,7 @@ export class PolicyDeniedError extends AppError {
 export type AnyCommand = CommandDef<any, any, string>;
 
 // Re-exported so command-layer consumers keep importing the rule from one place.
-export { IDEMPOTENCY_KEY_MAX, isValidIdempotencyKey };
+export { IDEMPOTENCY_KEY_MAX, isValidIdempotencyKey } from '@agentic-marketing/core';
 
 export interface ExecuteOptions {
   surface: Surface;
@@ -405,14 +395,6 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       });
       const input = rawInput ?? {};
       const inputHash = hashValue(redact(input, cmd.sensitive));
-      // An idempotency key is scoped to the caller as well as the workspace (#906 review round 2):
-      // a person is their user id (the same across sessions), an agent is its agent record, and an
-      // API token or OAuth connection is its own agent. The audit log keeps the call's `inputHash`;
-      // the idempotency row stores this principal-bound hash instead.
-      const idempotencyHash = hashValue({
-        principal: principal.type === 'agent' ? `agent:${principal.agent.id}` : `user:${principal.userId}`,
-        input: inputHash,
-      });
       let target: string | undefined;
       /** People an audited read reached besides `target` (#763); one audit row each. */
       let extraTargets: readonly string[] = [];
@@ -461,10 +443,23 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         throw refused;
       }
 
-      if (opts.idempotencyKey !== undefined && !isValidIdempotencyKey(opts.idempotencyKey))
-        return fail(
-          new AppError('invalid_input', `An idempotency key must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`),
-        );
+      // An idempotency key is scoped to the caller as well as the workspace (#906 review round 2):
+      // a person is their user id (the same across sessions); an agent is its agent record, and an
+      // API token or OAuth connection is its own agent. The audit log keeps the call's `inputHash`;
+      // the idempotency row stores this principal-bound hash instead. Derived here, after the
+      // missing-record guard: a read from such an agent is supported and must not dereference
+      // `principal.agent`, so it is named by its client id (or user id) instead.
+      const idempotencyHash = opts.idempotencyKey
+        ? hashValue({
+            principal:
+              principal.type === 'user'
+                ? `user:${principal.userId}`
+                : agent
+                  ? `agent:${agent.id}`
+                  : `agent-unregistered:${principal.clientId ?? principal.userId}`,
+            input: inputHash,
+          })
+        : inputHash;
       if (unknown.length) {
         if (options.strictInputs) return fail(new AppError('invalid_input', unknownMessages.join(' '), { unknownKeys: unknown }));
       }
@@ -623,13 +618,12 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               // predate the winner's commit, or the waiter re-runs the handler and then loses on
               // the unique key. A session-level lock on the same connection, released after commit
               // or rollback, gives the waiter a snapshot taken after the winner committed.
-              ...(opts.idempotencyKey
-                ? {
-                    advisoryLockKey: `idempotency:${principal.workspaceId}:${
-                      principal.type === 'agent' ? `agent:${principal.agent.id}` : `user:${principal.userId}`
-                    }:${opts.idempotencyKey}`,
-                  }
-                : {}),
+              // Keyed by workspace + key only (#906 review round 3): every caller presenting one
+              // key must serialise before any handler runs, or two callers could both run handlers
+              // and the loser's external effects would survive its rolled-back transaction. The
+              // caller is still bound by `idempotencyHash`: after the lock, a row from another
+              // caller answers the reused conflict before the handler.
+              ...(opts.idempotencyKey ? { advisoryLockKey: `idempotency:${principal.workspaceId}:${opts.idempotencyKey}` } : {}),
             },
           ),
         );

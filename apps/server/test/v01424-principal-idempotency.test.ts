@@ -96,16 +96,24 @@ describe('an idempotency key is bound to its principal (A1)', () => {
     expect(refused.body.error).toBe('invalid_input');
   });
 
-  it('rejects a key with whitespace or a non-printable character', async () => {
-    const space = await call(asPerson(ws), 'artifacts.create', note('Space key'), 'not a key');
-    expect(space.status).toBe(400);
-    expect(space.body.error).toBe('invalid_input');
+  it('still accepts and dedupes the REST values it accepted before: spaces, non-ASCII, long', async () => {
+    const keys = ['a key with spaces', 'nøkkel-é', 'k'.repeat(201)];
+    for (const [i, key] of keys.entries()) {
+      const name = `Legacy key ${i}`;
+      const first = await call(asPerson(ws), 'artifacts.create', note(name), key);
+      const replay = await call(asPerson(ws), 'artifacts.create', note(name), key);
+      expect(first.status, key.slice(0, 12)).toBe(200);
+      expect(replay.status, key.slice(0, 12)).toBe(200);
+      expect(replay.body.artifactId, key.slice(0, 12)).toBe(first.body.artifactId);
+    }
   });
 
-  it('answers a concurrent cross-principal race as a clean conflict, not a 500', async () => {
-    // Two principals use one key at the same time. Their advisory locks differ, so both reach the
-    // unique (workspace, key); the loser's transaction rolls back and answers the reused conflict.
+  it('serialises two different principals under one key before the handler, so no external effect leaks', async () => {
+    // The advisory lock is workspaces + key only, so the second caller waits. After the winner
+    // commits, the caller-bound hash differs and the waiter answers the reused conflict *before*
+    // its handler runs; otherwise its external side effects would survive the rollback.
     let runs = 0;
+    const externalEffects: string[] = [];
     const slow = defineCommand({
       name: 'test.slowCrossPrincipal',
       title: 'Slow cross-principal write',
@@ -116,6 +124,9 @@ describe('an idempotency key is bound to its principal (A1)', () => {
       output: z.object({ value: z.string() }),
       async handler(input) {
         runs++;
+        // Stands in for a segment refresh publishing membership events, or a ClickHouse message
+        // event written by requestEmail: outside the transaction, a rollback cannot undo it.
+        externalEffects.push(`${input.value}:${runs}`);
         await new Promise((resolve) => setTimeout(resolve, 250));
         return { value: input.value };
       },
@@ -130,6 +141,7 @@ describe('an idempotency key is bound to its principal (A1)', () => {
     expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
     const rejected = outcomes.find((o) => o.status === 'rejected');
     expect(rejected).toMatchObject({ status: 'rejected', reason: { code: 'conflict', details: { reason: 'idempotency_key_reused' } } });
-    expect(runs).toBeGreaterThanOrEqual(1);
+    expect(runs).toBe(1);
+    expect(externalEffects).toEqual(['v:1']);
   });
 });
