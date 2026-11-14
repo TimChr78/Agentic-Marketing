@@ -62,7 +62,7 @@ const FORMS: ((key: string) => string)[] = [
   (key) => `hint=${key}=${SECRET}`,
   (key) => `url?${key}=${SECRET}&x=1`,
   (key) => `X-${key}: ${SECRET}`,
-  (key) => `{"a":"b","${key}"={"deep":"${SECRET}"}}`.replace('"${key}"=', `"${key}":`),
+  (key) => `{"a":"b","${key}":{"deep":"${SECRET}"}}`,
 ];
 
 function randomCase(random: () => number): string {
@@ -106,7 +106,7 @@ describe('the credential redaction on generated cases (#898, #902, #920)', () =>
 
 describe('the credential redaction scales with the text (#902 round 2)', () => {
   const shapes: [string, (n: number) => string][] = [
-    ['repeated pairs ending in a secret', (n) => 'token='.repeat(n) + 'shortpw'],
+    ['repeated pairs ending in a secret', (n) => `${'token='.repeat(n)}shortpw`],
     ['a long colon run after a key', (n) => `token:${':'.repeat(n * 4)}`],
     ['a long equals run after a key', (n) => `token=${'='.repeat(n * 4)}`],
     ['a long quote run after a key', (n) => `token="${'"'.repeat(n * 4)}`],

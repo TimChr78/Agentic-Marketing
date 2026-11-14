@@ -285,7 +285,7 @@ describe('a structured value under a credential key (#902 round 2)', () => {
   });
 
   it('cuts an unbalanced or too deeply nested structure at the end of its line', () => {
-    const deep = '['.repeat(12) + 'shortpw' + ']'.repeat(12);
+    const deep = `${'['.repeat(12)}shortpw${']'.repeat(12)}`;
     expect(redactCredentials(`apiSecret=${deep}`)).toBe('apiSecret=[redacted]');
     expect(redactCredentials('authToken={"value":"shortpw"\nnext line')).toBe('authToken=[redacted]\nnext line');
     expect(redactCredentials('secret=["unterminated\nnext line')).toBe('secret=[redacted]\nnext line');
