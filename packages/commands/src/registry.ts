@@ -960,6 +960,11 @@ function knownConflict(err: unknown): AppError | null {
       'conflict',
       'This workspace already has an artifact of that type: another change created it at the same time. Nothing was written; retry and edit the existing artifact.',
     );
+  if (isOnePublishedConflict(err))
+    return new AppError(
+      'conflict',
+      'This artifact already has a published version: another change published one at the same time. Nothing was written; retry, then edit and publish the latest draft.',
+    );
   return null;
 }
 
@@ -969,13 +974,23 @@ export function isDeadlock(err: unknown): boolean {
   return false;
 }
 
-/** Postgres 23505 on the singleton partial unique index, directly or as the cause of a query error. */
-export function isSingletonConflict(err: unknown): boolean {
+/** Postgres 23505 on the unique index `index`, directly or as the cause of a query error. */
+function uniqueViolationOn(err: unknown, index: string): boolean {
   for (
     let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | undefined, depth = 0;
     e && depth < 5;
     e = e.cause as typeof e, depth++
   )
-    if (e.code === '23505' && e.constraint === 'artifacts_singleton_type') return true;
+    if (e.code === '23505' && e.constraint === index) return true;
   return false;
+}
+
+/** Postgres 23505 on the singleton partial unique index, directly or as the cause of a query error. */
+export function isSingletonConflict(err: unknown): boolean {
+  return uniqueViolationOn(err, 'artifacts_singleton_type');
+}
+
+/** Postgres 23505 on the one-published-version partial unique index (#912). */
+export function isOnePublishedConflict(err: unknown): boolean {
+  return uniqueViolationOn(err, 'artifact_versions_one_published');
 }
