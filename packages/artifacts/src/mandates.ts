@@ -57,12 +57,67 @@ export function outsideWorkingHours(
 
 /**
  * The active mandates of several agents in one grouped read (#489), newest artifact first per agent.
- * Same terms as `activeMandate`: published, not archived, for the agent, not expired.
+ * Same terms as `activeMandate`: published, not archived, for the agent, not expired, and the
+ * content must pass the full mandate schema (a row that does not cannot be used by the policy
+ * engine). Ties on `updated_at` are broken by the artifact id, so the answer is deterministic and
+ * the startup repair that applies the same rule agrees with it.
  */
 export async function activeMandates(tx: Tx, agentIds: string[], now = new Date()): Promise<Map<string, ActiveMandate>> {
   const out = new Map<string, ActiveMandate>();
   if (!agentIds.length) return out;
-  const rows = await tx
+  const rows = await publishedMandateRows(tx, agentIds);
+  const [w] = await tx.select({ timeZone: schema.workspaces.timeZone }).from(schema.workspaces);
+  const byAgent = new Map<string, MandateRow[]>();
+  for (const r of rows) {
+    const agent = agentOf(r.content);
+    if (!agent) continue;
+    byAgent.set(agent, [...(byAgent.get(agent) ?? []), r]);
+  }
+  for (const [agent, group] of byAgent) {
+    const pick = pickActiveMandate(group, now);
+    if (!pick) continue;
+    const m = artifactTypes.agent_mandate.content.parse(pick.content);
+    out.set(agent, {
+      content: m,
+      outsideHours: outsideWorkingHours(m, w?.timeZone ?? 'UTC', now),
+      view: {
+        id: pick.id,
+        version: pick.version!,
+        levels: m.levels as Partial<Record<ActionClass, number>>,
+        scope: m.scope,
+        limits: m.limits,
+        holdWindow: m.holdWindow,
+        independentCheck: m.independentCheck,
+        guardrails: m.guardrails,
+        purpose: m.purpose,
+        learning: m.learning,
+        goals: m.goals,
+        shadow: m.shadow as MandateView['shadow'],
+      },
+    });
+  }
+  return out;
+}
+
+/** One published mandate version, as the selection rule reads it. */
+interface MandateRow {
+  id: string;
+  version: number | null;
+  content: unknown;
+}
+
+/** The agent a mandate's content names, or null when the content has no usable `agent`. */
+function agentOf(content: unknown): string | null {
+  const agent = (content as { agent?: unknown } | null)?.agent;
+  return typeof agent === 'string' && agent ? agent : null;
+}
+
+/**
+ * Published, unarchived mandate versions, newest artifact first (ties by id). This is the one
+ * query behind both the runtime selection and the startup repair, so the two cannot drift.
+ */
+async function publishedMandateRows(tx: Tx, agentIds?: string[]): Promise<MandateRow[]> {
+  return tx
     .select({
       id: schema.artifacts.id,
       version: schema.artifacts.publishedVersion,
@@ -82,39 +137,36 @@ export async function activeMandates(tx: Tx, agentIds: string[], now = new Date(
         eq(schema.artifacts.type, 'agent_mandate'),
         eq(schema.artifacts.archived, false),
         isNotNull(schema.artifacts.publishedVersion),
-        sql`${schema.artifactVersions.content}->>'agent' IN (${sql.join(
-          agentIds.map((id) => sql`${id}`),
-          sql`, `,
-        )})`,
+        agentIds?.length
+          ? sql`${schema.artifactVersions.content}->>'agent' IN (${sql.join(
+              agentIds.map((id) => sql`${id}`),
+              sql`, `,
+            )})`
+          : undefined,
       ),
     )
-    .orderBy(desc(schema.artifacts.updatedAt));
-  const [w] = await tx.select({ timeZone: schema.workspaces.timeZone }).from(schema.workspaces);
-  for (const r of rows) {
-    const parsed = artifactTypes.agent_mandate.content.safeParse(r.content);
+    .orderBy(desc(schema.artifacts.updatedAt), desc(schema.artifacts.id));
+}
+
+/**
+ * What the runtime uses from one agent's rows, newest first: the first mandate whose content parses
+ * and whose `validUntil` is still in the future. An invalid or expired row never wins.
+ */
+function pickActiveMandate<T extends MandateRow>(rows: T[], now: Date): T | null {
+  for (const row of rows) {
+    const parsed = artifactTypes.agent_mandate.content.safeParse(row.content);
     if (!parsed.success || new Date(parsed.data.validUntil) <= now) continue;
-    const m = parsed.data;
-    if (out.has(m.agent)) continue;
-    out.set(m.agent, {
-      content: m,
-      outsideHours: outsideWorkingHours(m, w?.timeZone ?? 'UTC', now),
-      view: {
-        id: r.id,
-        version: r.version!,
-        levels: m.levels as Partial<Record<ActionClass, number>>,
-        scope: m.scope,
-        limits: m.limits,
-        holdWindow: m.holdWindow,
-        independentCheck: m.independentCheck,
-        guardrails: m.guardrails,
-        purpose: m.purpose,
-        learning: m.learning,
-        goals: m.goals,
-        shadow: m.shadow as MandateView['shadow'],
-      },
-    });
+    return row;
   }
-  return out;
+  return null;
+}
+
+/**
+ * The per-agent mandate lock: serialises "is there another active mandate?" against every writer,
+ * the publish validator and the startup repair. The key must stay identical everywhere.
+ */
+export async function lockAgentMandate(tx: Tx, workspaceId: string, agentId: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('am.agent-mandate'), hashtext(${`${workspaceId}:${agentId}`}))`);
 }
 
 /** The agent's mandate that applies now: published, not archived, for this agent, not expired. */
@@ -127,10 +179,9 @@ export async function activeMandate(tx: Tx, agentId: string, now = new Date()): 
 publishValidators.set('agent_mandate', async (content, tx: Tx, artifact) => {
   const m = content as AgentMandate;
   // Serialise the "no other active mandate" check per workspace + agent (#871): two different
-  // mandate rows otherwise lock different artifacts and both pass.
-  await tx.execute(
-    sql`SELECT pg_advisory_xact_lock(hashtext('am.agent-mandate'), hashtext(${`${artifact?.workspaceId ?? ''}:${m.agent}`}))`,
-  );
+  // mandate rows otherwise lock different artifacts and both pass. The startup repair takes the
+  // same lock before it archives a duplicate.
+  await lockAgentMandate(tx, artifact?.workspaceId ?? '', m.agent);
   const problems: string[] = [];
   const [agent] = await tx.select({ status: schema.agents.status }).from(schema.agents).where(eq(schema.agents.id, m.agent));
   if (!agent) problems.push(`agent ${m.agent} does not exist`);
@@ -228,4 +279,113 @@ export async function dueHolds(db: Db, now = new Date(), limit = 50) {
     [now, limit],
   );
   return rows;
+}
+
+// --- The single-active-mandate repair (#911) ----------------------------------------------------
+//
+// Before 0.14.17 two concurrent publishes could leave two published, unarchived mandates for one
+// agent. The repair cannot be SQL: which mandate applies is decided by the full `agent_mandate`
+// schema (an older valid mandate must beat a newer one whose content no longer parses), and only
+// the runtime knows that rule. So the SQL migration creates the `data_repairs` record table and
+// this job, one pass at start, applies `activeMandates` itself under the same per-agent lock the
+// publish validator takes.
+
+/** The `data_repairs` name of this repair. */
+export const ACTIVE_MANDATE_REPAIR = 'single_active_mandate';
+
+export interface ActiveMandateRepairResult {
+  /** Workspaces that still had a duplicate group when the repair started. */
+  workspaces: number;
+  /** Artifacts archived by this run. */
+  archived: string[];
+}
+
+/**
+ * Keep the mandate `activeMandates` picks for each agent and archive the rest of its published,
+ * unarchived duplicates (the 0092 rename). Runs per workspace under `lockAgentMandate`, is
+ * idempotent, and records that it ran for the workspace in `data_repairs`, so a restart does not
+ * scan it again. A group where the runtime uses none (all invalid or expired) keeps its newest row.
+ */
+export async function repairActiveMandates(db: Db, now = new Date()): Promise<ActiveMandateRepairResult> {
+  const { rows: candidates } = await db.admin.query<{ workspace_id: string }>(
+    `SELECT DISTINCT a.workspace_id
+       FROM artifacts a
+       JOIN artifact_versions v
+         ON v.workspace_id = a.workspace_id AND v.artifact_id = a.id AND v.number = a.published_version
+       LEFT JOIN data_repairs r ON r.name = $1 AND r.workspace_id = a.workspace_id
+      WHERE a.type = 'agent_mandate'
+        AND a.archived = false
+        AND a.published_version IS NOT NULL
+        AND v.content->>'agent' IS NOT NULL
+        AND r.name IS NULL
+      GROUP BY a.workspace_id, v.content->>'agent'
+     HAVING count(*) > 1`,
+    [ACTIVE_MANDATE_REPAIR],
+  );
+  const archived: string[] = [];
+  for (const { workspace_id: ws } of candidates) {
+    const removed = await db.withWorkspace(ws, async (tx) => {
+      const { rows: groups } = await tx.execute<{ agent: string }>(sql`
+        SELECT v.content->>'agent' AS agent
+          FROM artifacts a
+          JOIN artifact_versions v
+            ON v.workspace_id = a.workspace_id AND v.artifact_id = a.id AND v.number = a.published_version
+         WHERE a.type = 'agent_mandate'
+           AND a.archived = false
+           AND a.published_version IS NOT NULL
+           AND v.content->>'agent' IS NOT NULL
+         GROUP BY v.content->>'agent'
+        HAVING count(*) > 1`);
+      const gone: string[] = [];
+      for (const { agent } of groups) {
+        await lockAgentMandate(tx, ws, agent);
+        // Read after the lock: a publish that committed meanwhile is part of the decision.
+        const rows = await publishedMandateRows(tx, [agent]);
+        // The runtime's pick wins; without one (every row invalid or expired) the newest row stays.
+        const keep = pickActiveMandate(rows, now)?.id ?? rows[0]?.id;
+        for (const row of rows) {
+          if (row.id === keep) continue;
+          await tx
+            .update(schema.artifacts)
+            .set({
+              archived: true,
+              name: sql`${schema.artifacts.name} || ${` (archived duplicate ${row.id})`}`,
+              updatedAt: new Date(),
+            })
+            .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, row.id)));
+          gone.push(row.id);
+        }
+      }
+      return gone;
+    });
+    archived.push(...removed);
+    // Recorded after the workspace committed; the repair itself is idempotent, so losing a record
+    // to a crash only means the next start looks again and finds nothing.
+    await db.admin.query(
+      `INSERT INTO data_repairs (name, workspace_id, detail) VALUES ($1, $2, $3)
+       ON CONFLICT (name, workspace_id) DO UPDATE SET ran_at = now(), detail = EXCLUDED.detail`,
+      [ACTIVE_MANDATE_REPAIR, ws, JSON.stringify({ archived: removed })],
+    );
+  }
+  return { workspaces: candidates.length, archived };
+}
+
+/**
+ * The startup pass: runs the repair once, logs what it archived, and stops. A database still
+ * missing the `data_repairs` table (SKIP_MIGRATIONS) reports through `onError`; the next start
+ * retries, and the repair is safe to repeat.
+ */
+export async function runActiveMandateRepair(
+  deps: { db: Db },
+  signal: AbortSignal,
+  opts: { log?: (msg: string) => void; onError?: (err: unknown) => void } = {},
+): Promise<void> {
+  if (signal.aborted) return;
+  try {
+    const result = await repairActiveMandates(deps.db);
+    if (result.archived.length)
+      opts.log?.(`single active mandate repair: archived ${result.archived.length} extra mandate(s) in ${result.workspaces} workspace(s)`);
+  } catch (err) {
+    opts.onError?.(err);
+  }
 }
