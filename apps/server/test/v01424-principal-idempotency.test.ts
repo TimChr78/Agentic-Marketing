@@ -467,22 +467,21 @@ describe('an input-level idempotency key is bound to its caller and request (#92
     expect(changed.body.details?.reason).toBe('idempotency_key_reused');
   });
 
-  it('replays an internal journey step and a broadcast redelivery from their stable identities', async () => {
-    const han = people.get('one')!;
+  it('replays an internal journey step and a broadcast redelivery after a merge and a re-render', async () => {
+    // A journey step's request is its participant (enrollment), pinned node and sequence: a retry
+    // that resolves to the survivor after a merge, with different rendered data, still replays.
     const journeyKey = 'jrn:test:mail:1';
     const journeyHash = sendRequestHash('email', {
       caller: 'system:journey',
-      recipient: han,
-      template: emailTemplate,
       journey: journeyId,
       enrollment: 'prt_test',
       step: 'mail',
       sequence: 1,
     });
-    const journeySend = (data: Record<string, unknown>) =>
+    const journeySend = (profileId: string, data: Record<string, unknown>) =>
       t.srv.db.withWorkspace(ws, (tx) =>
         requestEmail(tx, ws, t.srv.keyProvider, t.srv.events, {
-          profileId: han,
+          profileId,
           templateId: emailTemplate,
           idempotencyKey: journeyKey,
           journeyId,
@@ -491,33 +490,34 @@ describe('an input-level idempotency key is bound to its caller and request (#92
           agentId: null,
         }),
       );
-    const j1 = await journeySend({ n: 1 });
-    const j2 = await journeySend({ n: 2 });
+    const j1 = await journeySend(mergedFrom, { n: 1 });
+    const j2 = await journeySend(mergedTo, { n: 2 });
     expect(j2).toMatchObject({ messageId: j1.messageId, duplicate: true });
     expect(await messageCount(journeyKey)).toBe(1);
 
-    const broadcastKey = 'bct:test:one';
+    // A broadcast is its run plus the recipient row the key names. A redelivery after the profile
+    // merge, with a re-assigned subject variant and different data, is still the same request.
+    const broadcastKey = `bct:test:${mergedFrom}`;
     const broadcastHash = sendRequestHash('email', {
       caller: 'system:broadcast',
-      recipient: han,
-      template: emailTemplate,
+      recipient: mergedFrom,
       broadcast: 'bct_test',
-      variant: null,
     });
-    const broadcastSend = (data: Record<string, unknown>) =>
+    const broadcastSend = (profileId: string, variant: string, data: Record<string, unknown>) =>
       t.srv.db.withWorkspace(ws, (tx) =>
         requestEmail(tx, ws, t.srv.keyProvider, t.srv.events, {
-          profileId: han,
+          profileId,
           templateId: emailTemplate,
           idempotencyKey: broadcastKey,
           journeyId: 'bct_test',
+          variant,
           data,
           requestHash: broadcastHash,
           agentId: null,
         }),
       );
-    const b1 = await broadcastSend({ n: 1 });
-    const b2 = await broadcastSend({ n: 2 });
+    const b1 = await broadcastSend(mergedFrom, 'A', { n: 1 });
+    const b2 = await broadcastSend(mergedTo, 'B', { n: 2 });
     expect(b2).toMatchObject({ messageId: b1.messageId, duplicate: true });
     expect(await messageCount(broadcastKey)).toBe(1);
   });

@@ -395,6 +395,7 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
           providerId: provider.id,
           status: 'sending',
           data: email.data ?? {},
+          // The member's stable user id and this notification's own key, never a profile id.
           requestHash: sendRequestHash('email', { caller: 'system:alert', recipient: email.userId, key: email.idempotencyKey }),
         });
       try {

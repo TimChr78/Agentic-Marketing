@@ -447,13 +447,12 @@ async function applyEffect(
       .where(and(eq(schema.journeyParticipants.workspaceId, workspaceId), eq(schema.journeyParticipants.id, p.id)));
     return null;
   }
-  // A journey step's identity is its enrollment and node, never the rendered context: a worker
-  // retry after re-rendering must replay the message it already queued (#926).
-  const journeyHash = (channel: 'email' | 'sms' | 'push', template: string) =>
+  // A journey step's identity is the participant (enrollment), the pinned node and its sequence:
+  // never the resolved profile (a merge changes it) or a template resolved at send time. A worker
+  // retry after re-rendering or a merge must replay the message it already queued (#926).
+  const journeyHash = (channel: 'email' | 'sms' | 'push') =>
     sendRequestHash(channel, {
       caller: 'system:journey',
-      recipient: p.profileId,
-      template,
       journey: p.journeyId,
       enrollment: p.id,
       step: eff.node,
@@ -468,7 +467,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
-      requestHash: journeyHash('email', eff.template),
+      requestHash: journeyHash('email'),
     });
     return `e-mail ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
@@ -481,7 +480,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
-      requestHash: journeyHash('sms', eff.template),
+      requestHash: journeyHash('sms'),
     });
     return `SMS ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }
@@ -494,7 +493,7 @@ async function applyEffect(
       journeyId: p.journeyId,
       data: p.context,
       agentId: await journeyOwnerAgentId(tx, p.journeyId),
-      requestHash: journeyHash('push', eff.template),
+      requestHash: journeyHash('push'),
     });
     return `push ${d.status}${d.reason ? `: ${d.reason}` : ''}`;
   }

@@ -139,6 +139,8 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
             reason,
             recipientHash,
             test: true,
+            // The address hash and template id are as supplied; the test-send key is unique per attempt.
+            // As above: the supplied address hash and template id, never a resolved profile.
             requestHash: sendRequestHash('email', { caller: 'system:test', recipient: recipientHash, template: opts.templateId }),
           })
           .returning();

@@ -24,10 +24,7 @@ const Row = z.object({
       z.object({
         purpose: z.string().regex(/^[a-z][a-z0-9_]{0,63}$/),
         status: z.enum(['granted', 'denied', 'withdrawn', 'objected']),
-        recordedAt: isoDateTime('recordedAt')
-          .optional()
-          .transform((v) => (v === undefined ? undefined : new Date(Math.min(Date.parse(v), Date.now())).toISOString()))
-          .describe('When the person gave it, from the old system; a future date is clamped to the import time'),
+        recordedAt: isoDateTime('recordedAt').optional().describe('When the person gave it, from the old system'),
         proof: z
           .record(z.string(), z.unknown())
           .default({})

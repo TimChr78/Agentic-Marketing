@@ -79,12 +79,14 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
       profileId,
       templateId: form.def.confirmationTemplate,
       idempotencyKey: `doi:${e.messageId}`,
-      // Stable identifiers only: a redelivery of the same submission replays the confirmation.
+      // Stable identifiers only: a redelivery of the same submission replays the confirmation,
+      // including after a profile merge (the resolved profile id is deliberately absent).
       requestHash: sendRequestHash('email', {
         caller: 'system:doi',
-        recipient: profileId,
-        template: form.def.confirmationTemplate,
         submission: e.messageId,
+        form: p.form_id,
+        formVersion: p.form_version,
+        template: form.def.confirmationTemplate,
       }),
       data: { confirm_url: `${linksUrl}/f/confirm/${deps.links.sign(token)}` },
     });

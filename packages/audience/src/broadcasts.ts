@@ -315,10 +315,8 @@ async function suppressForControl(
       requestHash: sendRequestHash(channel, {
         caller: 'system:broadcast_holdout',
         recipient: profileId,
-        template: def.template,
         broadcast: broadcastId,
         campaign: campaignId,
-        variant: variant ?? null,
       }),
     })
     .onConflictDoNothing()
@@ -1475,9 +1473,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         requestHash: sendRequestHash(channel, {
           caller: 'system:broadcast',
           recipient: m.profileId,
-          template: def.template,
           broadcast: broadcastId,
-          variant: variant ?? null,
         }),
       });
       if (test?.state === 'sampling' && d.status === 'queued' && !windowSkip) {
