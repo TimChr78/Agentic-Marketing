@@ -716,6 +716,16 @@ export async function coordinationFor(
 }
 
 /**
+ * The per-agent transaction lock that serialises every decision about one agent's writes: the
+ * policy engine, the guardian and the held-change runner all take it, so a pause, a cap or a
+ * refusal committed by one is visible to the other and cannot interleave with it (#240, #907).
+ * Transaction-scoped and reentrant; the key string must stay identical everywhere.
+ */
+export async function lockAgentPolicy(tx: Tx, workspaceId: string, agentId: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${workspaceId}:${agentId}`}, 0))`);
+}
+
+/**
  * The policy decision for one agent write (ADR-0016): the workspace settings, the agent's active
  * mandate, its guardrails and counters, then the independent check. Used by the executor for
  * every command and by commands that publish on an agent's behalf (config.import, #239).
@@ -732,7 +742,7 @@ export async function agentPolicy(
 ): Promise<PolicyOutcome> {
   const agent = principal.agent;
   if (!agent) throw new Error('agentPolicy needs an agent principal');
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${principal.workspaceId}:${agent.id}`}, 0))`);
+  await lockAgentPolicy(tx, principal.workspaceId, agent.id);
   const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
   const [row] = await tx
     .select({ guard: schema.agents.guard, status: schema.agents.status, statusReason: schema.agents.statusReason })

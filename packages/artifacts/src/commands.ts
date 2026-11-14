@@ -1,4 +1,11 @@
-import { type ActionClass, type CommandContext, defineCommand, type Impact, recordAgentAction } from '@agentic-marketing/commands';
+import {
+  type ActionClass,
+  type CommandContext,
+  defineCommand,
+  type Impact,
+  lockAgentPolicy,
+  recordAgentAction,
+} from '@agentic-marketing/commands';
 import { AppError, canonicalJson, decodeTimestampCursor, encodeTimestampCursor, hashValue, newId } from '@agentic-marketing/core';
 import { type AgentUndo, schema, type VersionState } from '@agentic-marketing/db';
 import { and, asc, count, desc, eq, gt, inArray, lt, or, sql } from 'drizzle-orm';
@@ -1691,17 +1698,30 @@ export function agentCredentialOf(client: string): readonly ['api_token' | 'oaut
   return ['oauth_client', client] as const;
 }
 
-async function requestingAgent(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
+/**
+ * The agent id behind an approval request's credential, read without its status: the held runner
+ * needs the id to take the per-agent lock before it reads the agent and the request (#907).
+ */
+async function requestingAgentId(
+  ctx: CommandContext,
+  r: { requestedByType: string; requestedByClient: string | null },
+): Promise<string | null> {
   if (r.requestedByType !== 'agent' || !r.requestedByClient) return null;
   const [kind, credentialId] = agentCredentialOf(r.requestedByClient);
+  const [row] = await ctx.tx
+    .select({ agentId: schema.agentCredentials.agentId })
+    .from(schema.agentCredentials)
+    .where(and(eq(schema.agentCredentials.kind, kind), eq(schema.agentCredentials.credentialId, credentialId)));
+  return row?.agentId ?? null;
+}
+
+async function requestingAgent(ctx: CommandContext, r: { requestedByType: string; requestedByClient: string | null }) {
+  const agentId = await requestingAgentId(ctx, r);
+  if (!agentId) return null;
   const [agent] = await ctx.tx
     .select({ id: schema.agents.id, name: schema.agents.name, status: schema.agents.status })
-    .from(schema.agentCredentials)
-    .innerJoin(
-      schema.agents,
-      and(eq(schema.agents.workspaceId, schema.agentCredentials.workspaceId), eq(schema.agents.id, schema.agentCredentials.agentId)),
-    )
-    .where(and(eq(schema.agentCredentials.kind, kind), eq(schema.agentCredentials.credentialId, credentialId)));
+    .from(schema.agents)
+    .where(and(eq(schema.agents.workspaceId, ctx.principal.workspaceId), eq(schema.agents.id, agentId)));
   return agent ?? null;
 }
 
@@ -1829,6 +1849,18 @@ export async function runHeldChange(
   approvalId: string,
   check: (agentId: string, held: HeldAction | null) => Promise<HeldCheck>,
 ): Promise<{ status: 'published' | 'needs_person' | 'not_due' | 'waiting'; reason?: string }> {
+  // The per-agent lock first (#907): the guardian takes it before it suspends this agent's holds,
+  // so taking it before this agent's approval row keeps one order — agent-policy → approval →
+  // artifacts → the mandate validator's lock — and cannot deadlock with a guardian round. A pause
+  // or cap that commits first is visible to the checks below; one that commits after waits for
+  // this run.
+  const requestScope = and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), eq(schema.approvalRequests.id, approvalId));
+  const [requestRow] = await ctx.tx
+    .select({ requestedByType: schema.approvalRequests.requestedByType, requestedByClient: schema.approvalRequests.requestedByClient })
+    .from(schema.approvalRequests)
+    .where(requestScope);
+  const heldAgentId = requestRow ? await requestingAgentId(ctx, requestRow) : null;
+  if (heldAgentId) await lockAgentPolicy(ctx.tx, ctx.principal.workspaceId, heldAgentId);
   // Locked: a veto or an early approval that commits first wins, and a second runner sees it (#263).
   const r = await lockApproval(ctx, approvalId);
   if (r?.status !== 'pending' || !r.holdUntil || r.holdUntil > new Date()) return { status: 'not_due' };

@@ -264,7 +264,7 @@ export async function startTestServer(
   name: string,
   port: number,
   env: Record<string, string> = {},
-  testOptions: { warehouseTickMs?: number; edgeTickMs?: number } = {},
+  testOptions: { warehouseTickMs?: number; edgeTickMs?: number; holdTickMs?: number } = {},
 ) {
   const base = `http://localhost:${port}`;
   const { url: pgUrl, migrated, dbName } = await freshDatabase(`am_${name}`);
@@ -335,7 +335,8 @@ export async function startTestServer(
       // Bulk enrollment tests drive the job directly with runEnrollmentJobsOnce.
       enrollmentTickMs: 86_400_000,
       guardianTickMs: 86_400_000,
-      holdTickMs: 300,
+      // A test that drives held changes itself keeps the background loop away (#907).
+      holdTickMs: testOptions.holdTickMs ?? 300,
       // Experience rollout tests drive the sweep directly with a fixed clock.
       rolloutTickMs: 86_400_000,
     }),

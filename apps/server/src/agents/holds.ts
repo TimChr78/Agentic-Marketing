@@ -16,6 +16,16 @@ import { eq } from 'drizzle-orm';
 // person rejecting the change, it is decided again as of now (#262): the current mandate, its
 // working hours, the agent's counters, guardrails and any guardian cap. Outside working hours it
 // waits for the next opening; anything the mandate no longer allows goes to a person.
+//
+// The check and the publish run in ONE transaction under the `agent-policy` advisory lock (#907),
+// which `runHeldChange` takes before it reads the agent. Lock order on this path, documented next
+// to the code that takes each lock: agent-policy → approval request rows (lockApproval) → artifact
+// rows (lockArtifacts) → the mandate validator's `am.agent-mandate` lock. The guardian uses the
+// same prefix (agent-policy, then the agent's pending requests), so the two cannot deadlock; the
+// executor's ordinary writes take the agent lock before their artifact writes too. Only a publish
+// command's impact locks its artifacts before the agent lock (#283), the one inverse order that
+// can still meet a held run; that races into a 40P01 the executor maps to a retryable conflict,
+// as it already does between two of its own commands in those two orders.
 
 export async function runHoldsOnce(deps: { db: Db; services: Services }) {
   let ran = 0;
