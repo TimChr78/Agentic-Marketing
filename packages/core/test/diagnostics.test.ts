@@ -493,6 +493,12 @@ describe('the added rules never take less than 0.14.20 did (#898 round 6)', () =
     }
   });
 
+  it('does not take a neighbouring pair for the value of a replaced token', () => {
+    const token = 'abcdef0123456789'.repeat(2);
+    const input = `organizationSecondaryAuthToken=shortpw {"a":"${token}","b":"keep"}`;
+    expect(redactCredentials(input)).toBe('[redacted][redacted] {"a":"[redacted]","b":"keep"}');
+  });
+
   it('leaves a flag under a credential-looking name readable', () => {
     expect(redactCredentials('requiresAuth: true, hasPassword: false')).toBe('requiresAuth: true, hasPassword: false');
     expect(redactCredentials('{"userSession":null}')).toBe('{"userSession":null}');

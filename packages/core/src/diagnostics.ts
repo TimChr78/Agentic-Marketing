@@ -267,7 +267,7 @@ const COMPOUND_KEY = /(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])
  * The same, or the marker in a key's place: what the bare-token rule leaves of a long key. That
  * rule takes a trailing `=` with the key, so the marker can also stand directly before the value.
  */
-const KEY_OR_MARKER = /\[redacted\](?=["']?\s*[:=]|[^\s,;&}\]"'[])|(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
+const KEY_OR_MARKER = /\[redacted\](?=["']?\s*[:=]|[^\s,;&}\][])|(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
 
 /** A name long enough for the bare-token rule to replace it before its value is looked at. */
 const TOKEN_SHAPED = /[A-Za-z0-9+/_-]{24,}/;
@@ -316,6 +316,9 @@ function redactCompoundKeys(text: string, markerKeys: boolean): string {
     PAIR_SEPARATOR.lastIndex = keyEnd;
     const separator = PAIR_SEPARATOR.exec(text);
     if (!separator && key[0] !== '[redacted]') continue;
+    // A marker with a quote right after it is a key only when it is not a quoted value itself
+    // (`"a":"[redacted]","b":…`): there the quote closes the string the marker stands in.
+    if (!separator && /["']/.test(text.charAt(keyEnd)) && /["']/.test(text.charAt(key.index - 1))) continue;
     const start = keyEnd + (separator?.[0].length ?? 0);
     SCHEME_START.lastIndex = start;
     if (SCHEME_START.test(text)) continue;
