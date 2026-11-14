@@ -95,14 +95,21 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
       else next[key] = value;
       return next;
     });
+    // A parameter edit makes every derived result stale (#933). The preview, its prerequisite
+    // check and an install success all describe the *old* parameters, so they are dropped, and
+    // the sequence moves on so an in-flight check or install for them cannot commit.
+    loadSeq.current += 1;
+    setPreview(null);
+    setCheckError(null);
     setInstalled(null);
+    setError(null);
   };
 
   const check = async () => {
     if (!recipe) return;
-    // A check belongs to the selection it was started for: a slower earlier response must not
-    // replace the newly selected starter's preview (#616, #792).
-    const seq = loadSeq.current;
+    // A check belongs to one set of parameters and one selection: it takes the next sequence, so
+    // an older check that resolves later is discarded (#792, #933).
+    const seq = ++loadSeq.current;
     setChecking(true);
     setError(null);
     setCheckError(null);
@@ -119,8 +126,8 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
 
   const install = async () => {
     if (!recipe) return;
-    // Same rule as `check`: an install result may land under the starter it was started for.
-    const seq = loadSeq.current;
+    // Same rule as `check`: an install result may land under another selection or other parameters.
+    const seq = ++loadSeq.current;
     setInstalling(true);
     setError(null);
     try {
