@@ -204,6 +204,10 @@ const PIECES = [
   '[redacted]',
   'TOPSECRET',
   'Sh0rtPw',
+  '"x"',
+  "'x'",
+  '="x"',
+  '=x',
   'user:Sh0rtPw@host',
   'https://',
   '?',
@@ -220,9 +224,42 @@ function* randomPairs(): Generator<Generated> {
   }
 }
 
+/**
+ * The pre-pass for long keys is the only code that runs before the old rules, so it gets its own
+ * cases: a long key with a plain value inside every context an old rule reads (an outer quoted
+ * value, a scheme, a nested pair, a URL, a token run).
+ */
+const LONG_KEYS = ['organizationSecondaryAuthToken', 'aaaaaaaaaaaaaaaaaaaaaaaaaaAuthToken', 'organizationSecondarySigningKey'];
+const BEFORE = [
+  '',
+  'token="TOPSECRET ',
+  "token='TOPSECRET ",
+  'password: ',
+  'Bearer ',
+  'Authorization: Basic ',
+  'x-api-key=',
+  'https://u:TOPSECRET',
+  'secret=TOPSECRET&',
+  'api_key: "',
+];
+const PLAIN_VALUES = ['x', '"x"', "'x'", 'x.y', 'TOPSECRET', '"TOP SECRET"', 'Bearer', 'true', 'x@host', 'abcdefghijklmnopqrstuvwxyz0123'];
+const AFTER = ['', '"', "'", ' tail', '=y', ': z', '@host/p', ' = TOPSECRET', ',"b":"TOPSECRET"}', '&token=TOPSECRET'];
+
+function* longKeys(): Generator<Generated> {
+  for (const before of BEFORE)
+    for (const key of LONG_KEYS)
+      for (const separator of ['=', ': ', '":"', ' = '])
+        for (const value of PLAIN_VALUES)
+          for (const after of AFTER) {
+            const input = `${before}${key}${separator}${value}${after} ${sentinel()}`;
+            yield { input, name: `long ${JSON.stringify(input)}` };
+          }
+}
+
 function* generated(): Generator<Generated> {
   yield* structured();
   yield* nested();
+  yield* longKeys();
   yield* randomPairs();
   yield* random();
 }

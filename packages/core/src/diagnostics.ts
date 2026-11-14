@@ -274,7 +274,7 @@ const TOKEN_SHAPED = /[A-Za-z0-9+/_-]{24,}/;
 
 /** A plain value: one token, or a quoted string, with nothing a rule could read as a pair. */
 const PLAIN_BARE = /[A-Za-z0-9._~+/@%!$*#^-]+(?=$|[\s,;&}\]])/y;
-const PLAIN_QUOTED = /"[^"\\:=\r\n]*"|'[^'\\:=\r\n]*'/y;
+const PLAIN_QUOTED = /"[^"'\\:=\r\n]+"|'[^"'\\:=\r\n]+'/y;
 /** A separator after the value: the value is then a key itself and is left to the rules. */
 const SEPARATOR_AHEAD = /["']?\s*[:=]/y;
 const SCHEME_WORD = /\b(?:bearer|basic)\b/i;
@@ -283,8 +283,9 @@ const SCHEME_WORD = /\b(?:bearer|basic)\b/i;
  * Replaces the value of a credential key that is itself token-shaped
  * (`organizationSecondaryAuthToken=shortpw`), before the rules run.
  *
- * Only a plain value is taken: one token, or a quoted string, that contains no `:` or `=`, no
- * quote, no Authorization scheme word, and is not followed by a separator. Such a value cannot be
+ * Only a plain value is taken: one token, or the content of a quoted string (its quotes stay),
+ * that contains no `:` or `=`, no quote of either kind, no Authorization scheme word, and is not
+ * followed by a separator. Such a value cannot be
  * a key, a scheme or part of a pair for any rule, so replacing it with the marker changes nothing
  * about what the rules remove elsewhere. Any other value is left as it is.
  */
@@ -301,12 +302,16 @@ function redactLongKeyValues(text: string): string {
     const start = keyEnd + separator[0].length;
     PLAIN_QUOTED.lastIndex = start;
     PLAIN_BARE.lastIndex = start;
-    const value = PLAIN_QUOTED.exec(text)?.[0] ?? PLAIN_BARE.exec(text)?.[0];
+    const quoted = PLAIN_QUOTED.exec(text)?.[0];
+    const value = quoted ?? PLAIN_BARE.exec(text)?.[0];
     if (!value || SCHEME_WORD.test(value) || PLAIN_LITERAL.test(value)) continue;
     SEPARATOR_AHEAD.lastIndex = start + value.length;
     if (SEPARATOR_AHEAD.test(text)) continue;
-    out += `${text.slice(copied, start)}[redacted]`;
-    copied = start + value.length;
+    // A quoted value keeps its quotes: either may also delimit a string around this pair
+    // (`token="… longAuthToken="x"`), and the rules must still see it.
+    const inset = quoted ? 1 : 0;
+    out += `${text.slice(copied, start + inset)}[redacted]`;
+    copied = start + value.length - inset;
     COMPOUND_KEY.lastIndex = copied;
   }
   return copied === 0 ? text : out + text.slice(copied);

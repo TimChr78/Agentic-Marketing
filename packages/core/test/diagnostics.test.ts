@@ -420,7 +420,7 @@ describe('the pair scan runs before the token passes (#902 round 4)', () => {
     const key = 'aaaaaaaaaaaaaaaaaaaaaaaaaaAuthToken';
     expect(key.length).toBeGreaterThanOrEqual(24);
     expect(redactCredentials(`${key}: shortpw`)).toBe('[redacted]: [redacted]');
-    expect(redactCredentials(`{"${key}":"shortpw"}`)).toBe('{"[redacted]":[redacted]}');
+    expect(redactCredentials(`{"${key}":"shortpw"}`)).toBe('{"[redacted]":"[redacted]"}');
   });
 });
 
@@ -500,6 +500,14 @@ describe('the added rules never take less than 0.14.20 did (#898 round 6)', () =
     const url = redactCredentials('organizationSecondaryAuthToken=x at https://user:pw@api.example.com/v1');
     expect(url).toContain('@api.example.com/v1');
     expect(url).not.toContain(':pw@');
+  });
+
+  it("keeps the quotes of a long key's value, which may close an outer string", () => {
+    for (const quote of ['"', "'"]) {
+      const out = redactCredentials(`token=${quote}TOPSECRET organizationSecondaryAuthToken=${quote}x${quote}`);
+      expect(out, quote).not.toContain('TOPSECRET');
+      expect(redactCredentials(out), quote).toBe(out);
+    }
   });
 
   it('is settled after one call when a replacement exposes a closing quote', () => {
