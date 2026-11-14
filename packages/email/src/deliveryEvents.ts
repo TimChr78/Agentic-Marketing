@@ -116,7 +116,10 @@ export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provi
           setWhere: sql`${schema.suppressions.reason} = 'stop'`,
         });
       if (existing?.reason === 'stop')
-        logger.info({ workspace: m.workspaceId, channel: m.channel, previous: 'stop', reason }, `suppression escalated from stop to ${reason}`);
+        logger.info(
+          { workspace: m.workspaceId, channel: m.channel, previous: 'stop', reason },
+          `suppression escalated from stop to ${reason}`,
+        );
     }
     if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
       await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp);
