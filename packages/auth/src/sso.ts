@@ -15,6 +15,19 @@ export interface SsoConfig {
   domainVerification?: boolean;
 }
 
+/**
+ * The largest `SAMLResponse` @better-auth/sso accepts (its own default `maxResponseSize`). The
+ * plugin is configured with this constant, so the ACS route limit below cannot drift from it.
+ */
+export const SSO_SAML_MAX_RESPONSE_BYTES = 262_144;
+
+/**
+ * The body ceiling for the SAML ACS and SLO routes. The response field may be 262,144 decoded
+ * bytes; `application/x-www-form-urlencoded` can expand every byte to three (`%XX`), and the
+ * `SAMLResponse=`, `RelayState` and separator envelope adds a little more (#932 review A1).
+ */
+export const SSO_SAML_CALLBACK_MAX_BODY = SSO_SAML_MAX_RESPONSE_BYTES * 3 + 16 * 1024;
+
 const MANAGED_ROLES: Role[] = ['admin', 'marketer', 'approver', 'viewer'];
 const ADMIN_PATHS = [
   '/sso/register',
@@ -53,6 +66,9 @@ export function ssoPlugin(db: Db, config: SsoConfig) {
   const verification = config.domainVerification ?? true;
   return sso({
     domainVerification: { enabled: verification },
+    // The same constant the ACS/SLO route limit is derived from, so a raised field size raises
+    // the request ceiling with it.
+    saml: { maxResponseSize: SSO_SAML_MAX_RESPONSE_BYTES },
     provisionUserOnEveryLogin: true,
     schema: {
       ssoProvider: {

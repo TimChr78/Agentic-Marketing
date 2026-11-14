@@ -1,8 +1,9 @@
 import { createHmac } from 'node:crypto';
 import http from 'node:http';
-import { BODY_LIMIT_BYTES } from '@agentic-marketing/ingest';
+import { SSO_SAML_CALLBACK_MAX_BODY, SSO_SAML_MAX_RESPONSE_BYTES } from '@agentic-marketing/auth';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { PASSWORD, startTestServer, testPort, type User } from './harness';
+import { findUnboundedRoutes } from './route-sweep';
 
 // #235/#242: public ingest, inbound webhooks and the unauthenticated form, decision, preference,
 // SMS and REST POSTs must refuse oversized bodies before buffering them, counting encoded bytes
@@ -509,61 +510,40 @@ describe('Better Auth catch-all (#932)', () => {
   });
 });
 
-// #932: the sweep. Every route that can read a request body has a bodyLimit, either on the route
-// itself or on a matching `app.use`. The exceptions below never read the body at all, so a new
-// POST/PUT/PATCH without a guard fails here even though Hono has no clean way to give a global
-// default that a route's own larger or smaller limit could override.
+// #932 review A1: the ACS accepts a SAMLResponse up to SSO_SAML_MAX_RESPONSE_BYTES. A form at that
+// maximum must not be refused by the catch-all's 256 KB; only the route's own derived ceiling
+// applies, and one byte over it is a 413.
+describe('SAML callbacks (#932 A1)', () => {
+  it('accepts a maximum-size SAMLResponse even at worst-case form encoding', async () => {
+    const body = new URLSearchParams({ SAMLResponse: '%'.repeat(SSO_SAML_MAX_RESPONSE_BYTES) }).toString();
+    expect(body.length).toBeGreaterThan(256 * 1024);
+    const res = await fetch(`${t.base}/api/auth/sso/saml2/sp/acs/limits`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: t.base },
+      body,
+    });
+    expect(res.status).not.toBe(413);
+  });
+
+  it('refuses a body one byte over the SAML route limit', async () => {
+    const body = `SAMLResponse=${'A'.repeat(SSO_SAML_CALLBACK_MAX_BODY)}`;
+    expect(body.length).toBeGreaterThan(SSO_SAML_CALLBACK_MAX_BODY);
+    const res = await fetch(`${t.base}/api/auth/sso/saml2/sp/acs/limits`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: t.base },
+      body,
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: 'payload_too_large' });
+  });
+});
+
+// #932: the sweep. Every route that can read a request body (including ALL registrations and
+// body-reading middleware) has a bodyLimit, either on the route itself or on a matching guard
+// registered before it. The allow-list and its reasons live with the sweep in ./route-sweep.ts.
 describe('body-limit route sweep (#932)', () => {
-  const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH']);
-  // Routes that answer from the URL alone: confirmation and one-click unsubscribe have no body
-  // contract (mail clients post an empty body), and the API-root 404s never read one either.
-  const NO_BODY_READ = new Set([
-    'POST /f/confirm/:token',
-    'POST /u/:token',
-    'ALL /hooks',
-    'ALL /hooks/*',
-    'ALL /oauth',
-    'ALL /oauth/*',
-    'ALL /scim',
-    'ALL /scim/*',
-  ]);
-
-  // A sub-app with its own onError handler is wrapped by Hono's router; the original handler is
-  // kept on __COMPOSED_HANDLER, so unwrap that chain before looking for the guard's limit.
-  const limitOf = (handler: unknown): number | undefined => {
-    let current = handler as (Record<PropertyKey, unknown> & { __COMPOSED_HANDLER?: unknown }) | undefined;
-    for (let i = 0; current && i < 10; i += 1) {
-      const limit = current[BODY_LIMIT_BYTES] as number | undefined;
-      if (limit !== undefined) return limit;
-      current = current.__COMPOSED_HANDLER as typeof current;
-    }
-    return undefined;
-  };
-
-  /** Whether a guard registered on `guardPath` also runs for `routePath` (Hono's `*` at the end). */
-  const covers = (guardPath: string, routePath: string) =>
-    guardPath === '*' ||
-    guardPath === '/*' ||
-    guardPath === routePath ||
-    (guardPath.endsWith('/*') && routePath.startsWith(guardPath.slice(0, -1))) ||
-    (guardPath.endsWith('*') && routePath.startsWith(guardPath.slice(0, -1)));
-
   it('gives every body-accepting route its own limit', () => {
-    const guards: { method: string; path: string; limit: number }[] = [];
-    const unbounded = new Set<string>();
-    for (const route of t.srv.app.routes) {
-      const limit = limitOf(route.handler);
-      if (limit !== undefined) {
-        guards.push({ method: route.method, path: route.path, limit });
-        continue;
-      }
-      if (!BODY_METHODS.has(route.method)) continue;
-      const covered = guards.some(
-        (g) => g.path !== '*' && g.path !== '/*' && (g.method === 'ALL' || g.method === route.method) && covers(g.path, route.path),
-      );
-      if (!covered && !NO_BODY_READ.has(`${route.method} ${route.path}`)) unbounded.add(`${route.method} ${route.path}`);
-    }
-    expect([...unbounded]).toEqual([]);
+    expect(findUnboundedRoutes(t.srv.app)).toEqual([]);
   });
 });
 

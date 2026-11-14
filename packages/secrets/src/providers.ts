@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { safeErrorText } from '@agentic-marketing/core';
+import { endpointFailure, splitUrlCredentials } from '@agentic-marketing/telemetry';
 import { AwsClient } from 'aws4fetch';
 import type { KeyProvider } from './keys';
 
@@ -12,7 +13,13 @@ import type { KeyProvider } from './keys';
 type Fetch = typeof fetch;
 
 async function call<T>(f: Fetch, url: string, init: RequestInit, what: string): Promise<T> {
-  const res = await f(url, init);
+  let res: Response;
+  try {
+    res = await f(url, init);
+  } catch (err) {
+    // Never let the fetch rejection's text (which repeats the URL) reach a log or a span.
+    throw new Error(`${what} failed: ${endpointFailure(err, url)}`);
+  }
   const text = await res.text();
   if (!res.ok) throw new Error(`${what} failed: HTTP ${res.status} ${safeErrorText(text, 200)}`);
   return JSON.parse(text) as T;
@@ -33,20 +40,21 @@ export function openbaoKeyProvider(o: {
 }): KeyProvider {
   const f = o.fetch ?? fetch;
   const mount = o.mount ?? 'transit';
-  const base = `${o.addr.replace(/\/$/, '')}/v1/${mount}`;
+  // A credential-bearing address is split before any request: fetch rejects a URL with userinfo
+  // and repeats it in the error (#931 round 2).
+  const { url: addr, headers: auth } = splitUrlCredentials(o.addr);
+  const base = new URL(addr);
+  base.pathname = `${base.pathname.replace(/\/$/, '')}/v1/${mount}`;
   let token: Promise<string> | undefined;
   const readToken = () => (o.token ? Promise.resolve(o.token) : readFile(o.tokenFile ?? '', 'utf8').then((t) => t.trim()));
   async function post<T>(path: string, body: unknown, retried = false): Promise<T> {
     token ??= readToken();
-    const headers: Record<string, string> = { 'content-type': 'application/json', 'x-vault-token': await token };
+    const headers: Record<string, string> = { ...auth, 'content-type': 'application/json', 'x-vault-token': await token };
     if (o.namespace) headers['x-vault-namespace'] = o.namespace;
+    const url = new URL(base);
+    url.pathname = `${base.pathname}/${path}/${encodeURIComponent(o.key)}`;
     try {
-      return await call<T>(
-        f,
-        `${base}/${path}/${encodeURIComponent(o.key)}`,
-        { method: 'POST', headers, body: JSON.stringify(body) },
-        `OpenBao ${path}`,
-      );
+      return await call<T>(f, url.toString(), { method: 'POST', headers, body: JSON.stringify(body) }, `OpenBao ${path}`);
     } catch (err) {
       if (!retried && o.tokenFile && /HTTP 403/.test((err as Error).message)) {
         token = undefined;

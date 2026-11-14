@@ -14,6 +14,7 @@ import {
   invitationWorkspace,
   isMcpResourceUrlAllowed,
   RESET_PASSWORD_TTL_SECONDS,
+  SSO_SAML_CALLBACK_MAX_BODY,
   withConsentRequest,
 } from '@agentic-marketing/auth';
 import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
@@ -56,11 +57,19 @@ const INVITATION_MAX_BODY = 8 * 1024;
 // A consent form is a decision and the signed authorization query; 16 KB leaves ample room while
 // refusing an unbounded body before Better Auth reads it (#790).
 const CONSENT_MAX_BODY = 16 * 1024;
-// The generic /api/auth/* catch-all forwards every Better Auth POST here. Sign-in, sign-up and OAuth
-// token bodies are tiny; the largest legitimate body is `/sso/register` with a SAML IdP metadata
-// XML or certificate, which @better-auth/sso itself caps at 100 KB (maxMetadataSize). 256 KB covers
-// that plus the JSON envelope and a handful of certificates, while still bounding an
-// unauthenticated body before `auth.handler` buffers it (#932).
+// The generic /api/auth/* catch-all forwards every other Better Auth POST here. Every POST this
+// app enables, and its largest legitimate body (#932):
+//
+//   | endpoint(s)                                                          | largest body        |
+//   |----------------------------------------------------------------------|---------------------|
+//   | sign-in/up/out, change-password, verify-email, OAuth token/revoke     | under 1 KB          |
+//   | /sso/register with a SAML IdP metadata XML or certificate             | 100 KB metadata cap |
+//   | /sso/register with an OIDC config, /sso/update-provider               | under 64 KB         |
+//   | /oauth2/register (dynamic client registration, metadata and JWKS)     | under 64 KB         |
+//
+// No organization, passkey or 2FA plugin is enabled. 256 KB covers all of the above with room for
+// JSON escaping. The SAML ACS and SLO posts are the one larger surface; they are registered with
+// their own limit, derived from `SSO_SAML_MAX_RESPONSE_BYTES`, before this catch-all.
 const AUTH_CATCHALL_MAX_BODY = 256 * 1024;
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
@@ -433,6 +442,14 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
     },
   );
+  // The SAML ACS and SLO endpoints accept a `SAMLResponse`/`SAMLRequest` field up to
+  // SSO_SAML_MAX_RESPONSE_BYTES. Its worst-case form encoding is larger than the catch-all's
+  // ceiling, so these two routes get their own limit before it (#932 review A1).
+  const samlCallbackLimit = bodyLimit(SSO_SAML_CALLBACK_MAX_BODY, (c) =>
+    c.json({ error: 'payload_too_large', message: `SAML requests are limited to ${SSO_SAML_CALLBACK_MAX_BODY / 1024} KB.` }, 413),
+  );
+  app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/acs/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
+  app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/slo/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
   app.on(
     ['GET', 'POST'],
     '/api/auth/*',

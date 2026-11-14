@@ -43,6 +43,12 @@ describe('the MCP-disabled startup warning (#931)', () => {
 /**
  * Every `logger.<level>( ... )` call in the server and package sources, with its argument text.
  * Parentheses inside strings are skipped so the call is cut at its own closing brace.
+ *
+ * The scanner below is a cheap tripwire for the obvious spelling only (a `…Url`, `…endpoint`,
+ * `…dsn`, `…addr` or `…uri` identifier passed to a logger without endpointOrigin/Location). It
+ * cannot see aliases, errors that already carry a URL, or a logger called through another helper;
+ * the runtime table-driven tests for OPENBAO_ADDR, CLICKHOUSE_URL, VALKEY_URL, NATS_URL and provider
+ * API bases are the actual invariant (#931 A3/B1).
  */
 function loggerCalls(source: string): string[] {
   const calls: string[] = [];
@@ -120,7 +126,9 @@ describe('configured URLs in logger calls (#931)', () => {
         const unsafe = withoutSafeForms(call);
         // An identifier that names a URL, unless it is an object key (`publicUrl:`), already
         // unwrapped by one of the helpers above.
-        const match = unsafe.match(/(?:config\.|process\.env\.)?\b[A-Za-z_][A-Za-z0-9_]*[Uu][Rr][Ll]\b(?!\s*:(?!:))/);
+        const match = unsafe.match(
+          /(?:config\.|process\.env\.)?\b[A-Za-z_][A-Za-z0-9_]*(?:[Uu][Rr][Ll]|[Ee]ndpoint|[Dd][Ss][Nn]|[Aa][Dd][Dd][Rr]|[Uu][Rr][Ii])\b(?!\s*:(?!:))/,
+        );
         if (match) offenders.push(`${file.replace(`${root}/`, '')}: ${match[0]}`);
       }
     }
