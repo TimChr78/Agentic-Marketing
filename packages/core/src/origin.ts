@@ -54,6 +54,13 @@ function wildcardChar(char: string): boolean {
   return char !== '/' && char !== '\\' && char !== ':' && char !== '@';
 }
 
+/** Drops trailing slashes without a regular expression: a trailing-slash pattern backtracks on a long run. */
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) end -= 1;
+  return end === value.length ? value : value.slice(0, end);
+}
+
 /**
  * The two-pointer wildcard match: `*` is a run of wildcard characters, `?` exactly one, everything
  * else is literal. The only backtrack point is the last `*`, so the work is bounded by
@@ -133,7 +140,7 @@ function normalizeExact(entry: string): string {
  * spelling of the entry changes, never the set of hosts it covers.
  */
 function normalizeWildcard(entry: string): string {
-  const trimmed = entry.trim().replace(/\/+$/, '');
+  const trimmed = trimTrailingSlashes(entry.trim());
   const schemeEnd = trimmed.indexOf('://');
   if (schemeEnd <= 0) return trimmed.toLowerCase();
   const scheme = trimmed.slice(0, schemeEnd).toLowerCase();
