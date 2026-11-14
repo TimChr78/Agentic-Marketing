@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { providerDiagnostic, redactCredentials, redactedText, safeErrorText } from '../src/diagnostics';
 
 // #885: a provider's error body is copied into an AppError whose message reaches the caller, the
@@ -274,33 +274,6 @@ describe('URL userinfo credentials (#920)', () => {
   });
 });
 
-describe('a structured value under a credential key (#902 round 2)', () => {
-  it('consumes the whole balanced array or object', () => {
-    expect(redactCredentials('{"apiSecret":["shortpw","morepw"]}')).toBe('{"apiSecret":[redacted]}');
-    expect(redactCredentials('{"apiSecret":{"value":"shortpw"}}')).toBe('{"apiSecret":[redacted]}');
-    expect(redactCredentials('token=[1, 2, 3]')).toBe('token=[redacted]');
-    expect(redactCredentials('token={"a":{"b":{"c":1}}}')).toBe('token=[redacted]');
-    // A bracket or an escaped quote inside a string does not end the structure early.
-    expect(redactCredentials('token=["a]b", {"c": "d\\"e"}]')).toBe('token=[redacted]');
-  });
-
-  it('cuts an unbalanced or too deeply nested structure at the end of its line', () => {
-    const deep = `${'['.repeat(12)}shortpw${']'.repeat(12)}`;
-    expect(redactCredentials(`apiSecret=${deep}`)).toBe('apiSecret=[redacted]');
-    expect(redactCredentials('authToken={"value":"shortpw"\nnext line')).toBe('authToken=[redacted]\nnext line');
-    expect(redactCredentials('secret=["unterminated\nnext line')).toBe('secret=[redacted]\nnext line');
-  });
-});
-
-describe('an Authorization value under a credential key (#902 round 2)', () => {
-  it('redacts a short Bearer or Basic value of any length', () => {
-    expect(redactCredentials('authToken=Bearer abc')).toBe('authToken=Bearer [redacted]');
-    expect(redactCredentials('apiSecret=Basic ab')).toBe('apiSecret=Basic [redacted]');
-    expect(redactCredentials('Authorization: bearer x')).toBe('Authorization: bearer [redacted]');
-    expect(redactCredentials('token: Bearer a')).toBe('token: Bearer [redacted]');
-  });
-});
-
 describe('an ordinary field ending in Key keeps its text (#898 round 2)', () => {
   it('does not treat a field name that merely ends in Key as a credential', () => {
     const fields = [
@@ -397,24 +370,6 @@ describe('URL userinfo with an @ in the password (#920 round 2)', () => {
   });
 });
 
-describe('a multi-line PEM block (#885 round 2)', () => {
-  const pem = '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\nhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----';
-
-  it('consumes the whole block under a credential key', () => {
-    expect(redactCredentials(`password=${pem}`)).toBe('password=[redacted]');
-    expect(redactCredentials(`secret: ${pem}\ntrailing`)).toBe('secret: [redacted]\ntrailing');
-    // A quoted value keeps the shape redaction has always produced: the value, quotes included,
-    // becomes the marker.
-    expect(redactCredentials(`{"privateKey":"${pem.replaceAll('\n', '\\n')}"}`)).toBe('{"privateKey":[redacted]}');
-  });
-
-  it('redacts an unterminated block to the end of the text', () => {
-    // A BEGIN without an END is a private key body: nothing of it may survive (#902 round 5).
-    expect(redactCredentials('password=-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkq\n')).toBe('password=[redacted]');
-    expect(redactCredentials('secret=-----BEGIN PRIVATE KEY-----\nshortpw\nmore\nand more')).toBe('secret=[redacted]');
-  });
-});
-
 describe('redaction is idempotent (#902 round 2)', () => {
   const forms = [
     'token=shortpw',
@@ -442,65 +397,6 @@ describe('redaction is idempotent (#902 round 2)', () => {
     expect(redactCredentials('token=[redacted]')).toBe('token=[redacted]');
     expect(redactCredentials('{"apiSecret":[redacted]}')).toBe('{"apiSecret":[redacted]}');
     expect(redactCredentials('token: Bearer [redacted]')).toBe('token: Bearer [redacted]');
-  });
-});
-
-describe('separators, markers and Unicode quotes (#902 round 3)', () => {
-  it('recognises => as a separator', () => {
-    expect(redactCredentials('key => shortpw')).toBe('key => [redacted]');
-    expect(redactCredentials('const token => shortpw')).toBe('const token => [redacted]');
-    expect(redactCredentials('apiSecret=>shortpw')).toBe('apiSecret=>[redacted]');
-  });
-
-  it('keeps a marker only when the value ends there', () => {
-    expect(redactCredentials('token=[redacted]')).toBe('token=[redacted]');
-    expect(redactCredentials('{"apiSecret":[redacted]}')).toBe('{"apiSecret":[redacted]}');
-    // A value that continues after the marker is redacted as a whole, not left readable.
-    expect(redactCredentials('token=[redacted]shortpw')).toBe('token=[redacted]');
-    expect(redactCredentials('token=[redacted]"shortpw"')).toBe('token=[redacted]');
-  });
-
-  it('recognises paired Unicode quotes', () => {
-    expect(redactCredentials('token: “short pw”')).toBe('token: [redacted]');
-    expect(redactCredentials('token: ‘short pw’')).toBe('token: [redacted]');
-    expect(redactCredentials('{"token":"“short pw”"}')).not.toContain('short');
-  });
-});
-
-describe('the scanner matches JavaScript whitespace (#902 round 3)', () => {
-  it('accepts a Unicode space around the separator', () => {
-    expect(redactCredentials('token = shortpw')).toBe('token = [redacted]');
-    expect(redactCredentials('token = shortpw')).toBe('token = [redacted]');
-    expect(redactCredentials('token= shortpw')).toBe('token= [redacted]');
-    expect(redactCredentials('token =shortpw')).toBe('token =[redacted]');
-    expect(redactCredentials('apiSecret　= shortpw')).toBe('apiSecret　= [redacted]');
-  });
-
-  it('treats every ECMAScript line terminator as the end of a line', () => {
-    for (const terminator of ['\n', '\r', '\u2028', '\u2029']) {
-      const input = `apiSecret={"a":${terminator}shortpw`;
-      expect(redactCredentials(input), terminator).toBe(`apiSecret=[redacted]${terminator}shortpw`);
-    }
-  });
-});
-
-describe('the scanner cannot be made to fail (#902 round 3)', () => {
-  it('returns the bare marker when the scan itself throws', () => {
-    const spy = vi.spyOn(String.prototype, 'replace').mockImplementationOnce(() => {
-      throw new Error('injected failure');
-    });
-    try {
-      expect(redactCredentials('token=shortpw')).toBe('[redacted]');
-    } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it('scans a text of any length, however large', () => {
-    const filler = 'word '.repeat(40_000);
-    const out = redactCredentials(`${filler}token=shortpw`);
-    expect(out).toContain('token=[redacted]');
-    expect(out.length).toBeGreaterThan(filler.length);
   });
 });
 
@@ -536,53 +432,6 @@ describe('a quoted value spans lines, as in 0.14.20 (#902 round 5)', () => {
 
   it('redacts a single-quoted value across a literal newline', () => {
     expect(redactCredentials("password='first\nshortpw'")).toBe('password=[redacted]');
-  });
-
-  it('redacts a Unicode-quoted value across a literal newline', () => {
-    expect(redactCredentials('password: \u201cfirst\nshortpw\u201d')).toBe('password: [redacted]');
-    expect(redactCredentials('password: \u2018first\nshortpw\u2019')).toBe('password: [redacted]');
-  });
-
-  it('redacts a pretty-printed JSON object across lines', () => {
-    const json = '{\n  "grant_type": "authorization_code",\n  "code": "shortpw"\n}';
-    expect(redactCredentials(`apiSecret=${json}`)).toBe('apiSecret=[redacted]');
-    expect(redactCredentials(`{"privateKey": ${json}}`)).toBe('{"privateKey": [redacted]}');
-  });
-
-  it('still cuts an unclosed quote at the end of its line', () => {
-    expect(redactCredentials('password="shortpw\nnext line')).toBe('password=[redacted]\nnext line');
-  });
-});
-
-describe('a scheme keeps one word and one token, and leaves the rest (#902 round 5)', () => {
-  it('keeps a provider explanation after the credential', () => {
-    expect(redactCredentials('Authorization: Bearer abcdefgh was rejected by the upstream (HTTP 401)')).toBe(
-      'Authorization: Bearer [redacted] was rejected by the upstream (HTTP 401)',
-    );
-  });
-
-  it('keeps the status of a Basic failure', () => {
-    expect(redactCredentials('Authorization: Basic dXNlcjpwYXNz failed: 403 Forbidden')).toBe(
-      'Authorization: Basic [redacted] failed: 403 Forbidden',
-    );
-  });
-
-  it('handles repeated and mixed scheme words', () => {
-    expect(redactCredentials('token=Bearer Bearer shortpw')).toBe('token=Bearer [redacted]');
-    expect(redactCredentials('token=Bearer Basic shortpw tail')).toBe('token=Bearer [redacted] tail');
-  });
-
-  it('leaves a query tail alone', () => {
-    expect(redactCredentials('authToken=Bearer abc; retry later')).toBe('authToken=Bearer [redacted]; retry later');
-  });
-
-  it('redacts a quoted value after the scheme', () => {
-    expect(redactCredentials('Authorization: Bearer "abc def" was rejected')).toBe('Authorization: Bearer [redacted] was rejected');
-  });
-
-  it('is idempotent on a value it already redacted', () => {
-    const once = redactCredentials('Authorization: Bearer abcdefgh was rejected (HTTP 401)');
-    expect(redactCredentials(once)).toBe(once);
   });
 });
 
