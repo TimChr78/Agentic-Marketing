@@ -56,6 +56,12 @@ const INVITATION_MAX_BODY = 8 * 1024;
 // A consent form is a decision and the signed authorization query; 16 KB leaves ample room while
 // refusing an unbounded body before Better Auth reads it (#790).
 const CONSENT_MAX_BODY = 16 * 1024;
+// The generic /api/auth/* catch-all forwards every Better Auth POST here. Sign-in, sign-up and OAuth
+// token bodies are tiny; the largest legitimate body is `/sso/register` with a SAML IdP metadata
+// XML or certificate, which @better-auth/sso itself caps at 100 KB (maxMetadataSize). 256 KB covers
+// that plus the JSON envelope and a handful of certificates, while still bounding an
+// unauthenticated body before `auth.handler` buffers it (#932).
+const AUTH_CATCHALL_MAX_BODY = 256 * 1024;
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export interface ServerOverrides {
@@ -426,7 +432,14 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
     },
   );
-  app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
+  app.on(
+    ['GET', 'POST'],
+    '/api/auth/*',
+    bodyLimit(AUTH_CATCHALL_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `Requests are limited to ${AUTH_CATCHALL_MAX_BODY / 1024} KB.` }, 413),
+    ),
+    (c) => auth.handler(withClientIp(c)),
+  );
 
   // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
   // plugin answers RFC 9728 protected-resource metadata itself when the root path reaches it.
