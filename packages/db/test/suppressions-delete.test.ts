@@ -89,9 +89,9 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
     await d.db.admin.query(`CREATE ROLE ${role} LOGIN CREATEROLE PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
     await d.db.admin.query(`GRANT CREATE ON SCHEMA public TO ${role}`);
     // The migration role owns the tables later migrations touch (suppressions for 0088, deliveries
-    // for 0089's index, artifacts for 0092's singleton index); FORCE RLS applies to it as well,
-    // which is the small-install path this guards.
-    for (const table of ['artifacts', 'suppressions', 'deliveries', 'oauth_workspace_selections'])
+    // for 0089's index, artifacts for 0092's singleton index, workspaces for 0095's gap table
+    // foreign key); FORCE RLS applies to it as well, which is the small-install path this guards.
+    for (const table of ['artifacts', 'suppressions', 'deliveries', 'oauth_workspace_selections', 'workspaces'])
       await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
     await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
 
