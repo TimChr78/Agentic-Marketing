@@ -125,7 +125,7 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       assertWorkspaceHeader(principal, c.req.raw.headers);
       const body = await c.req.json().catch(() => ({}));
       const idempotencyKey = c.req.header('idempotency-key');
-      // Compatibility (#906 review round 3): before 0.14.24 every non-empty header value was used
+      // Compatibility (#906 review round 3): before 0.14.21 every non-empty header value was used
       // for dedupe, so spaces, non-ASCII and long values must keep working. The one change is an
       // empty header, which used to mean "no key" and is now refused instead of silently running
       // the request without one.

@@ -476,6 +476,70 @@ describe('campaign roll-up currency separation (#511)', () => {
     await screen.findByText('Progress unavailable · multiple currencies cannot be combined');
     expect(screen.queryByText('0%')).toBeNull();
   });
+
+  it('shows a suppressed currency as Suppressed, counts it as a currency and withholds target progress (#909)', async () => {
+    h.summary = summaryMeasured({
+      headline: {
+        ...summaryMeasured().headline,
+        revenue: [
+          { currency: 'EUR', amount: null },
+          { currency: 'USD', amount: 400 },
+        ],
+        revenuePerRecipient: [
+          { currency: 'EUR', amount: null },
+          { currency: 'USD', amount: 0.17 },
+        ],
+        targetProgress: null,
+      },
+      meta: { ...meta, currency: null },
+      goal: { ...goal, kind: 'revenue', target: 1000 },
+    });
+
+    renderTab();
+    await screen.findByText('Revenue · EUR');
+    expect(screen.getByText('Revenue · USD')).toBeTruthy();
+    // The suppressed currency still occupies a row and reads as suppressed, not as €0 or a dash.
+    expect(screen.getByText('Suppressed')).toBeTruthy();
+    expect(screen.getByText('Per-recipient revenue suppressed')).toBeTruthy();
+    expect(screen.getByText('Progress unavailable · multiple currencies cannot be combined')).toBeTruthy();
+    // USD's 40% of target is never presented as the campaign's progress.
+    expect(screen.queryByText(/40% of target/)).toBeNull();
+    expect(screen.queryByText('€0')).toBeNull();
+  });
+});
+
+it('renders a suppressed holdout currency as Suppressed, not as zero (#901)', async () => {
+  h.holdout = campaignHoldout({
+    goal: { kind: 'revenue', event: 'Order Completed', attributionDays: 7 },
+    control: {
+      entered: 400,
+      converted: 6,
+      unsubscribed: 0,
+      conversionRate: 0.015,
+      unsubscribeRate: 0,
+      revenue: { EUR: null, USD: 500 },
+    },
+    treatment: {
+      entered: 2400,
+      converted: 144,
+      unsubscribed: 12,
+      conversionRate: 0.06,
+      unsubscribeRate: 0.005,
+      revenue: { EUR: null, USD: 4000 },
+    },
+    suppressedRevenue: 1,
+    note: 'Revenue for EUR in control, EUR in treatment is suppressed because fewer than k=5 people converted in that currency.',
+  });
+
+  render(<CampaignHoldoutCard campaignId={campaignId} artifact={campaignArtifact()} />);
+  await screen.findByText('Campaign-wide holdout');
+  const section = screen.getByRole('region', { name: 'Campaign-wide holdout' });
+  // Both arms have a null EUR amount; neither is rendered as €0 or as a missing row.
+  expect(within(section).getAllByText('Suppressed').length).toBeGreaterThanOrEqual(2);
+  expect(within(section).getByText('$500')).toBeTruthy();
+  expect(within(section).getByText('$4,000')).toBeTruthy();
+  expect(within(section).queryByText('€0')).toBeNull();
+  expect(within(section).getByText(/fewer than k=5 people converted/)).toBeTruthy();
 });
 
 describe('campaign roll-up holdouts (#511)', () => {

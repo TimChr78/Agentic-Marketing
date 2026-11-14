@@ -318,17 +318,20 @@ function PeriodReads({
 
 function PeriodTotals({ result, suppressed, k }: { result: Funnel; suppressed: number; k: number }) {
   const notes = result.meta?.notes ?? [];
+  // #908: a headline total withheld by the k rule is null; it must read as suppressed, not as zero
+  // and not as an "Unavailable" that could be mistaken for a failed read.
+  const totalText = (value: number | null | undefined) => (typeof value === 'number' ? value.toLocaleString() : 'Suppressed');
   return (
     <div className="space-y-3">
       <StatGrid columns={4} className="max-sm:grid-cols-1">
-        <StatCard label="Entered in period" value={countText(result.entered)} hint="Distinct participants" />
+        <StatCard label="Entered in period" value={totalText(result.entered)} hint="Distinct participants" />
         <StatCard
           label="Reached goal in period"
-          value={countText(result.goalReached)}
+          value={totalText(result.goalReached)}
           hint={conversionText(result.goalReached, result.entered)}
         />
-        <StatCard label="Completed in period" value={countText(result.completed)} />
-        <StatCard label="Exited in period" value={countText(result.exited)} />
+        <StatCard label="Completed in period" value={totalText(result.completed)} />
+        <StatCard label="Exited in period" value={totalText(result.exited)} />
       </StatGrid>
       {suppressed > 0 && (
         <Alert tone="warn" title={`Values unavailable — fewer than ${k} people.`}>
@@ -463,7 +466,7 @@ function StepTable({ rows }: { rows: StepRow[] }) {
                 </span>
               </Td>
               <Td className={rowCellClass} data-label="Period reach" align="right">
-                {countText(row.period)}
+                {row.periodSuppressed ? 'Suppressed' : countText(row.period)}
               </Td>
               <Td className={rowCellClass} data-label="All-time reach" align="right">
                 {countText(row.allTime)}

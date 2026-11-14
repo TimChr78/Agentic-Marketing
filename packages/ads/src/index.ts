@@ -6,3 +6,5 @@ export * from './hook';
 export * from './platforms';
 export * from './social';
 export * from './spend';
+export * from './spendGaps';
+export * from './spendState';

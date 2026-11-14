@@ -527,7 +527,13 @@ describe('campaign dimension and filter', () => {
     if (summary.state !== 'measured') return;
     expect(summary.headline.recipients).toBe(6);
     expect(summary.headline.converters).toBe(6);
-    expect(summary.headline.revenue).toEqual([{ currency: 'DKK', amount: 100 }]);
+    // #909: the suppressed EUR row is still a currency. Dropping it made two currencies look like
+    // one, so meta.currency named DKK and a revenue target would have been read from DKK alone.
+    expect(summary.headline.revenue).toHaveLength(2);
+    expect(summary.headline.revenue.find((row) => row.currency === 'DKK')?.amount).toBe(100);
+    expect(summary.headline.revenue.find((row) => row.currency === 'EUR')?.amount).toBeNull();
+    expect(summary.headline.revenuePerRecipient.find((row) => row.currency === 'EUR')?.amount).toBeNull();
+    expect(summary.meta.currency).toBeNull();
     expect(summary.meta.suppressed).toBe(1);
   });
 
@@ -557,6 +563,39 @@ describe('campaign dimension and filter', () => {
       { currency: 'DKK', amount: 100 },
       { currency: 'EUR', amount: 50 },
     ]);
+  });
+
+  it('withholds a revenue goal’s target progress when a second currency is suppressed (#909)', async () => {
+    const broadcast = (
+      await api().call('artifacts.create', { type: 'broadcast', name: 'Revenue goal broadcast', content: { template, segment } })
+    ).artifactId;
+    await api().call('artifacts.requestPublish', { artifactId: broadcast, note: 'revenue goal broadcast' });
+    const campaign = await createCampaign(
+      'Revenue goal campaign',
+      [broadcast],
+      { kind: 'revenue', target: 1000 },
+      '2026-05-01T00:00:00.000Z',
+    );
+    await api().call('artifacts.requestPublish', { artifactId: campaign, note: 'revenue goal campaign' });
+
+    // Six recipients: one EUR buyer (below the per-currency converter floor) and five USD buyers.
+    const people = Array.from({ length: 6 }, person);
+    await t.srv.events.insertMessageEvents(messageEvents(wsA, broadcast, '2026-05-02T10:00:00.000Z', people, [6, 0, 0, 0]));
+    await t.srv.events.insert([
+      goal(wsA, people[0]!, 4200, 'EUR', '2026-05-02T11:00:00.000Z'),
+      ...people.slice(1).map((p, i) => goal(wsA, p, 20, 'USD', `2026-05-02T12:0${i}:00.000Z`)),
+    ]);
+
+    const summary = await api().call('analytics.campaignSummary', { campaignId: campaign, from: REV_FROM, to: REV_TO });
+    expect(summary.state).toBe('measured');
+    if (summary.state !== 'measured') return;
+    expect(summary.goal).toMatchObject({ kind: 'revenue', target: 1000 });
+    // The suppressed EUR row stays visible as a currency, so the target is not read from USD alone.
+    expect(summary.headline.revenue.find((row) => row.currency === 'EUR')).toEqual({ currency: 'EUR', amount: null });
+    expect(summary.headline.revenue.find((row) => row.currency === 'USD')?.amount).toBe(100);
+    expect(summary.headline.revenuePerRecipient.find((row) => row.currency === 'EUR')?.amount).toBeNull();
+    expect(summary.meta.currency).toBeNull();
+    expect(summary.headline.targetProgress).toBeNull();
   });
 
   it('keeps converters and the conversion rate independent of a revenue measure (#779)', async () => {
@@ -632,8 +671,11 @@ describe('analytics.campaignSummary', () => {
     expect(summary.headline.unsubscribeRate).toBeCloseTo(2 / 9, 5);
     expect(summary.headline.converters).toBe(3);
     expect(summary.headline.conversionRate).toBeCloseTo(0.3, 5);
-    expect(summary.headline.revenue).toEqual([]);
-    expect(summary.headline.revenuePerRecipient).toEqual([]);
+    // The three converters split 1 DKK / 1 EUR, each below the per-currency floor: both currencies
+    // keep a row with a null amount (#909), so neither is mistaken for the campaign's only currency.
+    expect(summary.headline.revenue.map((row) => row.currency).sort()).toEqual(['DKK', 'EUR']);
+    expect(summary.headline.revenue.every((row) => row.amount === null)).toBe(true);
+    expect(summary.headline.revenuePerRecipient.every((row) => row.amount === null)).toBe(true);
     expect(summary.headline.targetProgress).toBeCloseTo(0.3, 5);
 
     expect(summary.funnel).toEqual([

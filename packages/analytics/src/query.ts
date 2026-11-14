@@ -69,6 +69,17 @@ export type QueryInput = z.infer<typeof queryInput> & {
   journeyVersion?: number;
 };
 
+/**
+ * Internal query options, a separate argument so they can never be part of a caller's input:
+ * `raw` returns the rows without the k floor for a named report that applies its own, stricter rule
+ * (the journey funnel hides whole subtrees under a hidden step). A raw query never reads from or
+ * writes to the shared result cache either — a raw result must not be reachable from a public
+ * `analytics.query` that normalises to the same key.
+ */
+export interface InternalQueryOptions {
+  raw?: boolean;
+}
+
 export const analyticsColumn = z.object({
   name: z.string(),
   kind: z.enum(['dimension', 'measure']),
@@ -328,6 +339,25 @@ export interface SuppressedRows {
  * in another, so the plan repeats until stable. The rows are in the query's deterministic sort
  * order, which decides a tie.
  */
+/**
+ * Shapes rows without applying the k floor. Only for an internal named report that applies its own
+ * rule to the raw counts; the values are never returned directly.
+ */
+export function rawRows(raw: readonly Record<string, unknown>[], compiled: Pick<CompiledQuery, 'outputs'>): (string | number | null)[][] {
+  return raw.map((row) =>
+    compiled.outputs.map((out) => {
+      const value = row[out.alias];
+      if (out.kind === 'dimension') {
+        if (value === '' || value === null || value === undefined) return null;
+        return typeof value === 'number' ? value : String(value);
+      }
+      if (value === null || value === undefined) return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }),
+  );
+}
+
 export function suppressRows(
   raw: readonly Record<string, unknown>[],
   compiled: Pick<CompiledQuery, 'outputs' | 'kAlias' | 'revenueKAlias' | 'hasNonTimeDimension'>,
@@ -592,7 +622,14 @@ async function segmentQuery(deps: Deps, input: QueryInput, filters: NormalizedFi
   };
 }
 
-async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], dimensions: DimensionId[], filters: NormalizedFilters) {
+async function execute(
+  deps: Deps,
+  input: QueryInput,
+  measures: MeasureDef[],
+  dimensions: DimensionId[],
+  filters: NormalizedFilters,
+  raw = false,
+) {
   const source = measures[0].source;
   if (source === 'segment_memberships') return segmentQuery(deps, input, filters);
 
@@ -664,7 +701,7 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
       result_overflow_mode: 'break',
     } as never,
   });
-  const raw = await result.json<Record<string, unknown>>();
+  const rowsRaw = await result.json<Record<string, unknown>>();
   const durationMs = Date.now() - started;
   const summary = result as unknown as {
     summary?: { read_rows?: string | number };
@@ -685,14 +722,16 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
       source,
       measures: measures.map((m) => m.id),
       dimensions,
-      rows: raw.length,
-      rowsRead: Number.isFinite(rowsRead) ? rowsRead : raw.length,
+      rows: rowsRaw.length,
+      rowsRead: Number.isFinite(rowsRead) ? rowsRead : rowsRaw.length,
       durationMs,
     },
     'analytics query',
   );
 
-  const shaped = suppressRows(raw, compiled);
+  const shaped = raw
+    ? { rows: rawRows(rowsRaw, compiled), suppressed: 0, complementary: false, revenueSuppressed: 0, withheld: [] as string[] }
+    : suppressRows(rowsRaw, compiled);
   const rows = shaped.rows;
   const { suppressed, revenueSuppressed } = shaped;
 
@@ -753,19 +792,24 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
 }
 
 /** Validates, caches for 60 seconds, and runs one query. Tenant scope comes from deps only. */
-export async function runAnalyticsQuery(deps: Deps, input: QueryInput): Promise<AnalyticsResult> {
+export async function runAnalyticsQuery(deps: Deps, input: QueryInput, options: InternalQueryOptions = {}): Promise<AnalyticsResult> {
   const { measures, dimensions, filters } = validate(input);
-  const key = cacheKey(deps.workspaceId, input, filters);
+  // A raw result must never sit in the shared cache: a public query that normalises to the same key
+  // would otherwise be served unsuppressed rows (#917 review round 6).
+  const raw = options.raw === true;
+  const key = raw ? null : cacheKey(deps.workspaceId, input, filters);
   const now = Date.now();
-  const hit = cache.get(key);
+  const hit = key === null ? undefined : cache.get(key);
   if (hit && hit.expires > now) {
     logger.debug({ workspaceId: deps.workspaceId, measures: input.measures }, 'analytics query cache hit');
     return clone(hit.value);
   }
-  const value = await execute(deps, input, measures, dimensions, filters);
-  cache.set(key, { expires: now + CACHE_TTL_MS, value });
-  // Keep the map small in a long-running process; the TTL is the point, not an unbounded store.
-  if (cache.size > 500) for (const [k, v] of cache) if (v.expires <= now) cache.delete(k);
+  const value = await execute(deps, input, measures, dimensions, filters, raw);
+  if (key !== null) {
+    cache.set(key, { expires: now + CACHE_TTL_MS, value });
+    // Keep the map small in a long-running process; the TTL is the point, not an unbounded store.
+    if (cache.size > 500) for (const [k, v] of cache) if (v.expires <= now) cache.delete(k);
+  }
   return clone(value);
 }
 

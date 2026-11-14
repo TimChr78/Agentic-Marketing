@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { campaignNotStarted, planMemberSuppression, summaryWindow } from '../src/campaignSummary';
+import { campaignNotStarted, planMemberSuppression, revenueTargetProgress, summaryRevenue, summaryWindow } from '../src/campaignSummary';
 
 // #747: a campaign whose recorded start is after the requested `to` has no sends in that window,
 // whether or not it has sent later. The default `from` must become an empty window instead of the
@@ -149,5 +149,76 @@ describe('per-total member suppression (#692 round 2)', () => {
     // the people total's complement, each e-mail total would equal the 10's own figure and is
     // withheld instead (round 3).
     expect(plan.withheld).toEqual(['email.sent', 'email.delivered', 'email.clicked', 'email.unsubscribed']);
+  });
+});
+
+// #909: a suppressed currency is a currency. The summary used to drop a null-amount revenue row,
+// which made two currencies look like one and let a revenue goal's target progress be computed from
+// the visible one alone.
+describe('campaign summary currency suppression (#909)', () => {
+  const rows = (values: [string, number | null][]) => values.map(([currency, amount]) => [currency, amount]);
+
+  it('keeps a suppressed currency beside a visible one', () => {
+    const revenue = summaryRevenue(
+      rows([
+        ['EUR', null],
+        ['USD', 400],
+      ]),
+      0,
+      1,
+    );
+    expect(revenue).toEqual([
+      { currency: 'EUR', amount: null },
+      { currency: 'USD', amount: 400 },
+    ]);
+    // Unknown shapes are still dropped, not invented as a currency row.
+    expect(
+      summaryRevenue(
+        [
+          ['EUR', 'n/a'],
+          [null, 1],
+        ],
+        0,
+        1,
+      ),
+    ).toEqual([]);
+  });
+
+  it('withholds target progress for a revenue goal when a second currency is suppressed', () => {
+    expect(
+      revenueTargetProgress({
+        goal: { kind: 'revenue', target: 1000 },
+        revenue: [
+          { currency: 'EUR', amount: null },
+          { currency: 'USD', amount: 400 },
+        ],
+        converters: 9,
+      }),
+    ).toBeNull();
+  });
+
+  it('withholds target progress when the only currency is suppressed', () => {
+    expect(
+      revenueTargetProgress({ goal: { kind: 'revenue', target: 1000 }, revenue: [{ currency: 'EUR', amount: null }], converters: 4 }),
+    ).toBeNull();
+  });
+
+  it('keeps target progress for a single visible currency', () => {
+    expect(
+      revenueTargetProgress({ goal: { kind: 'revenue', target: 1000 }, revenue: [{ currency: 'USD', amount: 400 }], converters: 9 }),
+    ).toBeCloseTo(0.4, 8);
+  });
+
+  it('leaves a conversion goal’s target progress on the converter count', () => {
+    expect(
+      revenueTargetProgress({
+        goal: { kind: 'conversion', target: 10 },
+        revenue: [
+          { currency: 'EUR', amount: null },
+          { currency: 'USD', amount: 400 },
+        ],
+        converters: 3,
+      }),
+    ).toBeCloseTo(0.3, 8);
   });
 });

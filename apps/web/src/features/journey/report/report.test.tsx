@@ -154,9 +154,9 @@ const funnel = (overrides: Record<string, unknown> = {}) => ({
   completed: 560,
   exited: 30,
   steps: [
-    { step: 'n1', reached: 812, dropOff: 0, dropOffRate: 0 },
-    { step: 'n2', reached: 720, dropOff: 92, dropOffRate: 92 / 812 },
-    { step: 'n3', reached: 600, dropOff: 120, dropOffRate: 120 / 720 },
+    { step: 'n1', reached: 812, suppressed: false, dropOff: 0, dropOffRate: 0 },
+    { step: 'n2', reached: 720, suppressed: false, dropOff: 92, dropOffRate: 92 / 812 },
+    { step: 'n3', reached: 600, suppressed: false, dropOff: 120, dropOffRate: 120 / 720 },
   ],
   meta: {
     timeZone: 'UTC',
@@ -742,6 +742,101 @@ describe('journey report states (#507)', () => {
     await waitFor(() => expect(calls('journeys.holdoutResult')).toHaveLength(1));
     expect(screen.getAllByText('Suppressed').length).toBeGreaterThan(1);
     expect(screen.getByText(/Groups smaller than k=5 are hidden/)).toBeTruthy();
+  });
+
+  it('renders a null funnel total as Suppressed, never as zero (#908)', async () => {
+    h.funnel = funnel({
+      entered: null,
+      goalReached: null,
+      completed: 0,
+      exited: null,
+      steps: [{ step: 'n1', reached: null, dropOff: null, dropOffRate: null }],
+      meta: {
+        ...funnel().meta,
+        suppressed: 4,
+        notes: [
+          'Totals withheld because fewer than k=5 people or a hidden step’s count could be derived from them: entered, goalReached, exited.',
+        ],
+      },
+    });
+    renderReport();
+    await screen.findByText('Entered in period');
+
+    // Three withheld totals read "Suppressed"; a recorded zero stays a zero.
+    expect(screen.getAllByText('Suppressed').length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText('0')).toBeTruthy();
+    expect(screen.getByText(/Totals withheld because fewer than k=5/)).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Zero recorded events does not prove no engagement.' })).toBeNull();
+  });
+
+  it('renders a hidden step row as Suppressed and a missing count as Unavailable (#917 review round 6)', async () => {
+    h.funnel = funnel({
+      steps: [
+        { step: 'n1', reached: 812, suppressed: false, dropOff: 0, dropOffRate: 0 },
+        { step: 'n2', reached: null, suppressed: true, dropOff: null, dropOffRate: null },
+        // A step the selected read did not return: missing data, not suppression.
+        { step: 'n3', reached: null, suppressed: false, dropOff: null, dropOffRate: null },
+      ],
+      meta: { ...funnel().meta, suppressed: 1 },
+    });
+    renderReport();
+    await screen.findByText('Entered in period');
+    const table = screen.getByRole('table', { name: 'Journey steps' });
+    expect(within(table).getAllByText('Suppressed').length).toBeGreaterThan(0);
+    expect(within(table).getAllByText('Unavailable').length).toBeGreaterThan(0);
+  });
+
+  it('formats the split card’s absolute lift and interval in percentage points, not percent (#916)', async () => {
+    const splitNodes = (): JNode[] => [
+      { id: 'n1', kind: 'trigger', label: 'Signed up', config: {}, next: [{ to: 'split' }] },
+      {
+        id: 'split',
+        kind: 'split',
+        label: 'A/B',
+        config: { weights: [50, 50] },
+        next: [{ to: 'a' }, { to: 'b' }],
+      },
+      { id: 'a', kind: 'email', label: 'Path A mail', config: {}, next: [] },
+      { id: 'b', kind: 'email', label: 'Path B mail', config: {}, next: [] },
+    ];
+    h.artifact = artifact({
+      version: {
+        number: 1,
+        state: 'published',
+        content: { purpose: 'marketing', goal: 'Signup', nodes: splitNodes() },
+      },
+    });
+    h.split = {
+      journeyId,
+      node: 'split',
+      k: 5,
+      suppressed: false,
+      arms: [
+        { arm: 0, weight: 50, entered: 100, converted: 10, unsubscribed: 1, conversionRate: 0.1, unsubscribeRate: 0.01, suppressed: false },
+        {
+          arm: 1,
+          weight: 50,
+          entered: 100,
+          converted: 15,
+          unsubscribed: 1,
+          conversionRate: 0.15,
+          unsubscribeRate: 0.01,
+          suppressed: false,
+        },
+      ],
+      comparisons: [{ arm: 1, absoluteLift: 0.05, relativeLift: 0.5, ci95: [0.01, 0.09], verdict: 'treatment_better' }],
+      note: 'Both arms have at least k=5 people.',
+    };
+    renderReport();
+    await screen.findByText('Entered in period');
+    await waitFor(() => expect(calls('journeys.splitResult')).toHaveLength(1));
+
+    // 10% vs 15% is a five percentage-point lift; the interval is in the same unit and stays signed.
+    const lift = await screen.findByText('+5.0 pp');
+    const line = lift.closest('p')!;
+    expect(line.textContent).toContain('95% CI +1.0 pp to +9.0 pp');
+    expect(line.textContent).toContain('50% relative');
+    expect(screen.queryByText('5%')).toBeNull();
   });
 
   it('shows a split arm below k as Suppressed and withholds its comparison (#757)', async () => {

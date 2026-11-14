@@ -556,7 +556,7 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   );
                 if (hit) {
                   // `inputHash` binds the caller too, so another principal presenting the key is a
-                  // conflict, never the first caller's stored response. Rows written before 0.14.24
+                  // conflict, never the first caller's stored response. Rows written before 0.14.21
                   // carry the old caller-agnostic hash and answer 409 until a new key is used.
                   if (hit.command !== cmd.name || hit.inputHash !== idempotencyHash)
                     throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
