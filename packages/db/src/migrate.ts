@@ -125,6 +125,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0091_oauth_selection_rls.sql': '0.14.16',
   '0092_singleton_artifacts.sql': '0.14.17',
   '0093_one_published_version.sql': '0.14.22',
+  '0094_single_active_mandate.sql': '0.14.22',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
