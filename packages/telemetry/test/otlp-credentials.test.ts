@@ -1,59 +1,119 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-// #931 review A3: OTEL_EXPORTER_OTLP_ENDPOINT may carry userinfo. The exporter is built from the
-// credential-free URL, with the credentials in an Authorization header, so its own errors cannot
-// repeat the secret. The exporter is mocked so the test sees exactly what initTelemetry passes.
+// #931 review round 3 (A2/A3): the real OTLP HTTP exporter, against a local capture server. When
+// no endpoint variable carries userinfo the SDK must resolve the endpoint and headers exactly as
+// before; only a credential-bearing endpoint is passed explicitly, without userinfo.
 
-const captured = vi.hoisted(() => ({ options: [] as unknown[] }));
+const requests: { url: string; headers: Record<string, string | string[] | undefined> }[] = [];
+const ENV_KEYS = [
+  'OTEL_EXPORTER_OTLP_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+  'OTEL_EXPORTER_OTLP_HEADERS',
+  'OTEL_EXPORTER_OTLP_TRACES_HEADERS',
+] as const;
+const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 
-vi.mock('@opentelemetry/exporter-trace-otlp-http', () => ({
-  OTLPTraceExporter: class {
-    constructor(options: unknown) {
-      captured.options.push(options);
-    }
-    export(_spans: unknown, callback: (result: { code: number }) => void) {
-      callback({ code: 0 });
-    }
-    shutdown() {
-      return Promise.resolve();
-    }
-    forceFlush() {
-      return Promise.resolve();
-    }
-  },
-}));
+let server: Server;
+let base = '';
+const basic = (value: string) => `Basic ${Buffer.from(value).toString('base64')}`;
 
-const original = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-const originalHeaders = process.env.OTEL_EXPORTER_OTLP_HEADERS;
+beforeAll(async () => {
+  server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      requests.push({ url: req.url ?? '', headers: req.headers });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{}');
+    });
+  });
+  await new Promise<void>((ready) => server.listen(0, '127.0.0.1', ready));
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+});
+afterAll(() => server?.close());
 
 afterEach(() => {
+  for (const key of ENV_KEYS) {
+    const value = saved[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   vi.resetModules();
-  captured.options.length = 0;
-  if (original === undefined) delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-  else process.env.OTEL_EXPORTER_OTLP_ENDPOINT = original;
-  if (originalHeaders === undefined) delete process.env.OTEL_EXPORTER_OTLP_HEADERS;
-  else process.env.OTEL_EXPORTER_OTLP_HEADERS = originalHeaders;
+  requests.length = 0;
 });
 
-describe('the OTLP endpoint credentials (#931 A3)', () => {
-  it('sends userinfo as a header and keeps the credential-free URL', async () => {
-    delete process.env.OTEL_EXPORTER_OTLP_HEADERS;
-    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://user:secret@otel.example:4318/v1/traces?token=abc';
-    const { initTelemetry, shutdownTelemetry } = await import('../src/index');
-    initTelemetry('test');
-    expect(captured.options[0]).toEqual({
-      url: 'http://otel.example:4318/v1/traces?token=abc',
-      headers: { authorization: `Basic ${Buffer.from('user:secret').toString('base64')}` },
-    });
-    await shutdownTelemetry();
+/** One real export through a freshly imported telemetry module, flushed by shutdown. */
+async function exportOnce(env: Partial<Record<(typeof ENV_KEYS)[number], string>>) {
+  for (const key of ENV_KEYS) delete process.env[key];
+  Object.assign(process.env, env);
+  requests.length = 0;
+  const { trace } = await import('@opentelemetry/api');
+  trace.disable();
+  const { initTelemetry, shutdownTelemetry } = await import('../src/index');
+  initTelemetry('test');
+  const span = trace.getTracer('capture').startSpan('capture');
+  span.end();
+  await shutdownTelemetry();
+  trace.disable();
+  return requests;
+}
+
+describe('the real OTLP exporter (#931 A2/A3)', () => {
+  it('keeps the SDK endpoint resolution: generic endpoint plus /v1/traces', async () => {
+    const sent = await exportOnce({ OTEL_EXPORTER_OTLP_ENDPOINT: base });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.url).toBe('/v1/traces');
+    expect(sent[0]!.headers.authorization).toBeUndefined();
   });
 
-  it('keeps the headers configured in OTEL_EXPORTER_OTLP_HEADERS', async () => {
-    process.env.OTEL_EXPORTER_OTLP_HEADERS = 'x-api-key=otel-key';
-    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://user:secret@otel.example:4318/v1/traces';
-    const { initTelemetry, shutdownTelemetry } = await import('../src/index');
-    initTelemetry('test');
-    expect(captured.options[0]).toMatchObject({ headers: { 'x-api-key': 'otel-key' } });
-    await shutdownTelemetry();
+  it('keeps slash handling and a generic endpoint path', async () => {
+    const sent = await exportOnce({ OTEL_EXPORTER_OTLP_ENDPOINT: `${base}/collect/` });
+    expect(sent[0]!.url).toBe('/collect/v1/traces');
+  });
+
+  it('uses the trace-specific endpoint as-is', async () => {
+    const sent = await exportOnce({ OTEL_EXPORTER_OTLP_ENDPOINT: `${base}/ignored`, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${base}/custom` });
+    expect(sent[0]!.url).toBe('/custom');
+  });
+
+  it('lets the SDK decode percent-encoded env headers', async () => {
+    const sent = await exportOnce({
+      OTEL_EXPORTER_OTLP_ENDPOINT: base,
+      OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Basic%20YWxpY2U6cGFzcw%3D%3D',
+    });
+    expect(sent[0]!.headers.authorization).toBe('Basic YWxpY2U6cGFzcw==');
+  });
+
+  it('moves userinfo from the generic endpoint into a Basic header without touching the path', async () => {
+    const sent = await exportOnce({ OTEL_EXPORTER_OTLP_ENDPOINT: `http://alice:p%40ss@${new URL(base).host}` });
+    expect(sent[0]!.url).toBe('/v1/traces');
+    expect(sent[0]!.headers.authorization).toBe(basic('alice:p@ss'));
+    expect(sent[0]!.headers.host).toBe(new URL(base).host);
+  });
+
+  it('moves userinfo from a trace-specific endpoint and keeps its path', async () => {
+    const sent = await exportOnce({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `${base}/ignored`,
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `http://alice:p%40ss@${new URL(base).host}/custom`,
+    });
+    expect(sent[0]!.url).toBe('/custom');
+    expect(sent[0]!.headers.authorization).toBe(basic('alice:p@ss'));
+  });
+
+  it('lets an env Authorization win over URL userinfo', async () => {
+    const sent = await exportOnce({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `http://alice:p%40ss@${new URL(base).host}`,
+      OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer%20env-token',
+    });
+    expect(sent[0]!.headers.authorization).toBe('Bearer env-token');
+  });
+
+  it('lets a trace-specific env Authorization win too', async () => {
+    const sent = await exportOnce({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `http://alice:p%40ss@${new URL(base).host}`,
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: 'Authorization=Bearer%20trace-token',
+    });
+    expect(sent[0]!.headers.authorization).toBe('Bearer trace-token');
   });
 });

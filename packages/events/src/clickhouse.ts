@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import type {} from '@agentic-marketing/commands';
-import { splitUrlCredentials } from '@agentic-marketing/telemetry';
 import { type ClickHouseClient, createClient } from '@clickhouse/client';
 import type { BusEvent } from './schema';
 
@@ -12,13 +11,24 @@ import type { BusEvent } from './schema';
 const MIGRATIONS = new URL('../clickhouse/', import.meta.url);
 
 /**
- * Client options with a credential-bearing URL split into an Authorization header: Node's fetch
- * and the ClickHouse client both reject (and repeat) a URL with userinfo in their errors (#931
- * round 2). The query string, if any, stays part of the address.
+ * Client options for a configured URL. The ClickHouse client authenticates from the URL userinfo
+ * itself, but it decodes it and sends Basic itself; keeping the userinfo in the URL passed to the
+ * client also means an error can repeat it. Move the percent-decoded credentials to the client's
+ * own username/password options, which is how the client builds the same Basic header, and give it
+ * a URL without userinfo (#931 round 3). The path, query parameters and their precedence over these
+ * options are unchanged.
  */
 function clientOptions(url: string) {
-  const { url: clean, headers } = splitUrlCredentials(url);
-  return Object.keys(headers).length ? { url: clean, http_headers: headers } : { url: clean };
+  const parsed = new URL(url);
+  const username = parsed.username ? decodeURIComponent(parsed.username) : undefined;
+  const password = parsed.password ? decodeURIComponent(parsed.password) : undefined;
+  parsed.username = '';
+  parsed.password = '';
+  return {
+    url: parsed.toString(),
+    ...(username !== undefined ? { username } : {}),
+    ...(password !== undefined ? { password } : {}),
+  };
 }
 
 export interface ConversionEvent {

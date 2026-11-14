@@ -78,27 +78,59 @@ export function endpointFailure(err: unknown, endpoint: string): string {
 /**
  * Start OpenTelemetry tracing when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise the API stays a no-op.
  * Works with any OTLP backend (Grafana Tempo, SigNoz, Jaeger, …).
+ *
+ * The SDK resolves the endpoint (generic + /v1/traces, or the trace-specific variable as-is) and its
+ * own environment headers. That stays untouched unless an effective endpoint carries userinfo: only
+ * then is the URL passed explicitly, without userinfo, with the URL-derived Basic header unless an
+ * Authorization is already configured in OTEL_EXPORTER_OTLP[_TRACES]_HEADERS (that wins).
  */
 export function initTelemetry(serviceName: string) {
-  if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT || sdk) return;
-  const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-  // A URL with userinfo is rejected by fetch and the error repeats it; send the credentials as a
-  // header instead, keeping any headers the operator configured in OTEL_EXPORTER_OTLP_HEADERS.
-  const { url, headers } = splitUrlCredentials(endpoint);
-  const configured = Object.fromEntries(
-    (process.env.OTEL_EXPORTER_OTLP_HEADERS ?? '')
-      .split(',')
-      .map((pair) => pair.split('='))
-      .filter((pair) => pair.length === 2 && pair[0].trim())
-      .map(([key, value]) => [key.trim(), value.trim()]),
-  );
-  const exporterHeaders = { ...configured, ...headers };
-  sdk = new NodeSDK({
-    serviceName,
-    traceExporter: new OTLPTraceExporter(Object.keys(exporterHeaders).length ? { url, headers: exporterHeaders } : { url }),
-  });
+  const generic = nonEmpty(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
+  if (!generic || sdk) return;
+  const specific = nonEmpty(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
+  const effective = specific ?? generic;
+  if (!hasUrlCredentials(effective)) {
+    // Exactly as before: the exporter reads the environment itself.
+    sdk = new NodeSDK({ serviceName, traceExporter: new OTLPTraceExporter() });
+  } else {
+    const { url, headers } = splitUrlCredentials(tracesEndpointUrl(specific, generic));
+    const urlAuth = headers.authorization;
+    sdk = new NodeSDK({
+      serviceName,
+      traceExporter: new OTLPTraceExporter(urlAuth && !envHasAuthorization() ? { url, headers: { authorization: urlAuth } } : { url }),
+    });
+  }
   sdk.start();
-  logger.info({ endpoint: endpointOrigin(endpoint) }, 'OpenTelemetry tracing enabled');
+  logger.info({ endpoint: endpointOrigin(effective) }, 'OpenTelemetry tracing enabled');
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function hasUrlCredentials(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return Boolean(url.username || url.password);
+  } catch {
+    return false;
+  }
+}
+
+/** The tracer exporter's own endpoint rules: trace-specific as-is, else generic + /v1/traces. */
+function tracesEndpointUrl(specific: string | undefined, generic: string): string {
+  if (specific) return new URL(specific).toString();
+  return new URL(`${generic.endsWith('/') ? generic : `${generic}/`}v1/traces`).toString();
+}
+
+/** Whether OTEL_EXPORTER_OTLP[_TRACES]_HEADERS already sets Authorization (case-insensitive). */
+function envHasAuthorization(): boolean {
+  const names = [process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS, process.env.OTEL_EXPORTER_OTLP_HEADERS]
+    .flatMap((raw) => (raw ?? '').split(','))
+    .map((pair) => pair.split('=')[0]?.trim().toLowerCase())
+    .filter(Boolean);
+  return names.includes('authorization');
 }
 
 export async function shutdownTelemetry() {
