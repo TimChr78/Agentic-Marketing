@@ -135,6 +135,42 @@ async function loadArtifact(ctx: CommandContext, artifactId: string) {
   return a;
 }
 
+/**
+ * Why nothing may be published on this artifact, or null (#900). Migration 0092 and config.import
+ * archive duplicate rows instead of deleting them, and a pending approval request or held change
+ * that names one survives the upgrade: publishing it would put a version live on the dead row,
+ * outside the singleton index the repair created. A singleton names the active row, like
+ * config.import does when an explicit id is archived.
+ */
+async function archiveProblem(
+  ctx: CommandContext,
+  a: { id: string; type: string; name: string; archived: boolean },
+): Promise<string | null> {
+  if (!a.archived) return null;
+  if (isSingleton(a.type)) {
+    const [active] = await ctx.tx
+      .select({ id: schema.artifacts.id })
+      .from(schema.artifacts)
+      .where(
+        and(
+          eq(schema.artifacts.workspaceId, ctx.principal.workspaceId),
+          eq(schema.artifacts.type, a.type),
+          eq(schema.artifacts.archived, false),
+        ),
+      )
+      .limit(1);
+    if (active)
+      return `${a.id} is an archived ${a.type}, but this workspace already has the active ${a.type} ${active.id}. A workspace can have only one active ${a.type}; publish ${active.id} instead of ${a.id}.`;
+  }
+  return `${a.id} (“${a.name}”) is archived, so nothing can be published on it. Restore it with config.import, or create a new artifact.`;
+}
+
+/** Refuses a publish on an archived artifact with the conflict a person or agent can act on (#900). */
+async function assertNotArchived(ctx: CommandContext, a: { id: string; type: string; name: string; archived: boolean }) {
+  const problem = await archiveProblem(ctx, a);
+  if (problem) throw new AppError('conflict', problem);
+}
+
 async function loadVersion(ctx: CommandContext, artifactId: string, number: number) {
   const [v] = await ctx.tx
     .select()
@@ -203,6 +239,7 @@ async function publishVersion(ctx: CommandContext, artifactId: string, number: n
   // both see `publishedVersion = null` would otherwise mark two versions published (#868).
   await lockArtifacts(ctx, [artifactId]);
   const a = await loadArtifact(ctx, artifactId);
+  await assertNotArchived(ctx, a);
   await checkPublishable(ctx, a.type, (await loadVersion(ctx, artifactId, number)).content, artifactId);
   if (a.publishedVersion && a.publishedVersion !== number) await setVersionState(ctx, artifactId, a.publishedVersion, 'superseded');
   await setVersionState(ctx, artifactId, number, 'published');
@@ -690,6 +727,10 @@ export const listArtifacts = defineCommand({
     type: artifactTypeEnum.optional(),
     limit: z.number().int().min(1).max(ARTIFACT_LIST_MAX_LIMIT).default(50),
     cursor: z.string().max(256).optional().describe('Opaque `nextCursor` from the previous page; omit for the first page'),
+    includeArchived: z
+      .boolean()
+      .default(false)
+      .describe('Also list archived artifacts, e.g. a duplicate migration or config.import archived; they cannot be published'),
   }),
   output: z.object({
     artifacts: z.array(
@@ -702,9 +743,10 @@ export const listArtifacts = defineCommand({
         publishedVersion: z.number().int().nullable(),
         ownerAgentId: z.string().nullable().optional().describe('The agent that owns this artifact, if any (#426)'),
         updatedAt: z.string(),
+        archived: z.boolean().describe('True for an archived artifact, which cannot be published (#900)'),
       }),
     ),
-    total: z.number().int().describe('All artifacts matching the type filter, across every page'),
+    total: z.number().int().describe('All artifacts matching the type and archived filters, across every page'),
     nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null on the last page'),
   }),
   permission: 'artifacts:read',
@@ -715,7 +757,12 @@ export const listArtifacts = defineCommand({
     if (input.cursor && !cursor) {
       throw new AppError('invalid_input', 'The cursor is not valid. Omit it to start from the first page.');
     }
-    const filter = input.type ? eq(schema.artifacts.type, input.type) : undefined;
+    const filter = and(
+      input.type ? eq(schema.artifacts.type, input.type) : undefined,
+      // Archived rows are history (a duplicate migration 0092 archived, or one config.import
+      // restored): they are not offered as work someone or an agent can pick up (#900).
+      input.includeArchived ? undefined : eq(schema.artifacts.archived, false),
+    );
     // Compare in the database's timestamp type so microseconds survive the round trip.
     const pageFilter = cursor
       ? and(
@@ -758,6 +805,7 @@ export const listArtifacts = defineCommand({
         publishedVersion: a.publishedVersion,
         ownerAgentId: a.ownerAgentId,
         updatedAt: a.updatedAt.toISOString(),
+        archived: a.archived,
       })),
       total: Number(n),
       nextCursor: rows.length > input.limit && last ? encodeArtifactListCursor({ updatedAt: last.cursorAt, id: last.a.id }) : null,
@@ -929,6 +977,7 @@ export const requestPublish = defineCommand({
     // committed between the read and publishVersion must not go live unreviewed (#867).
     await lockArtifacts(ctx, [input.artifactId]);
     const a = await loadArtifact(ctx, input.artifactId);
+    await assertNotArchived(ctx, a);
     refuseAgentsFor(ctx, a.type);
     const v = await loadVersion(ctx, a.id, a.latestVersion);
     if (v.state !== 'draft')
@@ -1052,6 +1101,7 @@ export const requestPublishBundle = defineCommand({
     const members = [];
     for (const id of ids) {
       const a = await loadArtifact(ctx, id);
+      await assertNotArchived(ctx, a);
       refuseAgentsFor(ctx, a.type);
       const v = await loadVersion(ctx, a.id, a.latestVersion);
       if (v.state !== 'draft')
@@ -1538,12 +1588,17 @@ export const approve = defineCommand({
     'Approve a pending request and publish that version; for a bundle, every request in it, published in dependency order in one step. Only people can approve.',
   input: z.object({ approvalId: z.string(), note: z.string().max(1000).optional() }),
   output: z.object({
-    status: z.literal('approved'),
+    status: z
+      .enum(['approved', 'rejected'])
+      .describe(
+        'approved: everything it names is live; rejected: it names an archived artifact, so nothing was published and the request was closed with the reason',
+      ),
     artifactId: z.string(),
     version: z.number().int(),
     published: z
       .array(z.object({ artifactId: z.string(), version: z.number().int() }))
       .describe('Everything this approval published, in order (more than one for a bundle)'),
+    reason: z.string().nullable().describe('Why the request was rejected instead of published; null when it was approved'),
   }),
   permission: 'artifacts:approve',
   effect: 'publish',
@@ -1558,6 +1613,19 @@ export const approve = defineCommand({
       ctx,
       members.map((m) => m.artifactId),
     );
+    // An archived artifact cannot be published (#900). The request is closed as rejected with the
+    // reason instead of staying pending forever or publishing the dead duplicate migration 0092
+    // archived: nothing is live and the person sees why.
+    const problems: string[] = [];
+    for (const m of members) {
+      const problem = await archiveProblem(ctx, await loadArtifact(ctx, m.artifactId));
+      if (problem) problems.push(problem);
+    }
+    if (problems.length) {
+      const reason = problems.join(' ');
+      await closeRejected(ctx, members, reason);
+      return { status: 'rejected' as const, artifactId: r.artifactId, version: r.version, published: [], reason };
+    }
     for (const m of members) await publishVersion(ctx, m.artifactId, m.version);
     await ctx.tx
       .update(schema.approvalRequests)
@@ -1576,9 +1644,30 @@ export const approve = defineCommand({
       artifactId: r.artifactId,
       version: r.version,
       published: members.map((m) => ({ artifactId: m.artifactId, version: m.version })),
+      reason: null,
     };
   },
 });
+
+/**
+ * Closes pending requests whose change can never be published (#900): the versions become rejected
+ * and the requests end as rejected with the reason, so nothing waits for a person forever.
+ */
+async function closeRejected(ctx: CommandContext, members: { id: string; artifactId: string; version: number }[], reason: string) {
+  for (const m of members) await setVersionState(ctx, m.artifactId, m.version, 'rejected');
+  await ctx.tx
+    .update(schema.approvalRequests)
+    .set({ status: 'rejected', decidedBy: 'policy:archived', decidedAt: new Date(), decisionNote: reason, holdUntil: null })
+    .where(
+      and(
+        eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
+        inArray(
+          schema.approvalRequests.id,
+          members.map((m) => m.id),
+        ),
+      ),
+    );
+}
 
 /**
  * A paused or revoked agent's pending changes wait (ADR-0016, #213): approving them would let the
@@ -1750,6 +1839,18 @@ export async function runHeldChange(
     ctx,
     members.map((m) => m.artifactId),
   );
+  // An archived artifact can never be published again (#900): a duplicate migration 0092 archived,
+  // or one config.import restored. Close the request with the reason instead of retrying every tick.
+  const archivedProblems: string[] = [];
+  for (const m of members) {
+    const problem = await archiveProblem(ctx, await loadArtifact(ctx, m.artifactId));
+    if (problem) archivedProblems.push(problem);
+  }
+  if (archivedProblems.length) {
+    const reason = archivedProblems.join(' ');
+    await closeRejected(ctx, members, `Not run after its veto window: ${reason}`);
+    return { status: 'needs_person', reason };
+  }
   const agent = await requestingAgent(ctx, r);
   const held = agent ? await heldActionFor(ctx, agent.id, r.artifactId) : null;
   let problem: string | null = null;

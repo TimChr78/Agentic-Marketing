@@ -19,7 +19,12 @@ export interface ArtifactListPageResponse {
   nextCursor?: string | null;
 }
 
-export type ArtifactListLoader = (input: { type?: string; limit: number; cursor?: string }) => Promise<ArtifactListPageResponse>;
+export type ArtifactListLoader = (input: {
+  type?: string;
+  limit: number;
+  cursor?: string;
+  includeArchived?: boolean;
+}) => Promise<ArtifactListPageResponse>;
 
 /** Matches the command's maximum page size. */
 export const ARTIFACT_PAGE_SIZE = 200;
