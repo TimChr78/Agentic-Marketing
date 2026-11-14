@@ -524,8 +524,18 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   );
                 if (hit) {
                   if (hit.command !== cmd.name || hit.inputHash !== inputHash)
-                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
-                  return hit.response as z.output<C['output']>;
+                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                      reason: 'idempotency_key_reused',
+                    });
+                  const replay = hit.response as z.output<C['output']>;
+                  // A replay returns before the handler, so computing targets only on the handler
+                  // path left the replay's audit row without them (#905). Compute them from the
+                  // stored response the same way. Every audited read stores its full output: the
+                  // commands with `auditTarget`/`auditTargets` and a `sensitiveOutput` are writes,
+                  // and the reads' targets are plain ids, so redaction never removes them.
+                  target = cmd.auditTarget?.(replay) ?? target;
+                  if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(replay);
+                  return replay;
                 }
               }
               const undo = createUndoCollector();
