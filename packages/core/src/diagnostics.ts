@@ -86,7 +86,7 @@ function redactKeyValuePairs(text: string): string {
         !AUTH_SCHEME.test(text) &&
         !(nested !== null && isCredentialKey(nested[1] ?? ''));
       if (replace) {
-        out += text.slice(cursor, match.index) + `${key}${quote}${separator}[redacted]`;
+        out += `${text.slice(cursor, match.index)}${key}${quote}${separator}[redacted]`;
         cursor = valueStart + value[0].length;
         KEY_VALUE_PAIR.lastIndex = cursor;
         match = KEY_VALUE_PAIR.exec(text);
