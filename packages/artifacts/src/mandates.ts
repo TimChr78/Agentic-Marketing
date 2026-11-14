@@ -526,16 +526,18 @@ export async function runActiveMandateRepair(
       opts.onError?.(err);
     }
     if (signal.aborted) return;
+    // The abort listener is removed when the timer fires, so a long-running scheduler does not
+    // collect one listener per pass.
     await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, tickMs);
+      signal.addEventListener('abort', onAbort, { once: true });
     });
   }
 }
