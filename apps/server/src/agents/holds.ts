@@ -5,6 +5,7 @@ import {
   coordinationFor,
   decide,
   IRREVERSIBLE,
+  isDeadlock,
   REACH_CLASSES,
   type Services,
 } from '@agentic-marketing/commands';
@@ -16,6 +17,16 @@ import { eq } from 'drizzle-orm';
 // person rejecting the change, it is decided again as of now (#262): the current mandate, its
 // working hours, the agent's counters, guardrails and any guardian cap. Outside working hours it
 // waits for the next opening; anything the mandate no longer allows goes to a person.
+//
+// The check and the publish run in ONE transaction under the `agent-policy` advisory lock (#907),
+// which `runHeldChange` takes before it reads the agent. Lock order on this path, documented next
+// to the code that takes each lock: agent-policy → approval request rows (lockApproval) → artifact
+// rows (lockArtifacts) → the mandate validator's `am.agent-mandate` lock. The guardian uses the
+// same prefix (agent-policy, then the agent's pending requests), so the two cannot deadlock; the
+// executor's ordinary writes take the agent lock before their artifact writes too. Only a publish
+// command's impact locks its artifacts before the agent lock (#283), the one inverse order that
+// can still meet a held run; that races into a 40P01 the executor maps to a retryable conflict,
+// as it already does between two of its own commands in those two orders.
 
 export async function runHoldsOnce(deps: { db: Db; services: Services }) {
   let ran = 0;
@@ -27,6 +38,16 @@ export async function runHoldsOnce(deps: { db: Db; services: Services }) {
       if (out.status !== 'not_due') ran++;
       logger.info({ workspace: ws, approval: id, ...out }, 'held agent change processed');
     } catch (err) {
+      // A deadlock means the whole transaction rolled back and nothing was written (#922). The
+      // request is still pending and still due, so the next round retries it; a 40P01 is not a
+      // reason to give up on a change that is only waiting for its veto window to end.
+      if (isDeadlock(err)) {
+        logger.info(
+          { err, workspace: ws, approval: id },
+          'held agent change deadlocked with another writer; nothing was written and it stays queued for the next round',
+        );
+        continue;
+      }
       logger.warn({ err, workspace: ws, approval: id }, 'held agent change failed');
     }
   }

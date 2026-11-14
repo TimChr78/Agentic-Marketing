@@ -172,7 +172,13 @@ export const artifactVersions = pgTable(
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.artifactId, t.number] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.artifactId, t.number] }),
+    // Exactly one published version per artifact (#912): `publishVersion` supersedes the old
+    // version before it publishes the new one, so the partial unique index never fires on the
+    // normal path; a writer that skips the lock gets a 23505 the executor answers as a conflict.
+    uniqueIndex('artifact_versions_one_published').on(t.workspaceId, t.artifactId).where(sql`state = 'published'`),
+  ],
 );
 
 /** Canvas positions, separate from the versioned content so moving a step is not a draft (issue #117). */

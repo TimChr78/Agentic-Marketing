@@ -4,6 +4,7 @@ export * from './datetime';
 export * from './diagnostics';
 export * from './errors';
 export * from './hash';
+export * from './idempotency';
 export * from './ids';
 export * from './net';
 export * from './origin';

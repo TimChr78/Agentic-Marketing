@@ -104,6 +104,7 @@ export const getWorkspace = defineCommand({
         and(
           eq(schema.artifacts.workspaceId, ctx.principal.workspaceId),
           eq(schema.artifacts.type, 'brand'),
+          eq(schema.artifacts.archived, false),
           isNotNull(schema.artifacts.publishedVersion),
         ),
       )
@@ -339,7 +340,13 @@ export const getBusinessContext = defineCommand({
           eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
         ),
       )
-      .where(and(eq(schema.artifacts.type, 'business_context'), isNotNull(schema.artifacts.publishedVersion)))
+      .where(
+        and(
+          eq(schema.artifacts.type, 'business_context'),
+          eq(schema.artifacts.archived, false),
+          isNotNull(schema.artifacts.publishedVersion),
+        ),
+      )
       .orderBy(desc(schema.artifacts.updatedAt))
       .limit(1);
     if (!row || row.version === null)

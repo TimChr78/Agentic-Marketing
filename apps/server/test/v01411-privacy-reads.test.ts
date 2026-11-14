@@ -195,6 +195,53 @@ describe('audited reads record the people they reached (#763)', () => {
   });
 });
 
+// #905: a deduped replay returns the stored response before the handler runs, so the
+// output-derived audit target was never computed and the replay's audit row had no target. The
+// replay now computes the targets from the stored response exactly as the handler path does.
+describe('a replayed audited read keeps its targets (#905)', () => {
+  const auditFor = (target: string) => t.api(owner, ws).call('audit.list', { target, limit: 500 });
+  const findRows = async () => (await auditFor(ada)).entries.filter((e) => e.command === 'profiles.find');
+  const messageRows = async (target: string) => (await auditFor(target)).entries.filter((e) => e.command === 'messages.list');
+
+  it('records the same person target on both the call and its deduped replay', async () => {
+    const api = t.api(marketer, ws);
+    const before = (await findRows()).length;
+    const key = `find-replay-${Date.now()}`;
+    const first = await api.call('profiles.find', { type: 'user_id', value: 'v01411-ada' }, { idempotencyKey: key });
+    const replay = await api.call('profiles.find', { type: 'user_id', value: 'v01411-ada' }, { idempotencyKey: key });
+    expect(replay).toEqual(first);
+    const rows = await findRows();
+    expect(rows.length).toBe(before + 2);
+    expect(rows.every((e) => e.target === ada)).toBe(true);
+  });
+
+  it('writes one row per person on the replay of a multi-target read', async () => {
+    const api = t.api(marketer, ws);
+    const before = await Promise.all([messageRows(ada), messageRows(bo)]);
+    const key = `list-replay-${Date.now()}`;
+    const first = await api.call('messages.list', { limit: 50 }, { idempotencyKey: key });
+    const replay = await api.call('messages.list', { limit: 50 }, { idempotencyKey: key });
+    expect(replay).toEqual(first);
+    const after = await Promise.all([messageRows(ada), messageRows(bo)]);
+    // Each call writes one entry for every person it reached: the replay adds no targetless row
+    // and does not drop the people the stored response named.
+    for (const i of [0, 1]) expect(after[i]!.length).toBe(before[i]!.length + 2);
+  });
+
+  it('still writes no second audit row for a replayed write', async () => {
+    const api = t.api(owner, ws);
+    const countCreates = async () =>
+      (await api.call('audit.list', { limit: 500 })).entries.filter((e) => e.command === 'artifacts.create').length;
+    const before = await countCreates();
+    const key = `create-replay-${Date.now()}`;
+    const input = { type: 'note' as const, name: 'Replayed write', content: { title: 'Replay', body: 'Once.' } };
+    const first = await api.call('artifacts.create', input, { idempotencyKey: key });
+    const replay = await api.call('artifacts.create', input, { idempotencyKey: key });
+    expect(replay.artifactId).toBe(first.artifactId);
+    expect(await countCreates()).toBe(before + 1);
+  });
+});
+
 describe('consent proof withholds national phones and addresses (#765)', () => {
   beforeAll(async () => {
     const api = t.api(owner, ws);

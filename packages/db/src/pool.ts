@@ -104,6 +104,9 @@ export function createDb(config: DbConfig): Db {
     new AppError(
       'conflict',
       'A request with this idempotency key is still in progress. Retry with the same key after it has finished; a new key would run the operation again.',
+      // A stable sub-code: clients retry this 409 with the same key, but never the other kind
+      // ("already used for a different request"), which is also a 409 (#906).
+      { reason: 'idempotency_in_progress' },
     );
 
   /** A pooled connection, or null when the deadline passes while the pool has none to give. */

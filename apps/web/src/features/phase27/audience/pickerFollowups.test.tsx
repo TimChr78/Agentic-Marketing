@@ -74,6 +74,7 @@ function formRow(name: string): ArtifactRow {
     latestState: 'draft',
     publishedVersion: null,
     updatedAt: '2026-11-02T09:00:00.000Z',
+    archived: false,
   };
 }
 
@@ -92,6 +93,7 @@ function templateRow(): ArtifactRow {
     latestState: 'published',
     publishedVersion: 1,
     updatedAt: '2026-11-02T09:00:00.000Z',
+    archived: false,
   };
 }
 
@@ -113,6 +115,7 @@ function deferredPage() {
             latestState: 'draft',
             publishedVersion: null,
             updatedAt: '2026-11-02T09:00:00.000Z',
+            archived: false,
           },
         ],
         total: 1,

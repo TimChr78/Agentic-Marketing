@@ -16,7 +16,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
 import { blockResolver } from './blocks';
-import { applyDeliveryEvents } from './deliveryEvents';
+import { applyDeliveryEvents, logSuppressionEscalation, type SuppressionEscalation } from './deliveryEvents';
 import {
   type ClickLink,
   type LinkSigner,
@@ -382,6 +382,7 @@ async function deliverOne(
   const { m, provider, transport, out } = prepared;
   let event: MessageEvent;
   let reported: MessageEvent[] = [];
+  let escalations: SuppressionEscalation[] = [];
   try {
     const { providerMessageId, events: known } = await transport.send(out);
     await db.withWorkspace(ws, (tx) =>
@@ -391,7 +392,11 @@ async function deliverOne(
         .where(eq(schema.messages.id, id)),
     );
     event = decisionEvent(m, 'sent', '', provider.adapter);
-    if (known?.length) reported = await db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, known, provider.adapter, deps.kp));
+    if (known?.length) {
+      const applied = await db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, known, provider.adapter, deps.kp));
+      reported = applied.events;
+      escalations = applied.escalations;
+    }
   } catch (e) {
     const reason = `provider_error: ${failureText((e as Error).message)}`;
     const retry = m.attempts < MAX_ATTEMPTS;
@@ -407,6 +412,8 @@ async function deliverOne(
   } finally {
     await transport.close?.();
   }
+  // After the transaction committed: a rolled-back escalation leaves no log behind.
+  for (const escalation of escalations) logSuppressionEscalation(escalation);
   await deps.events.insertMessageEvents([event, ...reported]);
 }
 

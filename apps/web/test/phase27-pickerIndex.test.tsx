@@ -43,6 +43,7 @@ function row(i: number, type = 'segment', prefix = 'seg') {
     latestState: 'draft' as const,
     publishedVersion: null,
     updatedAt: '2026-11-02T09:00:00.000Z',
+    archived: false,
   };
 }
 

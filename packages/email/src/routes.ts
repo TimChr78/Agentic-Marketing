@@ -19,7 +19,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { type Context, Hono } from 'hono';
 import type { DeliveryEvent, WebhookVerification } from './adapters';
-import { applyDeliveryEvents, type Msg, messageEvent, withdraw } from './deliveryEvents';
+import { applyDeliveryEvents, logSuppressionEscalation, type Msg, messageEvent, withdraw } from './deliveryEvents';
 import type { EmailServices } from './gateway';
 import type { ClickLink, TopicLink, UnsubscribeLink } from './links';
 import { transportFor, webhookTokenHash } from './providers';
@@ -94,26 +94,30 @@ export function emailRoutes(deps: EmailRouteDeps) {
       const [provider] = await tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.id, id));
       const transport = await transportFor(tx, provider, deps.kp, deps.email.adapterDeps);
       try {
-        if (!transport.parseWebhook) return { status: 400 as const, events: [], retryAfter: undefined };
+        if (!transport.parseWebhook) return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
         if (transport.verifyWebhook) {
           const refusal = webhookVerdict(await transport.verifyWebhook(req));
-          if (refusal) return { status: refusal.status, events: [], retryAfter: refusal.retryAfter };
+          if (refusal) return { status: refusal.status, events: [], escalations: [], retryAfter: refusal.retryAfter };
         }
         let parsed: DeliveryEvent[];
         try {
           parsed = await transport.parseWebhook(req);
         } catch {
-          return { status: 400 as const, events: [], retryAfter: undefined };
+          return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
         }
+        const applied = await applyDeliveryEvents(tx, parsed, provider.adapter, deps.kp);
         return {
           status: 200 as const,
-          events: await applyDeliveryEvents(tx, parsed, provider.adapter, deps.kp),
+          events: applied.events,
+          escalations: applied.escalations,
           retryAfter: undefined,
         };
       } finally {
         await transport.close?.();
       }
     });
+    // After the transaction committed: a rolled-back escalation leaves no log behind.
+    for (const escalation of result.escalations) logSuppressionEscalation(escalation);
     await deps.events.insertMessageEvents(result.events);
     for (const e of result.events)
       if ((e.type === 'unsubscribed' || e.type === 'complained') && e.profileId)

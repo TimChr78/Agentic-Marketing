@@ -242,7 +242,11 @@ export const driftConfig = defineCommand({
         ),
       );
     const byId = new Map(existing.map((entry) => [entry.a.id, entry]));
-    const singletons = new Map(existing.filter((entry) => isSingleton(entry.a.type)).map((entry) => [entry.a.type, entry]));
+    // Archived rows never resolve as the workspace's current singleton: migration 0092 left the
+    // duplicates behind as history (#899). An explicit id in the bundle still matches through byId.
+    const singletons = new Map(
+      existing.filter((entry) => isSingleton(entry.a.type) && !entry.a.archived).map((entry) => [entry.a.type, entry]),
+    );
     const drift: z.infer<typeof Drift>[] = [];
     for (const item of input.bundle.artifacts) {
       const content = await validateContent(item.type, item.content, 'draft');
