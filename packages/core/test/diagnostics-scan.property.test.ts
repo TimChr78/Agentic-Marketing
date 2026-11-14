@@ -12,7 +12,11 @@ const SECRET = 'S3cr3tV4l';
 /** Half of it, so a truncated redaction is still caught. */
 const SECRET_PART = 'S3cr3t';
 
-/** Credential keys in every spelling the rule must recognise. */
+/**
+ * Credential keys in every spelling the rule must recognise. A compound ending in `key` is here
+ * only when a qualifier precedes it (#898 round 2); `ORDINARY_KEYS` holds the fields that must keep
+ * their text.
+ */
 const KEYS = [
   'token',
   'authToken',
@@ -27,6 +31,43 @@ const KEYS = [
   'api-key',
   'credentials',
   'refreshToken',
+  'x-api-key',
+  'X-Auth-Key',
+  'API_KEY',
+  'secret_access_key',
+  'clientKey',
+  'consumer_key',
+  'hmacKey',
+  'vaultKey',
+  'twilioKey',
+];
+
+/** Ordinary fields ending in `Key` (or `keyId`): their values must come out unchanged. */
+const ORDINARY_KEYS = [
+  'entryKey',
+  'idempotencyKey',
+  'sortKey',
+  'primaryKey',
+  'partitionKey',
+  'cacheKey',
+  'dedupeKey',
+  'foreignKey',
+  'groupKey',
+  'storeKey',
+  'messageKey',
+  'routingKey',
+  'keyId',
+];
+
+/** An ordinary, non-secret value of the kind those fields carry. */
+const ORDINARY_VALUES = [
+  'step "a" does not exist',
+  'must be 1–200 printable characters',
+  'unknown column name',
+  '(none)',
+  'ascending',
+  'not set',
+  'utf8',
 ];
 
 /** Innocuous surrounding text, and the words a fragment must never be mistaken for. */
@@ -94,6 +135,21 @@ describe('the credential redaction on generated cases (#898, #902, #920)', () =>
     expect(survivors).toHaveLength(0);
     expect(unstable.slice(0, 5)).toEqual([]);
     expect(unstable).toHaveLength(0);
+  });
+
+  it('keeps an ordinary …Key field with an ordinary value exactly as it is', () => {
+    const random = seededRandom();
+    const changed: string[] = [];
+    for (let index = 0; index < 600; index += 1) {
+      const field = ORDINARY_KEYS[Math.floor(random() * ORDINARY_KEYS.length)]!;
+      const value = ORDINARY_VALUES[Math.floor(random() * ORDINARY_VALUES.length)]!;
+      const before = PROSE[Math.floor(random() * PROSE.length)]!;
+      const separator = random() < 0.5 ? ': ' : '=';
+      const input = `${before} ${field}${separator}${value}`;
+      if (redactCredentials(input) !== input) changed.push(input);
+    }
+    expect(changed.slice(0, 5)).toEqual([]);
+    expect(changed).toHaveLength(0);
   });
 
   it('covers every form with at least one generated case', () => {

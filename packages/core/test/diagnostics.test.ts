@@ -301,6 +301,86 @@ describe('an Authorization value under a credential key (#902 round 2)', () => {
   });
 });
 
+describe('an ordinary field ending in Key keeps its text (#898 round 2)', () => {
+  it('does not treat a field name that merely ends in Key as a credential', () => {
+    const fields = [
+      'entryKey',
+      'idempotencyKey',
+      'sortKey',
+      'primaryKey',
+      'partitionKey',
+      'cacheKey',
+      'dedupeKey',
+      'foreignKey',
+      'groupKey',
+      'storeKey',
+      'messageKey',
+      'routingKey',
+      'keyId',
+    ];
+    for (const field of fields) {
+      expect(redactCredentials(`${field}: step "a" does not exist`), field).toBe(`${field}: step "a" does not exist`);
+      expect(redactCredentials(`${field}=ascending`), field).toBe(`${field}=ascending`);
+    }
+    expect(redactCredentials('Allowed keys: (none).')).toBe('Allowed keys: (none).');
+    expect(redactCredentials('publicKey: not a VAPID key')).toBe('publicKey: not a VAPID key');
+    expect(redactCredentials('publishableKey: not configured')).toBe('publishableKey: not configured');
+  });
+
+  it('still redacts a key qualified by a credential word', () => {
+    const keys = [
+      'key',
+      'api_key',
+      'api-key',
+      'x-api-key',
+      'X-Auth-Key',
+      'apiKey',
+      'apiKey2',
+      'API_KEY',
+      'secret_access_key',
+      'aws_secret_access_key',
+      'private-key',
+      'privateKey',
+      'signingKey',
+      'sessionKey',
+      'clientKey',
+      'consumer_key',
+      'encryptionKey',
+      'masterKey',
+      'hmacKey',
+      'jwtKey',
+      'vaultKey',
+      'kmsKey',
+      'shopifyKey',
+      'twilioKey',
+      'fcmKey',
+      'vapidKey',
+      'dataKey',
+      'rootKey',
+      'adminKey',
+      'serviceKey',
+      'storageKey',
+      'licenseKey',
+      'appKey',
+      'subscriptionKey',
+      'apiKeys',
+    ];
+    for (const key of keys) {
+      expect(redactCredentials(`${key}=abcdefghij`), key).toBe(`${key}=[redacted]`);
+      expect(redactCredentials(`{"${key}":"abcdefghij"}`), key).toBe(`{"${key}":[redacted]}`);
+    }
+  });
+
+  it('leaves the value of an ordinary Key field to every other rule', () => {
+    // A long opaque value is still a bare token, wherever it sits.
+    const token = 'A1b2C3d4E5f6G7h8I9j0K1l2';
+    expect(redactCredentials(`idempotencyKey=${token}`)).toBe('idempotencyKey=[redacted]');
+    // An ordinary key does not switch the provider prefix or URL rules off either.
+    expect(redactCredentials('entryKey=postgres://u:shortpw@db:5432/am')).toBe('entryKey=postgres://u:[redacted]@db:5432/am');
+    expect(redactCredentials('sortKey=shpat_0123456789abcdef')).toBe('sortKey=[redacted]');
+  });
+});
+
 describe('URL userinfo with an @ in the password (#920 round 2)', () => {
   it('takes the last @ of the authority as the userinfo delimiter', () => {
     expect(redactCredentials('http://u:pa@ss@host')).toBe('http://u:[redacted]@host');

@@ -7,12 +7,15 @@
  * Anything whose value is a credential: the key is kept (it says what failed), the value is not.
  * A key is a credential key when its last word — after splitting on camelCase/PascalCase
  * boundaries, `_`, `-` and `.` — is a credential word (#898). So `token`, `access_token`,
- * `x-api-key`, `authToken`, `apiSecret`, `secretKey`, `signingKey`, `oauthToken`, `sessionKey` and
- * `X-Auth-Token` all match, while `monkey`, `keyboard`, `author`, `authority`, `tokenizer` and
- * `sessions_count` do not: a word that merely contains the letters is not a credential word, and
- * only the last word decides.
+ * `authToken`, `apiSecret`, `X-Auth-Token` and `oauthToken` all match, while `monkey`, `keyboard`,
+ * `author`, `authority`, `tokenizer` and `sessions_count` do not: a word that merely contains the
+ * letters is not a credential word, and only the last word decides.
+ *
+ * `key` is the one word with a qualifier rule (see `KEY_QUALIFIERS`): a compound ending in `key` is
+ * a credential only when a credential word precedes it, so `secretKey` and `x-api-key` are
+ * credentials while `entryKey` and `sortKey` are ordinary fields whose text must survive.
  */
-const CREDENTIAL_WORD = /^(?:token|secret|password|passwd|key|authorization|auth|credential|credentials|signature|session)$/;
+const CREDENTIAL_WORD = /^(?:token|secret|password|passwd|authorization|auth|credential|credentials|signature|session)$/;
 
 /**
  * The redaction marker. A second pass must leave it exactly as it is (#919 round 2), so it is
@@ -37,13 +40,126 @@ function keyWords(key: string): string[] {
     .filter((word) => word !== '');
 }
 
-/** Whether a key names a credential. A trailing number is not a word: `apiKey2` still ends in `key`. */
+/**
+ * The words that qualify a compound ending in `key` (#898 round 2). `secretKey`, `signingKey`,
+ * `api-key`, `aws_secret_access_key` and `clientKey` name credentials; `entryKey`, `sortKey`,
+ * `primaryKey` and `idempotencyKey` name ordinary fields, and a validation or conflict message that
+ * quotes one must keep its text — people and agents rely on it.
+ *
+ * The trade-off: a compound `…Key` that no qualifier precedes counts as an ordinary field, so a
+ * provider inventing a new spelling such as `tenantKey` is not caught by the key rule. Its value is
+ * still subject to every other rule — a provider prefix, a JWT, a `Bearer` value, a URL password, a
+ * 24+ character bare token — so a real secret of any length is still replaced.
+ *
+ * Some qualifiers are credential words of their own (`secret`, `token`, `password`, `auth`,
+ * `session`); listing them again keeps the rule readable. `public` and `publishable` keys are
+ * published on purpose and are deliberately not qualifiers.
+ */
+const KEY_QUALIFIERS = new Set([
+  // Generic credential and security words.
+  'api',
+  'secret',
+  'private',
+  'signing',
+  'sign',
+  'access',
+  'auth',
+  'session',
+  'encryption',
+  'encrypt',
+  'decryption',
+  'master',
+  'client',
+  'license',
+  'licence',
+  'app',
+  'application',
+  'account',
+  'service',
+  'server',
+  'webhook',
+  'hmac',
+  'shared',
+  'consumer',
+  'subscription',
+  'storage',
+  'sas',
+  'ssh',
+  'pgp',
+  'gpg',
+  'jwt',
+  'token',
+  'bearer',
+  'password',
+  'credential',
+  'security',
+  'crypto',
+  'cipher',
+  'data',
+  'kms',
+  'vault',
+  'wrap',
+  'wrapping',
+  'root',
+  'admin',
+  'developer',
+  'dev',
+  'partner',
+  'merchant',
+  'restricted',
+  'live',
+  'test',
+  // Providers this codebase integrates with, so `shopifyKey`, `twilioKey` and the like are
+  // credentials even though their prefix is not a generic security word.
+  'stripe',
+  'twilio',
+  'sendgrid',
+  'mailgun',
+  'postmark',
+  'shopify',
+  'salesforce',
+  'google',
+  'meta',
+  'linkedin',
+  'microsoft',
+  'pinterest',
+  'tiktok',
+  'slack',
+  'github',
+  'n8n',
+  'hubspot',
+  'klaviyo',
+  'brevo',
+  'cloudflare',
+  'ses',
+  'smtp',
+  'amazon',
+  'aws',
+  'azure',
+  's3',
+  'fcm',
+  'apns',
+  'vapid',
+  'webpush',
+  'openbao',
+]);
+
+/**
+ * Whether a key names a credential. A trailing number is not a word: `apiKey2` still ends in `key`.
+ * `key` on its own is always a credential; `keys` on its own is not (a message about "allowed
+ * keys" lists field names). A compound ending in `key`/`keys` is a credential only when one of the
+ * words before it is a qualifier from `KEY_QUALIFIERS`.
+ */
 function isCredentialKey(key: string): boolean {
-  const words = keyWords(key);
+  const words = keyWords(key).map((word) => word.replace(/[0-9]+$/, ''));
   for (let index = words.length - 1; index >= 0; index -= 1) {
-    const word = words[index]!.replace(/[0-9]+$/, '');
+    const word = words[index]!;
     if (!word) continue;
-    return CREDENTIAL_WORD.test(word.toLowerCase());
+    const lower = word.toLowerCase();
+    const qualified = words.slice(0, index).some((before) => KEY_QUALIFIERS.has(before.toLowerCase()));
+    if (lower === 'key') return index === 0 || qualified;
+    if (lower === 'keys') return index > 0 && qualified;
+    return CREDENTIAL_WORD.test(lower);
   }
   return false;
 }
@@ -248,10 +364,12 @@ function urlUserinfoAt(text: string, start: number): { passwordStart: number; en
 /**
  * The credential redaction of free text, in one pass (#885, #898, #902 round 2, #920). A key is a
  * credential key when its last word — split on camelCase/PascalCase, `_`, `-` and `.` — is a
- * credential word, so `authToken`, `apiSecret`, `secretKey`, `X-Auth-Token`, `access_token` and
- * `sessionKey` match while `monkey`, `keyboard`, `author`, `authority` and `sessions_count` do not.
- * The words are exactly the singular spellings (plus `credentials`, whose plural is the noun), so
- * an ordinary message such as `Allowed keys: (none)` or `expected tokens: 3` keeps its list.
+ * credential word, so `authToken`, `apiSecret`, `X-Auth-Token`, `access_token` and `sessionKey`
+ * match while `monkey`, `keyboard`, `author`, `authority` and `sessions_count` do not. The words are
+ * exactly the singular spellings (plus `credentials`, whose plural is the noun), so an ordinary
+ * message such as `Allowed keys: (none)` or `expected tokens: 3` keeps its list. `key` additionally
+ * needs a qualifier in front of it (`KEY_QUALIFIERS`): `secretKey` and `x-api-key` are credentials,
+ * `entryKey`, `sortKey` and `idempotencyKey` are ordinary fields whose values stay readable.
  *
  * Grammar of the text this walks, where KEY is a credential key:
  *
