@@ -529,18 +529,12 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     }`,
                   );
               }
-              // ADR-0016: every agent write passes the policy engine before the handler runs.
-              if (agent && cmd.effect !== 'read') {
-                const impact = cmd.impact ? await cmd.impact(parsed.data, { principal, tx, services }) : {};
-                policy = await agentPolicy(tx, services, principal, {
-                  command: cmd.name,
-                  actionClass: impact.actionClass ?? actionClassOf(cmd),
-                  impact,
-                  approvable: cmd.approvable === true,
-                  input: parsed.data,
-                });
-                if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
-              }
+              // The idempotency replay comes before the policy engine (#930). A retry of a write
+              // that already ran must answer the stored response: re-deciding would count the
+              // first action against the limits, could refuse the retry, and would bill the
+              // independent check again. Authentication, permission, the missing-record guard,
+              // input validation and this agent's status (under the lock above) still ran, so a
+              // paused or revoked agent gets its usual refusal instead of a replay.
               if (opts.idempotencyKey) {
                 // The key was serialised before BEGIN, so any winner has committed and its row is
                 // visible even in this read's snapshot (#812).
@@ -568,6 +562,18 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(replay);
                   return replay;
                 }
+              }
+              // ADR-0016: every agent write passes the policy engine before the handler runs.
+              if (agent && cmd.effect !== 'read') {
+                const impact = cmd.impact ? await cmd.impact(parsed.data, { principal, tx, services }) : {};
+                policy = await agentPolicy(tx, services, principal, {
+                  command: cmd.name,
+                  actionClass: impact.actionClass ?? actionClassOf(cmd),
+                  impact,
+                  approvable: cmd.approvable === true,
+                  input: parsed.data,
+                });
+                if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
               }
               const undo = createUndoCollector();
               const out = withInputWarnings(
