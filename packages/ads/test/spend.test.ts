@@ -14,7 +14,7 @@ const CONVERSION_COUNT = OLD_CAP + 1;
 /** The smallest tx shape publishedSingleton's conversion-map lookup uses, plus ad connections. */
 const commandTx = (
   rules: { event: string; value?: string }[],
-  connections: { connector: string; settings: Record<string, unknown> }[] = [],
+  connections: { connector: string; settings?: Record<string, unknown>; spendState?: unknown }[] = [],
 ) =>
   ({
     select: () => ({
@@ -338,19 +338,19 @@ describe('spend read truncation (#917)', () => {
     }
   });
 
-  it('only reports truncation for an import whose window overlaps the report', async () => {
-    const { spendTruncatedFor } = await import('../src/spend');
-    const connection = (truncated: boolean, since: string, until: string) => ({
+  it('only reports truncation for a stored incomplete range that overlaps the report', async () => {
+    const { incompleteSpendFor } = await import('../src/spendState');
+    const connection = (from: string, to: string) => ({
       connector: 'meta_ads',
-      settings: { spendImport: { truncated, since, until, at: '2026-01-11T00:00:00.000Z' } },
+      spendState: { incomplete: [{ from, to }] },
     });
-    expect(spendTruncatedFor([connection(true, '2025-12-01', '2026-01-31')], { since: '2026-01-01', until: '2026-01-10' })).toBe(true);
-    expect(spendTruncatedFor([connection(true, '2025-10-01', '2025-10-31')], { since: '2026-01-01', until: '2026-01-10' })).toBe(false);
-    expect(spendTruncatedFor([connection(false, '2025-12-01', '2026-01-31')], { since: '2026-01-01', until: '2026-01-10' })).toBe(false);
+    expect(incompleteSpendFor([connection('2025-12-01', '2026-01-31')], { since: '2026-01-01', until: '2026-01-10' })).toHaveLength(1);
+    expect(incompleteSpendFor([connection('2025-10-01', '2025-10-31')], { since: '2026-01-01', until: '2026-01-10' })).toEqual([]);
+    expect(incompleteSpendFor([connection('2025-12-01', '2026-01-31')], { since: '2026-02-01', until: '2026-02-10' })).toEqual([]);
     // A Meta-only report ignores a truncated Google import, and vice versa.
-    const google = { connector: 'google_ads', settings: { spendImport: { truncated: true, since: '2026-01-01', until: '2026-01-10' } } };
-    expect(spendTruncatedFor([google], { since: '2026-01-01', until: '2026-01-10', platform: 'meta' })).toBe(false);
-    expect(spendTruncatedFor([google], { since: '2026-01-01', until: '2026-01-10', platform: 'google' })).toBe(true);
+    const google = { connector: 'google_ads', spendState: { incomplete: [{ from: '2026-01-01', to: '2026-01-10' }] } };
+    expect(incompleteSpendFor([google], { since: '2026-01-01', until: '2026-01-10', platform: 'meta' })).toEqual([]);
+    expect(incompleteSpendFor([google], { since: '2026-01-01', until: '2026-01-10', platform: 'google' })).toHaveLength(1);
   });
 });
 
@@ -358,7 +358,7 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
   const attributionContext = (opts: {
     spend: Record<string, unknown>[];
     touch: string | null;
-    connections?: { connector: string; settings: Record<string, unknown> }[];
+    connections?: { connector: string; spendState: unknown }[];
   }) => {
     const conversions = [
       {
@@ -435,14 +435,26 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
     expect(result.totals.revenue).toBe(50);
   });
 
-  it('marks spendTruncated and explains that CPA is understated and ROAS overstated', async () => {
+  it('marks spendTruncated for an incomplete range in the window and names the range', async () => {
     const ctx = attributionContext({
       spend,
       touch: 'Spring',
-      connections: [{ connector: 'meta_ads', settings: { spendImport: { truncated: true, since: '2026-01-01', until: '2026-01-31' } } }],
+      connections: [{ connector: 'meta_ads', spendState: { incomplete: [{ from: '2026-01-01', to: '2026-01-31' }] } }],
     });
     const result = await adPerformance.handler({ since: '2026-01-01', until: '2026-01-10', windowDays: 30 }, ctx);
     expect(result.spendTruncated).toBe(true);
+    expect(result.notes.join(' ')).toContain('meta 2026-01-01 to 2026-01-10');
     expect(result.notes.join(' ')).toContain('CPA is understated and ROAS is overstated');
+  });
+
+  it('does not warn for a report entirely outside the stored incomplete range', async () => {
+    const ctx = attributionContext({
+      spend,
+      touch: 'Spring',
+      connections: [{ connector: 'meta_ads', spendState: { incomplete: [{ from: '2026-01-05', to: '2026-01-09' }] } }],
+    });
+    const result = await adPerformance.handler({ since: '2026-02-01', until: '2026-02-10', windowDays: 30 }, ctx);
+    expect(result.spendTruncated).toBe(false);
+    expect(result.notes.join(' ')).not.toContain('incomplete');
   });
 });

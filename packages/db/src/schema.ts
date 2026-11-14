@@ -1124,6 +1124,12 @@ export const connections = pgTable(
     connector: text('connector').notNull(),
     name: text('name').notNull(),
     settings: jsonb('settings').$type<Record<string, unknown>>().notNull().default({}),
+    /**
+     * Server-owned spend import completeness (#917). Date ranges a spend import could not fetch
+     * completely, written only by the import and read by ads.performance. Kept out of `settings` so
+     * a rename or settings edit cannot drop it and a caller cannot set it.
+     */
+    spendState: jsonb('spend_state').$type<{ incomplete?: { from: string; to: string }[] }>().notNull().default({}),
     secrets: bytea('secrets'),
     secretsKeyId: text('secrets_key_id'),
     tokenHash: text('token_hash'),

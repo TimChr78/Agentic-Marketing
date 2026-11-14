@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ATTRIBUTION_LIMITS, googleEmail, metaEmail, metaPhone, sha256 } from '@agentic-marketing/ads';
+import { ATTRIBUTION_LIMITS, googleEmail, metaEmail, metaPhone, SPEND_LIMITS, sha256 } from '@agentic-marketing/ads';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -18,6 +18,8 @@ const ids = { meta: '', google: '', microsoft: '', segment: '', sync: '' };
 const received: { method: string; path: string; body: string; headers: Record<string, unknown> }[] = [];
 let platformUrl = '';
 const today = new Date().toISOString().slice(0, 10);
+/** How many Meta insight pages still answer with a `paging.next` link (spend truncation test). */
+let metaPaging = 0;
 const platforms = createServer((req, res) => {
   let raw = '';
   req.on('data', (c) => (raw += c));
@@ -28,30 +30,34 @@ const platforms = createServer((req, res) => {
     };
     if (req.url === '/token') return json(200, { access_token: 'access', refresh_token: 'refresh', expires_in: 3600 });
     received.push({ method: req.method ?? '', path: req.url ?? '', body: raw, headers: req.headers });
-    if (req.url?.startsWith('/v24.0/act_1234567/insights'))
-      return json(200, {
-        data: [
-          {
-            campaign_id: '601',
-            campaign_name: 'Spring Sale',
-            spend: '100.00',
-            impressions: '5000',
-            clicks: '120',
-            date_start: today,
-            account_currency: 'DKK',
-            actions: [{ action_type: 'offsite_conversion.fb_pixel_purchase', value: '2' }],
-          },
-          {
-            campaign_id: '602',
-            campaign_name: 'Brand',
-            spend: '50.00',
-            impressions: '2000',
-            clicks: '30',
-            date_start: today,
-            account_currency: 'DKK',
-          },
-        ],
-      });
+    if (req.url?.startsWith('/v24.0/act_1234567/insights')) {
+      const data = [
+        {
+          campaign_id: '601',
+          campaign_name: 'Spring Sale',
+          spend: '100.00',
+          impressions: '5000',
+          clicks: '120',
+          date_start: today,
+          account_currency: 'DKK',
+          actions: [{ action_type: 'offsite_conversion.fb_pixel_purchase', value: '2' }],
+        },
+        {
+          campaign_id: '602',
+          campaign_name: 'Brand',
+          spend: '50.00',
+          impressions: '2000',
+          clicks: '30',
+          date_start: today,
+          account_currency: 'DKK',
+        },
+      ];
+      if (metaPaging > 0) {
+        metaPaging -= 1;
+        return json(200, { data, paging: { next: `${platformUrl}/v24.0/act_1234567/insights?page=${metaPaging}` } });
+      }
+      return json(200, { data });
+    }
     if (req.url === '/v25/customers/1234567890/googleAds:search')
       return req.headers['developer-token'] === 'dev-token-123'
         ? json(200, {
@@ -496,6 +502,67 @@ describe('spend and ROAS', () => {
     // report as unattributed, where the output says conversions without a touch belong.
     expect(withServerSide.totals).toMatchObject({ conversions: 1, revenue: 300 });
     expect(withServerSide.unattributed).toEqual({ conversions: 2, revenue: 110 });
+  });
+
+  it('keeps truncation per date range across a refresh, a rename and a settings edit (#917 review)', async () => {
+    const api = t.api(owner);
+    const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+    const saved = { ...SPEND_LIMITS };
+    try {
+      // The provider always has another page; the import may read only two of them.
+      SPEND_LIMITS.metaPages = 2;
+      metaPaging = 10_000;
+      const truncated = await api.call('ads.importSpend', { connection: ids.meta, days: 90 });
+      expect(truncated).toMatchObject({ truncated: true, rows: 4 });
+    } finally {
+      Object.assign(SPEND_LIMITS, saved);
+      metaPaging = 0;
+    }
+
+    // A scheduled three-day refresh completes, but the older days stay incomplete.
+    expect(await api.call('ads.importSpend', { connection: ids.meta, days: 3 })).toMatchObject({ truncated: false });
+    const wide = { since: day(89), until: today, windowDays: 7 };
+    const wideReport = await api.call('ads.performance', wide);
+    expect(wideReport.spendTruncated).toBe(true);
+    expect(wideReport.notes.join(' ')).toContain(`${day(89)} to ${day(3)}`);
+    expect((await api.call('ads.performance', { since: day(2), until: today, windowDays: 7 })).spendTruncated).toBe(false);
+
+    // A rename and a settings edit always keep the server-owned state.
+    const updated = await api.call('connections.update', {
+      id: ids.meta,
+      name: 'Meta renamed',
+      settings: { pixelId: '123456789', adAccountId: 'act_1234567', apiBase: platformUrl, testEventCode: 'probe' },
+    });
+    expect(updated.settings).not.toHaveProperty('spendState');
+    expect(updated.settings).not.toHaveProperty('spendImport');
+    expect((await api.call('ads.performance', wide)).spendTruncated).toBe(true);
+    // A caller cannot clear it with a settings key of the same name either.
+    await api.call('connections.update', {
+      id: ids.meta,
+      settings: { pixelId: '123456789', adAccountId: 'act_1234567', apiBase: platformUrl, spendState: {} },
+    });
+    expect((await api.call('ads.performance', wide)).spendTruncated).toBe(true);
+
+    // A complete re-import of the whole window clears it.
+    expect(await api.call('ads.importSpend', { connection: ids.meta, days: 90 })).toMatchObject({ truncated: false });
+    const cleared = await api.call('ads.performance', wide);
+    expect(cleared.spendTruncated).toBe(false);
+    expect(cleared.notes.join(' ')).not.toContain('Spend is incomplete');
+
+    // connections.create cannot seed the reserved state from caller settings.
+    const fresh = await api.call('connections.create', {
+      connector: 'meta_ads',
+      name: 'Fresh meta',
+      settings: {
+        pixelId: '123456789',
+        adAccountId: 'act_1234567',
+        apiBase: platformUrl,
+        spendState: { incomplete: [{ from: day(1), to: day(1) }] },
+      },
+      secrets: { accessToken: 'another-system-user-token-0123456789' },
+    });
+    expect(fresh.settings).not.toHaveProperty('spendState');
+    expect(fresh.settings).not.toHaveProperty('spendImport');
   });
 
   it('reads only the last touch per conversion, ignoring later and out-of-window touches (#786)', async () => {
