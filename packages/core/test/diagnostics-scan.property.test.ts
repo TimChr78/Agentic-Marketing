@@ -160,17 +160,86 @@ describe('the credential redaction on generated cases (#898, #902, #920)', () =>
   });
 });
 
+describe('random input never breaks the scanner (#902 round 3)', () => {
+  // An alphabet biased to the scanner's own special characters: separators, quotes (ASCII and
+  // Unicode), structures, escapes, URL punctuation, schemes, markers and the whitespace that ends
+  // a value (including NBSP and U+2028).
+  const ALPHABET = [
+    'a',
+    '+',
+    ':',
+    '/',
+    '@',
+    '=',
+    '>',
+    '"',
+    "'",
+    '\u201c',
+    '\u201d',
+    '[',
+    ']',
+    '{',
+    '}',
+    '\\',
+    '-',
+    '_',
+    '.',
+    ' ',
+    '\u00a0',
+    '\u2028',
+    '\n',
+    '\r',
+    'Bearer',
+    'Basic',
+    '-----BEGIN',
+    '[redacted]',
+    '://',
+    'token',
+    'key',
+    'apiSecret',
+  ];
+
+  it('never throws, stays idempotent and finishes every case quickly', () => {
+    const random = seededRandom();
+    const failures: string[] = [];
+    for (let index = 0; index < 3_000; index += 1) {
+      let input = '';
+      const length = 1 + Math.floor(random() * 40);
+      for (let part = 0; part < length; part += 1) input += ALPHABET[Math.floor(random() * ALPHABET.length)]!;
+      const started = performance.now();
+      let out: string;
+      try {
+        out = redactCredentials(input);
+      } catch {
+        failures.push(`threw on ${JSON.stringify(input)}`);
+        continue;
+      }
+      if (performance.now() - started > 50) failures.push(`slow on ${JSON.stringify(input)}`);
+      if (redactCredentials(out) !== out) failures.push(`unstable on ${JSON.stringify(input)}`);
+    }
+    expect(failures.slice(0, 5)).toEqual([]);
+    expect(failures).toHaveLength(0);
+  });
+});
+
 describe('the credential redaction scales with the text (#902 round 2)', () => {
   const shapes: [string, (n: number) => string][] = [
     ['repeated pairs ending in a secret', (n) => `${'token='.repeat(n)}shortpw`],
+    ['a run of scheme characters and plus signs', (n) => 'a+'.repeat(n)],
+    ['repeated Bearer words', (n) => 'Bearer '.repeat(n)],
+    ['repeated scheme separators', (n) => 'a://'.repeat(n)],
+    ['repeated markers', (n) => '[redacted]'.repeat(n)],
+    ['a run of double quotes', (n) => '"'.repeat(n)],
+    ['a run of open braces', (n) => '{'.repeat(n)],
+    ['repeated key= pairs', (n) => 'key='.repeat(n)],
+    ['repeated PEM beginnings', (n) => '-----BEGIN '.repeat(n)],
     ['a long colon run after a key', (n) => `token:${':'.repeat(n * 4)}`],
     ['a long equals run after a key', (n) => `token=${'='.repeat(n * 4)}`],
     ['a long quote run after a key', (n) => `token="${'"'.repeat(n * 4)}`],
     ['a long bracket run after a key', (n) => `token=apiSecret=${'['.repeat(n * 4)}`],
     ['a long brace run after a key', (n) => `secret=${'{'.repeat(n * 4)}`],
     ['a long at run in a URL authority', (n) => `http://u:pw@${'@'.repeat(n * 4)}`],
-    ['repeated scheme separators', (n) => 'a://'.repeat(n)],
-    ['repeated PEM beginnings', (n) => `password=${'-----BEGIN X-----'.repeat(n)}`],
+    ['a PEM under a credential key', (n) => `password=${'-----BEGIN X-----'.repeat(n)}`],
     ['prose with keys and no separators', (n) => 'token '.repeat(n)],
   ];
   for (const [name, build] of shapes) it(`is linear: ${name}`, () => expectLinear(build, redactCredentials, 2_000));

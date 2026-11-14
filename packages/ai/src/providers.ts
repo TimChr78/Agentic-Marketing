@@ -20,6 +20,8 @@ type ProviderRow = typeof schema.aiProviders.$inferSelect;
 (globalThis as { AI_SDK_LOG_WARNINGS?: boolean }).AI_SDK_LOG_WARNINGS = false;
 
 const Kind = z.enum(['openai-compatible', 'anthropic-compatible', 'decision']);
+/** The provider kinds this package speaks, so a test can check every one has a redaction qualifier (#898). */
+export const aiProviderKinds = Kind.options;
 const Use = z.enum(['journeys', 'copilot', 'decisions']);
 const Models = z.object({
   default: z.string().min(1).max(200).describe('Model id for most calls, e.g. "claude-sonnet-5-5" or "gpt-5.2"'),

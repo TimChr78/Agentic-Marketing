@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { providerDiagnostic, redactCredentials, redactedText, safeErrorText } from '../src/diagnostics';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  MAX_REDACT_LENGTH,
+  providerDiagnostic,
+  redactCredentials,
+  redactedText,
+  safeErrorText,
+  TRUNCATED_MARKER,
+} from '../src/diagnostics';
 
 // #885: a provider's error body is copied into an AppError whose message reaches the caller, the
 // audit log and the agent ledger. Only its own code and message fields may survive, and a token
@@ -440,6 +447,77 @@ describe('redaction is idempotent (#902 round 2)', () => {
     expect(redactCredentials('token=[redacted]')).toBe('token=[redacted]');
     expect(redactCredentials('{"apiSecret":[redacted]}')).toBe('{"apiSecret":[redacted]}');
     expect(redactCredentials('token: Bearer [redacted]')).toBe('token: Bearer [redacted]');
+  });
+});
+
+const MARKER_LENGTH = '[redacted]'.length;
+
+describe('separators, markers and Unicode quotes (#902 round 3)', () => {
+  it('recognises => as a separator', () => {
+    expect(redactCredentials('key => shortpw')).toBe('key => [redacted]');
+    expect(redactCredentials('const token => shortpw')).toBe('const token => [redacted]');
+    expect(redactCredentials('apiSecret=>shortpw')).toBe('apiSecret=>[redacted]');
+  });
+
+  it('keeps a marker only when the value ends there', () => {
+    expect(redactCredentials('token=[redacted]')).toBe('token=[redacted]');
+    expect(redactCredentials('{"apiSecret":[redacted]}')).toBe('{"apiSecret":[redacted]}');
+    // A value that continues after the marker is redacted as a whole, not left readable.
+    expect(redactCredentials('token=[redacted]shortpw')).toBe('token=[redacted]');
+    expect(redactCredentials('token=[redacted]"shortpw"')).toBe('token=[redacted]');
+  });
+
+  it('recognises paired Unicode quotes', () => {
+    expect(redactCredentials('token: “short pw”')).toBe('token: [redacted]');
+    expect(redactCredentials('token: ‘short pw’')).toBe('token: [redacted]');
+    expect(redactCredentials('{"token":"“short pw”"}')).not.toContain('short');
+  });
+});
+
+describe('the scanner matches JavaScript whitespace (#902 round 3)', () => {
+  it('accepts a Unicode space around the separator', () => {
+    expect(redactCredentials('token = shortpw')).toBe('token = [redacted]');
+    expect(redactCredentials('token = shortpw')).toBe('token = [redacted]');
+    expect(redactCredentials('token= shortpw')).toBe('token= [redacted]');
+    expect(redactCredentials('token =shortpw')).toBe('token =[redacted]');
+    expect(redactCredentials('apiSecret　= shortpw')).toBe('apiSecret　= [redacted]');
+  });
+
+  it('treats every ECMAScript line terminator as the end of a line', () => {
+    for (const terminator of ['\n', '\r', '\u2028', '\u2029']) {
+      const input = `apiSecret={"a":${terminator}shortpw`;
+      expect(redactCredentials(input), terminator).toBe(`apiSecret=[redacted]${terminator}shortpw`);
+    }
+  });
+});
+
+describe('the scanner cannot be made to fail (#902 round 3)', () => {
+  it('returns the bare marker when the scan itself throws', () => {
+    const spy = vi.spyOn(String.prototype, 'replace').mockImplementationOnce(() => {
+      throw new Error('injected failure');
+    });
+    try {
+      expect(redactCredentials('token=shortpw')).toBe('[redacted]');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('cuts the input at the cap before scanning, and says so', () => {
+    const beyond = `${'a'.repeat(MAX_REDACT_LENGTH + 200)}token=shortpw`;
+    const out = redactCredentials(beyond);
+    expect(out.endsWith(TRUNCATED_MARKER)).toBe(true);
+    expect(out).not.toContain('shortpw');
+    // A secret that sits entirely beyond the cap is dropped with the text it was in.
+    const late = `${'a '.repeat(MAX_REDACT_LENGTH / 2)}token=shortpw`;
+    expect(redactCredentials(late)).not.toContain('shortpw');
+  });
+
+  it('bounds the time for a 10 MB input', () => {
+    const started = Date.now();
+    const out = redactCredentials(`${'a'.repeat(10 * 1024 * 1024)}token=shortpw`);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(out.length).toBeLessThan(MAX_REDACT_LENGTH + TRUNCATED_MARKER.length + MARKER_LENGTH);
   });
 });
 

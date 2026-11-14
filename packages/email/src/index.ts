@@ -16,7 +16,7 @@ export * from './push/providers';
 export * from './push/routes';
 export * from './render';
 export * from './routes';
-export { smsOutbox, smsSegments, twilioSignature } from './sms/adapters';
+export { smsAdapters, smsOutbox, smsSegments, twilioSignature } from './sms/adapters';
 export * from './sms/commands';
 export { checkSmsRecipient, requestSms } from './sms/gateway';
 export * from './sms/providers';

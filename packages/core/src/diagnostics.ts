@@ -12,48 +12,35 @@
  * letters is not a credential word, and only the last word decides.
  *
  * `key` is the one word with a qualifier rule (see `KEY_QUALIFIERS`): a compound ending in `key` is
- * a credential only when a credential word precedes it, so `secretKey` and `x-api-key` are
- * credentials while `entryKey` and `sortKey` are ordinary fields whose text must survive.
+ * a credential when a credential word precedes it, and — as 0.14.20 did — always when the word is
+ * reached through `_`, `-` or `.`. So `secretKey`, `x-api-key`, `tenant_key` and `config.key` are
+ * credentials, while the camelCase validation fields `entryKey`, `sortKey`, `primaryKey` and
+ * `idempotencyKey` are ordinary fields whose text must reach the caller unchanged.
  */
 const CREDENTIAL_WORD = /^(?:token|secret|password|passwd|authorization|auth|credential|credentials|signature|session)$/;
 
 /**
- * The redaction marker. A second pass must leave it exactly as it is (#919 round 2), so it is
- * recognised before anything else that starts with `[`.
+ * The exact compounds 0.14.20 recognised with or without a separator, in any case. Without this, an
+ * environment-variable spelling such as `ACCESSTOKEN=…` (one all-caps word, so no camel boundary to
+ * split on) would fall through even though 0.14.20 redacted it. Deliberately narrow: `MONKEY` and
+ * `KEYBOARD` are not compounds of a credential word.
  */
-const MARKER = '[redacted]';
-
-/** The longest value structure (`[…]`, `{…}`) or PEM block walked before it is cut at the line end. */
-const STRUCTURE_MAX = 4_096;
-/** Nesting depth a value structure may have before it is treated as unbalanced. */
-const STRUCTURE_DEPTH = 8;
-/** The longest PEM block (`-----BEGIN …-----` to `-----END …-----`) consumed in one value. */
-const PEM_MAX = 8_192;
-/** The most a nested credential pair is followed down; `nestedPairAt` only looks one level ahead. */
-const NESTED_MAX = 1;
-
-/** The words of a key: `X-Auth-Token` → X, Auth, Token; `authToken` → auth, Token. */
-function keyWords(key: string): string[] {
-  return key
-    .split(/[^A-Za-z0-9]+/)
-    .flatMap((part) => part.split(/(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/))
-    .filter((word) => word !== '');
-}
+const LEGACY_COMPOUND =
+  /^(?:access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|developer[_-]?token|client[_-]?secret|app[_-]?secret|private[_-]?key|api[_-]?key)$/i;
 
 /**
- * The words that qualify a compound ending in `key` (#898 round 2). `secretKey`, `signingKey`,
- * `api-key`, `aws_secret_access_key` and `clientKey` name credentials; `entryKey`, `sortKey`,
- * `primaryKey` and `idempotencyKey` name ordinary fields, and a validation or conflict message that
- * quotes one must keep its text — people and agents rely on it.
+ * The words that qualify a camelCase/PascalCase compound ending in `key`: `secretKey`, `signingKey`,
+ * `apiKey`, `awsSecretAccessKey` and `clientKey` name credentials, `entryKey` and `sortKey` do not.
+ * A `_`/`-`/`.`-separated `key` needs no qualifier (0.14.20 parity, see `isCredentialKey`).
  *
- * The trade-off: a compound `…Key` that no qualifier precedes counts as an ordinary field, so a
- * provider inventing a new spelling such as `tenantKey` is not caught by the key rule. Its value is
- * still subject to every other rule — a provider prefix, a JWT, a `Bearer` value, a URL password, a
- * 24+ character bare token — so a real secret of any length is still replaced.
+ * The trade-off: a camelCase compound `…Key` that no qualifier precedes counts as an ordinary field,
+ * so a provider inventing a new spelling such as `tenantKey` is not caught by the key rule. Its
+ * value is still subject to every other rule — a provider prefix, a JWT, a `Bearer` value, a URL
+ * password, a 24+ character bare token — so a real secret of any length is still replaced. The list
+ * is checked against the provider registries in `apps/server/test/redaction-providers.test.ts`, so a
+ * new adapter or connector without a qualifier fails that test.
  *
- * Some qualifiers are credential words of their own (`secret`, `token`, `password`, `auth`,
- * `session`); listing them again keeps the rule readable. `public` and `publishable` keys are
- * published on purpose and are deliberately not qualifiers.
+ * `public`, `publishable` and `log` are deliberately out: a published key is not a secret.
  */
 const KEY_QUALIFIERS = new Set([
   // Generic credential and security words.
@@ -109,60 +96,113 @@ const KEY_QUALIFIERS = new Set([
   'restricted',
   'live',
   'test',
-  // Providers this codebase integrates with, so `shopifyKey`, `twilioKey` and the like are
-  // credentials even though their prefix is not a generic security word.
-  'stripe',
-  'twilio',
-  'sendgrid',
-  'mailgun',
+  // Model providers (packages/ai: `openai-compatible`, `anthropic-compatible`).
+  'openai',
+  'anthropic',
+  // E-mail adapters (packages/email/src/adapters).
+  'smtp',
+  'ses',
   'postmark',
+  'brevo',
+  'cloudflare',
+  // SMS and push adapters (packages/email/src/sms, packages/email/src/push).
+  'twilio',
+  'webpush',
+  'vapid',
+  'fcm',
+  'apns',
+  // Ad connectors (packages/ads).
+  'meta',
+  'google',
+  'microsoft',
+  'linkedin',
+  'tiktok',
+  'pinterest',
+  // Integrations connectors (packages/integrations/src/connectors) and the other services the
+  // platform talks to (stripe and the other prefixes the token rules know, GitHub, n8n, …).
   'shopify',
   'salesforce',
-  'google',
-  'meta',
-  'linkedin',
-  'microsoft',
-  'pinterest',
-  'tiktok',
   'slack',
+  'stripe',
+  'sendgrid',
+  'mailgun',
   'github',
   'n8n',
   'hubspot',
   'klaviyo',
-  'brevo',
-  'cloudflare',
-  'ses',
-  'smtp',
   'amazon',
   'aws',
   'azure',
   's3',
-  'fcm',
-  'apns',
-  'vapid',
-  'webpush',
   'openbao',
 ]);
 
 /**
- * Whether a key names a credential. A trailing number is not a word: `apiKey2` still ends in `key`.
- * `key` on its own is always a credential; `keys` on its own is not (a message about "allowed
- * keys" lists field names). A compound ending in `key`/`keys` is a credential only when one of the
- * words before it is a qualifier from `KEY_QUALIFIERS`.
+ * The redaction marker. A second pass must leave it exactly as it is (#919 round 2), so it is
+ * recognised before anything else that starts with `[`, and only when the value really ends there.
  */
-function isCredentialKey(key: string): boolean {
-  const words = keyWords(key).map((word) => word.replace(/[0-9]+$/, ''));
-  for (let index = words.length - 1; index >= 0; index -= 1) {
-    const word = words[index]!;
-    if (!word) continue;
-    const lower = word.toLowerCase();
-    const qualified = words.slice(0, index).some((before) => KEY_QUALIFIERS.has(before.toLowerCase()));
-    if (lower === 'key') return index === 0 || qualified;
-    if (lower === 'keys') return index > 0 && qualified;
-    return CREDENTIAL_WORD.test(lower);
-  }
-  return false;
-}
+const MARKER = '[redacted]';
+
+/** How much of a text is scanned at all. Longer input is cut first and marked (dropping is safe). */
+export const MAX_REDACT_LENGTH = 64 * 1024;
+/** Appended to a text that was cut at `MAX_REDACT_LENGTH`. */
+export const TRUNCATED_MARKER = '…[truncated]';
+
+/** The longest value structure (`[…]`, `{…}`) or PEM block walked before it is cut at the line end. */
+const STRUCTURE_MAX = 4_096;
+/** Nesting depth a value structure may have before it is treated as unbalanced. */
+const STRUCTURE_DEPTH = 8;
+/** The longest PEM block (`-----BEGIN …-----` to `-----END …-----`) consumed in one value. */
+const PEM_MAX = 8_192;
+
+/** JavaScript's `\s`, the whitespace 0.14.20's patterns matched: ASCII and the Unicode spaces. */
+const WHITESPACE = new Set([
+  ' ',
+  '\t',
+  '\n',
+  '\v',
+  '\f',
+  '\r',
+  '\u00a0',
+  '\u1680',
+  '\u2000',
+  '\u2001',
+  '\u2002',
+  '\u2003',
+  '\u2004',
+  '\u2005',
+  '\u2006',
+  '\u2007',
+  '\u2008',
+  '\u2009',
+  '\u200a',
+  '\u2028',
+  '\u2029',
+  '\u202f',
+  '\u205f',
+  '\u3000',
+  '\ufeff',
+]);
+
+/** The characters that end a line: the ECMAScript line terminators. */
+const LINE_BREAKS = new Set(['\n', '\r', '\u2028', '\u2029']);
+
+/**
+ * Paired quotes: ASCII and the Unicode ones a word processor or a model writes. `”` and `’` alone
+ * are closers, never openers, so they end a value instead of starting one.
+ */
+const QUOTE_PAIRS = new Map([
+  ['"', '"'],
+  ["'", "'"],
+  ['\u201c', '\u201d'],
+  ['\u2018', '\u2019'],
+]);
+
+/** Every quote character, opening or closing. */
+const QUOTES = new Set(['"', "'", '\u201c', '\u201d', '\u2018', '\u2019']);
+
+const isQuoteChar = (char: string): boolean => QUOTES.has(char);
+const isSpaceChar = (char: string): boolean => WHITESPACE.has(char);
 
 const isKeyChar = (char: string): boolean =>
   (char >= 'a' && char <= 'z') ||
@@ -173,14 +213,76 @@ const isKeyChar = (char: string): boolean =>
   char === '-';
 const isAlpha = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
 const isDigit = (char: string): boolean => char >= '0' && char <= '9';
-const isSpaceChar = (char: string): boolean =>
-  char === ' ' || char === '\t' || char === '\n' || char === '\r' || char === '\f' || char === '\v';
 const isWordChar = (char: string): boolean => isAlpha(char) || isDigit(char) || char === '_';
-/** Where an unquoted value ends: whitespace, an attribute separator, or a JSON/HTML delimiter. */
+const isSchemeChar = (char: string): boolean => isAlpha(char) || isDigit(char) || char === '+' || char === '.' || char === '-';
+
+/** Where an unquoted value ends: whitespace, an attribute separator, a JSON/HTML delimiter or a quote. */
 const isValueStop = (char: string): boolean =>
-  isSpaceChar(char) || char === ',' || char === ';' || char === '&' || char === '}' || char === ']' || char === '"' || char === "'";
+  isSpaceChar(char) || char === ',' || char === ';' || char === '&' || char === '}' || char === ']' || isQuoteChar(char);
+/** Where a value's atoms stop: a stop that no atom can start with. */
+const isHardStop = (char: string): boolean =>
+  isSpaceChar(char) || char === ',' || char === ';' || char === '&' || char === '}' || char === ']';
 /** Where a URL's authority ends: the path, the query, the fragment or whitespace. */
 const isAuthorityStop = (char: string): boolean => char === '/' || char === '?' || char === '#' || isSpaceChar(char);
+
+const CAMEL_BOUNDARY = /(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])/;
+
+interface KeyPart {
+  word: string;
+  /** What separated this word from the one before it: `''` at the start, `'camel'`, or the punctuation. */
+  separator: string;
+}
+
+/** The words of a key with the separator that introduced each: `X-Auth-Token` → X, Auth, Token. */
+function keyParts(key: string): KeyPart[] {
+  const parts: KeyPart[] = [];
+  let separator = '';
+  for (const chunk of key.split(/([^A-Za-z0-9]+)/)) {
+    if (!chunk) continue;
+    if (!/^[A-Za-z0-9]/.test(chunk)) {
+      separator = chunk;
+      continue;
+    }
+    let first = true;
+    for (const word of chunk.split(CAMEL_BOUNDARY)) {
+      if (!word) continue;
+      parts.push({ word, separator: first ? separator : 'camel' });
+      first = false;
+    }
+    separator = '';
+  }
+  return parts;
+}
+
+/**
+ * Whether a key names a credential. A trailing number is not a word: `apiKey2` still ends in `key`.
+ * `key` on its own is always a credential and `keys` on its own never is (a message about "allowed
+ * keys" lists field names); a compound ending in `key` is a credential when it is reached through
+ * `_`, `-` or `.` (0.14.20 parity: `tenant_key`, `x-tenant-key`, `config.key`, `ENTRY_KEY`) or when
+ * a qualifier precedes it (`apiKey`, `secretKey`, `sessionKey`, `openaiKey`). `keys` after a
+ * qualifier is a credential too (`apiKeys`).
+ */
+function isCredentialKey(key: string): boolean {
+  const parts = keyParts(key).map((part) => ({ ...part, word: part.word.replace(/[0-9]+$/, '') }));
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    const part = parts[index]!;
+    if (!part.word) continue;
+    const lower = part.word.toLowerCase();
+    if (LEGACY_COMPOUND.test(lower)) return true;
+    if (lower === 'key' || lower === 'keys') {
+      const qualified = parts.slice(0, index).some((before) => KEY_QUALIFIERS.has(before.word.toLowerCase()));
+      if (lower === 'key') {
+        if (index === 0) return true;
+        if (part.separator === 'camel') return qualified;
+        // `_`, `-`, `.` or any other punctuation: a compound key reached that way, as in 0.14.20.
+        return true;
+      }
+      return index > 0 && qualified;
+    }
+    return CREDENTIAL_WORD.test(lower);
+  }
+  return false;
+}
 
 /** The end of a key run starting at `start` (at least one character). */
 function keyRunEnd(text: string, start: number): number {
@@ -189,16 +291,23 @@ function keyRunEnd(text: string, start: number): number {
   return end;
 }
 
-/** The end of an unquoted value, which stops at the first delimiter. */
+/** The end of an unquoted value atom, which stops at the first delimiter. */
 function tokenEnd(text: string, start: number): number {
   let end = start;
   while (end < text.length && !isValueStop(text[end]!)) end += 1;
   return end;
 }
 
+/** The index of the first line terminator at or after `start`, or the text length. */
+function lineEnd(text: string, start: number): number {
+  for (let index = start; index < text.length; index += 1) if (LINE_BREAKS.has(text[index]!)) return index;
+  return text.length;
+}
+
 /** The end of a quoted string, escapes honoured, or null when the quote is not closed by `limit`. */
 function quotedEnd(text: string, start: number, limit = text.length): number | null {
-  const quote = text[start]!;
+  const closer = QUOTE_PAIRS.get(text[start]!);
+  if (closer === undefined) return null;
   let index = start + 1;
   while (index < limit) {
     const char = text[index]!;
@@ -206,7 +315,7 @@ function quotedEnd(text: string, start: number, limit = text.length): number | n
       index += 2;
       continue;
     }
-    if (char === quote) return index + 1;
+    if (char === closer) return index + 1;
     index += 1;
   }
   return null;
@@ -222,7 +331,7 @@ function structureEnd(text: string, start: number): number | null {
   let index = start;
   while (index < limit) {
     const char = text[index]!;
-    if (char === '"' || char === "'") {
+    if (isQuoteChar(char)) {
       const end = quotedEnd(text, index, limit);
       if (end === null) return null;
       index = end;
@@ -264,16 +373,16 @@ function pemEnd(text: string, start: number): number | null {
 
 /** A value that starts a credential pair of its own (`token: access_token=…`). */
 function nestedPairAt(text: string, start: number): boolean {
-  if (!isKeyChar(text[start] ?? '')) return false;
+  if (start >= text.length || !isKeyChar(text[start]!)) return false;
   const keyEnd = keyRunEnd(text, start);
   let index = keyEnd;
-  if (text[index] === '"' || text[index] === "'") index += 1;
+  if (isQuoteChar(text[index] ?? '')) index += 1;
   while (index < text.length && isSpaceChar(text[index]!)) index += 1;
   if (text[index] !== ':' && text[index] !== '=') return false;
   return isCredentialKey(text.slice(start, keyEnd));
 }
 
-/** The `Bearer`/`Basic` word at a value start, or null. */
+/** The end of a `Bearer`/`Basic` word at a value start followed by whitespace, or null. */
 function authSchemeAt(text: string, start: number): number | null {
   for (const word of ['bearer', 'basic']) {
     if (text.slice(start, start + word.length).toLowerCase() === word && isSpaceChar(text[start + word.length] ?? ''))
@@ -284,127 +393,167 @@ function authSchemeAt(text: string, start: number): number | null {
 
 /** A redaction that consumes the rest of the line, used when a value cannot be delimited. */
 function toLineEnd(text: string, start: number): { end: number; text: string } {
-  const newline = text.indexOf('\n', start);
-  return { end: newline === -1 ? text.length : newline, text: MARKER };
+  return { end: lineEnd(text, start), text: MARKER };
+}
+
+interface ValueRead {
+  end: number;
+  text: string;
 }
 
 /**
- * The redaction of one credential value: what to emit and where the value ends, or null when the
- * value must be left for the scan to reach by itself (a nested credential pair).
+ * The redaction of one credential value: what to emit and where the value ends (#902 round 3).
+ *
+ * A value is a run of atoms — a marker, a quoted string, a balanced structure, a PEM block or a
+ * plain token — and every atom is consumed where it is read, so the loop is bounded by the value.
+ * A leading run of `Bearer`/`Basic` words is consumed iteratively (no recursion), and the last one
+ * is kept in front of the marker. A nested credential pair is left for the scan to redact itself.
  */
-function redactValue(text: string, start: number): { end: number; text: string } | null {
+function readValue(text: string, start: number): ValueRead | null {
   if (start >= text.length) return null;
-  // The marker first: a second pass over redacted text must produce the same text.
-  if (text.startsWith(MARKER, start)) return { end: start + MARKER.length, text: MARKER };
-  const scheme = authSchemeAt(text, start);
-  if (scheme !== null) {
-    let inner = scheme;
-    while (inner < text.length && isSpaceChar(text[inner]!)) inner += 1;
-    const value = inner < text.length ? redactValue(text, inner) : null;
-    // `Bearer …`/`Basic …` of any length keeps its scheme word (#902 round 2) and loses the value.
-    if (value) return { end: value.end, text: `${text.slice(start, scheme)} ${MARKER}` };
-    return { end: tokenEnd(text, start), text: MARKER };
+  let index = start;
+  let scheme: string | null = null;
+  for (;;) {
+    const wordEnd = authSchemeAt(text, index);
+    if (wordEnd === null) break;
+    scheme = text.slice(index, wordEnd);
+    index = wordEnd;
+    while (index < text.length && isSpaceChar(text[index]!)) index += 1;
   }
-  let depth = 0;
-  const nestedFrom = start;
-  while (depth++ < NESTED_MAX && nestedPairAt(text, nestedFrom)) {
-    // Leave the outer value in place; the scan redacts the pair inside it on its own.
-    return null;
+  if (scheme === null && nestedPairAt(text, index)) return null;
+  const withScheme = (end: number) => ({ end, text: scheme === null ? MARKER : `${scheme} ${MARKER}` });
+  let atoms = 0;
+  let firstIsMarker = false;
+  let end = index;
+  while (end < text.length) {
+    const char = text[end]!;
+    if (isHardStop(char)) break;
+    if (text.startsWith(MARKER, end)) {
+      if (atoms === 0) firstIsMarker = true;
+      end += MARKER.length;
+      atoms += 1;
+      continue;
+    }
+    if (isQuoteChar(char)) {
+      const quoted = quotedEnd(text, end);
+      if (quoted === null) return toLineEnd(text, end);
+      end = quoted;
+      atoms += 1;
+      continue;
+    }
+    if (char === '[' || char === '{') {
+      const structure = structureEnd(text, end);
+      if (structure === null) return toLineEnd(text, end);
+      end = structure;
+      atoms += 1;
+      continue;
+    }
+    if (text.startsWith('-----BEGIN ', end)) {
+      const pem = pemEnd(text, end);
+      if (pem === null) return toLineEnd(text, end);
+      end = pem;
+      atoms += 1;
+      continue;
+    }
+    const token = tokenEnd(text, end);
+    if (token === end) break;
+    end = token;
+    atoms += 1;
   }
-  const char = text[start]!;
-  if (char === '[' || char === '{') {
-    const end = structureEnd(text, start);
-    return end === null ? toLineEnd(text, start) : { end, text: MARKER };
-  }
-  if (char === '"' || char === "'") {
-    const end = quotedEnd(text, start);
-    return end === null ? toLineEnd(text, start) : { end, text: MARKER };
-  }
-  if (text.startsWith('-----BEGIN ', start)) {
-    const end = pemEnd(text, start);
-    return end === null ? toLineEnd(text, start) : { end, text: MARKER };
-  }
-  const end = tokenEnd(text, start);
-  return end === start ? null : { end, text: MARKER };
+  if (atoms === 0) return scheme === null ? null : withScheme(index);
+  // The value is exactly the marker it already carries: keep it, so a second pass changes nothing.
+  if (scheme === null && atoms === 1 && firstIsMarker) return { end, text: MARKER };
+  return withScheme(end);
 }
 
 /**
- * The URL whose userinfo starts at `start`: the index where the password begins and where the
- * userinfo ends (`@`), or null. The authority runs to the first `/`, `?`, `#` or whitespace, and the
- * **last** `@` in it delimits the userinfo (a password may contain `@`); IPv6 hosts (`[::1]:5432`)
- * and an empty user (`://:pw@host`) are handled the same way (#920 round 2).
+ * The URL whose userinfo starts after a `://` that ends at `schemeEnd`: the index where the password
+ * begins and the end of the userinfo (`@`), or null. The authority runs to the first `/`, `?`, `#` or
+ * whitespace, and the **last** `@` in it delimits the userinfo (a password may contain `@`); IPv6
+ * hosts (`[::1]:5432`) and an empty user (`://:pw@host`) work the same way (#920).
  */
-function urlUserinfoAt(text: string, start: number): { passwordStart: number; end: number } | null {
-  if (start > 0 && isWordChar(text[start - 1]!)) return null;
-  if (!isAlpha(text[start]!)) return null;
-  let index = start + 1;
-  while (index < text.length) {
-    const char = text[index]!;
-    if (isAlpha(char) || isDigit(char) || char === '+' || char === '.' || char === '-') index += 1;
-    else break;
-  }
-  if (text[index] !== ':' || text[index + 1] !== '/' || text[index + 2] !== '/') return null;
-  const authorityStart = index + 3;
+function urlAuthorityAt(text: string, schemeEnd: number): { match: { passwordStart: number; end: number } | null; resume: number } {
+  const authorityStart = schemeEnd + 3;
   let authorityEnd = authorityStart;
   while (authorityEnd < text.length && !isAuthorityStop(text[authorityEnd]!)) authorityEnd += 1;
   let at = -1;
   for (let scan = authorityStart; scan < authorityEnd; scan += 1) if (text[scan] === '@') at = scan;
-  if (at < 0) return null;
-  let colon = -1;
-  for (let scan = authorityStart; scan < at; scan += 1)
-    if (text[scan] === ':') {
-      colon = scan;
-      break;
-    }
-  // No userinfo, or an empty password: nothing to redact.
-  if (colon < 0 || colon + 1 === at) return null;
-  return { passwordStart: colon + 1, end: at + 1 };
+  if (at >= 0) {
+    let colon = -1;
+    for (let scan = authorityStart; scan < at; scan += 1)
+      if (text[scan] === ':') {
+        colon = scan;
+        break;
+      }
+    // No user, or an empty password: nothing to redact.
+    if (colon >= 0 && colon + 1 !== at) return { match: { passwordStart: colon + 1, end: at + 1 }, resume: at + 1 };
+  }
+  // Nothing to redact: resume after the `://` and let the scan walk the rest as ordinary text.
+  return { match: null, resume: authorityStart };
 }
 
 /**
- * The credential redaction of free text, in one pass (#885, #898, #902 round 2, #920). A key is a
+ * The credential redaction of free text, in one pass (#885, #898, #902, #920). A key is a
  * credential key when its last word — split on camelCase/PascalCase, `_`, `-` and `.` — is a
- * credential word, so `authToken`, `apiSecret`, `X-Auth-Token`, `access_token` and `sessionKey`
- * match while `monkey`, `keyboard`, `author`, `authority` and `sessions_count` do not. The words are
- * exactly the singular spellings (plus `credentials`, whose plural is the noun), so an ordinary
- * message such as `Allowed keys: (none)` or `expected tokens: 3` keeps its list. `key` additionally
- * needs a qualifier in front of it (`KEY_QUALIFIERS`): `secretKey` and `x-api-key` are credentials,
- * `entryKey`, `sortKey` and `idempotencyKey` are ordinary fields whose values stay readable.
+ * credential word, with the qualifier rule for `key` described at `KEY_QUALIFIERS`.
  *
  * Grammar of the text this walks, where KEY is a credential key:
  *
  *   text        := ( url | pair | char )*
  *   url         := scheme "://" authority        — the password between the userinfo's first `:`
  *                                                  and the authority's last `@` is redacted
- *   pair        := KEY quote? space* (":" | "=") space* value
- *   value       := marker | auth-scheme | nested-pair | structure | quoted | pem | token
- *   marker      := "[redacted]"                  — kept as is, so a second pass changes nothing
- *   auth-scheme := ("Bearer"|"Basic") space+ value
- *   nested-pair := KEY quote? space* (":"|"=")   — left to the scan, which redacts its own value
+ *   pair        := KEY quote? space* (":" | "=" | "=>") space* value
+ *   value       := scheme-word* ( marker | atom )+ | nested-pair
+ *   atom        := quoted | structure | pem | token
+ *   marker      := "[redacted]"                  — kept only when it is the whole value
+ *   quoted      := "…" | '…' | “…” | ‘…’         (backslash escapes honoured)
  *   structure   := balanced `[…]`/`{…}`, strings escape-aware, depth ≤ 8, ≤ 4 KiB
- *   quoted      := "…" (with \\ escapes) | '…'
  *   pem         := "-----BEGIN …-----" … "-----END …-----" (≤ 8 KiB)
  *   token       := any run up to whitespace, `,`, `;`, `&`, `}`, `]` or a quote
  *
- * Every branching path consumes the characters it examined: a key run, a structure, a quoted string,
- * a PEM block and a token are each walked once and skipped, and the two-pointer backtracking that
- * the old patterns needed is gone, so the cost is linear in the length of the text. A value that
- * cannot be delimited (an unbalanced structure or an unclosed quote) is redacted to the end of its
- * line rather than left readable.
+ * Work is linear in the length of the text, and here is why for each lookahead the scan performs:
+ *
+ * - a scheme-character run is measured once and remembered for every position inside it, so a
+ *   string of `a+a+a+…` is walked once rather than once per character;
+ * - a key run is walked once and the scan resumes after it (or after its separator/value), never
+ *   inside it, so a key run is examined once plus at most once by `nestedPairAt`;
+ * - the separator lookahead (`quote? space* (:|=>)`) reads at most the characters that the pair
+ *   prefix then consumes, and a pair that does not form resumes at the key run's end;
+ * - markers (10 characters), quotes, structures (≤ 4 KiB), PEM blocks (≤ 8 KiB) and tokens are each
+ *   consumed where they are read, so the value loop is bounded by the value's length;
+ * - a failed PEM probe reads at most `PEM_MAX` characters and then redacts the rest of its line, and
+ *   the input is capped at `MAX_REDACT_LENGTH`, so the total stays bounded;
+ * - no path recurses: scheme words, values, atoms and structures are loops with explicit limits.
  */
 function redactScan(text: string): string {
   let out = '';
   let copied = 0;
   let index = 0;
   const length = text.length;
+  // The end of the scheme-character run that covers `index`, once measured. A run is measured once
+  // and reused for every position inside it, so `a+a+a+…` is walked once, not once per character.
+  let schemeEnd = 0;
   while (index < length) {
-    const url = urlUserinfoAt(text, index);
-    if (url) {
-      // The password, then the `@` that ends the userinfo (the emit runs up to it, not past it).
-      out += `${text.slice(copied, url.passwordStart)}${MARKER}@`;
-      copied = url.end;
-      index = url.end;
-      continue;
+    // A URL can only start at a word boundary with a letter.
+    if (isAlpha(text[index]!) && (index === 0 || !isWordChar(text[index - 1]!))) {
+      if (index >= schemeEnd) {
+        schemeEnd = index;
+        while (schemeEnd < length && isSchemeChar(text[schemeEnd]!)) schemeEnd += 1;
+      }
+      if (text[schemeEnd] === ':' && text[schemeEnd + 1] === '/' && text[schemeEnd + 2] === '/') {
+        const attempt = urlAuthorityAt(text, schemeEnd);
+        if (attempt.match) {
+          // The password, then the `@` that ends the userinfo (the emit runs up to it, not past it).
+          out += `${text.slice(copied, attempt.match.passwordStart)}${MARKER}@`;
+          copied = attempt.match.end;
+          index = attempt.match.end;
+        } else {
+          index = attempt.resume;
+        }
+        continue;
+      }
+      // No `://` at the end of this run, so nothing inside it can start a URL: fall through to the
+      // key rule, which examines this position and moves on.
     }
     if (!isKeyChar(text[index]!) || (index > 0 && isKeyChar(text[index - 1]!))) {
       index += 1;
@@ -412,16 +561,21 @@ function redactScan(text: string): string {
     }
     const keyEnd = keyRunEnd(text, index);
     let afterKey = keyEnd;
-    if (text[afterKey] === '"' || text[afterKey] === "'") afterKey += 1;
+    if (isQuoteChar(text[afterKey] ?? '')) afterKey += 1;
     let separator = afterKey;
     while (separator < length && isSpaceChar(text[separator]!)) separator += 1;
-    if (text[separator] !== ':' && text[separator] !== '=') {
+    let separatorEnd = separator;
+    if (text[separator] === ':' || text[separator] === '=') {
+      separatorEnd = separator + 1;
+      // `key => value`, the spelling JavaScript and TypeScript examples use.
+      if (text[separator] === '=' && text[separatorEnd] === '>') separatorEnd += 1;
+    } else {
       index = keyEnd;
       continue;
     }
-    let valueStart = separator + 1;
+    let valueStart = separatorEnd;
     while (valueStart < length && isSpaceChar(text[valueStart]!)) valueStart += 1;
-    const value = isCredentialKey(text.slice(index, keyEnd)) ? redactValue(text, valueStart) : null;
+    const value = isCredentialKey(text.slice(index, keyEnd)) ? readValue(text, valueStart) : null;
     if (!value) {
       index = valueStart;
       continue;
@@ -457,11 +611,28 @@ const REDACTIONS: readonly (readonly [RegExp, string])[] = [
 /**
  * Removes token-shaped values from free text: an exception's message, a provider's answer, a log
  * line that is about to become an AppError.
+ *
+ * Two structural safeguards (#902 round 3):
+ *
+ * - the text is cut to `MAX_REDACT_LENGTH` before it is scanned and a cut text ends with
+ *   `TRUNCATED_MARKER`. Dropping text can only lose a message's tail, never leak one, and it bounds
+ *   the absolute work for any input;
+ * - nothing here throws. A scan that fails for any reason returns the bare marker, so a broken
+ *   redactor can never turn an error path into an exception and never echoes the input.
  */
 export function redactCredentials(text: string): string {
-  let out = redactScan(text);
-  for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
-  return out;
+  const input = String(text);
+  const bounded = input.length > MAX_REDACT_LENGTH ? `${input.slice(0, MAX_REDACT_LENGTH)}${TRUNCATED_MARKER}` : input;
+  try {
+    // The token-shaped passes run first, so whatever a marker they leave behind is in the text the
+    // scan then walks: a marker next to a dangling quote or bracket is absorbed in the same call
+    // instead of one pass later, which is what keeps redaction idempotent (#902 round 3).
+    let out = bounded;
+    for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
+    return redactScan(out);
+  } catch {
+    return MARKER;
+  }
 }
 
 /**
