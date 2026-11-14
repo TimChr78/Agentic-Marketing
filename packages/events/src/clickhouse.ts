@@ -10,6 +10,27 @@ import type { BusEvent } from './schema';
 
 const MIGRATIONS = new URL('../clickhouse/', import.meta.url);
 
+/**
+ * Client options for a configured URL. The ClickHouse client authenticates from the URL userinfo
+ * itself, but it decodes it and sends Basic itself; keeping the userinfo in the URL passed to the
+ * client also means an error can repeat it. Move the percent-decoded credentials to the client's
+ * own username/password options, which is how the client builds the same Basic header, and give it
+ * a URL without userinfo (#931 round 3). The path, query parameters and their precedence over these
+ * options are unchanged.
+ */
+function clientOptions(url: string) {
+  const parsed = new URL(url);
+  const username = parsed.username ? decodeURIComponent(parsed.username) : undefined;
+  const password = parsed.password ? decodeURIComponent(parsed.password) : undefined;
+  parsed.username = '';
+  parsed.password = '';
+  return {
+    url: parsed.toString(),
+    ...(username !== undefined ? { username } : {}),
+    ...(password !== undefined ? { password } : {}),
+  };
+}
+
 export interface ConversionEvent {
   profileId: string;
   anonymousId: string;
@@ -254,10 +275,10 @@ export async function migrateClickHouse(
   log: (m: string) => void = () => {},
   opts: { rowPolicies?: 'required' | 'auto' | 'off' } = {},
 ) {
-  const root = createClient({ url });
+  const root = createClient(clientOptions(url));
   await root.command({ query: `CREATE DATABASE IF NOT EXISTS ${database}` });
   await root.close();
-  const ch = createClient({ url, database });
+  const ch = createClient({ ...clientOptions(url), database });
   await ch.command({
     query:
       'CREATE TABLE IF NOT EXISTS schema_migrations (name String, checksum String, at DateTime DEFAULT now()) ENGINE = MergeTree ORDER BY name',
@@ -291,7 +312,7 @@ export async function migrateClickHouse(
 
 export function clickHouseStore(opts: { url: string; database: string }): EventStore {
   const client = createClient({
-    url: opts.url,
+    ...clientOptions(opts.url),
     database: opts.database,
     // Large identity scopes exceed the server URI limit when encoded as URL parameters.
     use_multipart_params_auto: true,
@@ -800,7 +821,7 @@ declare module '@agentic-marketing/commands' {
 
 /** Drops a ClickHouse database (tests, and resetting a development install). */
 export async function resetClickHouse(url: string, database: string) {
-  const root = createClient({ url });
+  const root = createClient(clientOptions(url));
   await root.command({ query: `DROP DATABASE IF EXISTS ${database}` });
   await root.close();
 }

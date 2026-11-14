@@ -44,14 +44,114 @@ export function endpointLocation(endpoint: string): string {
 }
 
 /**
+ * A configured URL with its userinfo moved into an `Authorization: Basic …` header. Node's fetch
+ * rejects a URL that carries credentials, and the rejection's text includes the
+ * full URL; clients built from `OPENBAO_ADDR`, `CLICKHOUSE_URL`, `OTEL_EXPORTER_OTLP_ENDPOINT` and
+ * similar values therefore fetch the credential-free URL and send the header instead. The query
+ * string stays: it is part of the address, not a credential.
+ */
+export function splitUrlCredentials(endpoint: string): { url: string; headers: Record<string, string> } {
+  const url = new URL(endpoint);
+  const headers: Record<string, string> = {};
+  if (url.username || url.password) {
+    const user = decodeURIComponent(url.username);
+    const password = decodeURIComponent(url.password);
+    headers.authorization = `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
+    url.username = '';
+    url.password = '';
+  }
+  return { url: url.toString(), headers };
+}
+
+/**
+ * A failure from a client built from a configured URL, safe to log, return or record on a span.
+ * Only the endpoint's origin and the cause's code (or the error's name) are kept: no message, so
+ * userinfo, a query token or a thrown URL cannot reach a log line or `span.recordException`.
+ */
+export function endpointFailure(err: unknown, endpoint: string): string {
+  const cause = (err as { cause?: { code?: unknown } } | undefined)?.cause;
+  const code = typeof cause?.code === 'string' ? cause.code : undefined;
+  const name = err instanceof Error ? err.name : 'Error';
+  return `${endpointOrigin(endpoint)} (${code ?? name})`;
+}
+
+/**
  * Start OpenTelemetry tracing when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise the API stays a no-op.
  * Works with any OTLP backend (Grafana Tempo, SigNoz, Jaeger, …).
+ *
+ * The SDK resolves the endpoint (generic + /v1/traces, or the trace-specific variable as-is) and its
+ * own environment headers. That stays untouched unless an effective endpoint carries userinfo: only
+ * then is the URL passed explicitly, without userinfo, with the URL-derived Basic header unless an
+ * Authorization is already configured in OTEL_EXPORTER_OTLP[_TRACES]_HEADERS (that wins).
  */
 export function initTelemetry(serviceName: string) {
-  if (!process.env.OTEL_EXPORTER_OTLP_ENDPOINT || sdk) return;
-  sdk = new NodeSDK({ serviceName, traceExporter: new OTLPTraceExporter() });
+  const generic = nonEmpty(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
+  if (!generic || sdk) return;
+  const specific = nonEmpty(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
+  const effective = specific ?? generic;
+  if (!hasUrlCredentials(effective)) {
+    // Exactly as before: the exporter reads the environment itself.
+    sdk = new NodeSDK({ serviceName, traceExporter: new OTLPTraceExporter() });
+  } else {
+    const { url, headers } = splitUrlCredentials(tracesEndpointUrl(specific, generic));
+    const urlAuth = headers.authorization;
+    sdk = new NodeSDK({
+      serviceName,
+      traceExporter: new OTLPTraceExporter(urlAuth && !envHasAuthorization() ? { url, headers: { authorization: urlAuth } } : { url }),
+    });
+  }
   sdk.start();
-  logger.info({ endpoint: endpointOrigin(process.env.OTEL_EXPORTER_OTLP_ENDPOINT) }, 'OpenTelemetry tracing enabled');
+  logger.info({ endpoint: endpointOrigin(effective) }, 'OpenTelemetry tracing enabled');
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function hasUrlCredentials(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return Boolean(url.username || url.password);
+  } catch {
+    return false;
+  }
+}
+
+/** The tracer exporter's own endpoint rules: trace-specific as-is, else generic + /v1/traces. */
+function tracesEndpointUrl(specific: string | undefined, generic: string): string {
+  if (specific) return new URL(specific).toString();
+  return new URL(`${generic.endsWith('/') ? generic : `${generic}/`}v1/traces`).toString();
+}
+
+/**
+ * Whether OTEL_EXPORTER_OTLP[_TRACES]_HEADERS sets an Authorization header the exporter will
+ * really send. The entries are read by the SDK's own rules (`parseKeyPairsIntoRecord` in
+ * @opentelemetry/core): split on commas, anything after `;` dropped, the first `=` separates key
+ * and value, both trimmed, non-empty and percent-decoded. An entry the SDK drops (no `=`, an empty
+ * value, an invalid escape) does not count, so the URL's credentials still apply.
+ */
+function envHasAuthorization(): boolean {
+  return [process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS, process.env.OTEL_EXPORTER_OTLP_HEADERS]
+    .flatMap((raw) => (raw ?? '').split(','))
+    .some((entry) => sentHeaderName(entry) === 'authorization');
+}
+
+/** The lower-cased name of a header-list entry the SDK accepts, or undefined when it drops it. */
+function sentHeaderName(entry: string): string | undefined {
+  const metadata = entry.indexOf(';');
+  const pair = metadata === -1 ? entry : entry.slice(0, metadata);
+  const separator = pair.indexOf('=');
+  if (separator <= 0) return undefined;
+  const rawKey = pair.slice(0, separator).trim();
+  const rawValue = pair.slice(separator + 1).trim();
+  if (!rawKey || !rawValue) return undefined;
+  try {
+    if (!decodeURIComponent(rawValue)) return undefined;
+    return decodeURIComponent(rawKey).toLowerCase();
+  } catch {
+    return undefined;
+  }
 }
 
 export async function shutdownTelemetry() {

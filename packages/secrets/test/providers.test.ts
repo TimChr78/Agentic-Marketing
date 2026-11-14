@@ -69,6 +69,22 @@ describe('OpenBao Transit', () => {
     expect(kp.id).toBe('openbao:transit/am');
   });
 
+  it('moves URL userinfo to a Basic Authorization header without changing the request', async () => {
+    // #931 review round 3: the credential-bearing address must authenticate exactly as before.
+    const kp = openbaoKeyProvider({ addr: base.replace('http://', 'http://alice:p%40ss@'), key: 'am', token: 'root-token' });
+    await kp.wrap(newDataKey());
+    const last = requests.at(-1)!;
+    expect(last.path).toBe('/v1/transit/encrypt/am');
+    expect(last.headers.authorization).toBe(`Basic ${Buffer.from('alice:p@ss').toString('base64')}`);
+    expect(last.headers['x-vault-token']).toBe('root-token');
+  });
+
+  it('sends no Authorization header when the address has no userinfo', async () => {
+    const kp = openbaoKeyProvider({ addr: base, key: 'am', token: 'root-token' });
+    await kp.wrap(newDataKey());
+    expect(requests.at(-1)!.headers.authorization).toBeUndefined();
+  });
+
   it('re-reads a token file when the server rejects the token (renewed by a sidecar)', async () => {
     const file = join(await mkdtemp(join(tmpdir(), 'bao-')), 'token');
     await writeFile(file, 'root-token\n');

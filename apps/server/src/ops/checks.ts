@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 import { appRoleReach, createDb, type Db, normalizeHost } from '@agentic-marketing/db';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
+import { endpointFailure, splitUrlCredentials } from '@agentic-marketing/telemetry';
 import { type Config, ENV_KEYS, loadConfig, REQUIRED_ENV_KEYS } from '../config';
 import { keyProviderFor } from '../keys';
 import { VERSION } from '../version';
@@ -687,9 +688,11 @@ export async function checkAppRole(config: Config, db: Db): Promise<Check> {
 }
 
 export async function checkClickHouse(config: Config): Promise<Check> {
-  const url = `${config.clickhouse.url.replace(/\/+$/, '')}/ping`;
+  // CLICKHOUSE_URL may carry credentials; fetch them as a header and never echo the URL.
+  const { url: clean, headers } = splitUrlCredentials(config.clickhouse.url);
+  const url = `${clean.replace(/\/+$/, '')}/ping`;
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(TIMEOUT_MS) });
     if (!res.ok)
       return {
         id: 'clickhouse',
@@ -702,7 +705,7 @@ export async function checkClickHouse(config: Config): Promise<Check> {
     return {
       id: 'clickhouse',
       status: 'fail',
-      message: `ClickHouse is unreachable: ${messageOf(err)}`,
+      message: `ClickHouse is unreachable: ${endpointFailure(err, config.clickhouse.url)}`,
       hint: 'Check CLICKHOUSE_URL and that the ClickHouse container is running.',
     };
   }
@@ -770,7 +773,7 @@ export async function checkValkey(config: Config): Promise<Check> {
     return {
       id: 'valkey',
       status: 'fail',
-      message: `Valkey is unreachable: ${messageOf(err)}`,
+      message: `Valkey is unreachable: ${endpointFailure(err, config.valkey.url)}`,
       hint: 'Check VALKEY_URL and that the Valkey container is running.',
     };
   } finally {
@@ -1314,12 +1317,14 @@ function egressTarget(adapter: string, config: Record<string, unknown>): EgressT
   }
 }
 
-async function probeHttp(url: string): Promise<number> {
+async function probeHttp(rawUrl: string): Promise<number> {
+  // A provider's configured API base may carry userinfo; fetch it as a header instead.
+  const { url, headers } = splitUrlCredentials(rawUrl);
   const deadline = Date.now() + TIMEOUT_MS;
   const attempt = async (method: 'HEAD' | 'GET') => {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error(`egress timed out after ${SECONDS}s`);
-    const res = await fetch(url, { method, signal: AbortSignal.timeout(remaining), redirect: 'follow' });
+    const res = await fetch(url, { method, headers, signal: AbortSignal.timeout(remaining), redirect: 'follow' });
     return res.status;
   };
   // Some API hosts reject HEAD; a GET is still cheap and proves egress works, within the same
@@ -1354,7 +1359,7 @@ export async function checkEgress(providers: ProviderRow[]): Promise<Check[]> {
         return {
           id,
           status: 'fail' as const,
-          message: `${adapter} is unreachable: ${messageOf(err)}`,
+          message: `${adapter} is unreachable: ${target.kind === 'http' ? endpointFailure(err, target.url) : messageOf(err)}`,
           hint: 'Allow outbound HTTPS (or SMTP) from the host and check the provider host and port.',
         };
       }

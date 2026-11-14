@@ -1,7 +1,9 @@
 import { createHmac } from 'node:crypto';
 import http from 'node:http';
+import { SSO_SAML_CALLBACK_MAX_BODY, SSO_SAML_MAX_RESPONSE_BYTES } from '@agentic-marketing/auth';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startTestServer, testPort, type User } from './harness';
+import { PASSWORD, startTestServer, testPort, type User } from './harness';
+import { findUnboundedRoutes } from './route-sweep';
 
 // #235/#242: public ingest, inbound webhooks and the unauthenticated form, decision, preference,
 // SMS and REST POSTs must refuse oversized bodies before buffering them, counting encoded bytes
@@ -467,6 +469,81 @@ describe('OAuth consent (#790)', () => {
       body: JSON.stringify({ accept: true, oauth_query: 'client_id=limits' }),
     });
     expect(res.status).not.toBe(413);
+  });
+});
+
+// #932: Better Auth's catch-all forwards sign-in, sign-up, OAuth token and SSO registration bodies
+// to `auth.handler`, which reads the whole body before its own checks. The catch-all needs the
+// same guard as the consent route it sits below.
+describe('Better Auth catch-all (#932)', () => {
+  it('refuses an oversized sign-in body with a correct Content-Length', async () => {
+    const res = await fetch(`${t.base}/api/auth/sign-in/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: t.base },
+      body: JSON.stringify({ email: owner.email, password: PASSWORD, pad: oversize(512 * 1024) }),
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: 'payload_too_large' });
+  });
+
+  it('refuses an oversized chunked sign-up body without Content-Length while it is still arriving', async () => {
+    const total = 8 * 1024 * 1024;
+    const res = await postChunked('/api/auth/sign-up/email', { total, headers: { origin: t.base } });
+    expect(res.status).toBe(413);
+    expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('still signs in normally', async () => {
+    const res = await fetch(`${t.base}/api/auth/sign-in/email`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: t.base },
+      body: JSON.stringify({ email: owner.email, password: PASSWORD }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('still accepts a normal chunked sign-in without Content-Length', async () => {
+    const res = await postChunkedText('/api/auth/sign-in/email', JSON.stringify({ email: owner.email, password: PASSWORD }), {
+      origin: t.base,
+    });
+    expect(res.status).toBe(200);
+  });
+});
+
+// #932 review A1: the ACS accepts a SAMLResponse up to SSO_SAML_MAX_RESPONSE_BYTES. A form at that
+// maximum must not be refused by the catch-all's 256 KB; only the route's own derived ceiling
+// applies, and one byte over it is a 413.
+describe('SAML callbacks (#932 A1)', () => {
+  it('accepts a maximum-size SAMLResponse even at worst-case form encoding', async () => {
+    const body = new URLSearchParams({ SAMLResponse: '%'.repeat(SSO_SAML_MAX_RESPONSE_BYTES) }).toString();
+    expect(body.length).toBeGreaterThan(256 * 1024);
+    const res = await fetch(`${t.base}/api/auth/sso/saml2/sp/acs/limits`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: t.base },
+      body,
+    });
+    expect(res.status).not.toBe(413);
+  });
+
+  it('refuses a body one byte over the SAML route limit', async () => {
+    const body = `SAMLResponse=${'A'.repeat(SSO_SAML_CALLBACK_MAX_BODY)}`;
+    expect(body.length).toBeGreaterThan(SSO_SAML_CALLBACK_MAX_BODY);
+    const res = await fetch(`${t.base}/api/auth/sso/saml2/sp/acs/limits`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: t.base },
+      body,
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ error: 'payload_too_large' });
+  });
+});
+
+// #932: the sweep. Every route that can read a request body (including ALL registrations and
+// body-reading middleware) has a bodyLimit, either on the route itself or on a matching guard
+// registered before it. The allow-list and its reasons live with the sweep in ./route-sweep.ts.
+describe('body-limit route sweep (#932)', () => {
+  it('gives every body-accepting route its own limit', () => {
+    expect(findUnboundedRoutes(t.srv.app)).toEqual([]);
   });
 });
 

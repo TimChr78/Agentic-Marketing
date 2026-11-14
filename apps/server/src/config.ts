@@ -130,7 +130,19 @@ const Env = z.object({
   AWS_ACCESS_KEY_ID: z.string().optional(),
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   AWS_SESSION_TOKEN: z.string().optional(),
-  AWS_KMS_ENDPOINT: z.url().optional().describe('A VPC endpoint or a test server instead of kms.<region>.amazonaws.com'),
+  AWS_KMS_ENDPOINT: z
+    .url()
+    .refine((value) => {
+      try {
+        const url = new URL(value);
+        return !url.username && !url.password;
+      } catch {
+        // The URL format check reports an unparseable value separately.
+        return true;
+      }
+    }, 'must not contain credentials; AWS KMS signs requests with AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY')
+    .optional()
+    .describe('A VPC endpoint or a test server instead of kms.<region>.amazonaws.com'),
   CLICKHOUSE_URL: z.url().default('http://localhost:8123').describe('ClickHouse HTTP endpoint, credentials in the URL if needed'),
   CLICKHOUSE_DATABASE: z
     .string()

@@ -1,17 +1,28 @@
 import type { Context, MiddlewareHandler } from 'hono';
 
 /**
+ * The limit a guard enforces, readable from the middleware function itself. The server's route
+ * sweep (#932) walks Hono's registered routes and fails when a body-accepting route has no guard,
+ * so the number travels with the guard instead of a hand-kept list.
+ */
+export const BODY_LIMIT_BYTES: unique symbol = Symbol.for('agentic-marketing.bodyLimitBytes');
+
+export type BodyLimitGuard = MiddlewareHandler & { [BODY_LIMIT_BYTES]?: number };
+
+/**
  * Reusable request-body guard for the public and API surfaces.
  *
- * A trustworthy Content-Length is compared first, before any body bytes are touched. Without one
- * (a chunked request, or a hidden length) the body is counted in bytes as it streams in and the
- * request is refused as soon as the limit is crossed, so an oversized body is never buffered in
- * full. The remaining request body is discarded in the background rather than left unread: that
- * keeps the connection healthy so the caller actually receives the 413 instead of a connection
- * reset. Bodies within the limit are passed to the handler unchanged.
+ * A declared Content-Length over the limit is refused before any body bytes are touched, but a
+ * length at or below it is not trusted: the body is counted in bytes as it streams in, and the
+ * request is refused as soon as the count crosses the limit, so an understated header cannot
+ * smuggle an oversized body past the guard. The body is buffered while it is counted and then
+ * replayed to the handler, because a Hono request body can only be read once. The remaining request
+ * body is discarded in the background rather than left unread: that keeps the connection healthy
+ * so the caller actually receives the 413 instead of a connection reset. Bodies within the limit
+ * are passed to the handler unchanged.
  */
 export function bodyLimit(maxSize: number, onTooLarge: (c: Context) => Response | Promise<Response>) {
-  return (async (c, next) => {
+  const guard = (async (c, next) => {
     const body = c.req.raw.body;
     if (!body) return next();
 
@@ -23,7 +34,6 @@ export function bodyLimit(maxSize: number, onTooLarge: (c: Context) => Response 
         discard(body);
         return onTooLarge(c);
       }
-      return next();
     }
 
     const reader = body.getReader();
@@ -50,7 +60,9 @@ export function bodyLimit(maxSize: number, onTooLarge: (c: Context) => Response 
       duplex: 'half',
     } as RequestInit);
     return next();
-  }) as MiddlewareHandler;
+  }) as BodyLimitGuard;
+  guard[BODY_LIMIT_BYTES] = maxSize;
+  return guard;
 }
 
 /**

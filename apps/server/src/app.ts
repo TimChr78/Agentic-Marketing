@@ -14,6 +14,7 @@ import {
   invitationWorkspace,
   isMcpResourceUrlAllowed,
   RESET_PASSWORD_TTL_SECONDS,
+  SSO_SAML_CALLBACK_MAX_BODY,
   withConsentRequest,
 } from '@agentic-marketing/auth';
 import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
@@ -27,7 +28,7 @@ import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '
 import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { refreshPeople } from '@agentic-marketing/segments';
-import { logger } from '@agentic-marketing/telemetry';
+import { endpointLocation, logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { type Context, type ExecutionContext, Hono } from 'hono';
 import { mandateGuardrailBreach } from './agents/guardrails';
@@ -56,6 +57,20 @@ const INVITATION_MAX_BODY = 8 * 1024;
 // A consent form is a decision and the signed authorization query; 16 KB leaves ample room while
 // refusing an unbounded body before Better Auth reads it (#790).
 const CONSENT_MAX_BODY = 16 * 1024;
+// The generic /api/auth/* catch-all forwards every other Better Auth POST here. Every POST this
+// app enables, and its largest legitimate body (#932):
+//
+//   | endpoint(s)                                                          | largest body        |
+//   |----------------------------------------------------------------------|---------------------|
+//   | sign-in/up/out, change-password, verify-email, OAuth token/revoke     | under 1 KB          |
+//   | /sso/register with a SAML IdP metadata XML or certificate             | 100 KB metadata cap |
+//   | /sso/register with an OIDC config, /sso/update-provider               | under 64 KB         |
+//   | /oauth2/register (dynamic client registration, metadata and JWKS)     | under 64 KB         |
+//
+// No organization, passkey or 2FA plugin is enabled. 256 KB covers all of the above with room for
+// JSON escaping. The SAML ACS and SLO posts are the one larger surface; they are registered with
+// their own limit, derived from `SSO_SAML_MAX_RESPONSE_BYTES`, before this catch-all.
+const AUTH_CATCHALL_MAX_BODY = 256 * 1024;
 
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export interface ServerOverrides {
@@ -77,7 +92,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
   if (!mcpEnabled) {
     logger.warn(
-      { publicUrl: config.publicUrl },
+      // PUBLIC_URL may carry basic-auth userinfo or a query token; never put either in the logs.
+      { publicUrl: endpointLocation(config.publicUrl) },
       'MCP/OAuth client endpoints are disabled because PUBLIC_URL is plain HTTP on a non-loopback host; the admin UI and REST API still work. Use HTTPS (e.g. Tailscale or a Cloudflare Tunnel) to enable MCP.',
     );
   }
@@ -426,7 +442,22 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
     },
   );
-  app.on(['GET', 'POST'], '/api/auth/*', (c) => auth.handler(withClientIp(c)));
+  // The SAML ACS and SLO endpoints accept a `SAMLResponse`/`SAMLRequest` field up to
+  // SSO_SAML_MAX_RESPONSE_BYTES. Its worst-case form encoding is larger than the catch-all's
+  // ceiling, so these two routes get their own limit before it (#932 review A1).
+  const samlCallbackLimit = bodyLimit(SSO_SAML_CALLBACK_MAX_BODY, (c) =>
+    c.json({ error: 'payload_too_large', message: `SAML requests are limited to ${SSO_SAML_CALLBACK_MAX_BODY / 1024} KB.` }, 413),
+  );
+  app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/acs/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
+  app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/slo/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
+  app.on(
+    ['GET', 'POST'],
+    '/api/auth/*',
+    bodyLimit(AUTH_CATCHALL_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `Requests are limited to ${AUTH_CATCHALL_MAX_BODY / 1024} KB.` }, 413),
+    ),
+    (c) => auth.handler(withClientIp(c)),
+  );
 
   // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
   // plugin answers RFC 9728 protected-resource metadata itself when the root path reaches it.

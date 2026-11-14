@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readdir, readFile } from 'node:fs/promises';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -13,6 +13,73 @@ const paths = {
   pilot: join(root, 'docs/pilots/martechsignal.md'),
 };
 const read = (path: string) => readFile(path, 'utf8');
+
+const COMMAND_FILES = new Set(['.md', '.sh', '.mjs', '.js']);
+
+async function commandFiles(dir: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...(await commandFiles(path)));
+    else if (COMMAND_FILES.has(path.slice(path.lastIndexOf('.')))) found.push(path);
+  }
+  return found;
+}
+
+interface CurlCommand {
+  file: string;
+  line: number;
+  text: string;
+}
+
+/** Every shell curl example, with backslash continuations joined into one command. */
+async function curlCommands(): Promise<CurlCommand[]> {
+  const files = [
+    join(root, 'README.md'),
+    ...(await commandFiles(join(root, 'docs'))),
+    ...(await commandFiles(join(root, '.claude/skills'))),
+    ...(await commandFiles(join(root, 'scripts'))),
+  ];
+  const commands: CurlCommand[] = [];
+  for (const file of files) {
+    const lines = (await readFile(file, 'utf8')).split('\n');
+    for (let i = 0; i < lines.length; i += 1) {
+      if (!/\bcurl\b/.test(lines[i])) continue;
+      const line = i + 1;
+      let text = lines[i];
+      while (text.trimEnd().endsWith('\\') && i + 1 < lines.length) {
+        i += 1;
+        text = `${text.slice(0, text.lastIndexOf('\\'))} ${lines[i]}`;
+      }
+      commands.push({ file: relative(root, file), line, text });
+    }
+  }
+  return commands;
+}
+
+describe('documented commands', () => {
+  // Since the 0.14.16 CSRF work a cookie-authenticated write needs an Origin that matches
+  // PUBLIC_URL/TRUSTED_ORIGINS, or Better Auth answers 403 MISSING_OR_NULL_ORIGIN (#929).
+  // Bearer-token examples do not, because a page does not attach the token.
+  it('sends Origin on every cookie-authenticated curl write', async () => {
+    const violations = (await curlCommands())
+      .filter((command) => {
+        const sendsCookie = /(?:^|\s)(?:-b|--cookie)\b/.test(command.text) || /\bcookie\s*:/i.test(command.text);
+        const writes =
+          /(?:^|\s)(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b/i.test(command.text) ||
+          /(?:^|\s)(?:-d|--data(?:-raw|-binary|-urlencode)?)\b/.test(command.text);
+        const targetsApi = /\/api\/auth\/|\/v1\//.test(command.text);
+        const hasOrigin =
+          /(?:^|\s)(?:-H|--header)\s+['"]?origin\s*:/i.test(command.text) ||
+          /(?:^|\s)origin\s*:/i.test(command.text) ||
+          /sec-fetch-site\s*:\s*same-origin/i.test(command.text);
+        return sendsCookie && writes && targetsApi && !hasOrigin;
+      })
+      .map((command) => `${command.file}:${command.line}`);
+    expect(violations).toEqual([]);
+  });
+});
 
 describe('pilot documentation', () => {
   it('describes automatic retention instead of manual cleanup', async () => {

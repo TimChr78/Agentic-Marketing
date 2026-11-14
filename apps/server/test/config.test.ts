@@ -26,6 +26,20 @@ describe('configuration', () => {
     expect(() => loadConfig({ ...base, PUBLIC_LINKS_URL: 'not a url' })).toThrow('PUBLIC_LINKS_URL');
   });
 
+  // AWS KMS signs with SigV4 and cannot use basic-auth userinfo; reject it by variable name
+  // without echoing the credential (#931 review A4).
+  it('rejects credentials in AWS_KMS_ENDPOINT without printing them', () => {
+    let error: unknown;
+    try {
+      loadConfig({ ...base, AWS_KMS_ENDPOINT: 'https://user:secret@kms.example.com' });
+    } catch (err) {
+      error = err;
+    }
+    expect((error as Error).message).toContain('AWS_KMS_ENDPOINT');
+    expect((error as Error).message).not.toContain('secret');
+    expect((error as Error).message).not.toContain('user');
+  });
+
   // Docker Compose substitutes POSTGRES_PASSWORD into DATABASE_URL verbatim, and a base64 password
   // contains `/` about half the time; a raw TypeError from new URL() escaped main.ts's ConfigError
   // path and killed the container with a stack trace (#647).
