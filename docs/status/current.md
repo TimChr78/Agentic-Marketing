@@ -42,11 +42,10 @@ _Last updated: 2026-11-14_
   - **0.14.18** (packaging hardening: #870) is released and verified: Sol approved (admin port on loopback by default via `AM_BIND`, empty template database passwords, role-aware healthcheck, per-run smoke ports, digest-pinned images).
   - **0.14.19** (privacy and test reliability: #692, #820, #828, #830, #831, #840) is released and verified: Sol approved after four rounds (complementary suppression per total, e-mail totals protected by any member with in-window e-mail activity, per-variant k floor in experiment results).
   - **0.14.20** (error-text sweep and reliability: #885, #877, #892, #893) is released: Sol approved after ten rounds (one redaction rule, redact before cut, applied at the executor for every AppError, at policy-reason creation and at each stored error column; Docker-assigned smoke ports; a deterministic linear-helper self-test; uuid pinned to 11.1.1). This completes the 2026-11-13 plan.
-- **The 2026-11-14 re-audit plan runs as patch releases 0.14.21 to 0.14.24.** The re-audit of v0.14.20 filed 23 issues (#898–#920); all 23 were confirmed against the code. Plan: https://claude.ai/artifact/CDenbTFevFfh33DCMtJUrN
-  - **0.14.21** (security hardening: #898, #902, #913, #914, #919, #920) is in progress on `fix/01421-security`.
-  - **0.14.22** (artifact and agent integrity: #899, #900, #907, #911, #912; migrations 0093 and 0094) is in progress on `fix/01422-integrity`.
-  - **0.14.23** (privacy and reporting correctness: #901, #903, #908, #909, #916, #917) is next.
-  - **0.14.24** (audit trail, idempotency, small fixes and docs: #904, #905, #906, #910, #915, #918) is next.
+- **The 2026-11-14 re-audit plan runs as patch releases 0.14.21 and 0.14.22.** The re-audit of v0.14.20 filed 23 issues (#898–#920); all 23 were confirmed against the code. Plan: https://claude.ai/artifact/CDenbTFevFfh33DCMtJUrN (it lists four releases; three batches were approved together and ship as one).
+  - **0.14.21** (artifact and agent integrity, audit trail and idempotency, privacy and reporting: #899, #900, #901, #903, #904, #905, #906, #907, #908, #909, #910, #911, #912, #915, #916, #917, #918; migrations 0093–0095) is released: Sol approved the three batches after three, four and six rounds (one lock order for agent writes, a startup mandate repair that uses the runtime picker, caller-bound idempotency keys, a journey funnel that hides the subtree after a below-k step and withholds its totals, spend completeness as date ranges per ad account).
+  - **0.14.22** (security hardening: #898, #902, #913, #914, #919, #920) is in review on `fix/01421-security` (PR #923).
+  - Follow-up filed: #926 (send and enrollment idempotency keys are not bound to the caller).
   - Decisions taken with the recommended options: #906 documents the same-key retry rule and adds an optional key to MCP tools; #904 documents the header-copying limit; #917 keeps `unattributed` and adds `unmatched` and `spendTruncated`; #911 archives the older of two active mandates; #900 hides archived artifacts from `artifacts.list` unless `includeArchived` is set.
   - **Follow-ups filed (S3):** #671, #672 and #673.
 
@@ -93,4 +92,4 @@ When these are signed off, the Wave 5 epic #439 can close.
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.20, released from `main`; v0.14.20 is verified.
+- The last release is v0.14.21, released from `main`; v0.14.20 is verified.
