@@ -534,6 +534,8 @@ export const recordConsentCommand = defineCommand({
         source: ctx.principal.type === 'agent' ? 'agent' : input.source,
         proof: input.proof,
         recordedBy: ctx.principal.userId,
+        // A synchronous command handler: now() is the person's (or caller's) action time.
+        recordedAt: new Date(),
       },
     ]);
     const state = currentConsent(await consentStateOf(ctx.tx, ctx.principal.workspaceId, p.id), input.purpose, input.channel || undefined);

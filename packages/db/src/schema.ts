@@ -577,6 +577,12 @@ export const messages = pgTable(
     test: boolean('test').notNull().default(false),
     /** The agent behind this message (#426): a direct send by an agent, or an agent-owned broadcast or journey. */
     agentId: text('agent_id'),
+    /**
+     * The immutable request fingerprint behind an input-level idempotency key (#926): caller and
+     * the request as supplied before any resolution. Null on rows written before this column; those
+     * fall back to comparing the recipient and template columns.
+     */
+    requestHash: text('request_hash'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },

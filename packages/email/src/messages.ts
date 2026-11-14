@@ -1,9 +1,9 @@
-import { defineCommand } from '@agentic-marketing/commands';
+import { callerHash, defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { requestEmail } from './gateway';
+import { requestEmail, sendRequestHash } from './gateway';
 import { directSendImpact, directSendLedger } from './sendTouches';
 
 const Status = z.enum(['queued', 'sending', 'sent', 'suppressed', 'failed', 'delivered', 'bounced', 'complained']);
@@ -51,6 +51,12 @@ export const sendEmail = defineCommand({
     requestEmail(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
+      requestHash: sendRequestHash('email', {
+        caller: callerHash(ctx.principal),
+        recipient: input.profileId,
+        template: input.templateId,
+        data: input.data ?? null,
+      }),
     }),
 });
 

@@ -167,8 +167,10 @@ export function emailRoutes(deps: EmailRouteDeps) {
           templateVersion: null,
           journeyId: null,
         } as Msg);
-      await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, deps.kp);
-      return messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: new Date().toISOString() }, '');
+      // A one-click unsubscribe is a synchronous write: the link POST is the person's action.
+      const at = new Date();
+      await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, deps.kp, at);
+      return messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() }, '');
     });
     await deps.events.insertMessageEvents([recorded]);
     if (recorded.profileId) await consentChanged(link.w, [recorded.profileId], `unsubscribe:${link.m}`);

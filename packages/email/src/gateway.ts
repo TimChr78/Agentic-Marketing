@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type CampaignUtmCache, campaignUtmCampaign } from '@agentic-marketing/campaigns';
-import { newId, newUuid } from '@agentic-marketing/core';
+import { AppError, hashValue, newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore, MessageEvent } from '@agentic-marketing/events';
 import {
@@ -77,6 +77,71 @@ export interface EmailRequest {
   notBefore?: Date;
   /** The agent behind this message (#426): a direct send, or the owner of the broadcast or journey. */
   agentId?: string | null;
+  /**
+   * The immutable request fingerprint (#926), from `sendRequestHash`. Required: an input-level
+   * `idempotencyKey` is bound to it, so a changed variable or another caller is a conflict, while
+   * a merged profile or a re-rendered payload still replays.
+   */
+  requestHash: string;
+}
+
+export type SendChannel = 'email' | 'sms' | 'push';
+
+/**
+ * The request fingerprint behind an input-level send key (#926). It is computed once from the
+ * ORIGINAL request, before any resolution, and stored on the message:
+ *
+ * | source | fields |
+ * |---|---|
+ * | direct send | `caller` (principal hash), `recipient` (the profile id as supplied), `template`
+ * |             | (the template id as supplied), `data` (the variables as supplied) |
+ * | DOI | `caller: 'system:doi'`, `recipient`, `template`, `submission` (the event id) |
+ * | journey | `caller: 'system:journey'`, `recipient`, `template`, `journey`, `enrollment`,
+ * |         | `step`, `sequence` (never the rendered context) |
+ * | broadcast | `caller: 'system:broadcast'`, `recipient`, `template`, `broadcast`, `variant` |
+ * | holdout | `caller: 'system:broadcast_holdout'`, `recipient`, `template`, `broadcast`,
+ * |         | `campaign`, `variant` |
+ * | test send | `caller: 'system:test'`, `recipient` (address hash), `template` |
+ *
+ * Resolution (a merged profile id, the template's current purpose, a computed subject or send
+ * window) is deliberately absent: none of it changes what the caller asked for.
+ */
+export function sendRequestHash(channel: SendChannel, parts: Record<string, unknown>): string {
+  return hashValue({ version: 1, channel, ...parts });
+}
+
+/**
+ * Serialise one input-level send key before its lookup (#926 A3). Two concurrent requests for the
+ * same key take this transaction-scoped lock in turn, so the loser sees the winner's committed row
+ * and answers a replay or the 409 instead of a raw unique-constraint error.
+ *
+ * Order: the executor's command-level idempotency lock is taken before BEGIN; this is the first
+ * lock inside a send handler and precedes every message write. The delivery worker's
+ * `message-cap` lock is taken only for an existing message and never calls the request gateways,
+ * so the two cannot form a cycle.
+ */
+export async function lockSendKey(tx: Tx, workspaceId: string, key: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`send-idempotency:${workspaceId}:${key}`}, 0))`);
+}
+
+/** A pre-release row's fallback: compare the columns that were stored then, as documented (#926). */
+export function legacySameSend(
+  existing: typeof schema.messages.$inferSelect,
+  req: { profileId: string; templateId: string; journeyId?: string; variant?: string },
+): boolean {
+  return (
+    existing.profileId === req.profileId &&
+    existing.templateId === req.templateId &&
+    (existing.journeyId ?? null) === (req.journeyId ?? null) &&
+    (existing.variant ?? null) === (req.variant ?? null)
+  );
+}
+
+/** The one conflict answer for an input-level key reused by another caller or for another send. */
+export function idempotencyKeyReused(what: 'send' | 'enrollment'): AppError {
+  return new AppError('conflict', `This idempotency key was already used for a different ${what}. Use a new key.`, {
+    reason: 'idempotency_key_reused',
+  });
 }
 
 export interface Decision {
@@ -169,8 +234,15 @@ export async function checkRecipient(
  */
 export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider, events: EventStore, req: EmailRequest): Promise<Decision> {
   const key = req.idempotencyKey ?? newUuid();
+  if (req.idempotencyKey) await lockSendKey(tx, workspaceId, key);
   const [existing] = await tx.select().from(schema.messages).where(eq(schema.messages.idempotencyKey, key));
-  if (existing) return { messageId: existing.id, status: existing.status, reason: existing.reason, duplicate: true };
+  if (existing) {
+    // The key dedupes per workspace, so it must also name the same caller and the same request.
+    // Rows from before `request_hash` existed fall back to the columns stored then (#926).
+    const same = existing.requestHash === null ? legacySameSend(existing, req) : existing.requestHash === req.requestHash;
+    if (!same) throw idempotencyKeyReused('send');
+    return { messageId: existing.id, status: existing.status, reason: existing.reason, duplicate: true };
+  }
 
   const tpl = await publishedTemplate(tx, req.templateId);
   const purpose = tpl?.template?.purpose ?? 'unknown';
@@ -204,6 +276,7 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
       variant: req.variant ?? null,
       notBefore: req.notBefore ?? null,
       agentId: req.agentId ?? null,
+      requestHash: req.requestHash,
       data: req.subject ? { ...(req.data ?? {}), __subject: req.subject } : (req.data ?? {}),
     })
     .returning();

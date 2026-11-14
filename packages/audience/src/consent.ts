@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import type { Db, Tx } from '@agentic-marketing/db';
-import { type LinkSigner, requestEmail } from '@agentic-marketing/email';
+import { type LinkSigner, requestEmail, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
 import { type ConsentInput, consentStateOf, currentConsent, type ResolvedEvent, recordConsent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -36,6 +36,10 @@ async function recordChanges(tx: Tx, ws: string, profileId: string, records: Con
 async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent, deps: ConsentHookDeps) {
   const p = e.properties as Record<string, unknown>;
   const purposes = Array.isArray(p.purposes) ? (p.purposes as string[]) : [];
+  // The action time, never the worker's processing time (#928). Form and confirmation events set
+  // their timestamp server-side, and `correctedTimestamp` clamps it to the receive time, so a
+  // submitter cannot post-date a signup past a withdrawal that happened later.
+  const recordedAt = new Date(e.timestamp);
   if (e.sourceId.startsWith('frm_') && e.name === SUBMITTED) {
     const proof = {
       form_id: p.form_id,
@@ -50,7 +54,14 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
         tx,
         ws,
         profileId,
-        purposes.map((purpose) => ({ purpose, status: 'granted' as const, source: 'form' as const, proof, messageId: e.messageId })),
+        purposes.map((purpose) => ({
+          purpose,
+          status: 'granted' as const,
+          source: 'form' as const,
+          proof,
+          messageId: e.messageId,
+          recordedAt,
+        })),
       );
     const form = await publishedForm(tx, String(p.form_id), Number(p.form_version));
     if (!form?.def.confirmationTemplate) return;
@@ -68,6 +79,15 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
       profileId,
       templateId: form.def.confirmationTemplate,
       idempotencyKey: `doi:${e.messageId}`,
+      // Stable identifiers only: a redelivery of the same submission replays the confirmation,
+      // including after a profile merge (the resolved profile id is deliberately absent).
+      requestHash: sendRequestHash('email', {
+        caller: 'system:doi',
+        submission: e.messageId,
+        form: p.form_id,
+        formVersion: p.form_version,
+        template: form.def.confirmationTemplate,
+      }),
       data: { confirm_url: `${linksUrl}/f/confirm/${deps.links.sign(token)}` },
     });
     if (d.status !== 'queued') logger.warn({ form: p.form_id, status: d.status, reason: d.reason }, 'confirmation e-mail not queued');
@@ -83,6 +103,7 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
         status: 'granted' as const,
         source: 'form' as const,
         messageId: e.messageId,
+        recordedAt,
         proof: {
           form_id: p.form_id,
           form_version: p.form_version,
@@ -97,19 +118,25 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
     const consent = Array.isArray(p.consent)
       ? (p.consent as { purpose: string; status: ConsentInput['status']; recordedAt?: string; proof?: object }[])
       : [];
+    // The import's own (server-assigned) time is the ceiling: a historical timestamp is kept as
+    // given, but a future-dated grant cannot outrank a withdrawal that happens after the import.
+    const importedAt = new Date(e.timestamp);
     return recordChanges(
       tx,
       ws,
       profileId,
-      consent.map((c) => ({
-        purpose: c.purpose,
-        status: c.status,
-        source: 'import' as const,
-        messageId: e.messageId,
-        recordedAt: c.recordedAt ? new Date(c.recordedAt) : new Date(e.timestamp),
-        recordedBy: typeof p.imported_by === 'string' ? p.imported_by : undefined,
-        proof: { ...(c.proof ?? {}), import_batch: e.sourceId, import_label: p.label },
-      })),
+      consent.map((c) => {
+        const given = c.recordedAt ? new Date(c.recordedAt) : importedAt;
+        return {
+          purpose: c.purpose,
+          status: c.status,
+          source: 'import' as const,
+          messageId: e.messageId,
+          recordedAt: given.getTime() > importedAt.getTime() ? importedAt : given,
+          recordedBy: typeof p.imported_by === 'string' ? p.imported_by : undefined,
+          proof: { ...(c.proof ?? {}), import_batch: e.sourceId, import_label: p.label },
+        };
+      }),
     );
   }
 }

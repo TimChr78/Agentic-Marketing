@@ -247,3 +247,160 @@ describe('the independent model check (#231)', () => {
     expect(out.body.heldBecause.join(' ')).toContain('no AI provider');
   });
 });
+
+describe('an idempotent replay of an agent write (#930)', () => {
+  // The executor used to run `impact`, the policy engine (counters and the billed independent
+  // check) before the idempotency lookup, so a retry of a succeeded write could be refused and
+  // billed again. A non-approvable agent command makes the refusal visible: at its daily cap the
+  // policy drops it to level 1, which for a command that cannot wait for a person is a denial.
+  let replayToken = '';
+  let replayAgent = '';
+  let provider = '';
+  let otherSegment = '';
+
+  const checks = () => llm.requests.filter((r) => r.system.includes('independent reviewer')).length;
+  const callAs = async (name: string, body: unknown, key: string) => {
+    const res = await fetch(`${t.base}/v1/${name}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${replayToken}`, 'idempotency-key': key },
+      body: JSON.stringify(body),
+    });
+    return { status: res.status, body: (await res.json()) as any };
+  };
+  const refresh = (artifactId: string, key: string) => callAs('segments.refresh', { artifactId }, key);
+  const changes = async () =>
+    (
+      await t.srv.db.admin.query<{ changes: number }>(
+        `SELECT count(*)::int AS changes FROM agent_actions
+         WHERE agent_id = $1 AND decision = 'allow' AND ok AND action_class <> 'draft' AND at > now() - interval '24 hours'`,
+        [replayAgent],
+      )
+    ).rows[0]!.changes;
+
+  beforeAll(async () => {
+    const api = t.api(owner);
+    provider = (
+      await api.call('aiProviders.create', {
+        name: 'Model again',
+        kind: 'anthropic-compatible',
+        baseUrl: llm.baseUrl,
+        models: { default: 'claude-sonnet-test' },
+        apiKey: 'sk-test-0123456789',
+        useFor: ['journeys'],
+      })
+    ).id;
+    replayToken = (
+      await api.call('apiTokens.create', { name: 'Replay agent', scopes: ['artifacts:read', 'artifacts:write', 'artifacts:publish'] })
+    ).token;
+    replayAgent = (await callAs('agents.get', {}, 'unused')).body.id;
+    await api.call('workspace.setAutonomy', { maxLevel: { 'audience.publish': 3 } });
+    const mandate = await api.call('artifacts.create', {
+      type: 'agent_mandate',
+      name: 'Replay mandate',
+      content: {
+        agent: replayAgent,
+        purpose: 'Recompute the newsletter segment when a person asks',
+        validUntil: inDays(30),
+        scope: { segments: [segmentId], purposes: ['marketing_email'], channels: ['email'] },
+        levels: { 'audience.publish': 3 },
+        independentCheck: true,
+      } as never,
+    });
+    expect((await api.call('artifacts.requestPublish', { artifactId: mandate.artifactId, note: 'grant' })).status).toBe('published');
+    const second = await api.call('artifacts.create', {
+      type: 'segment',
+      name: 'Another segment',
+      content: { condition: { consent: 'marketing_email' } },
+    });
+    otherSegment = second.artifactId;
+    await api.call('artifacts.requestPublish', { artifactId: otherSegment, note: 'setup' });
+  }, 60_000);
+
+  it('replays without re-running the policy engine or the check when the agent is at its cap', async () => {
+    const api = t.api(owner);
+    const before = await changes();
+    // The first refresh here exactly fills the cap; the retry then runs at the limit.
+    await api.call('workspace.setAutonomy', { limits: { changesPerDay: before + 1 } });
+    try {
+      const first = await refresh(segmentId, 'replay-at-cap');
+      expect(first.status).toBe(200);
+      expect(first.body.members).toBe(3);
+      const checkCount = checks();
+
+      const again = await refresh(segmentId, 'replay-at-cap');
+      expect(again.status).toBe(200);
+      expect(again.body).toEqual(first.body);
+      expect(checks()).toBe(checkCount);
+    } finally {
+      await api.call('workspace.setAutonomy', { limits: { changesPerDay: 500 } });
+    }
+  });
+
+  it('replays the stored success when the independent check would now fail', async () => {
+    const api = t.api(owner);
+    const first = await refresh(segmentId, 'replay-check-fails');
+    expect(first.status).toBe(200);
+    const checkCount = checks();
+
+    // Without a provider the check fails closed, which for a command that cannot wait for a person
+    // is a denial. A replay must not re-ask it.
+    await api.call('aiProviders.delete', { id: provider });
+    try {
+      const again = await refresh(segmentId, 'replay-check-fails');
+      expect(again.status).toBe(200);
+      expect(again.body).toEqual(first.body);
+      expect(checks()).toBe(checkCount);
+    } finally {
+      provider = (
+        await api.call('aiProviders.create', {
+          name: 'Model restored',
+          kind: 'anthropic-compatible',
+          baseUrl: llm.baseUrl,
+          models: { default: 'claude-sonnet-test' },
+          apiKey: 'sk-test-0123456789',
+          useFor: ['journeys'],
+        })
+      ).id;
+    }
+  });
+
+  it('refuses a replay from a paused agent, as it refuses any of its writes', async () => {
+    const api = t.api(owner);
+    const first = await refresh(segmentId, 'replay-paused');
+    expect(first.status).toBe(200);
+
+    await api.call('agents.pause', { id: replayAgent });
+    try {
+      const again = await refresh(segmentId, 'replay-paused');
+      expect(again.status).toBe(403);
+      expect(again.body.message).toContain('paused');
+    } finally {
+      await api.call('agents.resume', { id: replayAgent });
+    }
+  });
+
+  it('answers a different request with the same key as a conflict without running policy or the check', async () => {
+    const first = await refresh(segmentId, 'replay-reused');
+    expect(first.status).toBe(200);
+    const checkCount = checks();
+
+    const reused = await refresh(otherSegment, 'replay-reused');
+    expect(reused.status).toBe(409);
+    expect(reused.body.details?.reason).toBe('idempotency_key_reused');
+    expect(checks()).toBe(checkCount);
+  });
+
+  it('runs a concurrent same-key agent write once, with one check', async () => {
+    const before = checks();
+    const activity = async () =>
+      (await t.api(owner).call('agents.activity', { agentId: replayAgent, limit: 100 })).actions.filter(
+        (x) => x.command === 'segments.refresh',
+      ).length;
+    const actionsBefore = await activity();
+    const [a, b] = await Promise.all([refresh(segmentId, 'replay-concurrent'), refresh(segmentId, 'replay-concurrent')]);
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(b.body).toEqual(a.body);
+    expect(checks()).toBe(before + 1);
+    expect(await activity()).toBe(actionsBefore + 1);
+  }, 60_000);
+});
