@@ -127,6 +127,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0093_one_published_version.sql': '0.14.21',
   '0094_single_active_mandate.sql': '0.14.21',
   '0095_ad_spend_gaps.sql': '0.14.21',
+  '0096_message_request_identity.sql': '0.14.23',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

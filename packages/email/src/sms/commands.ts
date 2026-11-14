@@ -1,9 +1,10 @@
 import { contentValidators, DEFAULT_PURPOSES, publishedSingleton, publishValidators, type SmsTemplate } from '@agentic-marketing/artifacts';
-import { defineCommand } from '@agentic-marketing/commands';
+import { callerHash, defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { sendRequestHash } from '../gateway';
 import { isMarketing } from '../policy';
 import { templateRenderError } from '../render';
 import { directSendImpact, directSendLedger } from '../sendTouches';
@@ -41,6 +42,12 @@ export const sendSms = defineCommand({
     requestSms(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
+      requestHash: sendRequestHash('sms', {
+        caller: callerHash(ctx.principal),
+        recipient: input.profileId,
+        template: input.templateId,
+        data: input.data ?? null,
+      }),
     }),
 });
 

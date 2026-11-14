@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import RecipesPage from '../../../pages/build/RecipesPage';
@@ -345,5 +345,120 @@ describe('Starters gallery (#526)', () => {
     await act(async () => {});
     expect(screen.queryByText(/Created 1 drafts/)).toBeNull();
     expect(screen.queryByText('Starter A draft')).toBeNull();
+  });
+
+  // #933: a parameter edit invalidates the derived state, exactly as a selection change does. The
+  // screen once kept the old parameters' "Everything is in place", prerequisites and enabled
+  // Create drafts, and two checks could overwrite each other because only `load()` moved the
+  // sequence.
+  const editParam = async (value: string) => {
+    const input = screen.getByLabelText(/^Newsletter name/);
+    await userEvent.clear(input);
+    await userEvent.type(input, value);
+  };
+
+  it('drops the previous parameters’ check and readiness when a parameter changes', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /Weekly newsletter/ });
+    await waitFor(() => expect(screen.getByText('Everything is in place.')).toBeTruthy());
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false);
+    expect(screen.getByRole('heading', { name: 'Prerequisites' })).toBeTruthy();
+
+    await editParam('Fjeldvej');
+
+    expect(screen.queryByText('Everything is in place.')).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Prerequisites' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
+
+    // A new check computes for the current parameters and restores readiness.
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(screen.getByText('Everything is in place.')).toBeTruthy());
+    expect(h.calls.filter((c) => c.name === 'recipes.preview').at(-1)?.input.params).toMatchObject({ newsletterName: 'Fjeldvej' });
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false);
+  });
+
+  it('keeps a slow check for the old parameters off the screen after an edit', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /Weekly newsletter/ });
+    await waitFor(() => expect(screen.getByText('Everything is in place.')).toBeTruthy());
+
+    h.holdPreview = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(h.previewHeld).toHaveLength(1));
+
+    await editParam('Fjeldvej');
+    await act(async () => {
+      h.previewHeld[0].resolve({
+        ready: true,
+        prerequisites: [{ kind: 'purpose', description: 'Old purpose', ok: true, message: '' }],
+        artifacts: [{ key: 'tpl_old', type: 'email_template', name: 'Old parameters draft' }],
+      });
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText('Everything is in place.')).toBeNull();
+    expect(screen.queryByText('Old parameters draft')).toBeNull();
+    expect(screen.queryByText('Old purpose')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
+  });
+
+  it('lets only the latest of two checks in flight commit', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /Weekly newsletter/ });
+    await waitFor(() => expect(screen.getByText('Everything is in place.')).toBeTruthy());
+
+    // Two clicks in one tick, before the button can paint its loading state: both checks run.
+    h.holdPreview = true;
+    const button = screen.getByRole('button', { name: 'Check prerequisites' });
+    await act(async () => {
+      fireEvent.click(button);
+      fireEvent.click(button);
+    });
+    await waitFor(() => expect(h.previewHeld).toHaveLength(2));
+
+    const [older, newer] = h.previewHeld;
+    await act(async () => {
+      newer.resolve({
+        ready: false,
+        prerequisites: [{ kind: 'purpose', description: 'New purpose', ok: false, message: 'The newest check says a purpose is missing.' }],
+        artifacts: [{ key: 'tpl_new', type: 'email_template', name: 'Newest check draft' }],
+      });
+    });
+    await screen.findByText('The newest check says a purpose is missing.');
+
+    // The older check resolves last; its result belongs to no current request.
+    await act(async () => {
+      older.resolve({
+        ready: true,
+        prerequisites: [{ kind: 'purpose', description: 'Old purpose', ok: true, message: '' }],
+        artifacts: [{ key: 'tpl_old', type: 'email_template', name: 'Older check draft' }],
+      });
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText('Older check draft')).toBeNull();
+    expect(screen.queryByText('Everything is in place.')).toBeNull();
+    expect(screen.getByText('The newest check says a purpose is missing.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
+  });
+
+  it('does not show an install success under parameters it was not run for', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /Weekly newsletter/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    h.holdInstall = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+
+    await editParam('Fjeldvej');
+    await act(async () => {
+      h.installHeld[0].resolve({ artifacts: [{ artifactId: `eml_${'e'.repeat(32)}`, name: 'Old parameters draft' }] });
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText(/Created 1 drafts/)).toBeNull();
+    expect(screen.queryByText('Old parameters draft')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
   });
 });

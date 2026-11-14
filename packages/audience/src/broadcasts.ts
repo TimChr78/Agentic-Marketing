@@ -31,6 +31,7 @@ import {
   requestEmail,
   requestPush,
   requestSms,
+  sendRequestHash,
   sendTestMessages,
   testRecipientsInput,
   testSendOutput,
@@ -311,6 +312,12 @@ async function suppressForControl(
       reason,
       variant: variant ?? null,
       agentId,
+      requestHash: sendRequestHash(channel, {
+        caller: 'system:broadcast_holdout',
+        recipient: profileId,
+        broadcast: broadcastId,
+        campaign: campaignId,
+      }),
     })
     .onConflictDoNothing()
     .returning({ id: schema.messages.id });
@@ -1445,6 +1452,13 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           notBefore = hold.next;
         }
       }
+      // A broadcast sends one stable request per recipient: the run id, the person and the variant,
+      // never the rendered subject or payload, so a redelivery or a rule-out replay stays one message.
+      const channel = def.template.startsWith('sms_')
+        ? ('sms' as const)
+        : def.template.startsWith('psh_')
+          ? ('push' as const)
+          : ('email' as const);
       const d = await requestFor(def.template)(tx, ws, deps.kp, deps.events, {
         profileId: m.profileId,
         templateId: def.template,
@@ -1456,6 +1470,11 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         subject,
         notBefore,
         agentId: artifact.ownerAgentId,
+        requestHash: sendRequestHash(channel, {
+          caller: 'system:broadcast',
+          recipient: m.profileId,
+          broadcast: broadcastId,
+        }),
       });
       if (test?.state === 'sampling' && d.status === 'queued' && !windowSkip) {
         const at = notBefore ?? now;

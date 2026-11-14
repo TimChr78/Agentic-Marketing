@@ -87,6 +87,9 @@ export function smsRoutes(deps: Deps) {
         const inbound = transport.parseInbound(req);
         if (!inbound) return { status: 400 as const };
         const match = classifySmsReply(inbound.body);
+        // The provider's payload carries no message time, so the request's arrival is the action's
+        // time; it is a synchronous write and never the time a later job got to it (#928).
+        const receivedAt = new Date();
         let reply: string | null = null;
         if (match?.intent === 'stop') {
           const { hash, profileIds } = await profilesWithPhone(tx, target.ws, deps.kp, inbound.from);
@@ -103,6 +106,7 @@ export function smsRoutes(deps: Deps) {
                 channel: 'sms',
                 status: p.basis === 'legitimate_interest' ? ('objected' as const) : ('withdrawn' as const),
                 source: 'unsubscribe' as const,
+                recordedAt: receivedAt,
                 proof: { via: `SMS ${match.keyword}`, provider: provider.id },
               })),
             );
