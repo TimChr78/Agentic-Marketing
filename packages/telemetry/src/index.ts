@@ -124,22 +124,33 @@ function tracesEndpointUrl(specific: string | undefined, generic: string): strin
   return new URL(`${generic.endsWith('/') ? generic : `${generic}/`}v1/traces`).toString();
 }
 
-/** Whether OTEL_EXPORTER_OTLP[_TRACES]_HEADERS already sets Authorization (decoded, case-insensitive). */
+/**
+ * Whether OTEL_EXPORTER_OTLP[_TRACES]_HEADERS sets an Authorization header the exporter will
+ * really send. The entries are read by the SDK's own rules (`parseKeyPairsIntoRecord` in
+ * @opentelemetry/core): split on commas, anything after `;` dropped, the first `=` separates key
+ * and value, both trimmed, non-empty and percent-decoded. An entry the SDK drops (no `=`, an empty
+ * value, an invalid escape) does not count, so the URL's credentials still apply.
+ */
 function envHasAuthorization(): boolean {
-  const names = [process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS, process.env.OTEL_EXPORTER_OTLP_HEADERS]
+  return [process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS, process.env.OTEL_EXPORTER_OTLP_HEADERS]
     .flatMap((raw) => (raw ?? '').split(','))
-    .map((pair) => decodedHeaderName(pair.split('=')[0] ?? ''))
-    .filter(Boolean);
-  return names.includes('authorization');
+    .some((entry) => sentHeaderName(entry) === 'authorization');
 }
 
-/** A header name as the SDK reads it: percent-decoded (`%61uthorization`), trimmed, lower-cased. */
-function decodedHeaderName(raw: string): string {
-  const name = raw.trim();
+/** The lower-cased name of a header-list entry the SDK accepts, or undefined when it drops it. */
+function sentHeaderName(entry: string): string | undefined {
+  const metadata = entry.indexOf(';');
+  const pair = metadata === -1 ? entry : entry.slice(0, metadata);
+  const separator = pair.indexOf('=');
+  if (separator <= 0) return undefined;
+  const rawKey = pair.slice(0, separator).trim();
+  const rawValue = pair.slice(separator + 1).trim();
+  if (!rawKey || !rawValue) return undefined;
   try {
-    return decodeURIComponent(name).trim().toLowerCase();
+    if (!decodeURIComponent(rawValue)) return undefined;
+    return decodeURIComponent(rawKey).toLowerCase();
   } catch {
-    return name.toLowerCase();
+    return undefined;
   }
 }
 

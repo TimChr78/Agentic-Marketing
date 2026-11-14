@@ -133,4 +133,32 @@ describe('the real OTLP exporter (#931 A2/A3)', () => {
     });
     expect(sent[0]!.headers.authorization).toBe('Bearer trace-token');
   });
+
+  // Round 4: an entry the SDK itself drops is not an Authorization header, so the URL's
+  // credentials still apply.
+  const DROPPED = [
+    ['no separator', '%61uthorization'],
+    ['an empty value', '%61uthorization= '],
+    ['an invalid escape in the value', '%41uthorization=Bearer%ZZ'],
+    ['an invalid escape in the name', '%ZZauthorization=Bearer%20x'],
+  ] as const;
+  const cases = DROPPED.flatMap(([label, header]) =>
+    (['OTEL_EXPORTER_OTLP_HEADERS', 'OTEL_EXPORTER_OTLP_TRACES_HEADERS'] as const).map((variable) => [label, variable, header] as const),
+  );
+
+  it.each(cases)('keeps the URL credentials when the env entry has %s (%s)', async (_label, variable, header) => {
+    const sent = await exportOnce({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `http://alice:p%40ss@${new URL(base).host}`,
+      [variable]: header,
+    });
+    expect(sent[0]!.headers.authorization).toBe(basic('alice:p@ss'));
+  });
+
+  it('reads an entry with metadata after a semicolon as the SDK does', async () => {
+    const sent = await exportOnce({
+      OTEL_EXPORTER_OTLP_ENDPOINT: `http://alice:p%40ss@${new URL(base).host}`,
+      OTEL_EXPORTER_OTLP_HEADERS: 'authorization=Bearer%20env-token;ignored=1',
+    });
+    expect(sent[0]!.headers.authorization).toBe('Bearer env-token');
+  });
 });
