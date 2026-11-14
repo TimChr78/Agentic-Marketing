@@ -595,7 +595,7 @@ describe('named reports', () => {
     expect(funnel.entered).toBeNull();
     expect(funnel.steps.every((s) => s.reached !== 3 && s.dropOff !== 3)).toBe(true);
     expect(funnel.meta.suppressed).toBeGreaterThanOrEqual(3);
-    expect(funnel.meta.notes.join(' ')).toContain('suppressed');
+    expect(funnel.meta.notes.join(' ')).toContain('Steps after a_trigger are hidden');
   });
 
   it('protects a hidden branch from the fork total, not with an unrelated step (#908 review)', async () => {
@@ -665,7 +665,7 @@ describe('named reports', () => {
     ];
     const differences = visible.flatMap((a) => visible.filter((b) => b !== a).map((b) => Math.abs(a - b)));
     expect(differences).not.toContain(3);
-    expect(funnel.meta.notes.join(' ')).toContain('branch');
+    expect(funnel.meta.notes.join(' ')).toContain('Steps after split are hidden');
   });
 
   it('withholds every headline for a goal match/timeout split (#908 review round 4)', async () => {
@@ -734,6 +734,89 @@ describe('named reports', () => {
     const differences = visible.flatMap((x) => visible.filter((y) => y !== x).map((y) => Math.abs(x - y)));
     expect(differences).not.toContain(3);
     expect(funnel.meta.notes.join(' ')).toContain('All totals are withheld');
+  });
+
+  it('hides the whole subtree of a small branch parent, so a same-advance e-mail step cannot leak 1 (#908 review round 5)', async () => {
+    const api = t.api(owner);
+    const mail = await api.call('artifacts.create', {
+      type: 'email_template',
+      name: 'Small branch mail',
+      content: {
+        purpose: 'marketing_email',
+        subject: 'Hi',
+        mjml: '<mjml><mj-body><mj-section><mj-column><mj-text>Hi</mj-text><mj-text><a href="{{ unsubscribe_url | raw }}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>',
+      },
+    });
+    await api.call('artifacts.requestPublish', { artifactId: mail.artifactId, note: 'small branch mail' });
+    const journey = (
+      await api.call('artifacts.create', {
+        type: 'journey',
+        name: 'Small branch with an e-mail sibling',
+        content: {
+          purpose: 'marketing_email',
+          nodes: [
+            { id: 'trigger', kind: 'trigger', label: 'Entered', config: { event: 'Order Completed' }, next: [{ to: 'split' }] },
+            { id: 'split', kind: 'split', label: 'A/B', config: { weights: [99, 1] }, next: [{ to: 'small_exit' }, { to: 'a_large' }] },
+            { id: 'small_exit', kind: 'exit', label: 'Small', config: {} },
+            { id: 'a_large', kind: 'email', label: 'Large mail', config: { template: mail.artifactId }, next: [{ to: 'z_end' }] },
+            { id: 'z_end', kind: 'exit', label: 'End', config: {} },
+          ],
+        },
+      })
+    ).artifactId;
+    await api.call('artifacts.requestPublish', { artifactId: journey, note: 'small branch' });
+
+    const events: JourneyEvent[] = [];
+    const add = (profileId: string, node: string, type: JourneyEvent['type'], seq: number) =>
+      events.push({
+        workspaceId: wsA,
+        journeyId: journey,
+        version: 1,
+        participantId: Number.parseInt(profileId.slice(-8), 16),
+        profileId,
+        node,
+        type,
+        seq,
+        at: FROM,
+        detail: '',
+      });
+    // 100 reach the fork: 1 takes the small exit, 99 walk the e-mail node and z_end in one advance.
+    for (let i = 0; i < 100; i++) {
+      const p = person();
+      add(p, 'trigger', 'entered', 0);
+      add(p, 'trigger', 'step', 1);
+      add(p, 'split', 'step', 2);
+      if (i === 0) {
+        add(p, 'small_exit', 'step', 3);
+        add(p, 'small_exit', 'completed', 4);
+      } else {
+        add(p, 'a_large', 'step', 3);
+        add(p, 'z_end', 'step', 4);
+        add(p, 'z_end', 'completed', 5);
+      }
+    }
+    await t.srv.events.insertJourneyEvents(events);
+
+    const funnel = await api.call('analytics.journeyFunnel', { journeyId: journey, from: FROM, to: TO });
+    const reached = Object.fromEntries(funnel.steps.map((step) => [step.step, step.reached]));
+    expect(reached.small_exit).toBeNull();
+    // a_large and z_end are recorded in the same advance; both are below the hidden branch's parent.
+    expect(reached.a_large).toBeNull();
+    expect(reached.z_end).toBeNull();
+    expect(reached.trigger).toBe(100);
+    expect(reached.split).toBe(100);
+    const visible = [
+      ...funnel.steps.flatMap((step) => (step.reached === null ? [] : [step.reached])),
+      ...Object.values({
+        entered: funnel.entered,
+        goalReached: funnel.goalReached,
+        completed: funnel.completed,
+        exited: funnel.exited,
+      }).flatMap((value) => (value === null ? [] : [value])),
+    ];
+    expect(visible).not.toContain(99);
+    expect(funnel.entered).toBeNull();
+    expect(funnel.meta.notes.join(' ')).toContain('Steps after split are hidden');
   });
 
   it('computes the drop-off chain over the published version only (#591)', async () => {

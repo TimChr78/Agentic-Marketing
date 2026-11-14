@@ -1,4 +1,4 @@
-import { artifactTypes, planComplementarySuppression } from '@agentic-marketing/artifacts';
+import { artifactTypes } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -79,22 +79,25 @@ export interface JourneyFunnelNode {
 type TotalName = 'entered' | 'goalReached' | 'completed' | 'exited';
 
 /**
- * The funnel's k rule (#908, #917 review rounds 2-4).
+ * The funnel's k rule (#908, #917 review rounds 2-5).
  *
- * Step rows are protected along the published topology. A relation between STEPS is a set of counts
- * that add up: a fork's children to their parent, and a reconvergence's parents to the node. When
- * exactly one term of a relation is hidden, the smallest visible term of that SAME relation is hidden
- * too (or the parent/node when that is the only other term), and the shared
- * {@link planComplementarySuppression} repeats to a fixed point. A step in an unrelated branch is
- * never a complement.
+ * Step rows are read RAW from the measure layer (no row suppression) so this report can apply a rule
+ * that is sound by construction. Let P be the rows that are below k (primary hidden rows). For every
+ * h in P and every parent p of h in the published graph, hide every proper descendant of p: all of
+ * p's children and everything below them, through forks, merges and loops (a visited set terminates
+ * cycles; p itself stays visible). If a primary row has no parent — an entry/trigger step — hide
+ * every step row. Nothing else is hidden, and rows hidden by this rule never trigger it again.
  *
- * Headlines are not modelled. How a headline relates to the steps cannot be known in general:
- * `goalReached` counts participants who matched the goal, not the goal step's reach (a timeout still
- * reaches the step), `completed` can be recorded at several nodes, and `exited` anywhere. So once any
- * step row is hidden — below k or as a complementary row — every headline total is withheld (null):
- * a headline minus the visible steps could otherwise name the hidden count. A positive headline that
- * is itself below k is withheld regardless. A drop-off or rate with a hidden operand is null in the
- * handler. Over-suppression is deliberate; the note says a hidden step withheld the totals.
+ * Why it is sound: every number the response still prints is unchanged if one participant who passed
+ * through p is moved between branches below p, or from waiting at p into h's branch, because every
+ * row that changes lies below p and is hidden and the headlines are withheld whenever a step is
+ * hidden. Two populations with different counts at h therefore produce the same visible response.
+ *
+ * Headlines are never modelled: whenever any step row is hidden, every headline total is withheld
+ * (a headline minus the visible steps could name the hidden count); a positive headline below k is
+ * withheld regardless. Without a published topology there is no graph, so a below-k step hides every
+ * step row and every headline. Drop-off and rate with a hidden operand are null in the handler.
+ * Over-suppression is deliberate.
  */
 export function planJourneyFunnelSuppression(opts: {
   totals: JourneyFunnelTotals;
@@ -107,7 +110,10 @@ export function planJourneyFunnelSuppression(opts: {
   steps: JourneyFunnelStep[];
   withheld: string[];
   hiddenSteps: number;
-  complementary: boolean;
+  /** The parents whose whole subtree was hidden, for the note. */
+  hiddenParents: string[];
+  /** True when every step row was hidden (no graph, or a hidden step with no parent). */
+  allStepsHidden: boolean;
 } {
   const k = opts.k ?? K;
   const names: readonly TotalName[] = ['entered', 'goalReached', 'completed', 'exited'];
@@ -115,73 +121,47 @@ export function planJourneyFunnelSuppression(opts: {
   const totals = { ...opts.totals };
   const steps = opts.steps.map((step) => ({ ...step }));
   const present = new Set(steps.map((step) => step.step));
-  const reached = new Map(steps.map((step) => [step.step, step.reached ?? 0]));
-  const hidden = new Map(steps.map((step) => [step.step, step.reached === null]));
-  const hideStep = (id: string): boolean => {
-    if (hidden.get(id) !== false) return false;
-    hidden.set(id, true);
-    return true;
-  };
 
-  interface Relation {
-    name: string;
-    steps: readonly string[];
-    /** Hidden when the relation has one hidden term and nothing visible to hide in its place. */
-    withheldStep?: string;
-  }
-  const relations: Relation[] = [];
-  if (opts.topology) {
-    const children = new Map(opts.topology.map((node) => [node.id, node.children.filter((id) => present.has(id))]));
-    const parents = new Map<string, string[]>();
-    for (const node of opts.topology)
-      for (const child of children.get(node.id) ?? []) parents.set(child, [...(parents.get(child) ?? []), node.id]);
-    for (const node of opts.topology) {
-      const kids = children.get(node.id) ?? [];
-      if (kids.length >= 2)
-        relations.push({
-          name: `fork:${node.id}`,
-          steps: [...(present.has(node.id) ? [node.id] : []), ...kids],
-          ...(present.has(node.id) ? { withheldStep: node.id } : {}),
-        });
-      const from = (parents.get(node.id) ?? []).filter((id) => present.has(id));
-      if (from.length >= 2)
-        relations.push({
-          name: `merge:${node.id}`,
-          steps: [...(present.has(node.id) ? [node.id] : []), ...from],
-          ...(present.has(node.id) ? { withheldStep: node.id } : {}),
-        });
+  // A row with reached 0 is not below k; a null input row is already hidden.
+  const primary = steps.filter((step) => step.reached === null || (step.reached > 0 && step.reached < k)).map((step) => step.step);
+  const hidden = new Set<string>();
+  const hiddenParents = new Set<string>();
+  let allStepsHidden = false;
+
+  if (primary.length) {
+    if (!opts.topology) {
+      allStepsHidden = true;
+    } else {
+      const childrenOf = new Map(opts.topology.map((node) => [node.id, node.children]));
+      for (const step of primary) {
+        const parents = opts.topology.filter((node) => node.children.includes(step)).map((node) => node.id);
+        if (!parents.length) {
+          // An entry/trigger step has no parent to scope the change to.
+          allStepsHidden = true;
+          break;
+        }
+        for (const parent of parents) {
+          hiddenParents.add(parent);
+          // Every proper descendant of the parent; the parent itself seeds the visited set so a
+          // loop back to it does not hide it.
+          const seen = new Set([parent]);
+          const queue = [...(childrenOf.get(parent) ?? [])];
+          while (queue.length) {
+            const id = queue.shift()!;
+            if (seen.has(id)) continue;
+            seen.add(id);
+            if (present.has(id)) hidden.add(id);
+            queue.push(...(childrenOf.get(id) ?? []));
+          }
+        }
+      }
     }
   }
-  const byName = new Map(relations.map((relation) => [relation.name, relation]));
-  const termsOf = (relation: Relation) =>
-    relation.steps.map((id) => ({
-      id: `s:${id}`,
-      group: reached.get(id) ?? 0,
-      value: reached.get(id) ?? 0,
-      hidden: hidden.get(id) === true,
-    }));
-
-  for (let round = 0; round <= relations.length + steps.length + 2; round++) {
-    const plan = planComplementarySuppression({
-      totals: relations.map((relation) => relation.name),
-      contributors: (name) => termsOf(byName.get(name)!),
-      hide: (name, id) => {
-        const relation = byName.get(name);
-        const key = String(id).replace(/^s:/, '');
-        return Boolean(relation && relation.steps.includes(key)) && hideStep(key);
-      },
-    });
-    let changed = false;
-    for (const name of plan.withheld) {
-      const step = byName.get(name)?.withheldStep;
-      if (step !== undefined && hideStep(step)) changed = true;
-    }
-    if (!changed) break;
-  }
+  if (allStepsHidden) for (const step of steps) hidden.add(step.step);
 
   let hiddenSteps = 0;
   for (const step of steps) {
-    if (hidden.get(step.step) !== true) continue;
+    if (!hidden.has(step.step)) continue;
     if (step.reached !== null) hiddenSteps += 1;
     step.reached = null;
   }
@@ -191,13 +171,27 @@ export function planJourneyFunnelSuppression(opts: {
     const value = totals[name];
     if (value !== null && value > 0 && value < k) totals[name] = null;
   }
-  // A hidden step can be recovered as a headline minus the visible steps, so with any hidden step
-  // every headline goes. This holds without a published topology too: no relations, but the same
-  // conservative rule.
+  // Any hidden step could be recovered as a headline minus the visible steps, so every headline goes.
   if (steps.some((step) => step.reached === null)) for (const name of names) totals[name] = null;
 
+  // Drop a parent that is itself inside another hidden parent's subtree: the note names the roots,
+  // and a second primary row below one only adds a redundant name.
+  const descendantsOf = (root: string): Set<string> => {
+    const seen = new Set<string>([root]);
+    const queue = [...(opts.topology?.find((node) => node.id === root)?.children ?? [])];
+    while (queue.length) {
+      const id = queue.shift()!;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      queue.push(...(opts.topology?.find((node) => node.id === id)?.children ?? []));
+    }
+    return seen;
+  };
+  const roots = [...hiddenParents].filter(
+    (parent) => ![...hiddenParents].some((other) => other !== parent && descendantsOf(other).has(parent)),
+  );
   const withheld = names.filter((name) => totals[name] === null && initial[name] !== null);
-  return { totals, steps, withheld, hiddenSteps, complementary: hiddenSteps > 0 };
+  return { totals, steps, withheld, hiddenSteps, hiddenParents: roots.sort(), allStepsHidden };
 }
 
 /**
@@ -315,7 +309,8 @@ export const analyticsJourneyFunnel = defineCommand({
   name: 'analytics.journeyFunnel',
   title: 'Journey funnel',
   description:
-    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. A drop-off or rate that would be computed from a withheld count is null. Counts use only the published version when the journey has one. Step counts come from journey_events; groups smaller than k=5 are suppressed and counted in meta.suppressed. Step rows are protected along the published topology: a fork’s branches add up to their parent and a reconvergence’s parents to the node, so when exactly one term of such a relation is hidden the smallest visible term of that same relation (or the parent/node when it is the only other term) is hidden too. Headlines are not modelled: if any step row is hidden, every headline total (entered, goalReached, completed, exited) is withheld (null), because a headline minus the visible steps could name the hidden count, and a positive headline below k is withheld regardless. Without a published version the step relations are unknown and no complementary step is hidden, but the same headline rule applies. A note says which totals were withheld and why.',
+    'One journey over a period: entered → each step reached → goal reached → completed or exited. Drop-off and drop-off rate are returned only for a straight-line published journey (no branch, split, alternative wait/action exit, loop or reconvergence) whose counts are non-increasing along the walk; any other topology, or a later step that outnumbers an earlier one because people joined mid-journey (for example after a version migration), reports reach per node in breadth-first order with null drop-off. A drop-off or rate that would be computed from a withheld count is null. Counts use only the published version when the journey has one. Step counts come from journey_events. A step row below k=5 hides the whole subtree under its parent in the published graph — every descendant, through forks, merges and loops — so moving one participant between branches under that parent cannot change anything the response still shows. A below-k entry step, or any below-k step when no published version is selected, hides every step row. Headlines are not modelled: if any step row is hidden, every headline total (entered, goalReached, completed, exited) is withheld (null), because a headline minus the visible steps could name the hidden count, and a positive headline below k is withheld regardless. A drop-off or rate with a hidden operand is null. A note names the hidden subtree’s parent, or says every step row was hidden.',
+
   input: z.object({
     journeyId: JourneyId,
     from: isoDateTime('from'),
@@ -371,6 +366,8 @@ export const analyticsJourneyFunnel = defineCommand({
       filters,
       limit: 5000,
       order: { by: 'journey_step', dir: 'asc' },
+      // Raw rows: this report applies its own subtree rule below (#917 review round 5).
+      suppress: false,
       ...versionScope,
     });
 
@@ -424,8 +421,14 @@ export const analyticsJourneyFunnel = defineCommand({
     });
 
     const suppressionNotes: string[] = [];
-    if (funnel.hiddenSteps > 0)
-      suppressionNotes.push(`One further step row was suppressed so a step below k=${K} cannot be derived from its branch.`);
+    if (funnel.allStepsHidden)
+      suppressionNotes.push(
+        published
+          ? `Every step row is hidden because a step below k=${K} has no parent in the published graph.`
+          : `No published version is selected, and a step has fewer than k=${K} people, so every step row is hidden.`,
+      );
+    else if (funnel.hiddenParents.length > 0)
+      suppressionNotes.push(`Steps after ${funnel.hiddenParents.join(', ')} are hidden because one of them has fewer than k=${K} people.`);
     if (steps.some((step) => step.reached === null))
       suppressionNotes.push(
         'All totals are withheld because a step row is hidden: a headline minus the visible steps could name the hidden count.',
@@ -456,7 +459,7 @@ export const analyticsJourneyFunnel = defineCommand({
       steps,
       meta: {
         ...stepsResult.meta,
-        suppressed: totals.meta.suppressed + stepsResult.meta.suppressed + funnel.hiddenSteps + funnel.withheld.length,
+        suppressed: steps.filter((step) => step.reached === null).length + funnel.withheld.length,
         notes,
       },
     };

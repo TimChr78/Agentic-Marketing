@@ -67,6 +67,12 @@ export type QueryInput = z.infer<typeof queryInput> & {
    * describes one topology; analytics.query's own input does not accept it.
    */
   journeyVersion?: number;
+  /**
+   * Internal: return the raw rows without the k floor. Only a named report that applies its own,
+   * stricter rule may use it (the journey funnel hides whole subtrees of a hidden step); the raw
+   * values never leave that handler. analytics.query's own input does not accept it.
+   */
+  suppress?: boolean;
 };
 
 export const analyticsColumn = z.object({
@@ -328,6 +334,25 @@ export interface SuppressedRows {
  * in another, so the plan repeats until stable. The rows are in the query's deterministic sort
  * order, which decides a tie.
  */
+/**
+ * Shapes rows without applying the k floor. Only for an internal named report that applies its own
+ * rule to the raw counts; the values are never returned directly.
+ */
+export function rawRows(raw: readonly Record<string, unknown>[], compiled: Pick<CompiledQuery, 'outputs'>): (string | number | null)[][] {
+  return raw.map((row) =>
+    compiled.outputs.map((out) => {
+      const value = row[out.alias];
+      if (out.kind === 'dimension') {
+        if (value === '' || value === null || value === undefined) return null;
+        return typeof value === 'number' ? value : String(value);
+      }
+      if (value === null || value === undefined) return null;
+      const n = Number(value);
+      return Number.isFinite(n) ? n : null;
+    }),
+  );
+}
+
 export function suppressRows(
   raw: readonly Record<string, unknown>[],
   compiled: Pick<CompiledQuery, 'outputs' | 'kAlias' | 'revenueKAlias' | 'hasNonTimeDimension'>,
@@ -692,7 +717,10 @@ async function execute(deps: Deps, input: QueryInput, measures: MeasureDef[], di
     'analytics query',
   );
 
-  const shaped = suppressRows(raw, compiled);
+  const shaped =
+    input.suppress === false
+      ? { rows: rawRows(raw, compiled), suppressed: 0, complementary: false, revenueSuppressed: 0, withheld: [] as string[] }
+      : suppressRows(raw, compiled);
   const rows = shaped.rows;
   const { suppressed, revenueSuppressed } = shaped;
 
