@@ -130,8 +130,15 @@ export function ApprovalDrawer({
     setBusy(kind);
     setActionError(null);
     try {
-      if (kind === 'approve') await api.call('approvals.approve', { approvalId: a.id });
-      else await api.call('approvals.reject', { approvalId: a.id, note: reason.trim() });
+      if (kind === 'approve') {
+        const out = await api.call('approvals.approve', { approvalId: a.id });
+        // An archived artifact can never be published; the request is closed as rejected (#900).
+        if (out.status === 'rejected') {
+          setActionError(out.reason ?? 'This change names an archived artifact, so nothing was published.');
+          await d.reload();
+          return;
+        }
+      } else await api.call('approvals.reject', { approvalId: a.id, note: reason.trim() });
       for (const m of bundle?.members ?? [a]) invalidateArtifact(m.artifactId);
       const what = bundle
         ? `${bundle.members.length} changes (${bundle.members.map((m) => `“${m.artifactName}”`).join(', ')})`

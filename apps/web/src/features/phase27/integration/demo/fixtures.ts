@@ -106,7 +106,16 @@ function artifact(
   publishedVersion: number | null,
   updatedAt: string,
 ): DemoArtifactRow {
-  return { id: demoId(prefix, `${type}:${name}`), type, name, latestVersion, latestState: state, publishedVersion, updatedAt };
+  return {
+    id: demoId(prefix, `${type}:${name}`),
+    type,
+    name,
+    latestVersion,
+    latestState: state,
+    publishedVersion,
+    updatedAt,
+    archived: false,
+  };
 }
 
 /**

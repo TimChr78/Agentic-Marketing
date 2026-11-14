@@ -509,8 +509,13 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             async (tx) => {
               committed.length = 0;
               policy = undefined;
+              // The agent-policy lock comes first for every agent write (#922 A2): before a
+              // command's `impact`, which may lock artifacts for the independent check. Taking it
+              // later is what let a held run and a publish request deadlock on the same artifact.
+              // See lockAgentPolicy for the one global order.
+              if (agent && cmd.effect !== 'read') await lockAgentPolicy(tx, principal.workspaceId, agent.id);
               // The agent was resolved when the request (or a hosted run) began; a pause or revoke
-              // committed since then stops this command too (#275).
+              // committed since then stops this command too (#275). Read under the lock above.
               if (agent) {
                 const [current] = await tx
                   .select({ status: schema.agents.status, statusReason: schema.agents.statusReason })
@@ -769,6 +774,30 @@ export async function coordinationFor(
 }
 
 /**
+ * The per-agent transaction lock that serialises every decision about one agent's writes: the
+ * policy engine, the guardian, the held-change runner and a person's pause/resume/revoke/clearGuard
+ * all take it, so a pause, a cap or a refusal committed by one is visible to the other and cannot
+ * interleave with it (#240, #907, #922).
+ *
+ * THE ONE LOCK ORDER on these paths, everywhere:
+ *   1. this agent-policy lock,
+ *   2. approval_requests rows (`lockApproval`),
+ *   3. artifact rows in id order (`lockArtifacts`, `coordinationFor`),
+ *   4. the mandate validator's `am.agent-mandate` lock (taken inside `publishVersion`).
+ * Take it before a command's `impact` (which may lock artifacts for the independent check, #283),
+ * before any status/guard read that gates a write, and before approval or artifact locks. The
+ * executor (agent writes), `approvals.approve` (an agent's request), `runHeldChange`, the guardian
+ * and `agents.pause`/`resume`/`revoke`/`clearGuard` all follow this order; a path that needs two of
+ * these locks must not take them the other way round or the held runner and a publish request can
+ * deadlock on the same artifact (#922 A2).
+ *
+ * Transaction-scoped and reentrant; the key string must stay identical everywhere.
+ */
+export async function lockAgentPolicy(tx: Tx, workspaceId: string, agentId: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${workspaceId}:${agentId}`}, 0))`);
+}
+
+/**
  * The policy decision for one agent write (ADR-0016): the workspace settings, the agent's active
  * mandate, its guardrails and counters, then the independent check. Used by the executor for
  * every command and by commands that publish on an agent's behalf (config.import, #239).
@@ -785,7 +814,7 @@ export async function agentPolicy(
 ): Promise<PolicyOutcome> {
   const agent = principal.agent;
   if (!agent) throw new Error('agentPolicy needs an agent principal');
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${principal.workspaceId}:${agent.id}`}, 0))`);
+  await lockAgentPolicy(tx, principal.workspaceId, agent.id);
   const [ws] = await tx.select({ autonomy: schema.workspaces.autonomy }).from(schema.workspaces);
   const [row] = await tx
     .select({ guard: schema.agents.guard, status: schema.agents.status, statusReason: schema.agents.statusReason })
@@ -1013,6 +1042,11 @@ function knownConflict(err: unknown): AppError | null {
       'conflict',
       'This workspace already has an artifact of that type: another change created it at the same time. Nothing was written; retry and edit the existing artifact.',
     );
+  if (isOnePublishedConflict(err))
+    return new AppError(
+      'conflict',
+      'This artifact already has a published version: another change published one at the same time. Nothing was written; retry, then edit and publish the latest draft.',
+    );
   return null;
 }
 
@@ -1022,24 +1056,28 @@ export function isDeadlock(err: unknown): boolean {
   return false;
 }
 
-/** Postgres 23505 on the idempotency primary key, directly or as the cause of a query error. */
-function isIdempotencyKeyConflict(err: unknown): boolean {
+/** Postgres 23505 on the unique index `index`, directly or as the cause of a query error. */
+function uniqueViolationOn(err: unknown, index: string): boolean {
   for (
     let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | undefined, depth = 0;
     e && depth < 5;
     e = e.cause as typeof e, depth++
   )
-    if (e.code === '23505' && e.constraint === 'idempotency_keys_pkey') return true;
+    if (e.code === '23505' && e.constraint === index) return true;
   return false;
+}
+
+/** Postgres 23505 on the idempotency primary key, directly or as the cause of a query error. */
+function isIdempotencyKeyConflict(err: unknown): boolean {
+  return uniqueViolationOn(err, 'idempotency_keys_pkey');
 }
 
 /** Postgres 23505 on the singleton partial unique index, directly or as the cause of a query error. */
 export function isSingletonConflict(err: unknown): boolean {
-  for (
-    let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | undefined, depth = 0;
-    e && depth < 5;
-    e = e.cause as typeof e, depth++
-  )
-    if (e.code === '23505' && e.constraint === 'artifacts_singleton_type') return true;
-  return false;
+  return uniqueViolationOn(err, 'artifacts_singleton_type');
+}
+
+/** Postgres 23505 on the one-published-version partial unique index (#912). */
+export function isOnePublishedConflict(err: unknown): boolean {
+  return uniqueViolationOn(err, 'artifact_versions_one_published');
 }

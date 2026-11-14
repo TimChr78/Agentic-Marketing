@@ -9,6 +9,7 @@ const row = (i: number) => ({
   latestState: 'draft' as const,
   publishedVersion: null,
   updatedAt: new Date(2026, 0, 1, 0, 0, i).toISOString(),
+  archived: false,
 });
 
 describe('artifact list pagination (#382)', () => {

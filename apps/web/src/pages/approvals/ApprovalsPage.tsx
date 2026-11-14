@@ -293,7 +293,9 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
     const failed: string[] = [];
     for (const a of chosen) {
       try {
-        await api.call('approvals.approve', { approvalId: a.id });
+        const out = await api.call('approvals.approve', { approvalId: a.id });
+        // An archived artifact can never be published; the request is closed as rejected (#900).
+        if (out.status === 'rejected') failed.push(`${a.artifactName}: ${out.reason ?? 'it is archived'}`);
       } catch (e) {
         failed.push(`${a.artifactName}: ${(e as Error).message}`);
       }
