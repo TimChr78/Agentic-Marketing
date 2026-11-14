@@ -1,6 +1,6 @@
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { activeMandate } from '@agentic-marketing/artifacts';
-import type { Services } from '@agentic-marketing/commands';
+import { lockAgentPolicy, type Services } from '@agentic-marketing/commands';
 import { newId } from '@agentic-marketing/core';
 import { type AgentGuardState, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
@@ -319,8 +319,9 @@ export async function runGuardianOnce(deps: GuardianDeps, now = new Date()): Pro
   for (const { workspace_id: ws, id } of rows) {
     try {
       await deps.db.withWorkspace(ws, async (tx) => {
-        // The same lock as the policy engine: a decision and the guardian never interleave.
-        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`agent-policy:${ws}:${id}`}, 0))`);
+        // The same lock as the policy engine and the held-change runner: a decision, a held run
+        // and the guardian never interleave (#907).
+        await lockAgentPolicy(tx, ws, id);
         const [agent] = await tx.select().from(schema.agents).where(eq(schema.agents.id, id));
         if (agent?.status !== 'active') return;
         summary.checked++;

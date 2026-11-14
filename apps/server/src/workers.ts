@@ -1,6 +1,7 @@
 import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
+import { runActiveMandateRepair } from '@agentic-marketing/artifacts';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
 import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
@@ -95,6 +96,12 @@ export function startScheduler(
     runSentAtBackfill({ db: srv.db }, signal, {
       log: (message) => logger.info(message),
       onError: (err) => logger.error({ err }, 'sent_at backfill failed'),
+    }),
+    // One pass at start: the single-active-mandate repair (#911) keeps the mandate the runtime
+    // uses and archives legacy duplicates; it needs the runtime's schema check, so it is code.
+    runActiveMandateRepair({ db: srv.db }, signal, {
+      log: (message) => logger.info(message),
+      onError: (err) => logger.error({ err }, 'single active mandate repair failed'),
     }),
     runSegmentScheduler(
       {

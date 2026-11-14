@@ -71,6 +71,9 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
   const [conversationAgent, setConversationAgent] = useState<string | null>(null);
   const [dialog, confirm] = useConfirm();
   const end = useRef<HTMLDivElement>(null);
+  // The last conversation read the person asked for (#918). A response or error from an earlier
+  // read is dropped, so a slow read never replaces the conversation clicked after it.
+  const readSeq = useRef(0);
   // Scroll immediately: JS `behavior: 'smooth'` ignores the CSS reduced-motion override, and
   // motion.md forbids smooth auto-scrolling (#555 review).
   // biome-ignore lint/correctness/useExhaustiveDependencies: scroll to the newest message whenever the list changes, which the body does not read
@@ -85,9 +88,12 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
 
   async function openConversation(id: string) {
     if (busy) return;
+    const read = ++readSeq.current;
     setError(null);
     try {
       const c = await api.call('copilot.conversation', { id });
+      // A later click, a new chat or a sent message moved on while this read was in flight.
+      if (read !== readSeq.current) return;
       const streaming = { id: null as string | null };
       setItems((c.events as Event[]).reduce<Item[]>((xs, e) => apply(xs, e, streaming), []));
       setConversationId(c.id);
@@ -95,6 +101,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
       // The counter belongs to the conversation on screen, never to the one before it (#613).
       setTokens(usageTotal((c as { usage?: ConversationUsage }).usage) ?? 0);
     } catch (e) {
+      if (read !== readSeq.current) return;
       setError(errText(e));
     }
   }
@@ -105,6 +112,8 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
       return;
     }
     if (!text.trim() || busy) return;
+    // A message starts a new turn in the conversation on screen; an older read must not replace it.
+    readSeq.current++;
     setInput('');
     setBusy(true);
     setError(null);
@@ -158,10 +167,13 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
     if (!ok) return;
     try {
       await api.call('copilot.deleteConversation', { id });
+      // A read for the deleted conversation must not land afterwards and restore its transcript.
+      readSeq.current++;
       loadPast();
       if (id === conversationId) {
         setItems([]);
         setConversationId(undefined);
+        setConversationAgent(null);
         setTokens(0);
       }
     } catch (e) {
@@ -184,6 +196,8 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             variant="ghost"
             disabled={busy}
             onClick={() => {
+              // A read still in flight belongs to the conversation being left behind.
+              readSeq.current++;
               setItems([]);
               setConversationId(undefined);
               setConversationAgent(null);

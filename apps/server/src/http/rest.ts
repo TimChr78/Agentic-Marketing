@@ -68,6 +68,12 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       'x-permission': cmd.permission,
       'x-humans-only': cmd.humansOnly ?? false,
       request: {
+        headers: z.object({
+          'idempotency-key': z.string().min(1).optional().openapi({
+            description:
+              'Optional, non-empty. Values of up to 200 printable characters without spaces are recommended; values with spaces, non-ASCII characters or more than 200 characters keep working for compatibility. A retry of the same logical request must reuse its key: the first response is replayed and the command runs once. A key reused for a different command, input or caller answers 409 (details.reason "idempotency_key_reused"). A 409 whose details.reason is "idempotency_in_progress" means the first request is still running after ten seconds: retry with this same key shortly; a new key would run it again. An empty header answers 400.',
+          }),
+        }),
         body: { required: true, content: { 'application/json': { schema: jsonSchema(api, cmd.input, cmd.name, 'input') as never } } },
       },
       responses: {
@@ -118,7 +124,14 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       // a workspace only for a session (#187).
       assertWorkspaceHeader(principal, c.req.raw.headers);
       const body = await c.req.json().catch(() => ({}));
-      const out = await deps.executor.execute(cmd, body, principal, { surface: 'rest', idempotencyKey: c.req.header('idempotency-key') });
+      const idempotencyKey = c.req.header('idempotency-key');
+      // Compatibility (#906 review round 3): before 0.14.21 every non-empty header value was used
+      // for dedupe, so spaces, non-ASCII and long values must keep working. The one change is an
+      // empty header, which used to mean "no key" and is now refused instead of silently running
+      // the request without one.
+      if (idempotencyKey === '')
+        throw new AppError('invalid_input', 'The idempotency-key header must not be empty. Omit it or send a value.');
+      const out = await deps.executor.execute(cmd, body, principal, { surface: 'rest', idempotencyKey });
       return c.json(out as object, 200);
     });
   }

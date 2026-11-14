@@ -1,6 +1,13 @@
 import { getBusinessContext, listLearnings } from '@agentic-marketing/artifacts';
 import { type Auth, principalFromAccessToken, principalFromApiToken, workspaceHeaderConflict } from '@agentic-marketing/auth';
-import { type CommandDef, type Executor, type Principal, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
+import {
+  type CommandDef,
+  type Executor,
+  IDEMPOTENCY_KEY_MAX,
+  isValidIdempotencyKey,
+  type Principal,
+  ROLE_PERMISSIONS,
+} from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { requireMcpAuth } from '@better-auth/mcp';
@@ -39,16 +46,44 @@ export function commandForMcpTool(toolName: string, style: McpToolNameStyle): Co
  * (so tools/list still advertises the command input) but hand the raw arguments to the executor,
  * which is the single place that parses and reports unknown input keys.
  */
-export function mcpInputSchema(schema: StandardSchemaWithJSON): StandardSchemaWithJSON {
+export function mcpInputSchema(schema: StandardSchemaWithJSON, opts: { idempotencyKey?: boolean } = {}): StandardSchemaWithJSON {
   const standard = schema['~standard'];
   return {
     '~standard': {
       version: standard.version,
       vendor: standard.vendor,
-      jsonSchema: standard.jsonSchema,
+      jsonSchema: opts.idempotencyKey
+        ? {
+            input: (options) => addIdempotencyKey(standard.jsonSchema.input(options)),
+            output: (options) => standard.jsonSchema.output(options),
+          }
+        : standard.jsonSchema,
       validate: (value: unknown) => ({ value }),
     },
   };
+}
+
+/** Adds the optional retry key to a write tool's advertised input schema (#906). */
+function addIdempotencyKey(json: Record<string, unknown>): Record<string, unknown> {
+  const properties = json.properties && typeof json.properties === 'object' ? (json.properties as Record<string, unknown>) : {};
+  return {
+    ...json,
+    properties: {
+      ...properties,
+      idempotencyKey: {
+        type: 'string',
+        minLength: 1,
+        maxLength: IDEMPOTENCY_KEY_MAX,
+        description:
+          'Optional: reuse the same key when retrying this write so it runs once; a new key would run it again. The key is scoped to you and this workspace, so another caller using it answers 409; 1–200 printable characters without spaces (see the idempotency contract in docs/integrations.md).',
+      },
+    },
+  };
+}
+
+/** True when the command already declares its own `idempotencyKey` input field (a send, an enrollment). */
+function declaresIdempotencyKey(schema: CommandDef['input']): boolean {
+  return schema instanceof z.ZodObject && Object.hasOwn(schema.shape, 'idempotencyKey');
 }
 
 /**
@@ -140,6 +175,10 @@ export function mcpServerFor(
     const toolName = mcpToolName(cmd.name, style);
     const granted = principal.permissions.has(cmd.permission);
     if (!granted && !(opts.stepUp && missingScope(principal, toolName, style))) continue;
+    // A write takes the retry key as its own argument unless the command already has one for its
+    // handler (a send's `idempotencyKey`, a bulk enrollment's): that field keeps its meaning and
+    // is not stripped or turned into the executor key (#906).
+    const writeKey = cmd.effect !== 'read' && !declaresIdempotencyKey(cmd.input);
     server.registerTool(
       toolName,
       {
@@ -147,7 +186,7 @@ export function mcpServerFor(
         description: granted
           ? cmd.description
           : `${cmd.description}\n\nNeeds the "${cmd.permission}" permission, which this connection was not granted: calling it asks the person to grant it.`,
-        inputSchema: mcpInputSchema(cmd.input),
+        inputSchema: mcpInputSchema(cmd.input, { idempotencyKey: writeKey }),
         outputSchema: mcpOutputSchema(cmd.output),
         annotations: {
           readOnlyHint: cmd.effect === 'read',
@@ -158,7 +197,33 @@ export function mcpServerFor(
       },
       async (input: unknown) => {
         try {
-          const out = await executor.execute(cmd, input, principal, { surface: 'mcp' });
+          let commandInput = input;
+          let idempotencyKey: string | undefined;
+          if (writeKey && input && typeof input === 'object' && !Array.isArray(input)) {
+            const { idempotencyKey: raw, ...rest } = input as Record<string, unknown>;
+            if (raw !== undefined) {
+              if (!isValidIdempotencyKey(raw))
+                return {
+                  isError: true,
+                  content: [
+                    {
+                      type: 'text' as const,
+                      text: JSON.stringify({
+                        error: 'invalid_input',
+                        message: `The idempotencyKey argument must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`,
+                      }),
+                    },
+                  ],
+                };
+              idempotencyKey = raw;
+            }
+            // The key is not part of the command's input: the executor hashes and validates the rest.
+            commandInput = rest;
+          }
+          const out = await executor.execute(cmd, commandInput, principal, {
+            surface: 'mcp',
+            ...(idempotencyKey ? { idempotencyKey } : {}),
+          });
           return {
             content: [
               { type: 'text' as const, text: opts.textContent === 'summary' ? summarizeOutput(cmd.name, out) : JSON.stringify(out) },

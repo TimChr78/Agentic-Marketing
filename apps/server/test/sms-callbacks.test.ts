@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { twilioSignature } from '@agentic-marketing/email';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { logger } from '@agentic-marketing/telemetry';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // #457: Twilio signs the exact callback URL it called. Public routing keeps the fallback and every
@@ -253,11 +254,17 @@ describe('START lifts only the SMS stop suppression (#664, #750)', () => {
     const phone = '+4512345679';
     const inbound = (body: string) => callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/inbound`, { From: phone, Body: body });
     const since = new Date();
+    const logged = vi.spyOn(logger, 'info');
 
     expect((await inbound('STOP')).status).toBe(200);
     const stops = await stopRow(since);
     expect(stops).toHaveLength(1);
     const hash = stops[0]!.value_hash;
+
+    // The STOP was on day 1; move the row's timestamp back so the escalation has to move it to
+    // the delivery's own time, not keep the STOP's (#910).
+    const dayOne = new Date('2026-01-01T09:00:00.000Z');
+    await t.srv.db.admin.query(`UPDATE suppressions SET at = $3 WHERE workspace_id = $1 AND value_hash = $2`, [ws, hash, dayOne]);
 
     // The message was already in flight when the STOP arrived, then the carrier reports it
     // undelivered with a permanent error (Twilio 30003: unreachable handset) — a hard bounce.
@@ -267,16 +274,46 @@ describe('START lifts only the SMS stop suppression (#664, #750)', () => {
        VALUES ($1, $2, $3, 'sms', 'marketing_sms', 'sent', $4, $5)`,
       [ws, `msg-${sid}`, `idem-${sid}`, sid, hash],
     );
-    const status = await callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/status`, {
-      MessageSid: sid,
-      MessageStatus: 'undelivered',
-      ErrorCode: '30003',
-    });
-    expect(status.status).toBe(200);
+    const bounce = () =>
+      callback(FALLBACK, `localhost:${PORT}`, `${webhookPath}/status`, {
+        MessageSid: sid,
+        MessageStatus: 'undelivered',
+        ErrorCode: '30003',
+      });
+    const bouncedAt = new Date();
+    expect((await bounce()).status).toBe(200);
     expect(await rowsFor(hash)).toEqual(['hard_bounce']);
+    const escalated = (
+      await t.srv.db.admin.query<{ at: Date }>(
+        `SELECT at FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND value_hash = $2`,
+        [ws, hash],
+      )
+    ).rows[0]!.at;
+    expect(escalated.getTime()).toBeGreaterThan(dayOne.getTime());
+    expect(escalated.getTime()).toBeGreaterThanOrEqual(bouncedAt.getTime() - 1000);
+    // The transition is logged once, like STOP and START, without the raw number.
+    const escalationLogs = logged.mock.calls.filter(([, message]) =>
+      String(message).includes('suppression escalated from stop to hard_bounce'),
+    );
+    expect(escalationLogs).toHaveLength(1);
+    expect(escalationLogs[0]![0]).toMatchObject({ workspace: ws, channel: 'sms', previous: 'stop', reason: 'hard_bounce' });
+    expect(JSON.stringify(escalationLogs)).not.toContain(phone);
+
+    // A second bounce changes neither the reason nor the timestamp: only a stop row may move.
+    expect((await bounce()).status).toBe(200);
+    const afterSecond = (
+      await t.srv.db.admin.query<{ reason: string; at: Date }>(
+        `SELECT reason, at FROM suppressions WHERE workspace_id = $1 AND channel = 'sms' AND value_hash = $2`,
+        [ws, hash],
+      )
+    ).rows[0]!;
+    expect(afterSecond.reason).toBe('hard_bounce');
+    expect(afterSecond.at.getTime()).toBe(escalated.getTime());
+    expect(logged.mock.calls.filter(([, message]) => String(message).includes('suppression escalated')).length).toBe(1);
 
     // START lifts the carrier block, never the delivery fact.
     expect((await inbound('START')).status).toBe(200);
     expect(await rowsFor(hash)).toEqual(['hard_bounce']);
+    logged.mockRestore();
   });
 });

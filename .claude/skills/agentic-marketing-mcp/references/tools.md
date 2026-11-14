@@ -2,6 +2,8 @@
 
 Generated from the command registry (`apps/server/src/registry.ts`). **Effect**: `read` changes nothing; `write` changes drafts or data; `publish` reaches customers or needs approval; `destructive` cannot be undone. **Who**: "people only" tools are not offered to agents (MCP or API tokens), whatever the scopes. Otherwise the scope in **Permission** is needed.
 
+Every **write** tool also takes an optional `idempotencyKey` string (1–200 printable characters, no spaces). Reuse one key when retrying a logical call so the server replays the first response instead of running it again; a key reused for a different command, input or caller answers `409` with `details.reason: "idempotency_key_reused"`, and a `409` with `"idempotency_in_progress"` means the first call is still running: retry with the same key shortly. Tools whose input already has an `idempotencyKey` (a send, a bulk enrollment) keep that field's own meaning.
+
 | Tool | Effect | Permission | Who | What |
 |---|---|---|---|---|
 | `ads.acknowledgeAudienceCleanup` | write | workspace:admin | people only | Record that a person finished the manual removal for selected audience cleanup ids. Only the named orphaned rows/intents are removed; the sync id and a hash of the complete input (including the note) are audited, and the note text is not retained. This never sends a request to an ad platform and never acknowledges a row that is not in this sync's backlog. |

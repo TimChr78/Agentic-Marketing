@@ -47,9 +47,45 @@ export async function withdraw(tx: Tx, m: Msg, source: 'unsubscribe', proof: Rec
   ]);
 }
 
+/** A STOP suppression that this delivery escalated to a delivery fact (#910). */
+export interface SuppressionEscalation {
+  workspaceId: string;
+  channel: string;
+  reason: 'hard_bounce' | 'complaint';
+}
+
+/** The result of one webhook's events: what to publish, and which suppressions escalated. */
+export interface DeliveryEventsResult {
+  events: MessageEvent[];
+  escalations: SuppressionEscalation[];
+}
+
+/**
+ * Emits the escalation log. Callers invoke this only after their transaction committed, so a
+ * rollback never leaves a log behind and concurrent requests report each escalation once
+ * (#906 review round 2).
+ */
+export function logSuppressionEscalation(escalation: SuppressionEscalation): void {
+  logger.info(
+    {
+      workspace: escalation.workspaceId,
+      channel: escalation.channel,
+      previous: 'stop',
+      reason: escalation.reason,
+    },
+    `suppression escalated from stop to ${escalation.reason}`,
+  );
+}
+
 /** Applies a provider's delivery events to the message log, suppressions and consent. */
-export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provider: string, kp: KeyProvider): Promise<MessageEvent[]> {
+export async function applyDeliveryEvents(
+  tx: Tx,
+  events: DeliveryEvent[],
+  provider: string,
+  kp: KeyProvider,
+): Promise<DeliveryEventsResult> {
   const out: MessageEvent[] = [];
+  const escalations: SuppressionEscalation[] = [];
   for (const e of events) {
     const [m] = e.messageId
       ? await tx.select().from(schema.messages).where(eq(schema.messages.id, e.messageId))
@@ -84,26 +120,38 @@ export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provi
         .update(schema.messages)
         .set({ status: next, reason: e.reason ?? m.reason, sentAt: m.sentAt ?? new Date(at), updatedAt: new Date() })
         .where(eq(schema.messages.id, m.id));
-    if (m.recipientHash && ((e.type === 'bounced' && e.bounce === 'hard') || e.type === 'complained'))
-      await tx
+    if (m.recipientHash && ((e.type === 'bounced' && e.bounce === 'hard') || e.type === 'complained')) {
+      const reason = e.type === 'complained' ? 'complaint' : 'hard_bounce';
+      const atTime = new Date(at);
+      // Only a `stop` row may escalate (#750). The mutation itself says whether it did: `setWhere`
+      // returns no row when it does not fire, and `xmax <> 0` separates an escalating UPDATE from
+      // the INSERT of a new delivery fact. Deciding from the statement (not a prior SELECT) means a
+      // concurrent STOP inserted just before the upsert is still reported, exactly once.
+      const [changed] = await tx
         .insert(schema.suppressions)
         .values({
           workspaceId: m.workspaceId,
           channel: m.channel,
           valueHash: m.recipientHash,
-          reason: e.type === 'complained' ? 'complaint' : 'hard_bounce',
+          reason,
+          at: atTime,
         })
         // A delivery fact outranks an SMS STOP: STOP can be lifted by START, a bounce or complaint
-        // cannot. When the stop row already holds the key, escalate it; never downgrade a stronger
-        // row back to stop (#750). SMS STOP itself inserts with DO NOTHING, so it cannot overwrite
+        // cannot. When the stop row already holds the key, escalate it and move `at` to the
+        // delivery's own time, so the row records when the bounce arrived rather than when the STOP
+        // did (#910). `setWhere` keeps a second bounce from moving either; a stronger row is never
+        // downgraded back to stop. SMS STOP itself inserts with DO NOTHING, so it cannot overwrite
         // a bounce or complaint either.
         .onConflictDoUpdate({
           target: [schema.suppressions.workspaceId, schema.suppressions.channel, schema.suppressions.valueHash],
-          set: { reason: e.type === 'complained' ? 'complaint' : 'hard_bounce' },
+          set: { reason, at: atTime },
           setWhere: sql`${schema.suppressions.reason} = 'stop'`,
-        });
+        })
+        .returning({ reason: schema.suppressions.reason, updated: sql<boolean>`(xmax <> 0)` });
+      if (changed?.updated && changed.reason === reason) escalations.push({ workspaceId: m.workspaceId, channel: m.channel, reason });
+    }
     if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
       await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp);
   }
-  return out;
+  return { events: out, escalations };
 }

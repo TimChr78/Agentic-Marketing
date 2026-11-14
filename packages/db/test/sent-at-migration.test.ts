@@ -153,6 +153,7 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       // superuser and has no BYPASSRLS, so FORCE RLS applies to it.
       for (const table of [
         'artifacts',
+        'artifact_versions',
         'messages',
         'experience_rollouts',
         'hosted_agent_runs',

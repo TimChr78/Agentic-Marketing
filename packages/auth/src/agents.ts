@@ -6,6 +6,7 @@ import {
   type CommandContext,
   defineCommand,
   isUndoable,
+  lockAgentPolicy,
   type Principal,
   runUndo,
   undoBlocker,
@@ -373,6 +374,10 @@ const setStatus = <N extends 'agents.pause' | 'agents.resume' | 'agents.revoke'>
     humansOnly: true,
     target: (i) => i.id,
     handler: async (input, ctx) => {
+      // The agent-policy lock first (#922 B): a manual pause, resume or revoke must not commit
+      // between a held run's status check and its publish. The one order is documented at
+      // lockAgentPolicy; the lock is also what makes the read below current.
+      await lockAgentPolicy(ctx.tx, ctx.principal.workspaceId, input.id);
       const [a] = await ctx.tx.select().from(schema.agents).where(eq(schema.agents.id, input.id));
       if (!a) throw new AppError('not_found', `Agent ${input.id} not found.`);
       if (a.status === 'revoked') throw new AppError('conflict', 'This agent is revoked and cannot change status.');
@@ -579,6 +584,8 @@ export const clearGuard = defineCommand({
   humansOnly: true,
   target: (i) => i.agentId,
   handler: async (input, ctx) => {
+    // The same lock as a pause (#922 B): clearing the cap changes what a held run's check reads.
+    await lockAgentPolicy(ctx.tx, ctx.principal.workspaceId, input.agentId);
     const [a] = await ctx.tx.select({ id: schema.agents.id }).from(schema.agents).where(eq(schema.agents.id, input.agentId));
     if (!a) throw new AppError('not_found', `Agent ${input.agentId} not found.`);
     const now = new Date();
