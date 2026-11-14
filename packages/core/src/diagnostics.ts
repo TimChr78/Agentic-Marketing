@@ -34,11 +34,21 @@ function isCredentialKey(key: string): boolean {
 }
 
 /**
- * A `key: value`, `key=value`, JSON pair or header, with the key, an optional closing quote, the
- * separator and the value in separate groups. The character classes do not overlap, so the pattern
- * cannot backtrack across a value (CodeQL's polynomial-regex rule).
+ * A `key: value`, `key=value`, JSON pair or header: the key, an optional closing quote and the
+ * separator. The value is matched separately and only for a credential key, so a value is never
+ * rescanned and the redaction stays linear in the length of the text.
  */
-const KEY_VALUE_PAIR = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)(["']?)(\s*[:=]\s*)("(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}\]"']+)/g;
+const KEY_VALUE_PAIR = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)(["']?)(\s*[:=]\s*)/g;
+
+/** The value of a pair: a quoted string (escapes included) or a run without whitespace or punctuation. */
+const VALUE = /"(?:[^"\\]|\\.)*"|'[^']*'|[^\s,;&}\]"']+/y;
+
+/**
+ * URL userinfo (`scheme://user:password@host`), the shape a driver error quotes when a connection
+ * string fails (#920). Any scheme: `postgres`, `http`, `redis`, `nats`, `amqp`, `mongodb+srv`. The
+ * user is kept, the password is not, whatever its length and whether it is percent-escaped.
+ */
+const URL_USERINFO = /\b([a-z][a-z0-9+.-]{0,31}:\/\/)([^/?#@:\s]{0,128}):([^@/\s]{1,256})@/gi;
 
 /**
  * A value that is itself a credential pair (`token: access_token=…`): the outer key keeps its own
@@ -60,25 +70,31 @@ function redactKeyValuePairs(text: string): string {
   KEY_VALUE_PAIR.lastIndex = 0;
   let match = KEY_VALUE_PAIR.exec(text);
   while (match) {
-    const [pair, key = '', quote = '', separator = '', value = ''] = match;
-    const valueStart = match.index + key.length + quote.length + separator.length;
-    // A `Bearer`/`Basic` value is left to the scheme rule below, which keeps the scheme word, and a
-    // value that is already `[redacted]` is not written twice. A nested credential pair is redacted
-    // by its own key instead of swallowing the key's text.
-    AUTH_SCHEME.lastIndex = valueStart;
-    const nested = NESTED_PAIR.exec(value);
-    const keep =
-      value.startsWith('[redacted]') ||
-      AUTH_SCHEME.test(text) ||
-      (nested !== null && isCredentialKey(nested[1] ?? '')) ||
-      !isCredentialKey(key);
-    if (keep) {
-      KEY_VALUE_PAIR.lastIndex = valueStart;
-    } else {
-      out += text.slice(cursor, match.index) + `${key}${quote}${separator}[redacted]`;
-      cursor = match.index + pair.length;
-      KEY_VALUE_PAIR.lastIndex = cursor;
+    const [prefix, key = '', quote = '', separator = ''] = match;
+    const valueStart = match.index + prefix.length;
+    if (isCredentialKey(key)) {
+      VALUE.lastIndex = valueStart;
+      const value = VALUE.exec(text);
+      AUTH_SCHEME.lastIndex = valueStart;
+      const nested = value ? NESTED_PAIR.exec(value[0]) : null;
+      // A `Bearer`/`Basic` value is left to the scheme rule, which keeps the scheme word; a value
+      // that is already `[redacted]` is not written twice; and a nested credential pair is redacted
+      // by its own key instead of swallowing the key's text (#885 round 3, #898).
+      const replace =
+        value !== null &&
+        !value[0].startsWith('[redacted]') &&
+        !AUTH_SCHEME.test(text) &&
+        !(nested !== null && isCredentialKey(nested[1] ?? ''));
+      if (replace) {
+        out += text.slice(cursor, match.index) + `${key}${quote}${separator}[redacted]`;
+        cursor = valueStart + value[0].length;
+        KEY_VALUE_PAIR.lastIndex = cursor;
+        match = KEY_VALUE_PAIR.exec(text);
+        continue;
+      }
     }
+    // The key is at least one character, so this always moves the scan forward.
+    KEY_VALUE_PAIR.lastIndex = valueStart;
     match = KEY_VALUE_PAIR.exec(text);
   }
   return out + text.slice(cursor);
@@ -110,7 +126,8 @@ const REDACTIONS: readonly (readonly [RegExp, string])[] = [
  * line that is about to become an AppError.
  */
 export function redactCredentials(text: string): string {
-  let out = redactKeyValuePairs(text);
+  let out = text.replace(URL_USERINFO, '$1$2:[redacted]@');
+  out = redactKeyValuePairs(out);
   for (const [pattern, replacement] of REDACTIONS) out = out.replace(pattern, replacement);
   return out;
 }

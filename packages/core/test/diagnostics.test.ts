@@ -232,6 +232,41 @@ describe('camelCase and PascalCase credential keys (#898)', () => {
   });
 });
 
+describe('URL userinfo credentials (#920)', () => {
+  it('replaces the password of a connection string and keeps the rest of the URL', () => {
+    expect(redactCredentials('postgres://am:shortpw@db:5432/am')).toBe('postgres://am:[redacted]@db:5432/am');
+    expect(redactCredentials('http://user:pw@clickhouse:8123')).toBe('http://user:[redacted]@clickhouse:8123');
+    expect(redactCredentials('redis://:pw@valkey:6379/0')).toBe('redis://:[redacted]@valkey:6379/0');
+    expect(redactCredentials('mongodb+srv://app:pw@cluster.example.net/db?retryWrites=true')).toBe(
+      'mongodb+srv://app:[redacted]@cluster.example.net/db?retryWrites=true',
+    );
+    expect(redactCredentials('nats://nats:pw@nats:4222')).toBe('nats://nats:[redacted]@nats:4222');
+    expect(redactCredentials('amqp://guest:pw@rabbit:5672/%2f')).toBe('amqp://guest:[redacted]@rabbit:5672/%2f');
+  });
+
+  it('redacts a password that contains percent-escapes or a colon', () => {
+    expect(redactCredentials('postgres://u:p%40ss@db:5432/am')).toBe('postgres://u:[redacted]@db:5432/am');
+    expect(redactCredentials('postgres://u:pa%3Ass%2Fword@db/am')).toBe('postgres://u:[redacted]@db/am');
+    expect(redactCredentials('postgres://u:pa:ss@db/am')).toBe('postgres://u:[redacted]@db/am');
+  });
+
+  it('leaves a URL without a password alone', () => {
+    const untouched = [
+      'https://user@host',
+      'mailto:a@b.c',
+      'https://host/path?x=a:b@c',
+      'https://host:8080/path',
+      'https://host/path#frag@ment',
+      'postgres://db:5432/am',
+    ];
+    for (const text of untouched) expect(redactCredentials(text), text).toBe(text);
+  });
+
+  it('does not redact an e-mail address or a clock time', () => {
+    expect(redactCredentials('write to ops@example.com at 12:30')).toBe('write to ops@example.com at 12:30');
+  });
+});
+
 describe('safeErrorText (#885 round 5)', () => {
   const token = 'abcdef0123456789'.repeat(3);
 
