@@ -8,7 +8,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
-import { applyDeliveryEvents } from '../deliveryEvents';
+import { applyDeliveryEvents, logSuppressionEscalation } from '../deliveryEvents';
 import type { EmailServices } from '../gateway';
 import { isMarketing } from '../policy';
 import { classifySmsReply } from './keywords';
@@ -79,8 +79,10 @@ export function smsRoutes(deps: Deps) {
         const transport = await smsTransportFor(tx, provider, deps.kp, deps.email.adapterDeps);
         if (!transport.verifyWebhook(req)) return { status: 401 as const };
 
-        if (kind === 'status')
-          return { status: 200 as const, events: await applyDeliveryEvents(tx, transport.parseStatus(req), provider.adapter, deps.kp) };
+        if (kind === 'status') {
+          const applied = await applyDeliveryEvents(tx, transport.parseStatus(req), provider.adapter, deps.kp);
+          return { status: 200 as const, events: applied.events, escalations: applied.escalations };
+        }
 
         const inbound = transport.parseInbound(req);
         if (!inbound) return { status: 400 as const };
@@ -129,6 +131,8 @@ export function smsRoutes(deps: Deps) {
       });
       if (result.status !== 200) return c.json({ error: result.status === 401 ? 'bad_signature' : 'not_found' }, result.status);
       if ('events' in result) {
+        // After the transaction committed: a rolled-back escalation leaves no log behind.
+        for (const escalation of result.escalations ?? []) logSuppressionEscalation(escalation);
         await deps.events.insertMessageEvents(result.events ?? []);
         return c.json({ ok: true });
       }
