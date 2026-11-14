@@ -65,12 +65,26 @@ describe('MCP write tools take an idempotency key (#906)', () => {
     expect(JSON.parse(text).details.reason).toBe('idempotency_key_reused');
   });
 
-  it('refuses a key outside the header bound', async () => {
+  it('refuses an empty key instead of treating it as no key', async () => {
     const refused = await mcp.callTool({
+      name: 'artifacts.create',
+      arguments: { ...note('Empty key'), idempotencyKey: '' },
+    });
+    expect(refused.isError).toBe(true);
+    expect((refused.content as { text: string }[])[0]!.text).toContain('1 to 200 printable characters');
+  });
+
+  it('refuses a key outside the header bound or with spaces', async () => {
+    const tooLong = await mcp.callTool({
       name: 'artifacts.create',
       arguments: { ...note('Too long'), idempotencyKey: 'k'.repeat(201) },
     });
-    expect(refused.isError).toBe(true);
-    expect((refused.content as { text: string }[])[0]!.text).toContain('1 to 200 characters');
+    expect(tooLong.isError).toBe(true);
+    expect((tooLong.content as { text: string }[])[0]!.text).toContain('1 to 200 printable characters');
+    const spaced = await mcp.callTool({
+      name: 'artifacts.create',
+      arguments: { ...note('Spaced'), idempotencyKey: 'two words' },
+    });
+    expect(spaced.isError).toBe(true);
   });
 });

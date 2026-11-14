@@ -1,6 +1,13 @@
 import { getBusinessContext, listLearnings } from '@agentic-marketing/artifacts';
 import { type Auth, principalFromAccessToken, principalFromApiToken, workspaceHeaderConflict } from '@agentic-marketing/auth';
-import { type CommandDef, type Executor, IDEMPOTENCY_KEY_MAX, type Principal, ROLE_PERMISSIONS } from '@agentic-marketing/commands';
+import {
+  type CommandDef,
+  type Executor,
+  IDEMPOTENCY_KEY_MAX,
+  isValidIdempotencyKey,
+  type Principal,
+  ROLE_PERMISSIONS,
+} from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { requireMcpAuth } from '@better-auth/mcp';
@@ -68,7 +75,7 @@ function addIdempotencyKey(json: Record<string, unknown>): Record<string, unknow
         minLength: 1,
         maxLength: IDEMPOTENCY_KEY_MAX,
         description:
-          'Optional: reuse the same key when retrying this write so it runs once; a new key would run it again (see the idempotency contract in docs/integrations.md).',
+          'Optional: reuse the same key when retrying this write so it runs once; a new key would run it again. The key is scoped to you and this workspace, so another caller using it answers 409; 1–200 printable characters without spaces (see the idempotency contract in docs/integrations.md).',
       },
     },
   };
@@ -195,7 +202,7 @@ export function mcpServerFor(
           if (writeKey && input && typeof input === 'object' && !Array.isArray(input)) {
             const { idempotencyKey: raw, ...rest } = input as Record<string, unknown>;
             if (raw !== undefined) {
-              if (typeof raw !== 'string' || raw.length < 1 || raw.length > IDEMPOTENCY_KEY_MAX)
+              if (!isValidIdempotencyKey(raw))
                 return {
                   isError: true,
                   content: [
@@ -203,7 +210,7 @@ export function mcpServerFor(
                       type: 'text' as const,
                       text: JSON.stringify({
                         error: 'invalid_input',
-                        message: `The idempotencyKey argument must be a string of 1 to ${IDEMPOTENCY_KEY_MAX} characters.`,
+                        message: `The idempotencyKey argument must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`,
                       }),
                     },
                   ],

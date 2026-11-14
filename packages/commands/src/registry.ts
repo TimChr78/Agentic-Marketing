@@ -1,4 +1,14 @@
-import { AppError, canonicalJson, hashValue, redactCredentials, redactedText, safeErrorText, sha256 } from '@agentic-marketing/core';
+import {
+  AppError,
+  canonicalJson,
+  hashValue,
+  IDEMPOTENCY_KEY_MAX,
+  isValidIdempotencyKey,
+  redactCredentials,
+  redactedText,
+  safeErrorText,
+  sha256,
+} from '@agentic-marketing/core';
 import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
@@ -235,8 +245,8 @@ export class PolicyDeniedError extends AppError {
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous command lists
 export type AnyCommand = CommandDef<any, any, string>;
 
-/** The longest idempotency key accepted from the REST header or an MCP write tool (#906). */
-export const IDEMPOTENCY_KEY_MAX = 200;
+// Re-exported so command-layer consumers keep importing the rule from one place.
+export { IDEMPOTENCY_KEY_MAX, isValidIdempotencyKey };
 
 export interface ExecuteOptions {
   surface: Surface;
@@ -395,6 +405,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       });
       const input = rawInput ?? {};
       const inputHash = hashValue(redact(input, cmd.sensitive));
+      // An idempotency key is scoped to the caller as well as the workspace (#906 review round 2):
+      // a person is their user id (the same across sessions), an agent is its agent record, and an
+      // API token or OAuth connection is its own agent. The audit log keeps the call's `inputHash`;
+      // the idempotency row stores this principal-bound hash instead.
+      const idempotencyHash = hashValue({
+        principal: principal.type === 'agent' ? `agent:${principal.agent.id}` : `user:${principal.userId}`,
+        input: inputHash,
+      });
       let target: string | undefined;
       /** People an audited read reached besides `target` (#763); one audit row each. */
       let extraTargets: readonly string[] = [];
@@ -443,6 +461,10 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         throw refused;
       }
 
+      if (opts.idempotencyKey !== undefined && !isValidIdempotencyKey(opts.idempotencyKey))
+        return fail(
+          new AppError('invalid_input', `An idempotency key must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`),
+        );
       if (unknown.length) {
         if (options.strictInputs) return fail(new AppError('invalid_input', unknownMessages.join(' '), { unknownKeys: unknown }));
       }
@@ -526,7 +548,10 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
                   );
                 if (hit) {
-                  if (hit.command !== cmd.name || hit.inputHash !== inputHash)
+                  // `inputHash` binds the caller too, so another principal presenting the key is a
+                  // conflict, never the first caller's stored response. Rows written before 0.14.24
+                  // carry the old caller-agnostic hash and answer 409 until a new key is used.
+                  if (hit.command !== cmd.name || hit.inputHash !== idempotencyHash)
                     throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
                       reason: 'idempotency_key_reused',
                     });
@@ -563,13 +588,25 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
               }
               if (opts.idempotencyKey)
-                await tx.insert(schema.idempotencyKeys).values({
-                  workspaceId: principal.workspaceId,
-                  key: opts.idempotencyKey,
-                  command: cmd.name,
-                  inputHash,
-                  response: redact(out, cmd.sensitiveOutput) as object,
-                });
+                try {
+                  await tx.insert(schema.idempotencyKeys).values({
+                    workspaceId: principal.workspaceId,
+                    key: opts.idempotencyKey,
+                    command: cmd.name,
+                    inputHash: idempotencyHash,
+                    response: redact(out, cmd.sensitiveOutput) as object,
+                  });
+                } catch (err) {
+                  // Two different principals can use one key without serialising against each
+                  // other (the lock names the principal). The unique (workspace, key) then decides:
+                  // the loser's whole transaction rolls back and answers the same clean conflict as
+                  // a sequential reuse, never a 500 or a silent second run.
+                  if (isIdempotencyKeyConflict(err))
+                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                      reason: 'idempotency_key_reused',
+                    });
+                  throw err;
+                }
               // A read's target can only come from its output too (#763): a lookup resolves the
               // person, a preview samples people, a list returns rows about people.
               target = cmd.auditTarget?.(out) ?? target;
@@ -586,7 +623,13 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               // predate the winner's commit, or the waiter re-runs the handler and then loses on
               // the unique key. A session-level lock on the same connection, released after commit
               // or rollback, gives the waiter a snapshot taken after the winner committed.
-              ...(opts.idempotencyKey ? { advisoryLockKey: `idempotency:${principal.workspaceId}:${opts.idempotencyKey}` } : {}),
+              ...(opts.idempotencyKey
+                ? {
+                    advisoryLockKey: `idempotency:${principal.workspaceId}:${
+                      principal.type === 'agent' ? `agent:${principal.agent.id}` : `user:${principal.userId}`
+                    }:${opts.idempotencyKey}`,
+                  }
+                : {}),
             },
           ),
         );
@@ -979,6 +1022,17 @@ function knownConflict(err: unknown): AppError | null {
 export function isDeadlock(err: unknown): boolean {
   for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
     if (e.code === '40P01') return true;
+  return false;
+}
+
+/** Postgres 23505 on the idempotency primary key, directly or as the cause of a query error. */
+function isIdempotencyKeyConflict(err: unknown): boolean {
+  for (
+    let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | undefined, depth = 0;
+    e && depth < 5;
+    e = e.cause as typeof e, depth++
+  )
+    if (e.code === '23505' && e.constraint === 'idempotency_keys_pkey') return true;
   return false;
 }
 

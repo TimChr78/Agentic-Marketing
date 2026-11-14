@@ -20,10 +20,10 @@ const HEADER = `# Tool catalog
 
 Generated from the command registry (\`apps/server/src/registry.ts\`). **Effect**: \`read\` changes nothing; \`write\` changes drafts or data; \`publish\` reaches customers or needs approval; \`destructive\` cannot be undone. **Who**: "people only" tools are not offered to agents (MCP or API tokens), whatever the scopes. Otherwise the scope in **Permission** is needed.
 
-| Tool | Effect | Permission | Who | What |
-|---|---|---|---|---|
+Every **write** tool also takes an optional \`idempotencyKey\` string (1–200 printable characters, no spaces). Reuse one key when retrying a logical call so the server replays the first response instead of running it again; a key reused for a different command, input or caller answers \`409\` with \`details.reason: "idempotency_key_reused"\`, and a \`409\` with \`"idempotency_in_progress"\` means the first call is still running: retry with the same key shortly. Tools whose input already has an \`idempotencyKey\` (a send, a bulk enrollment) keep that field's own meaning.
 
-Every **write** tool also takes an optional \`idempotencyKey\` string (1–200 characters). Reuse one key when retrying a logical call so the server replays the first response instead of running it again; a key reused for a different command or input answers \`409\` with \`details.reason: "idempotency_key_reused"\`, and a \`409\` with \`"idempotency_in_progress"\` means the first call is still running: retry with the same key shortly. Tools whose input already has an \`idempotencyKey\` (a send, a bulk enrollment) keep that field's own meaning.`;
+| Tool | Effect | Permission | Who | What |
+|---|---|---|---|---|`;
 
 /** The metadata the catalog needs from a command definition. */
 type CommandMeta = {

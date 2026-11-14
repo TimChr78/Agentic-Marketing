@@ -1,5 +1,5 @@
 import { type Auth, assertWorkspaceHeader, principalFromApiToken, principalFromSession } from '@agentic-marketing/auth';
-import { type Executor, IDEMPOTENCY_KEY_MAX, type Principal } from '@agentic-marketing/commands';
+import { type Executor, IDEMPOTENCY_KEY_MAX, isValidIdempotencyKey, type Principal } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
@@ -125,8 +125,13 @@ export function restApi(deps: { auth: Auth; db: Db; executor: Executor; assetMax
       assertWorkspaceHeader(principal, c.req.raw.headers);
       const body = await c.req.json().catch(() => ({}));
       const idempotencyKey = c.req.header('idempotency-key');
-      if (idempotencyKey !== undefined && (idempotencyKey.length < 1 || idempotencyKey.length > IDEMPOTENCY_KEY_MAX))
-        throw new AppError('invalid_input', `The idempotency-key header must be 1 to ${IDEMPOTENCY_KEY_MAX} characters.`);
+      // An empty header is present but means nothing: refuse it instead of silently running
+      // without a key, or a retry could execute twice (#906 review round 2).
+      if (idempotencyKey !== undefined && !isValidIdempotencyKey(idempotencyKey))
+        throw new AppError(
+          'invalid_input',
+          `The idempotency-key header must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`,
+        );
       const out = await deps.executor.execute(cmd, body, principal, { surface: 'rest', idempotencyKey });
       return c.json(out as object, 200);
     });

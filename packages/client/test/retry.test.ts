@@ -96,6 +96,45 @@ describe('the typed client retries an idempotent call (#906)', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it('refuses an empty or malformed supplied key before sending anything', async () => {
+    const fetch = vi.fn(async () => respond(200, { id: 'note_1' }));
+    const api = createClient<Commands>({ fetch: fetch as unknown as typeof globalThis.fetch });
+
+    await expect(api.callWithRetry('test.write', { value: 'a' }, { idempotencyKey: '' })).rejects.toThrow(
+      'idempotency key must be 1 to 200 printable characters',
+    );
+    expect(() => api.call('test.write', { value: 'a' }, { idempotencyKey: 'not a key' })).toThrow(
+      'idempotency key must be 1 to 200 printable characters',
+    );
+    await expect(api.callWithRetry('test.write', { value: 'a' }, { idempotencyKey: 'k'.repeat(201) })).rejects.toThrow(
+      'idempotency key must be 1 to 200 printable characters',
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('replays a lost response with the same generated key instead of running twice', async () => {
+    const committed = new Map<string, { id: string }>();
+    const calls: (RequestInit | undefined)[] = [];
+    let runs = 0;
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.push(init);
+      const key = keyOf(init);
+      if (key === null) return respond(400, { error: 'invalid_input', message: 'no key' });
+      if (!committed.has(key)) {
+        runs++;
+        committed.set(key, { id: `note_${runs}` });
+      }
+      // The first attempt's response is lost after the server committed.
+      if (calls.length === 1) throw new TypeError('socket hang up');
+      return respond(200, committed.get(key));
+    });
+    const api = createClient<Commands>({ fetch: fetch as unknown as typeof globalThis.fetch });
+
+    expect(await api.callWithRetry('test.write', { value: 'a' })).toEqual({ id: 'note_1' });
+    expect(runs).toBe(1);
+    expect(calls).toHaveLength(2);
+  });
+
   it('recognises the in-progress sub-code only', () => {
     expect(isIdempotencyInProgress(new ApiError(409, 'conflict', 'x', { reason: 'idempotency_in_progress' }))).toBe(true);
     expect(isIdempotencyInProgress(new ApiError(409, 'conflict', 'x', { reason: 'idempotency_key_reused' }))).toBe(false);

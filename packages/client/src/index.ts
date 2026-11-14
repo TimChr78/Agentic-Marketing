@@ -1,4 +1,7 @@
 import type { AnyCommand } from '@agentic-marketing/commands';
+// The validator module only: the core index also pulls Node-only hashing and net helpers, which a
+// browser bundle must not load.
+import { IDEMPOTENCY_KEY_MAX, isValidIdempotencyKey } from '@agentic-marketing/core/idempotency';
 import type { z } from 'zod';
 
 // Typed client for the REST surface. Input and output types are inferred from the command
@@ -58,6 +61,12 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 const newIdempotencyKey = () => globalThis.crypto.randomUUID();
 
+/** Refuses a supplied key before any request, with the server's own rule (#906 review round 2). */
+function checkIdempotencyKey(key: string | undefined): void {
+  if (key !== undefined && !isValidIdempotencyKey(key))
+    throw new Error(`An idempotency key must be 1 to ${IDEMPOTENCY_KEY_MAX} printable characters without spaces.`);
+}
+
 export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOptions = {}) {
   const f = opts.fetch ?? fetch;
 
@@ -72,7 +81,8 @@ export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOpt
       headers: {
         'content-type': 'application/json',
         ...opts.headers,
-        ...(callOpts.idempotencyKey ? { 'idempotency-key': callOpts.idempotencyKey } : {}),
+        // Presence, not truthiness: an empty key was validated away, and a key of "0" is valid.
+        ...(callOpts.idempotencyKey !== undefined ? { 'idempotency-key': callOpts.idempotencyKey } : {}),
       },
       body: JSON.stringify(input ?? {}),
     });
@@ -88,6 +98,7 @@ export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOpt
       input: CommandInput<Cmds, N>,
       callOpts: CallOptions = {},
     ): Promise<CommandOutput<Cmds, N>> {
+      checkIdempotencyKey(callOpts.idempotencyKey);
       return once(name, input, callOpts);
     },
     /**
@@ -104,6 +115,7 @@ export function createClient<Cmds extends readonly AnyCommand[]>(opts: ClientOpt
       input: CommandInput<Cmds, N>,
       callOpts: CallOptions = {},
     ): Promise<CommandOutput<Cmds, N>> {
+      checkIdempotencyKey(callOpts.idempotencyKey);
       const idempotencyKey = callOpts.idempotencyKey ?? newIdempotencyKey();
       for (let attempt = 0; ; attempt++) {
         try {
