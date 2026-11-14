@@ -23,7 +23,11 @@ import { findUnknownInputKeys, type UnknownInputKey, unknownKeyMessages } from '
 // validation, authorization, idempotency and audit cannot be skipped by any surface.
 
 export type Effect = 'read' | 'write' | 'publish' | 'destructive';
-export type Surface = 'rest' | 'mcp' | 'scim' | 'internal';
+/**
+ * Where a request came in. `internal` is a path with no request behind it (a scheduler job, the
+ * password reset a worker performs); `cli` is an operator running `am` on the host (#913).
+ */
+export type Surface = 'rest' | 'mcp' | 'scim' | 'internal' | 'cli';
 
 /** A public request's brand context (#185), attached by the server's public middleware. */
 export interface PublicRequest {

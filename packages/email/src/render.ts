@@ -1,6 +1,6 @@
 /// <reference path="./mjml.d.ts" />
 import type { EmailBlockParam, EmailTemplate } from '@agentic-marketing/artifacts';
-import { AppError, redactCredentials, safeErrorText } from '@agentic-marketing/core';
+import { AppError, safeErrorText } from '@agentic-marketing/core';
 import { convert } from 'html-to-text';
 import {
   AssertionError,
@@ -40,13 +40,26 @@ export class TemplateError extends Error {
   }
 }
 
-/** The first line of a message: library errors append a stack or an excerpt after it. */
 /**
- * The first line of an error message, credential-redacted. Redaction runs on the whole message
- * first: cutting at a newline can separate a quoted credential from its closing quote, and the
- * rule would no longer recognise what is left (#885 round 4).
+ * The longest first line a render or check problem keeps. A caller that stores or returns text from
+ * an exception may not rely on the exception being short: `firstLine` bounds every one of them, so
+ * a two-megabyte single-line gateway answer cannot reach a message row, a decision event or a
+ * caller's error (#919).
  */
-export const firstLine = (message: string) => redactCredentials(message).split('\n')[0]!;
+const FIRST_LINE_MAX = 500;
+
+/**
+ * The first line of an error message, credential-redacted and bounded. Redaction runs on the whole
+ * message first: cutting at a newline can separate a quoted credential from its closing quote, and
+ * the rule would no longer recognise what is left (#885 round 4).
+ */
+export const firstLine = (message: string) => safeErrorText(message, FIRST_LINE_MAX);
+
+/**
+ * The stored reason of a failed send: the provider's text redacted while complete, then its first
+ * line, then cut to the length the message log keeps (#919).
+ */
+export const failureText = (message: string) => safeErrorText(message, 300);
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 function escapeOutput(value: unknown): string {

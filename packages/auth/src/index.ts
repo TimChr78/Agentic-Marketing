@@ -4,6 +4,7 @@ import { AppError } from '@agentic-marketing/core';
 import type { Db, Role } from '@agentic-marketing/db';
 import { type CimdOptions, cimd } from '@better-auth/cimd';
 import { fetchClientMetadataResource } from '@better-auth/cimd/node';
+import { runWithTransaction } from '@better-auth/core/context';
 import { mcp } from '@better-auth/mcp';
 import { type BetterAuthOptions, betterAuth } from 'better-auth';
 import { getMigrations } from 'better-auth/db/migration';
@@ -190,6 +191,17 @@ export function createAuth(config: AuthConfig) {
   return betterAuth(authOptions(config));
 }
 export type Auth = ReturnType<typeof createAuth>;
+
+/**
+ * Runs `fn` in one transaction on Better Auth's own adapter (#913). Everything an
+ * `internalAdapter` call does inside `fn` joins that transaction, so a password write and the
+ * session revocation after it commit together or not at all; a failure rolls both back. Better
+ * Auth's reset flow uses the same helper, and a call made inside an open transaction joins it.
+ */
+export async function inAuthTransaction<T>(auth: Auth, fn: () => Promise<T>): Promise<T> {
+  const context = await auth.$context;
+  return runWithTransaction(context.adapter, fn);
+}
 
 export async function migrateAuth(config: AuthConfig) {
   const { runMigrations } = await getMigrations(authOptions(config));

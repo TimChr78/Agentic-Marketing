@@ -10,6 +10,7 @@ import { createServer } from './app';
 import { resolvePassword } from './cli-password';
 import { ConfigError, loadConfig } from './config';
 import { runLoadTest } from './loadtest';
+import { resetPasswordForEmail } from './passwordReset';
 import { COMMIT, VERSION } from './version';
 
 // Admin CLI.
@@ -190,23 +191,11 @@ async function admin(command: string, rest: string[]) {
         envVar: 'AM_RESET_PASSWORD',
         passwordFlag: values.password,
       });
-      const context = await auth.$context;
-      const found = await context.internalAdapter.findUserByEmail(values.email, { includeAccounts: true });
-      if (!found) throw new Error(`reset-password: no user with email ${values.email}`);
-      const hashed = await context.password.hash(password);
-      const credential = found.accounts.find((account) => account.providerId === 'credential');
-      if (credential) await context.internalAdapter.updateAccount(credential.id, { password: hashed });
-      else
-        await context.internalAdapter.linkAccount({
-          userId: found.user.id,
-          providerId: 'credential',
-          accountId: found.user.id,
-          password: hashed,
-        });
-      // A reset is the break-glass path for a compromised password: end every session of this person
-      // in the same operation, so a cookie stolen before the reset cannot outlive it. Other people's
-      // sessions and other credentials are untouched.
-      await context.internalAdapter.deleteUserSessions(found.user.id);
+      // A reset is the break-glass path for a compromised password: the password write and the end
+      // of every session of this person are one transaction (#913), so a crash cannot leave a
+      // cookie stolen before the reset valid. Other people's sessions and other credentials are
+      // untouched, and the same audit entry the web reset writes is recorded as a `cli` reset.
+      await resetPasswordForEmail({ db, auth }, values.email, password);
       console.log(`password updated for ${values.email}`);
     } else if (command === 'rotate-keys') {
       const { rewrapped } = await rewrapDataKeys(db.admin, keyProvider);

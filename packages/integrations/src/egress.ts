@@ -106,22 +106,25 @@ function ipv6Words(address: string): number[] | null {
 const ipv4 = (hi: number, lo: number) => `${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`;
 
 /**
- * The IPv4 address an IPv6 form embeds, or null. IPv4-mapped (`::ffff:0:0/96`), IPv4-translated
- * (SIIT, `::ffff:0:0:0/96`), IPv4-compatible (`::/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`,
- * the address in bits 16-48) all carry an IPv4 address that must be checked against the IPv4 block
- * list.
+ * The IPv4 addresses an IPv6 form embeds. IPv4-mapped (`::ffff:0:0/96`), IPv4-translated (SIIT,
+ * `::ffff:0:0:0/96`), IPv4-compatible (`::/96`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`, the
+ * address in bits 16-48) carry one. Teredo (`2001:0000::/32`) carries two (#914): its server in
+ * bits 32-64, plain, and its client in bits 96-128, complemented, and either can name a private
+ * target.
  */
-function embeddedIpv4(address: string): string | null {
+function embeddedIpv4s(address: string): string[] {
   const w = ipv6Words(address);
-  if (!w) return null;
+  if (!w) return [];
   const zero = (from: number, to: number) => w.slice(from, to).every((n) => n === 0);
-  if (zero(0, 5) && w[5] === 0xffff) return ipv4(w[6]!, w[7]!);
+  if (zero(0, 5) && w[5] === 0xffff) return [ipv4(w[6]!, w[7]!)];
   // SIIT: ::ffff:0:a.b.c.d. It is not mapped (w[5] is 0), so the rule above does not match it.
-  if (zero(0, 4) && w[4] === 0xffff && w[5] === 0) return ipv4(w[6]!, w[7]!);
-  if (zero(0, 6)) return ipv4(w[6]!, w[7]!);
-  if (w[0] === 0x64 && w[1] === 0xff9b && zero(2, 6)) return ipv4(w[6]!, w[7]!);
-  if (w[0] === 0x2002) return ipv4(w[1]!, w[2]!);
-  return null;
+  if (zero(0, 4) && w[4] === 0xffff && w[5] === 0) return [ipv4(w[6]!, w[7]!)];
+  if (zero(0, 6)) return [ipv4(w[6]!, w[7]!)];
+  if (w[0] === 0x64 && w[1] === 0xff9b && zero(2, 6)) return [ipv4(w[6]!, w[7]!)];
+  if (w[0] === 0x2002) return [ipv4(w[1]!, w[2]!)];
+  // Teredo: the server address is plain, the client address is the bitwise complement.
+  if (w[0] === 0x2001 && w[1] === 0x0000) return [ipv4(w[2]!, w[3]!), ipv4(w[6]! ^ 0xffff, w[7]! ^ 0xffff)];
+  return [];
 }
 
 /** Whether an address is private (and not explicitly allowed). Anything that is not an IP address is refused. */
@@ -131,11 +134,12 @@ export function isBlockedAddress(address: string, policy: EgressPolicy): boolean
   if (isIP(a) === 0) return true;
   const { nets } = allowList(policy);
   if (nets.check(a, family(a))) return false;
-  const embedded = isIP(a) === 6 ? embeddedIpv4(a) : null;
-  if (embedded !== null) {
-    // An allow-listed IPv4 range also covers its mapped/NAT64/6to4 forms.
-    if (nets.check(embedded, 'ipv4')) return false;
-    return blocked.check(embedded, 'ipv4');
+  const embedded = isIP(a) === 6 ? embeddedIpv4s(a) : [];
+  if (embedded.length) {
+    // An allow-listed IPv4 range also covers its mapped/NAT64/6to4/Teredo forms. Every embedded
+    // address has to be public or explicitly allowed: for Teredo that means both the server and
+    // the client, so neither can name an internal target.
+    return embedded.some((ip) => !nets.check(ip, 'ipv4') && blocked.check(ip, 'ipv4'));
   }
   return blocked.check(a, family(a));
 }
