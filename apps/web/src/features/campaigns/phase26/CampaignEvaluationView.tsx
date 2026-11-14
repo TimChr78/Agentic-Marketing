@@ -24,6 +24,7 @@ import {
   ROLE_LABEL,
   rateOrDash,
   revenuePerRecipientFor,
+  revenueText,
   targetProgressText,
   typeLabel,
   zoneOf,
@@ -98,13 +99,15 @@ function MetricGrid({ summary }: { summary: MeasuredSummary }) {
             const perRecipient = revenuePerRecipientFor(h, row.currency);
             return (
               <StatCard
-                key={`${row.currency}-${row.amount}`}
+                key={row.currency}
                 label={`Revenue · ${row.currency}`}
-                value={money(row.amount, row.currency)}
+                value={revenueText(row.amount, row.currency)}
                 hint={
-                  perRecipient
-                    ? `${money(perRecipient.amount, row.currency)} per attributed recipient on any channel`
-                    : 'Per-recipient revenue unavailable'
+                  perRecipient === null
+                    ? 'Per-recipient revenue unavailable'
+                    : perRecipient.amount === null
+                      ? 'Per-recipient revenue suppressed'
+                      : `${money(perRecipient.amount, row.currency)} per attributed recipient on any channel`
                 }
               />
             );

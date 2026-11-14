@@ -477,6 +477,35 @@ describe('campaign roll-up currency separation (#511)', () => {
     expect(screen.queryByText('0%')).toBeNull();
   });
 
+  it('shows a suppressed currency as Suppressed, counts it as a currency and withholds target progress (#909)', async () => {
+    h.summary = summaryMeasured({
+      headline: {
+        ...summaryMeasured().headline,
+        revenue: [
+          { currency: 'EUR', amount: null },
+          { currency: 'USD', amount: 400 },
+        ],
+        revenuePerRecipient: [
+          { currency: 'EUR', amount: null },
+          { currency: 'USD', amount: 0.17 },
+        ],
+        targetProgress: null,
+      },
+      meta: { ...meta, currency: null },
+      goal: { ...goal, kind: 'revenue', target: 1000 },
+    });
+
+    renderTab();
+    await screen.findByText('Revenue · EUR');
+    expect(screen.getByText('Revenue · USD')).toBeTruthy();
+    // The suppressed currency still occupies a row and reads as suppressed, not as €0 or a dash.
+    expect(screen.getByText('Suppressed')).toBeTruthy();
+    expect(screen.getByText('Per-recipient revenue suppressed')).toBeTruthy();
+    expect(screen.getByText('Progress unavailable · multiple currencies cannot be combined')).toBeTruthy();
+    // USD's 40% of target is never presented as the campaign's progress.
+    expect(screen.queryByText(/40% of target/)).toBeNull();
+    expect(screen.queryByText('€0')).toBeNull();
+  });
 });
 
 it('renders a suppressed holdout currency as Suppressed, not as zero (#901)', async () => {

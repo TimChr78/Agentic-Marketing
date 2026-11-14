@@ -54,12 +54,18 @@ const headlineSchema = z.object({
   unsubscribeRate: z.number().nullable(),
   converters: z.number().int().nullable().describe('Distinct campaign converters; null when the total was withheld'),
   conversionRate: z.number().nullable(),
-  revenue: z.array(currencyAmount),
-  revenuePerRecipient: z.array(currencyAmount),
+  revenue: z
+    .array(currencyAmount)
+    .describe('Revenue per currency; a currency below k=5 converters keeps its row with a null amount, and currencies are never combined'),
+  revenuePerRecipient: z
+    .array(currencyAmount)
+    .describe('Revenue divided by the recipients total, one row per currency, including a suppressed currency with a null amount'),
   targetProgress: z
     .number()
     .nullable()
-    .describe('Progress against goal.target; null when there is no target, a needed total was withheld, or currencies cannot be compared'),
+    .describe(
+      'Progress against goal.target; null when there is no target, a needed total was withheld, or a revenue goal has more than one currency (including a suppressed one) or a suppressed amount',
+    ),
 });
 
 const funnelStep = z.object({
@@ -485,11 +491,48 @@ export function planMemberSuppression(
   return { hidden, withheld: plan.withheld, complementary: plan.hidden > 0 };
 }
 
+/**
+ * The headline revenue rows (#909): a currency the query suppressed keeps its row with a null
+ * amount, so the reader knows the currency exists and the UI can still see that there is more than
+ * one. Only a non-string currency or a value that is neither a number nor null is dropped.
+ */
+export function summaryRevenue(
+  rows: readonly (readonly unknown[])[],
+  currencyIndex: number,
+  revenueIndex: number,
+): { currency: string; amount: number | null }[] {
+  return rows.flatMap((row) => {
+    const currency = row[currencyIndex];
+    const amount = row[revenueIndex];
+    return typeof currency === 'string' && (typeof amount === 'number' || amount === null) ? [{ currency, amount }] : [];
+  });
+}
+
+/**
+ * Progress towards a goal's target (#909). A revenue goal needs exactly one currency in total and a
+ * visible amount: with a suppressed second currency the amounts cannot be compared, so progress is
+ * withheld instead of computed from the visible one alone.
+ */
+export function revenueTargetProgress(opts: {
+  goal: { kind: string; target: number | null };
+  revenue: readonly { currency: string; amount: number | null }[];
+  converters: number | null;
+}): number | null {
+  const { goal, revenue, converters } = opts;
+  if (goal.target === null || !(goal.target > 0)) return null;
+  if (goal.kind === 'revenue') {
+    if (revenue.length !== 1) return null;
+    const amount = revenue[0]!.amount;
+    return amount === null ? null : amount / goal.target;
+  }
+  return converters === null ? null : converters / goal.target;
+}
+
 export const analyticsCampaignSummary = defineCommand({
   name: 'analytics.campaignSummary',
   title: 'Campaign evaluation',
   description:
-    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed; a currency revenue row below k=5 converters has its revenue suppressed while the rest of the campaign headline stays. Each headline total beside the member rows is protected per total: when exactly one member is hidden, the smallest visible member with a value in that total is hidden too, and a total with no visible member to hide is withheld (null) and named in the notes. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
+    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed; a currency revenue row below k=5 converters keeps its row with a null amount, while the rest of the campaign headline stays, and a revenue goal’s target progress is withheld when more than one currency is in play. Each headline total beside the member rows is protected per total: when exactly one member is hidden, the smallest visible member with a value in that total is hidden too, and a total with no visible member to hide is withheld (null) and named in the notes. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
   input: z.object({
     campaignId: CampaignId,
     from: isoDateTime('from')
@@ -595,14 +638,7 @@ export const analyticsCampaignSummary = defineCommand({
     const complained = cell(email, 'email.complained');
     const currencyIndex = columnIndex(revenue, 'currency');
     const revenueIndex = columnIndex(revenue, 'campaign.revenue');
-    const revenueRows =
-      currencyIndex >= 0 && revenueIndex >= 0
-        ? revenue.rows.flatMap((row) => {
-            const currency = row[currencyIndex];
-            const amount = row[revenueIndex];
-            return typeof currency === 'string' && typeof amount === 'number' ? [{ currency, amount }] : [];
-          })
-        : [];
+    const revenueRows = currencyIndex >= 0 && revenueIndex >= 0 ? summaryRevenue(revenue.rows, currencyIndex, revenueIndex) : [];
 
     // Revenue goals follow the conversion map, exactly like campaign.converters does.
     const conversionMap = await publishedSingleton(ctx.tx, 'conversion_map');
@@ -643,14 +679,10 @@ export const analyticsCampaignSummary = defineCommand({
     const conversionRate = recipients !== null && recipients > 0 && converters !== null ? converters / recipients : null;
     const revenuePerRecipient = revenueRows.map((r) => ({
       currency: r.currency,
-      amount: recipients === null ? null : recipients === 0 ? 0 : r.amount / recipients,
+      amount: r.amount === null || recipients === null ? null : recipients === 0 ? 0 : r.amount / recipients,
     }));
 
-    let targetProgress: number | null = null;
-    if (record.goal.target && record.goal.target > 0) {
-      if (record.goal.kind === 'revenue' && revenueRows.length === 1) targetProgress = revenueRows[0].amount / record.goal.target;
-      else if (record.goal.kind !== 'revenue' && converters !== null) targetProgress = converters / record.goal.target;
-    }
+    const targetProgress = revenueTargetProgress({ goal: record.goal, revenue: revenueRows, converters });
 
     let memberSuppressed = 0;
     const members = sending.map((m, index) => {
