@@ -235,6 +235,9 @@ export class PolicyDeniedError extends AppError {
 // biome-ignore lint/suspicious/noExplicitAny: heterogeneous command lists
 export type AnyCommand = CommandDef<any, any, string>;
 
+// Re-exported so command-layer consumers keep importing the rule from one place.
+export { IDEMPOTENCY_KEY_MAX, isValidIdempotencyKey } from '@agentic-marketing/core';
+
 export interface ExecuteOptions {
   surface: Surface;
   idempotencyKey?: string;
@@ -440,6 +443,26 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         throw refused;
       }
 
+      // An idempotency key is scoped to the caller as well as the workspace (#906 review round 2):
+      // a person is their user id (the same across sessions); an agent is its agent record, and an
+      // API token or OAuth connection is its own agent. The audit log keeps the call's `inputHash`;
+      // the idempotency row stores this principal-bound hash instead. Derived here, after the
+      // missing-record guard: a read from such an agent is supported and must not dereference
+      // `principal.agent`, so it is named by its client id and user id instead.
+      const idempotencyHash = opts.idempotencyKey
+        ? hashValue({
+            // Named fields, never one joined string: an unregistered agent's client id and user
+            // id are separate values, so `{userId: 'alice'}` cannot hash like
+            // `{clientId: 'alice', userId: 'bob'}` (#906 review round 3).
+            principal:
+              principal.type === 'user'
+                ? { kind: 'user', userId: principal.userId }
+                : agent
+                  ? { kind: 'agent', agentId: agent.id }
+                  : { kind: 'agent-unregistered', clientId: principal.clientId ?? null, userId: principal.userId ?? null },
+            input: inputHash,
+          })
+        : inputHash;
       if (unknown.length) {
         if (options.strictInputs) return fail(new AppError('invalid_input', unknownMessages.join(' '), { unknownKeys: unknown }));
       }
@@ -523,9 +546,22 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
                   );
                 if (hit) {
-                  if (hit.command !== cmd.name || hit.inputHash !== inputHash)
-                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.');
-                  return hit.response as z.output<C['output']>;
+                  // `inputHash` binds the caller too, so another principal presenting the key is a
+                  // conflict, never the first caller's stored response. Rows written before 0.14.24
+                  // carry the old caller-agnostic hash and answer 409 until a new key is used.
+                  if (hit.command !== cmd.name || hit.inputHash !== idempotencyHash)
+                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                      reason: 'idempotency_key_reused',
+                    });
+                  const replay = hit.response as z.output<C['output']>;
+                  // A replay returns before the handler, so computing targets only on the handler
+                  // path left the replay's audit row without them (#905). Compute them from the
+                  // stored response the same way. Every audited read stores its full output: the
+                  // commands with `auditTarget`/`auditTargets` and a `sensitiveOutput` are writes,
+                  // and the reads' targets are plain ids, so redaction never removes them.
+                  target = cmd.auditTarget?.(replay) ?? target;
+                  if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(replay);
+                  return replay;
                 }
               }
               const undo = createUndoCollector();
@@ -550,13 +586,25 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
               }
               if (opts.idempotencyKey)
-                await tx.insert(schema.idempotencyKeys).values({
-                  workspaceId: principal.workspaceId,
-                  key: opts.idempotencyKey,
-                  command: cmd.name,
-                  inputHash,
-                  response: redact(out, cmd.sensitiveOutput) as object,
-                });
+                try {
+                  await tx.insert(schema.idempotencyKeys).values({
+                    workspaceId: principal.workspaceId,
+                    key: opts.idempotencyKey,
+                    command: cmd.name,
+                    inputHash: idempotencyHash,
+                    response: redact(out, cmd.sensitiveOutput) as object,
+                  });
+                } catch (err) {
+                  // Two different principals can use one key without serialising against each
+                  // other (the lock names the principal). The unique (workspace, key) then decides:
+                  // the loser's whole transaction rolls back and answers the same clean conflict as
+                  // a sequential reuse, never a 500 or a silent second run.
+                  if (isIdempotencyKeyConflict(err))
+                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                      reason: 'idempotency_key_reused',
+                    });
+                  throw err;
+                }
               // A read's target can only come from its output too (#763): a lookup resolves the
               // person, a preview samples people, a list returns rows about people.
               target = cmd.auditTarget?.(out) ?? target;
@@ -573,6 +621,11 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               // predate the winner's commit, or the waiter re-runs the handler and then loses on
               // the unique key. A session-level lock on the same connection, released after commit
               // or rollback, gives the waiter a snapshot taken after the winner committed.
+              // Keyed by workspace + key only (#906 review round 3): every caller presenting one
+              // key must serialise before any handler runs, or two callers could both run handlers
+              // and the loser's external effects would survive its rolled-back transaction. The
+              // caller is still bound by `idempotencyHash`: after the lock, a row from another
+              // caller answers the reused conflict before the handler.
               ...(opts.idempotencyKey ? { advisoryLockKey: `idempotency:${principal.workspaceId}:${opts.idempotencyKey}` } : {}),
             },
           ),
@@ -966,6 +1019,17 @@ function knownConflict(err: unknown): AppError | null {
 export function isDeadlock(err: unknown): boolean {
   for (let e = err as { code?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++)
     if (e.code === '40P01') return true;
+  return false;
+}
+
+/** Postgres 23505 on the idempotency primary key, directly or as the cause of a query error. */
+function isIdempotencyKeyConflict(err: unknown): boolean {
+  for (
+    let e = err as { code?: unknown; constraint?: unknown; cause?: unknown } | undefined, depth = 0;
+    e && depth < 5;
+    e = e.cause as typeof e, depth++
+  )
+    if (e.code === '23505' && e.constraint === 'idempotency_keys_pkey') return true;
   return false;
 }
 
