@@ -2,11 +2,11 @@ import { hkdfSync } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { type Auth, hashedResetTokenIdentifier, inAuthTransaction, mintResetVerification } from '@agentic-marketing/auth';
-import { canonicalJson, newId, sha256 } from '@agentic-marketing/core';
-import { type Db, schema } from '@agentic-marketing/db';
+import { appendAuditEntry, type Principal } from '@agentic-marketing/commands';
+import { newId, sha256 } from '@agentic-marketing/core';
+import type { Db } from '@agentic-marketing/db';
 import { open, seal } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { desc, eq, sql } from 'drizzle-orm';
 
 // Self-service password reset (#191), the server side of Better Auth's reset flow:
 //
@@ -706,44 +706,38 @@ export async function runPasswordResetDeliveries(
       logger.info({ command: entry.command, userId, ip: entry.ip }, 'password reset event for a person without a workspace');
       return;
     }
-    await db.withWorkspace(workspaceId, async (tx) => {
-      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`audit:${workspaceId}`}, 0))`);
-      const [previous] = await tx
-        .select({ hash: schema.auditLog.hash })
-        .from(schema.auditLog)
-        .where(eq(schema.auditLog.workspaceId, workspaceId))
-        .orderBy(desc(schema.auditLog.seq))
-        .limit(1);
-      const row = {
-        workspaceId,
-        principalType: 'user',
-        principalId: userId,
-        clientId: null,
-        surface: entry.surface ?? 'internal',
-        command: entry.command,
-        effect: 'write',
-        target: userId,
+    const ok = entry.outcome === 'ok' || entry.outcome === 'sent';
+    // The shared append helper, so the entry is shaped (and hashed) exactly like every other audit
+    // entry: an absent IP is omitted from the hash, which a hand-built entry got wrong (#913).
+    // The principal is audit-only; no permission is evaluated when an entry is appended.
+    const principal: Principal = { type: 'user', userId, workspaceId, role: 'viewer', permissions: new Set() };
+    await db.withWorkspace(workspaceId, (tx) =>
+      appendAuditEntry(
+        tx,
+        principal,
+        entry.surface ?? 'internal',
+        { name: entry.command, effect: 'write' },
         // What happened and from where, never the token or the password.
-        inputHash: sha256(`${entry.command}:${userId}:${entry.ip}:${entry.outcome}`),
-        ok: entry.outcome === 'ok' || entry.outcome === 'sent',
-        error: entry.outcome === 'ok' || entry.outcome === 'sent' ? null : `password_reset: ${entry.outcome}`,
-        prevHash: previous?.hash ?? null,
-        ip: entry.ip,
-      };
-      await tx.insert(schema.auditLog).values({ ...row, hash: sha256(canonicalJson(row)) });
-    });
+        sha256(`${entry.command}:${userId}:${entry.ip}:${entry.outcome}`),
+        userId,
+        ok ? undefined : { code: 'password_reset', message: entry.outcome },
+        entry.ip,
+      ),
+    );
   } catch (err) {
     // An audit write must never break the flow; the request outcome is already logged above.
     logger.warn({ err, command: entry.command, userId }, 'could not append the password reset audit entry');
   }
 }
 
-/** What an operator-initiated reset needs; the session revocation is a seam for tests. */
+/** What an operator-initiated reset needs; the two writes are seams for tests. */
 export interface AdminResetDeps {
   db: Db;
   auth: Auth;
   /** Deletes every session of the person. Defaults to Better Auth's internal adapter. */
   revokeSessions?: (userId: string) => Promise<void>;
+  /** Writes the new credential, updating the password account or linking one. Same default. */
+  writeCredential?: (target: { userId: string; credentialId: string | null; hashed: string }) => Promise<void>;
 }
 
 /**
@@ -761,16 +755,21 @@ export async function resetPasswordForEmail(deps: AdminResetDeps, email: string,
   const hashed = await context.password.hash(password);
   const credential = found.accounts.find((account) => account.providerId === 'credential');
   const revokeSessions = deps.revokeSessions ?? ((userId: string) => context.internalAdapter.deleteUserSessions(userId));
+  const writeCredential =
+    deps.writeCredential ??
+    (async ({ userId, credentialId, hashed: passwordHash }: { userId: string; credentialId: string | null; hashed: string }) => {
+      if (credentialId) await context.internalAdapter.updateAccount(credentialId, { password: passwordHash });
+      else
+        await context.internalAdapter.linkAccount({
+          userId,
+          providerId: 'credential',
+          accountId: userId,
+          password: passwordHash,
+        });
+    });
   await inAuthTransaction(deps.auth, async () => {
     await revokeSessions(found.user.id);
-    if (credential) await context.internalAdapter.updateAccount(credential.id, { password: hashed });
-    else
-      await context.internalAdapter.linkAccount({
-        userId: found.user.id,
-        providerId: 'credential',
-        accountId: found.user.id,
-        password: hashed,
-      });
+    await writeCredential({ userId: found.user.id, credentialId: credential?.id ?? null, hashed });
   });
   await recordPasswordResetAudit(deps.db, {
     userId: found.user.id,

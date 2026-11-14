@@ -95,6 +95,7 @@ describe('am reset-password', { timeout: 180_000 }, () => {
 describe('the reset itself (#913)', { timeout: 60_000 }, () => {
   let txn: User;
   let txnWs = '';
+  let txnOtherWs = '';
   const hashOf = async (userId: string) => {
     const { rows } = await t.srv.db.admin.query<{ password: string | null }>(
       `SELECT password FROM "account" WHERE "userId" = $1 AND "providerId" = 'credential'`,
@@ -132,6 +133,9 @@ describe('the reset itself (#913)', { timeout: 60_000 }, () => {
   beforeAll(async () => {
     txn = await t.signUp(`cli-txn-${Date.now()}@example.com`);
     txnWs = await t.workspaceWith([[txn, 'owner']]);
+    // A second membership: the audit entry lands in the oldest workspace, and both chains must
+    // still verify afterwards (#913).
+    txnOtherWs = await t.workspaceWith([[txn, 'admin']]);
   });
 
   it('leaves the password and the sessions alone when the session deletion fails', async () => {
@@ -157,6 +161,74 @@ describe('the reset itself (#913)', { timeout: 60_000 }, () => {
     expect(await audits()).toEqual([]);
   });
 
+  // The review of the first round: a failure injected *before* either write would pass without a
+  // transaction. This one fails inside the credential write, after the session deletion has already
+  // run, so only a transaction can put the sessions back.
+  it('restores the sessions when the password write fails after they were deleted', async () => {
+    const before = await hashOf(txn.id);
+    await expect(
+      resetPasswordForEmail(
+        {
+          db: t.srv.db,
+          auth: t.srv.auth,
+          writeCredential: async () => {
+            throw new Error('credential store unavailable');
+          },
+        },
+        txn.email,
+        'a-rolled-back-password',
+      ),
+    ).rejects.toThrow('credential store unavailable');
+    expect(await hashOf(txn.id)).toBe(before);
+    // The default revocation really ran first; the rollback is what makes the old cookie work again.
+    expect((await whoamiIn(txn.cookie)).status).toBe(200);
+    expect((await signIn(txn.email, 'a-rolled-back-password')).status).toBe(401);
+    expect(await audits()).toEqual([]);
+  });
+
+  it('covers the link-account branch, and a person who has no password account', async () => {
+    const noCred = await t.signUp(`cli-nocred-${Date.now()}@example.com`);
+    const ws = await t.workspaceWith([[noCred, 'owner']]);
+    // A person with no credential account: single sign-on or SCIM provisioned.
+    await t.srv.db.admin.query(`DELETE FROM "account" WHERE "userId" = $1 AND "providerId" = 'credential'`, [noCred.id]);
+    const credentialRows = async () => {
+      const { rows } = await t.srv.db.admin.query('SELECT id FROM "account" WHERE "userId" = $1 AND "providerId" = \'credential\'', [
+        noCred.id,
+      ]);
+      return rows.length;
+    };
+    expect(await credentialRows()).toBe(0);
+
+    await expect(
+      resetPasswordForEmail(
+        {
+          db: t.srv.db,
+          auth: t.srv.auth,
+          writeCredential: async () => {
+            throw new Error('link failed');
+          },
+        },
+        noCred.email,
+        'a-linked-password',
+      ),
+    ).rejects.toThrow('link failed');
+    expect(await credentialRows()).toBe(0);
+    expect(
+      (
+        await fetch(`${t.base}/v1/workspace.get`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', origin: t.base, cookie: noCred.cookie, 'x-workspace-id': ws },
+          body: '{}',
+        })
+      ).status,
+    ).toBe(200);
+
+    // Without a failure the same person gets a credential account and can sign in with it.
+    await resetPasswordForEmail({ db: t.srv.db, auth: t.srv.auth }, noCred.email, 'a-linked-password');
+    expect(await credentialRows()).toBe(1);
+    expect((await signIn(noCred.email, 'a-linked-password')).status).toBe(200);
+  });
+
   it('commits the password, ends the old sessions and records the CLI audit entry', async () => {
     await resetPasswordForEmail({ db: t.srv.db, auth: t.srv.auth }, txn.email, 'a-committed-password');
 
@@ -169,5 +241,12 @@ describe('the reset itself (#913)', { timeout: 60_000 }, () => {
     const rows = await audits();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ surface: 'cli', principal_type: 'user', principal_id: txn.id, ok: true, ip: null });
+
+    // The CLI reset writes no IP. The chain has to verify anyway: a hand-built entry that hashes
+    // `ip: null` while verification omits it broke every `audit.verify` after a reset (#913).
+    for (const workspaceId of [txnWs, txnOtherWs]) {
+      const verified = await t.api({ ...txn, cookie: cookieOf(signedIn) }, workspaceId).call('audit.verify', {});
+      expect(verified, workspaceId).toMatchObject({ ok: true, firstBrokenSeq: null });
+    }
   });
 });
