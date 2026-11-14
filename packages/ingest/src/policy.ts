@@ -181,9 +181,14 @@ export function processEvent(
       ?.properties.filter((p) => !p.pii)
       .map((p) => p.name),
   );
-  if (plan && !isConsentChange && !platformEvent && (e.type === 'track' || e.type === 'page' || e.type === 'screen')) {
+  if (plan && !isConsentChange && (e.type === 'track' || e.type === 'page' || e.type === 'screen')) {
     const def = plan.events.find((d) => d.name === name);
-    if (!def) {
+    if (platformEvent) {
+      // A strict plan must not reject a connector's mapped event (#764), but the plan's declared
+      // personal properties are still removed exactly as they are for the operator's own events
+      // (#903): a custom name such as customer_email never matches the reserved list below.
+      if (def) for (const p of def.properties) if (p.pii) delete properties[p.name];
+    } else if (!def) {
       if (plan.unknownEvents === 'block') return { kind: 'rejected', error: `Event "${name}" is not in the tracking plan.` };
       if (plan.unknownEvents === 'warn') warnings.push(`Event "${name}" is not in the tracking plan.`);
     } else {
