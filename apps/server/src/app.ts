@@ -27,7 +27,7 @@ import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '
 import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
 import { refreshPeople } from '@agentic-marketing/segments';
-import { logger } from '@agentic-marketing/telemetry';
+import { endpointLocation, logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { type Context, type ExecutionContext, Hono } from 'hono';
 import { mandateGuardrailBreach } from './agents/guardrails';
@@ -83,7 +83,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const mcpEnabled = isMcpResourceUrlAllowed(config.publicUrl);
   if (!mcpEnabled) {
     logger.warn(
-      { publicUrl: config.publicUrl },
+      // PUBLIC_URL may carry basic-auth userinfo or a query token; never put either in the logs.
+      { publicUrl: endpointLocation(config.publicUrl) },
       'MCP/OAuth client endpoints are disabled because PUBLIC_URL is plain HTTP on a non-loopback host; the admin UI and REST API still work. Use HTTPS (e.g. Tailscale or a Cloudflare Tunnel) to enable MCP.',
     );
   }
