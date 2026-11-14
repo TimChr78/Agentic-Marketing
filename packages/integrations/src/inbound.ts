@@ -215,8 +215,9 @@ export function inboundApi(deps: {
           : createHash('sha256').update(`${conn.row.id}\n${raw}\n${replayHeaders}`).digest('hex'));
       const replayKey = replayId ? inboundReplayKey(ws, conn.row.id, replayId) : undefined;
       let claimToken: string | undefined;
-      // A stable id per mapped record: if the hot state loses the key, JetStream still drops the
-      // retried delivery because both attempts derive the same message ids (120 s window).
+      // A stable id per mapped record: if the hot state loses the key, both attempts still derive
+      // the same message ids, so JetStream drops the retry inside its 120 s duplicate window. A
+      // retry that arrives after the entry is gone and after that window is published again.
       const messageIdFor = replayId
         ? (index: number) => `wh-${conn.row.id}-${createHash('sha256').update(`${ws}\n${replayId}`).digest('hex').slice(0, 32)}-${index}`
         : undefined;
