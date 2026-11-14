@@ -448,15 +448,18 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       // API token or OAuth connection is its own agent. The audit log keeps the call's `inputHash`;
       // the idempotency row stores this principal-bound hash instead. Derived here, after the
       // missing-record guard: a read from such an agent is supported and must not dereference
-      // `principal.agent`, so it is named by its client id (or user id) instead.
+      // `principal.agent`, so it is named by its client id and user id instead.
       const idempotencyHash = opts.idempotencyKey
         ? hashValue({
+            // Named fields, never one joined string: an unregistered agent's client id and user
+            // id are separate values, so `{userId: 'alice'}` cannot hash like
+            // `{clientId: 'alice', userId: 'bob'}` (#906 review round 3).
             principal:
               principal.type === 'user'
-                ? `user:${principal.userId}`
+                ? { kind: 'user', userId: principal.userId }
                 : agent
-                  ? `agent:${agent.id}`
-                  : `agent-unregistered:${principal.clientId ?? principal.userId}`,
+                  ? { kind: 'agent', agentId: agent.id }
+                  : { kind: 'agent-unregistered', clientId: principal.clientId ?? null, userId: principal.userId ?? null },
             input: inputHash,
           })
         : inputHash;

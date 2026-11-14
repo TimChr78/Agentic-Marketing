@@ -80,4 +80,23 @@ describe.skipIf(!hasTestDatabase())('a key on a read from an agent without a rec
     );
     expect(rows[0]!.n).toBe(1);
   });
+
+  // Round 3: `{userId: 'alice'}` and `{clientId: 'alice', userId: 'bob'}` are different callers.
+  it("does not replay one unregistered agent's response to another whose client id equals its user id", async () => {
+    const d = await createDisposableDb('cmd_agent_collide');
+    disposables.push(d);
+    const db = createDb({ adminUrl: d.url.toString(), appUrl: d.url.toString(), poolSize: 2 });
+    pools.push(db);
+    const rich = createExecutor(db, { serverVersion: 'test', strictInputs: true });
+    let runs = 0;
+    const counted = defineCommand({ ...read, name: 'test.countedRead', handler: async () => ({ ok: ++runs > 0 }) });
+    const alice = { ...userPrincipal('alice', d.workspace, 'owner'), type: 'agent' } as unknown as Principal;
+    const bob = { ...userPrincipal('bob', d.workspace, 'owner'), type: 'agent', clientId: 'alice' } as unknown as Principal;
+    expect(await rich.execute(counted, {}, alice, { surface: 'mcp', idempotencyKey: 'shared-key' })).toEqual({ ok: true });
+    await expect(rich.execute(counted, {}, bob, { surface: 'mcp', idempotencyKey: 'shared-key' })).rejects.toMatchObject({
+      code: 'conflict',
+      details: { reason: 'idempotency_key_reused' },
+    });
+    expect(runs).toBe(1);
+  });
 });
