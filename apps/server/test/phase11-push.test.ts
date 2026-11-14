@@ -24,6 +24,12 @@ let apnsBase = '';
 /** FCM answers 503 this many times for the transient token below, then succeeds (#639). */
 let fcmFailures = 0;
 const TRANSIENT_FCM_TOKEN = 'fcm-token-transient-0123456789';
+/**
+ * FCM answers this device with a single-line error just under the egress guard's 1 MiB response
+ * cap, the largest an adapter can still echo into a message (#919).
+ */
+const HUGE_FCM_TOKEN = 'fcm-token-huge-error-0123456789';
+const HUGE_ERROR = 'the push gateway answered with its own body '.repeat(21_000);
 const webPushes: { path: string; headers: IncomingMessage['headers']; body: Buffer }[] = [];
 const fcmSends: { auth: string; body: { message: { token: string; notification: { title: string } } } }[] = [];
 const apnsSends: { path: string; headers: Record<string, unknown>; body: { aps: { alert: { title: string } } } }[] = [];
@@ -55,6 +61,10 @@ beforeAll(async () => {
     if (req.url?.startsWith('/v1/projects/')) {
       const b = JSON.parse(body.toString());
       fcmSends.push({ auth: String(req.headers.authorization), body: b });
+      if (b.message?.token === HUGE_FCM_TOKEN)
+        return res
+          .writeHead(500, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ error: { status: 'INTERNAL', message: HUGE_ERROR } }));
       if (b.message?.token === TRANSIENT_FCM_TOKEN && fcmFailures > 0) {
         fcmFailures--;
         return res
@@ -278,6 +288,24 @@ describe('sending', () => {
     expect(settled).toMatchObject({ status: 'sent', reason: null });
     expect(webSends()).toBe(1); // never sent to the device that already had it
     expect(fcmTries()).toBe(2); // retried exactly once
+  });
+
+  // #919: a provider that echoes a huge single-line body must not have it stored per recipient and
+  // rendered in the message log. (The 2 MB case is the one #919 describes; the egress guard refuses
+  // a response past 1 MiB, so this uses the largest body an adapter can still echo.)
+  it('bounds the stored reason when a gateway answers with a huge error', async () => {
+    const api = t.api(owner);
+    const huge = await person('u-huge', 'anon-huge', true);
+    expect((await post('/v1/push/subscribe', serverKey, { userId: 'u-huge', kind: 'fcm', token: HUGE_FCM_TOKEN })).status).toBe(200);
+
+    const d = await api.call('messages.sendPush', { profileId: huge, templateId: template });
+    const row = await eventually(
+      async () => (await api.call('messages.list', { profileId: huge, limit: 10 })).messages.find((m) => m.id === d.messageId),
+      (m) => m?.reason?.includes('provider_error') ?? false,
+      15_000,
+    );
+    expect(row?.reason).toContain('the push gateway answered');
+    expect(row?.reason?.length ?? 0).toBeLessThanOrEqual(330);
   });
 
   it('does not notify without consent, or without devices', async () => {

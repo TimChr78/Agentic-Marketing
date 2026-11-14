@@ -31,7 +31,7 @@ import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from './outbox'
 import { checkPolicy } from './policy';
 import { transportFor } from './providers';
 import { deliverPush } from './push/gateway';
-import { firstLine, renderSubject, renderTemplate } from './render';
+import { failureText, renderSubject, renderTemplate } from './render';
 import { deliverSms } from './sms/gateway';
 
 // The send gateway (ADR-0007). Every e-mail is requested here and goes out through an outbox:
@@ -333,7 +333,7 @@ async function deliverOne(
       const subject = m.data.__subject;
       if (typeof subject === 'string') rendered.subject = await renderSubject(subject, vars);
     } catch (e) {
-      return finish('failed', `render_error: ${firstLine((e as Error).message)}`);
+      return finish('failed', `render_error: ${failureText((e as Error).message)}`);
     }
     const skipUtm = [publicUrl];
     // Shared UTM campaign: the campaign supplies utm_campaign unless the template sets its own
@@ -393,7 +393,7 @@ async function deliverOne(
     event = decisionEvent(m, 'sent', '', provider.adapter);
     if (known?.length) reported = await db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, known, provider.adapter, deps.kp));
   } catch (e) {
-    const reason = `provider_error: ${firstLine((e as Error).message)}`;
+    const reason = `provider_error: ${failureText((e as Error).message)}`;
     const retry = m.attempts < MAX_ATTEMPTS;
     const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(out.stream, m.attempts) * 1000) : null;
     logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'e-mail send failed');

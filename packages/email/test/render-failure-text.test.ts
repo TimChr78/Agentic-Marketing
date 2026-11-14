@@ -3,7 +3,7 @@ import type { CommandContext } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { describe, expect, it } from 'vitest';
 import { emailPublishProblems } from '../src/checks';
-import { firstLine, TemplateError, templateRenderError } from '../src/render';
+import { failureText, firstLine, TemplateError, templateRenderError } from '../src/render';
 import { checkTemplate, previewTemplate } from '../src/templates';
 
 // #885: templates.preview, templates.check and the publish gate wrapped *every* failure of a render
@@ -161,5 +161,29 @@ describe('render failure text redaction order (#885 round 4)', () => {
   it('firstLine never returns a credential split from its closing quote', () => {
     expect(firstLine('token="probe-secret\nrest"')).not.toContain('probe-secret');
     expect(firstLine('plain first line\nsecond')).toBe('plain first line');
+  });
+
+  it('bounds a first line even when nothing else does (#919)', () => {
+    // 2 MB on one line: a misbehaving gateway echoing its body. No caller may store it whole.
+    const huge = 'the gateway answered '.repeat(100_000);
+    expect(huge.length).toBeGreaterThan(2 * 1024 * 1024);
+    expect(firstLine(huge).length).toBe(500);
+  });
+});
+
+describe('the stored send-failure reason is bounded (#919)', () => {
+  const huge = 'the gateway answered '.repeat(100_000);
+
+  it('keeps at most 300 characters of a 2 MB single-line provider error', () => {
+    const reason = `provider_error: ${failureText(huge)}`;
+    expect(reason.length).toBeLessThanOrEqual(320);
+    expect(reason.startsWith('provider_error: the gateway answered')).toBe(true);
+  });
+
+  it('redacts first, then takes the first line, then cuts', () => {
+    const reason = `provider_error: ${failureText(`password=${'z'.repeat(4096)}\nsecond line`)}`;
+    expect(reason).not.toContain('zzzz');
+    expect(reason).toContain('password=[redacted]');
+    expect(reason).not.toContain('second line');
   });
 });

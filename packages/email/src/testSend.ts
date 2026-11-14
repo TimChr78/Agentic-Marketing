@@ -1,6 +1,6 @@
 import type { EmailTemplate } from '@agentic-marketing/artifacts';
 import type { CommandContext } from '@agentic-marketing/commands';
-import { AppError, newId, newUuid, redactCredentials } from '@agentic-marketing/core';
+import { AppError, newId, newUuid } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { personCrypto, profileForMessage } from '@agentic-marketing/profiles';
 import { logger } from '@agentic-marketing/telemetry';
@@ -10,7 +10,7 @@ import { MESSAGE_ID_HEADER, ProviderSendError } from './adapters';
 import { blockResolver } from './blocks';
 import { tagLinks, tagTextLinks } from './links';
 import { transportFor } from './providers';
-import { firstLine, renderTemplate, templateRenderError } from './render';
+import { failureText, renderTemplate, templateRenderError } from './render';
 
 // Test sends (#46): the same template and provider a real send would use, to a workspace member
 // or an address on the admin-configured seed list. Purpose and consent are skipped on purpose;
@@ -190,9 +190,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
         // The template's own Liquid/MJML/parameter failure is expected and keeps its message; a
         // block resolver's database error or a bug gets a fixed reason, never its text (#885).
         const expected = templateRenderError(e, 'the template could not be rendered');
-        const reason = expected
-          ? `render_error: ${firstLine(redactCredentials(expected.message)).slice(0, 300)}`
-          : 'render_error: the template could not be rendered';
+        const reason = expected ? `render_error: ${failureText(expected.message)}` : 'render_error: the template could not be rendered';
         await ctx.tx
           .update(schema.messages)
           .set({ status: 'failed', reason, updatedAt: new Date() })
@@ -227,7 +225,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
         // socket or driver error is not, so it becomes a fixed reason (#885 round 2).
         const reason =
           e instanceof ProviderSendError
-            ? `provider_error: ${firstLine(redactCredentials(e.message)).slice(0, 300)}`
+            ? `provider_error: ${failureText(e.message)}`
             : 'provider_error: the provider did not accept the message';
         logger.warn({ messageId: message.id, provider: provider.adapter, err: (e as Error).message }, 'test e-mail send failed');
         await ctx.tx

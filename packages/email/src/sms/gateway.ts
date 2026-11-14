@@ -10,7 +10,7 @@ import type { Decision, EmailServices } from '../gateway';
 import { topicSuppression } from '../gateway';
 import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
 import { checkPolicy, isMarketing } from '../policy';
-import { firstLine } from '../render';
+import { failureText } from '../render';
 import { billingOf, smsTransportFor, smsWebhookPath } from './providers';
 import { renderSms } from './render';
 
@@ -182,7 +182,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
     try {
       text = await renderSms(tpl.template, { ...m.data, profile: v.vars }, marketing);
     } catch (e) {
-      return finish('failed', `render_error: ${firstLine((e as Error).message)}`);
+      return finish('failed', `render_error: ${failureText((e as Error).message)}`);
     }
     const billing = billingOf(provider);
     if (billing.monthlyBudget !== undefined) {
@@ -231,7 +231,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
     );
     event = decisionEvent(m, 'sent', '', provider.adapter);
   } catch (e) {
-    const reason = `provider_error: ${firstLine((e as Error).message)}`;
+    const reason = `provider_error: ${failureText((e as Error).message)}`;
     const retry = m.attempts < MAX_ATTEMPTS;
     const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(stream, m.attempts) * 1000) : null;
     logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'SMS send failed');
