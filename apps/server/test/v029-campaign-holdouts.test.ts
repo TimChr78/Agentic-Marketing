@@ -359,6 +359,9 @@ describe('campaign result statistics', () => {
     const before = new Date(assignedAt.getTime() - 3_600_000);
     await t.srv.events.insert([
       ...controlPeople.slice(0, 10).map((p) => event(p.userId, inside, 10, 'USD')),
+      // Two of the same ten buyers also paid in DKK: two DKK converters is below k=5, so that
+      // currency's amount must be withheld even though the arm has twenty people (#901).
+      ...controlPeople.slice(0, 2).map((p) => event(p.userId, inside, 5, 'DKK')),
       ...treatmentPeople.slice(0, 30).map((p) => event(p.userId, inside, 20, 'EUR')),
       // Outside the 7-day window, or before the assignment: events that must not count.
       ...controlPeople.slice(10, 25).map((p) => event(p.userId, outside, 99, 'USD')),
@@ -384,8 +387,14 @@ describe('campaign result statistics', () => {
     );
 
     const result = await api().call('campaigns.holdoutResult', { campaignId: id });
-    expect(result.control).toMatchObject({ entered: 100, converted: 10, unsubscribed: 0, revenue: { USD: 100 } });
+    expect(result.control).toMatchObject({ entered: 100, converted: 10, unsubscribed: 0 });
     expect(result.treatment).toMatchObject({ entered: 100, converted: 30, unsubscribed: 5, revenue: { EUR: 600 } });
+    // The DKK amount (10) is null because only two people bought in DKK; USD, with ten buyers,
+    // keeps its amount. The currency key stays so the reader knows DKK exists.
+    expect(result.control.revenue).toEqual({ USD: 100, DKK: null });
+    expect(result.suppressedRevenue).toBe(1);
+    expect(result.suppressed).toBe(false);
+    expect(result.note).toContain('fewer than k=5 people converted in that currency');
     expect(result.control.conversionRate).toBeCloseTo(0.1, 10);
     expect(result.treatment.conversionRate).toBeCloseTo(0.3, 10);
     expect(result.treatment.unsubscribeRate).toBeCloseTo(0.05, 10);

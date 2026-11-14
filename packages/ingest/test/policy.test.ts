@@ -325,6 +325,49 @@ describe('platform-owned events', () => {
     expect(acceptInternalItems([order], connector, strict).accepted).toHaveLength(1);
   });
 
+  it('still deletes the plan’s declared personal properties on a connector event (#903)', () => {
+    // #764 skipped the plan's rejection paths for connector events; it must not skip the plan's
+    // declared-PII deletion. A custom-named personal property never matches the reserved list.
+    const declared: WorkspacePolicy = {
+      ...defaultPolicy,
+      plan: artifactTypes.tracking_plan.content.parse({
+        unknownEvents: 'block',
+        unknownProperties: 'block',
+        declaredProperties: 'block',
+        events: [
+          {
+            name: 'order.completed',
+            properties: [{ name: 'customer_email', pii: true }, { name: 'total' }],
+          },
+        ],
+      }),
+    };
+    const connector: SourceInfo = { ...server, platform: true };
+    const order = {
+      type: 'track',
+      event: 'order.completed',
+      userId: 'u1',
+      properties: { customer_email: 'buyer@example.com', total: 10 },
+    };
+    const out = processEvent(InboundEvent.parse(order), connector, declared, now, { messageId: () => 'x', internal: true });
+    expect(out).toMatchObject({ kind: 'accepted' });
+    if (out.kind !== 'accepted') throw new Error(out.kind);
+    expect(out.event.properties).toEqual({ total: 10 });
+    expect(acceptInternalItems([order], connector, declared).accepted[0]?.properties).toEqual({ total: 10 });
+
+    // The rejection paths stay skipped: an unknown event name and an undeclared property are
+    // accepted on a strict plan, because a connector payload is not the operator's own tracking.
+    expect(
+      processEvent(
+        InboundEvent.parse({ type: 'track', event: 'Shopify Order', userId: 'u1', properties: { note: 'gift' } }),
+        connector,
+        declared,
+        now,
+        { messageId: () => 'x', internal: true },
+      ),
+    ).toMatchObject({ kind: 'accepted', event: { properties: { note: 'gift' } } });
+  });
+
   it('exempts only the internal entry point, not the public one', () => {
     const item = { type: 'track', event: 'Form Submitted', anonymousId: 'a' };
     expect(acceptItems([item], server, strict).rejected).toHaveLength(1);

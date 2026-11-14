@@ -1,0 +1,5 @@
+---
+section: Fixed
+issues: [917]
+---
+- **Breaking:** `ads.performance` now distinguishes a conversion that had a campaign touch from one that had none. `unattributed` keeps its name and means only conversions with no campaign touch in the window; a new `unmatched` object counts the conversions whose last touch names a campaign with no spend row, and `totals` remains the sum of the campaign rows. A spend read that stops at its provider page ceiling is no longer silent: `ads.importSpend` returns `truncated`, and `ads.performance` returns `spendTruncated` with a note naming the incomplete dates, so cost is known to be incomplete and CPA understated while ROAS is overstated. The incomplete dates are kept with the spend they describe, in a workspace-scoped `ad_spend_gaps` table keyed by workspace, platform and ad account (migration 0095), so a later complete refresh of a few days cannot hide an older gap and renaming, re-pointing or deleting a connection cannot drop the warning; concurrent imports serialise on an advisory lock. The page ceilings were also raised (Meta 200 pages, Google Ads 50).

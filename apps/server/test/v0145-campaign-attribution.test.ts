@@ -483,11 +483,15 @@ describe('one identity resolution for the headline and the holdout card (#590)',
 });
 
 describe('a revenue goal without a conversion map (#632)', () => {
-  it('counts the goal event in the holdout and treats a missing rule as revenue 0', async () => {
+  it('counts the goal event in the holdout and suppresses the zero revenue below k', async () => {
     const result = await api(wsB).call('campaigns.holdoutResult', { campaignId: campaignR });
     expect(result.goal).toMatchObject({ kind: 'revenue', event: 'Renewal Complete', attributionDays: 7 });
     expect(result.control.converted).toBe(0);
     expect(result.treatment.converted).toBe(3);
-    expect(result.treatment.revenue).toEqual({ UNKNOWN: 0 });
+    // A missing rule values each event at 0, but the currency has three converters, below k=5, so
+    // the per-currency floor keeps the key with a null amount (#901) instead of publishing a figure.
+    expect(result.treatment.revenue).toEqual({ UNKNOWN: null });
+    expect(result.suppressedRevenue).toBe(1);
+    expect(result.note).toContain('fewer than k=5 people converted in that currency');
   });
 });

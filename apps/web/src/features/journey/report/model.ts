@@ -193,6 +193,8 @@ export interface StepRow {
   kind: string | null;
   /** Selected-period reach from the funnel wrapper; null when absent or suppressed. */
   period: number | null;
+  /** True when the funnel suppressed this row (a hidden subtree), not when data is missing. */
+  periodSuppressed: boolean;
   /** All-time distinct reach; null when the key was absent. */
   allTime: number | null;
   /** Current waiting count; null when the key was absent. */
@@ -245,6 +247,7 @@ export function stepRows({ nodes, steps, reached, waitingAt }: StepRowsInput): S
   for (const id of Object.keys(waitingAt ?? {})) ids.add(id);
 
   const periodByStep = new Map(steps.map((step) => [step.step, step.reached]));
+  const suppressedByStep = new Map(steps.map((step) => [step.step, step.suppressed === true]));
   const order = graphOrder(nodes);
   const rows = Array.from(ids, (id): StepRow => {
     const node = byId.get(id);
@@ -253,6 +256,7 @@ export function stepRows({ nodes, steps, reached, waitingAt }: StepRowsInput): S
       label: node?.label ?? null,
       kind: node?.kind ?? null,
       period: periodByStep.get(id) ?? null,
+      periodSuppressed: suppressedByStep.get(id) === true,
       allTime: reached && Object.hasOwn(reached, id) ? reached[id]! : null,
       waiting: waitingAt && Object.hasOwn(waitingAt, id) ? waitingAt[id]! : null,
     };

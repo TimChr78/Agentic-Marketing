@@ -1,7 +1,7 @@
 import type { CommandContext } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { describe, expect, it } from 'vitest';
-import { adPerformance } from '../src/spend';
+import { adPerformance, googleSpend, metaSpend } from '../src/spend';
 
 // #786: ads.performance used to read conversion events with a raw `LIMIT 100000` and no order,
 // paging or truncation signal, so a busy window silently lost conversions, revenue, CPA and ROAS.
@@ -11,11 +11,12 @@ import { adPerformance } from '../src/spend';
 const OLD_CAP = 100_000;
 const CONVERSION_COUNT = OLD_CAP + 1;
 
-/** The smallest tx shape publishedSingleton's conversion-map lookup uses. */
-const conversionMapTx = (rules: { event: string; value?: string }[]) =>
+/** The smallest tx shape publishedSingleton's conversion-map lookup and the spend gaps read use. */
+const commandTx = (rules: { event: string; value?: string }[], gaps: { platform: string; fromDate: string; toDate: string }[] = []) =>
   ({
     select: () => ({
       from: () => ({
+        where: async () => gaps,
         innerJoin: () => ({
           where: async () => [{ content: { rules } }],
         }),
@@ -23,7 +24,7 @@ const conversionMapTx = (rules: { event: string; value?: string }[]) =>
     }),
   }) as never;
 
-const context = (): CommandContext => {
+const context = (gaps: { platform: string; fromDate: string; toDate: string }[] = []): CommandContext => {
   const paged = Array.from({ length: CONVERSION_COUNT }, (_, i) => ({
     profileId: '',
     anonymousId: '',
@@ -71,7 +72,7 @@ const context = (): CommandContext => {
   };
   return {
     principal: { workspaceId: 'ws_test' },
-    tx: conversionMapTx([{ event: 'Order Completed', value: 'total' }]),
+    tx: commandTx([{ event: 'Order Completed', value: 'total' }], gaps),
     services: { events },
   } as unknown as CommandContext;
 };
@@ -214,5 +215,246 @@ describe('provider error bodies (#885)', () => {
     } finally {
       await provider.close();
     }
+  });
+});
+
+// #917: both spend reads stopped at 50 pages with no signal, so a large account's cost was silently
+// short and CPA/ROAS were quietly wrong. The fetchers now say whether more pages remained.
+describe('spend read truncation (#917)', () => {
+  const startProvider = async (respond: (url: string, body: string, hits: number) => unknown) => {
+    const { createServer } = await import('node:http');
+    let hits = 0;
+    const server = createServer(async (req, res) => {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      hits += 1;
+      const payload = respond(req.url ?? '', body, hits);
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(payload));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    return {
+      base: `http://127.0.0.1:${port}`,
+      hits: () => hits,
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  };
+  const egress = { allowedHosts: ['127.0.0.1'] };
+  const metaRow = {
+    campaign_id: 'c1',
+    campaign_name: 'Spring',
+    spend: '10',
+    impressions: '2',
+    clicks: '1',
+    date_start: '2026-01-02',
+    account_currency: 'DKK',
+  };
+  const googleBody = {
+    results: [
+      {
+        campaign: { id: '1', name: 'Search' },
+        segments: { date: '2026-01-02' },
+        metrics: { costMicros: '1000000', impressions: '5', clicks: '2', conversions: 1 },
+        customer: { currencyCode: 'DKK' },
+      },
+    ],
+    nextPageToken: 'more',
+  };
+
+  it('reports a complete Meta read as not truncated', async () => {
+    const provider = await startProvider(() => ({ data: [metaRow] }));
+    try {
+      const conn = {
+        connector: 'meta_ads',
+        settings: { pixelId: '1234567890', adAccountId: '1234567890', apiBase: provider.base, apiVersion: 'v24.0' },
+      } as never;
+      const read = await metaSpend(conn, { accessToken: 't'.repeat(30) }, '2026-01-01', '2026-01-02', egress);
+      expect(read.rows).toHaveLength(1);
+      // The account identity the ad_spend rows carry; the gap key uses the same value.
+      expect(read.account).toBe('act_1234567890');
+      expect(read.truncated).toBe(false);
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('reports Meta truncation at the page ceiling instead of stopping silently', async () => {
+    let port = 0;
+    const provider = await startProvider((_url, _body, hits) => ({
+      data: [metaRow],
+      paging: { next: `http://127.0.0.1:${port}/next?page=${hits}` },
+    }));
+    port = Number(new URL(provider.base).port);
+    try {
+      const { SPEND_LIMITS } = await import('../src/spend');
+      const conn = {
+        connector: 'meta_ads',
+        settings: { pixelId: '1234567890', adAccountId: '1234567890', apiBase: provider.base, apiVersion: 'v24.0' },
+      } as never;
+      const read = await metaSpend(conn, { accessToken: 't'.repeat(30) }, '2026-01-01', '2026-01-02', egress);
+      expect(read.truncated).toBe(true);
+      expect(read.rows).toHaveLength(SPEND_LIMITS.metaPages);
+      expect(provider.hits()).toBe(SPEND_LIMITS.metaPages);
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('reports Google truncation at the page ceiling', async () => {
+    const provider = await startProvider(() => googleBody);
+    try {
+      const { SPEND_LIMITS } = await import('../src/spend');
+      const conn = {
+        connector: 'google_ads',
+        oauthStatus: 'connected',
+        settings: { customerId: '1234567890', reportingBase: provider.base },
+      } as never;
+      const secrets = { clientId: 'c', clientSecret: 's', developerToken: 'd'.repeat(20), __oauth: { accessToken: 't'.repeat(30) } };
+      const read = await googleSpend(conn, secrets, '2026-01-01', '2026-01-02', egress);
+      expect(read.truncated).toBe(true);
+      expect(read.rows).toHaveLength(SPEND_LIMITS.googlePages);
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('reports a complete Google read as not truncated', async () => {
+    const provider = await startProvider(() => ({ ...googleBody, nextPageToken: undefined }));
+    try {
+      const conn = {
+        connector: 'google_ads',
+        oauthStatus: 'connected',
+        settings: { customerId: '1234567890', reportingBase: provider.base },
+      } as never;
+      const secrets = { clientId: 'c', clientSecret: 's', developerToken: 'd'.repeat(20), __oauth: { accessToken: 't'.repeat(30) } };
+      const read = await googleSpend(conn, secrets, '2026-01-01', '2026-01-02', egress);
+      expect(read.rows).toHaveLength(1);
+      expect(read.account).toBe('1234567890');
+      expect(read.truncated).toBe(false);
+    } finally {
+      await provider.close();
+    }
+  });
+
+  it('only reports truncation for a stored range that overlaps the report', async () => {
+    const { incompleteSpendFor } = await import('../src/spendState');
+    const gap = (platform: 'meta' | 'google', from: string, to: string) => ({ platform, from, to });
+    expect(incompleteSpendFor([gap('meta', '2025-12-01', '2026-01-31')], { since: '2026-01-01', until: '2026-01-10' })).toHaveLength(1);
+    expect(incompleteSpendFor([gap('meta', '2025-10-01', '2025-10-31')], { since: '2026-01-01', until: '2026-01-10' })).toEqual([]);
+    expect(incompleteSpendFor([gap('meta', '2025-12-01', '2026-01-31')], { since: '2026-02-01', until: '2026-02-10' })).toEqual([]);
+    // A Meta-only report ignores a truncated Google import, and vice versa.
+    expect(
+      incompleteSpendFor([gap('google', '2026-01-01', '2026-01-10')], { since: '2026-01-01', until: '2026-01-10', platform: 'meta' }),
+    ).toEqual([]);
+    expect(
+      incompleteSpendFor([gap('google', '2026-01-01', '2026-01-10')], { since: '2026-01-01', until: '2026-01-10', platform: 'google' }),
+    ).toHaveLength(1);
+  });
+});
+
+describe('ads.performance unattributed and unmatched (#917)', () => {
+  const attributionContext = (opts: {
+    spend: Record<string, unknown>[];
+    touch: string | null;
+    gaps?: { platform: string; fromDate: string; toDate: string }[];
+  }) => {
+    const conversions = [
+      {
+        profileId: '',
+        anonymousId: 'anon-touch',
+        userId: '',
+        name: 'Order Completed',
+        timestamp: Date.parse('2026-01-05T00:00:00.000Z'),
+        properties: { total: 50 },
+      },
+      {
+        profileId: '',
+        anonymousId: '',
+        userId: 'user-only',
+        name: 'Order Completed',
+        timestamp: Date.parse('2026-01-05T00:01:00.000Z'),
+        properties: { total: 10 },
+      },
+    ];
+    const events = {
+      settingsFor: async () => ({}),
+      conversionEvents: async (_ws: string, q: { onPage?: (rows: typeof conversions) => void | Promise<void> }) => {
+        await q.onPage?.(conversions);
+        return [];
+      },
+      client: {
+        query: async ({ query }: { query: string }) => ({
+          json: async () => {
+            if (query.includes('FROM ad_spend')) return opts.spend;
+            if (query.includes('count() AS n')) return [{ anonymous_id: 'anon-touch', n: 1 }];
+            if (query.includes('argMax')) return opts.touch ? [{ idx: 0, campaign: opts.touch, source: 'facebook' }] : [];
+            return [];
+          },
+        }),
+      },
+    };
+    return {
+      principal: { workspaceId: 'ws_test' },
+      tx: commandTx([{ event: 'Order Completed', value: 'total' }], opts.gaps ?? []),
+      services: { events },
+    } as unknown as CommandContext;
+  };
+  const spend = [
+    {
+      platform: 'meta',
+      campaign_id: 'spring',
+      campaign_name: 'Spring',
+      cost: 100,
+      currency: 'DKK',
+      impressions: 1,
+      clicks: 1,
+      platform_conversions: 1,
+    },
+  ];
+
+  it('puts a conversion whose last touch names a campaign without spend in unmatched, not unattributed', async () => {
+    const ctx = attributionContext({ spend, touch: 'Summer Sale' });
+    const result = await adPerformance.handler({ since: '2026-01-01', until: '2026-01-10', windowDays: 30 }, ctx);
+    expect(result.unmatched).toEqual({ conversions: 1, revenue: 50 });
+    expect(result.unattributed).toEqual({ conversions: 1, revenue: 10 });
+    expect(result.totals.conversions).toBe(0);
+    expect(result.totals.revenue).toBe(0);
+    expect(result.notes.join(' ')).toContain('matches no spend row');
+  });
+
+  it('attributes a touch that matches a spend row and leaves unmatched empty', async () => {
+    const ctx = attributionContext({ spend, touch: 'Spring' });
+    const result = await adPerformance.handler({ since: '2026-01-01', until: '2026-01-10', windowDays: 30 }, ctx);
+    expect(result.campaigns[0]).toMatchObject({ campaignId: 'spring', conversions: 1, revenue: 50 });
+    expect(result.unmatched).toEqual({ conversions: 0, revenue: 0 });
+    expect(result.unattributed).toEqual({ conversions: 1, revenue: 10 });
+    // totals are the campaign rows only.
+    expect(result.totals.conversions).toBe(1);
+    expect(result.totals.revenue).toBe(50);
+  });
+
+  it('marks spendTruncated for an incomplete range in the window and names the range', async () => {
+    const ctx = attributionContext({
+      spend,
+      touch: 'Spring',
+      gaps: [{ platform: 'meta', fromDate: '2026-01-01', toDate: '2026-01-31' }],
+    });
+    const result = await adPerformance.handler({ since: '2026-01-01', until: '2026-01-10', windowDays: 30 }, ctx);
+    expect(result.spendTruncated).toBe(true);
+    expect(result.notes.join(' ')).toContain('meta 2026-01-01 to 2026-01-10');
+    expect(result.notes.join(' ')).toContain('CPA is understated and ROAS is overstated');
+  });
+
+  it('does not warn for a report entirely outside the stored incomplete range', async () => {
+    const ctx = attributionContext({
+      spend,
+      touch: 'Spring',
+      gaps: [{ platform: 'meta', fromDate: '2026-01-05', toDate: '2026-01-09' }],
+    });
+    const result = await adPerformance.handler({ since: '2026-02-01', until: '2026-02-10', windowDays: 30 }, ctx);
+    expect(result.spendTruncated).toBe(false);
+    expect(result.notes.join(' ')).not.toContain('incomplete');
   });
 });

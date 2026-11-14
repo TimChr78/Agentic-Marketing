@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ATTRIBUTION_LIMITS, googleEmail, metaEmail, metaPhone, sha256 } from '@agentic-marketing/ads';
+import { ATTRIBUTION_LIMITS, googleEmail, metaEmail, metaPhone, recordSpendGaps, SPEND_LIMITS, sha256 } from '@agentic-marketing/ads';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -18,6 +18,8 @@ const ids = { meta: '', google: '', microsoft: '', segment: '', sync: '' };
 const received: { method: string; path: string; body: string; headers: Record<string, unknown> }[] = [];
 let platformUrl = '';
 const today = new Date().toISOString().slice(0, 10);
+/** How many Meta insight pages still answer with a `paging.next` link (spend truncation test). */
+let metaPaging = 0;
 const platforms = createServer((req, res) => {
   let raw = '';
   req.on('data', (c) => (raw += c));
@@ -28,30 +30,34 @@ const platforms = createServer((req, res) => {
     };
     if (req.url === '/token') return json(200, { access_token: 'access', refresh_token: 'refresh', expires_in: 3600 });
     received.push({ method: req.method ?? '', path: req.url ?? '', body: raw, headers: req.headers });
-    if (req.url?.startsWith('/v24.0/act_1234567/insights'))
-      return json(200, {
-        data: [
-          {
-            campaign_id: '601',
-            campaign_name: 'Spring Sale',
-            spend: '100.00',
-            impressions: '5000',
-            clicks: '120',
-            date_start: today,
-            account_currency: 'DKK',
-            actions: [{ action_type: 'offsite_conversion.fb_pixel_purchase', value: '2' }],
-          },
-          {
-            campaign_id: '602',
-            campaign_name: 'Brand',
-            spend: '50.00',
-            impressions: '2000',
-            clicks: '30',
-            date_start: today,
-            account_currency: 'DKK',
-          },
-        ],
-      });
+    if (/^\/v24\.0\/act_\d+\/insights/.test(req.url ?? '')) {
+      const data = [
+        {
+          campaign_id: '601',
+          campaign_name: 'Spring Sale',
+          spend: '100.00',
+          impressions: '5000',
+          clicks: '120',
+          date_start: today,
+          account_currency: 'DKK',
+          actions: [{ action_type: 'offsite_conversion.fb_pixel_purchase', value: '2' }],
+        },
+        {
+          campaign_id: '602',
+          campaign_name: 'Brand',
+          spend: '50.00',
+          impressions: '2000',
+          clicks: '30',
+          date_start: today,
+          account_currency: 'DKK',
+        },
+      ];
+      if (metaPaging > 0) {
+        metaPaging -= 1;
+        return json(200, { data, paging: { next: `${platformUrl}/v24.0/act_1234567/insights?page=${metaPaging}` } });
+      }
+      return json(200, { data });
+    }
     if (req.url === '/v25/customers/1234567890/googleAds:search')
       return req.headers['developer-token'] === 'dev-token-123'
         ? json(200, {
@@ -498,6 +504,172 @@ describe('spend and ROAS', () => {
     expect(withServerSide.unattributed).toEqual({ conversions: 2, revenue: 110 });
   });
 
+  it('keeps truncation per date range across a refresh, a rename and a settings edit (#917 review)', async () => {
+    const api = t.api(owner);
+    const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+    const saved = { ...SPEND_LIMITS };
+    try {
+      // The provider always has another page; the import may read only two of them.
+      SPEND_LIMITS.metaPages = 2;
+      metaPaging = 10_000;
+      const truncated = await api.call('ads.importSpend', { connection: ids.meta, days: 90 });
+      expect(truncated).toMatchObject({ truncated: true, rows: 4 });
+    } finally {
+      Object.assign(SPEND_LIMITS, saved);
+      metaPaging = 0;
+    }
+
+    // A scheduled three-day refresh completes, but the older days stay incomplete.
+    expect(await api.call('ads.importSpend', { connection: ids.meta, days: 3 })).toMatchObject({ truncated: false });
+    const wide = { since: day(89), until: today, windowDays: 7 };
+    const wideReport = await api.call('ads.performance', wide);
+    expect(wideReport.spendTruncated).toBe(true);
+    expect(wideReport.notes.join(' ')).toContain(`${day(89)} to ${day(3)}`);
+    expect((await api.call('ads.performance', { since: day(2), until: today, windowDays: 7 })).spendTruncated).toBe(false);
+
+    // A rename and a settings edit always keep the server-owned state.
+    const updated = await api.call('connections.update', {
+      id: ids.meta,
+      name: 'Meta renamed',
+      settings: { pixelId: '123456789', adAccountId: 'act_1234567', apiBase: platformUrl, testEventCode: 'probe' },
+    });
+    expect(updated.settings).not.toHaveProperty('spendState');
+    expect(updated.settings).not.toHaveProperty('spendImport');
+    expect((await api.call('ads.performance', wide)).spendTruncated).toBe(true);
+    // A caller cannot clear it with a settings key of the same name either.
+    await api.call('connections.update', {
+      id: ids.meta,
+      settings: { pixelId: '123456789', adAccountId: 'act_1234567', apiBase: platformUrl, spendState: {} },
+    });
+    expect((await api.call('ads.performance', wide)).spendTruncated).toBe(true);
+
+    // A complete re-import of the whole window clears it.
+    expect(await api.call('ads.importSpend', { connection: ids.meta, days: 90 })).toMatchObject({ truncated: false });
+    const cleared = await api.call('ads.performance', wide);
+    expect(cleared.spendTruncated).toBe(false);
+    expect(cleared.notes.join(' ')).not.toContain('Spend is incomplete');
+
+    // connections.create cannot seed the reserved state from caller settings.
+    const fresh = await api.call('connections.create', {
+      connector: 'meta_ads',
+      name: 'Fresh meta',
+      settings: {
+        pixelId: '123456789',
+        adAccountId: 'act_1234567',
+        apiBase: platformUrl,
+        spendState: { incomplete: [{ from: day(1), to: day(1) }] },
+      },
+      secrets: { accessToken: 'another-system-user-token-0123456789' },
+    });
+    expect(fresh.settings).not.toHaveProperty('spendState');
+    expect(fresh.settings).not.toHaveProperty('spendImport');
+  });
+
+  it('keeps a gap with the spend across an account switch, a deletion and tenant isolation (#917 review rounds 2-3)', async () => {
+    const work = await t.workspaceWith([[owner, 'owner']]);
+    const api = t.api(owner, work);
+    const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+    const meta = async (adAccountId: string, name: string) =>
+      (
+        await api.call('connections.create', {
+          connector: 'meta_ads',
+          name,
+          settings: { pixelId: '123456789', adAccountId, apiBase: platformUrl },
+          secrets: { accessToken: 'gap-test-system-user-token-0123456789' },
+        })
+      ).id;
+    const wide = { since: day(89), until: today, windowDays: 7 };
+    const id = await meta('act_1234567', 'Gap meta');
+    const saved = { ...SPEND_LIMITS };
+    try {
+      SPEND_LIMITS.metaPages = 2;
+      metaPaging = 10_000;
+      expect(await api.call('ads.importSpend', { connection: id, days: 90 })).toMatchObject({ truncated: true });
+    } finally {
+      Object.assign(SPEND_LIMITS, saved);
+      metaPaging = 0;
+    }
+
+    // Pointing the connection at another account: a complete import of B cannot clear A's gap,
+    // because A's partial spend rows still feed the report.
+    await api.call('connections.update', {
+      id,
+      settings: { pixelId: '123456789', adAccountId: 'act_7654321', apiBase: platformUrl },
+    });
+    expect(await api.call('ads.importSpend', { connection: id, days: 3 })).toMatchObject({ truncated: false });
+    expect((await api.call('ads.performance', wide)).spendTruncated).toBe(true);
+
+    // Deleting the connection does not delete the spend or the gap it warns about.
+    await api.call('connections.delete', { id });
+    expect((await api.call('ads.performance', wide)).spendTruncated).toBe(true);
+
+    // Tenant isolation: another workspace's gap is invisible here, and empty workspaces have no gap.
+    const isolated = await t.workspaceWith([[owner, 'owner']]);
+    const other = await t.workspaceWith([[owner, 'owner']]);
+    await t.srv.db.admin.query(
+      `INSERT INTO ad_spend_gaps (workspace_id, platform, account, from_date, to_date) VALUES ($1, 'meta', 'act_other', $2, $3)`,
+      [other, day(89), today],
+    );
+    expect((await t.api(owner, isolated).call('ads.performance', wide)).spendTruncated).toBe(false);
+    expect((await t.api(owner, other).call('ads.performance', wide)).spendTruncated).toBe(true);
+
+    // No command lets a caller write the server-owned gap table: a settings key of that name is
+    // just an undeclared connector setting and never becomes state.
+    const fresh = await api.call('connections.create', {
+      connector: 'meta_ads',
+      name: 'Gap settings probe',
+      settings: {
+        pixelId: '123456789',
+        adAccountId: 'act_1234567',
+        apiBase: platformUrl,
+        spendState: { incomplete: [{ from: day(1), to: day(1) }] },
+        ad_spend_gaps: [{ from: day(1), to: day(1) }],
+      },
+      secrets: { accessToken: 'gap-probe-system-user-token-0123456789' },
+    });
+    expect(fresh.settings).not.toHaveProperty('spendState');
+    expect(fresh.settings).not.toHaveProperty('ad_spend_gaps');
+  });
+
+  it('serialises concurrent imports for one account in both orders (#917 review round 3)', async () => {
+    const work = await t.workspaceWith([[owner, 'owner']]);
+    const key = { platform: 'meta' as const, account: 'act_concurrent' };
+    const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+    const covers = async (): Promise<(day: string) => boolean> => {
+      const { rows } = await t.srv.db.admin.query<{ from_date: string; to_date: string }>(
+        `SELECT from_date::text, to_date::text FROM ad_spend_gaps WHERE workspace_id = $1 AND platform = $2 AND account = $3`,
+        [work, key.platform, key.account],
+      );
+      return (value: string) => rows.some((row) => row.from_date <= value && value <= row.to_date);
+    };
+    const run = async (order: 'truncated-first' | 'complete-first') => {
+      await t.srv.db.admin.query(`DELETE FROM ad_spend_gaps WHERE workspace_id = $1 AND platform = $2 AND account = $3`, [
+        work,
+        key.platform,
+        key.account,
+      ]);
+      const truncated = () => recordSpendGaps(t.srv.db, work, key, { incomplete: { from: day(89), to: today } });
+      const complete = () => recordSpendGaps(t.srv.db, work, key, { complete: { from: day(2), to: today } });
+      const [first, second] = order === 'truncated-first' ? [truncated, complete] : [complete, truncated];
+      // Two pooled connections, deliberately offset; the advisory lock serialises the read-modify-write.
+      await Promise.all([
+        (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          await first();
+        })(),
+        (async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          await second();
+        })(),
+      ]);
+      const covered = await covers();
+      // Whichever order wins, the 87 older days stay incomplete.
+      for (let i = 3; i <= 89; i++) expect(covered(day(i)), `${order} day ${day(i)}`).toBe(true);
+    };
+    await run('truncated-first');
+    await run('complete-first');
+  });
+
   it('reads only the last touch per conversion, ignoring later and out-of-window touches (#786)', async () => {
     const work = await t.workspaceWith([[owner, 'owner']]);
     const api = t.api(owner, work);
@@ -651,7 +823,11 @@ describe('spend and ROAS', () => {
     }
     // Within the budget the same report attributes every conversion.
     const result = await report();
-    expect(result.unattributed).toEqual({ conversions: 10, revenue: 100 });
+    // The touches name "Budget", a campaign with no spend row: they had a touch, so they are
+    // unmatched, not unattributed (#917).
+    expect(result.unattributed).toEqual({ conversions: 0, revenue: 0 });
+    expect(result.unmatched).toEqual({ conversions: 10, revenue: 100 });
+    expect(result.notes.join(' ')).toContain('matches no spend row');
   });
 
   it('breaks a same-time touch tie deterministically by event id (#786)', async () => {

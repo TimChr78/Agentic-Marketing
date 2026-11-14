@@ -1158,6 +1158,24 @@ export const connections = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+/**
+ * Date ranges a spend import could not fetch completely (#917). Keyed by the same identity an
+ * `ad_spend` row carries (workspace, platform, account), so the state stays with the spend when a
+ * connection is renamed, re-pointed or deleted. Written only by the import, under an advisory lock.
+ */
+export const adSpendGaps = pgTable(
+  'ad_spend_gaps',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    platform: text('platform').$type<'meta' | 'google'>().notNull(),
+    account: text('account').notNull(),
+    fromDate: date('from_date', { mode: 'string' }).notNull(),
+    toDate: date('to_date', { mode: 'string' }).notNull(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.platform, t.account, t.fromDate] })],
+);
+
 export type DeliveryStatus = 'pending' | 'running' | 'done' | 'failed' | 'dead';
 export const deliveries = pgTable(
   'deliveries',

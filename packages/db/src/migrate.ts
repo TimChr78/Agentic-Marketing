@@ -124,8 +124,9 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0090_suppressions_update_grant.sql': '0.14.11',
   '0091_oauth_selection_rls.sql': '0.14.16',
   '0092_singleton_artifacts.sql': '0.14.17',
-  '0093_one_published_version.sql': '0.14.22',
-  '0094_single_active_mandate.sql': '0.14.22',
+  '0093_one_published_version.sql': '0.14.21',
+  '0094_single_active_mandate.sql': '0.14.21',
+  '0095_ad_spend_gaps.sql': '0.14.21',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
