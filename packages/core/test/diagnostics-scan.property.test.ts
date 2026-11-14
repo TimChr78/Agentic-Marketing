@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { expectLinear } from '../../../test-support/linear';
-import { redactCredentials } from '../src/diagnostics';
+import { MAX_REDACT_LENGTH, redactCredentials } from '../src/diagnostics';
 
 // #898/#902/#920 round 2: the credential redaction is one scan over the text, so it has properties
 // a table of examples cannot show: no planted secret survives whatever form the value takes, a
@@ -157,6 +157,107 @@ describe('the credential redaction on generated cases (#898, #902, #920)', () =>
       const key = KEYS[index % KEYS.length]!;
       expect(redactCredentials(form(key)), `form ${index}`).not.toContain(SECRET_PART);
     }
+  });
+});
+
+describe('the scanner is linear for every special shape (#902 round 4)', () => {
+  const PREFIXES = ['', 'token=', 'a://', '"k":'];
+  // Every character or word the scanner treats specially, as an opener inside a repeated unit.
+  const OPENERS = [
+    '"',
+    "'",
+    '\u201c',
+    '\u201d',
+    '\u2018',
+    '\u2019',
+    '[',
+    ']',
+    '{',
+    '}',
+    '-----BEGIN ',
+    'Bearer ',
+    'Basic ',
+    '[redacted',
+    '://',
+    '@',
+    '=>',
+    '=',
+    ':',
+    '\\',
+  ];
+  const FILLERS = ['', 'abc'];
+  const TERMINATORS = ['', '\n', ' '];
+
+  const measure = (text: string): number => {
+    const started = performance.now();
+    redactCredentials(text);
+    return performance.now() - started;
+  };
+
+  it('grows roughly fourfold when the input grows fourfold', () => {
+    const slow: string[] = [];
+    for (const prefix of PREFIXES) {
+      for (const opener of OPENERS) {
+        for (const filler of FILLERS) {
+          for (const terminator of TERMINATORS) {
+            const unit = `${prefix}${opener}${filler}${terminator}`;
+            const small = unit.repeat(200);
+            const large = unit.repeat(800);
+            measure(small);
+            const first = Math.min(measure(small), measure(small));
+            const second = Math.min(measure(large), measure(large));
+            if (second > Math.max(first * 8, 5)) slow.push(JSON.stringify(unit));
+          }
+        }
+      }
+    }
+    expect(slow.slice(0, 10)).toEqual([]);
+    expect(slow).toHaveLength(0);
+  });
+
+  it('does not rescan the text for an unclosed Unicode quote', () => {
+    const started = performance.now();
+    const out = redactCredentials('token=\u201cabc\n'.repeat(5_900));
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(out.split('\n').every((line) => !line.includes('abc'))).toBe(true);
+  });
+});
+
+describe('a credential straddling the cut never survives (#902 round 4)', () => {
+  const cap = MAX_REDACT_LENGTH;
+  // No 4-gram here is an ordinary word, so a surviving 4-gram is a real leak.
+  const SECRET = 'q7Xk2Zp9Lm4Rt8Vw6Yb3Sd5Nf1Gh4Jk';
+  const cases: [string, (secret: string) => string][] = [
+    ['a bare token', (secret) => secret],
+    ['a key=value pair', (secret) => `token=${secret}`],
+    ['a quoted value', (secret) => `apiSecret="${secret}"`],
+    ['a URL userinfo', (secret) => `postgres://u:${secret}@host`],
+    ['a Bearer value', (secret) => `Authorization: Bearer ${secret}`],
+    ['a JSON pair', (secret) => `{"apiSecret":"${secret}"}`],
+    ['a PEM block', (secret) => `secret=-----BEGIN PRIVATE KEY-----\n${secret}\n-----END PRIVATE KEY-----`],
+  ];
+  const grams = (text: string): string[] => {
+    const out: string[] = [];
+    for (let index = 0; index + 4 <= text.length; index += 1) out.push(text.slice(index, index + 4));
+    return out;
+  };
+
+  it('leaves no 4-character part of the secret at any offset around the cap', () => {
+    const leaks: string[] = [];
+    for (const [name, wrap] of cases) {
+      for (let delta = -40; delta <= 40; delta += 1) {
+        for (const pad of ['x', 'x ']) {
+          const unit = wrap(SECRET);
+          const start = Math.max(0, cap - SECRET.length - delta);
+          const input = `${pad.repeat(Math.ceil(start / pad.length)).slice(0, start)}${unit}${pad.repeat(cap)}`;
+          if (input.length <= cap) continue;
+          const out = redactCredentials(input);
+          for (const gram of grams(SECRET)) if (out.includes(gram)) leaks.push(`${name} ${delta} ${JSON.stringify(pad)}: ${gram}`);
+        }
+      }
+    }
+    expect(leaks.slice(0, 5)).toEqual([]);
+    expect(leaks).toHaveLength(0);
   });
 });
 

@@ -521,6 +521,99 @@ describe('the scanner cannot be made to fail (#902 round 3)', () => {
   });
 });
 
+describe('the pair scan runs before the token passes (#902 round 4)', () => {
+  it('keeps a long credential key and its short value apart', () => {
+    expect(redactCredentials('X-Organization-Auth-Token: shortpw')).toBe('[redacted]: [redacted]');
+    expect(redactCredentials('x-organization-auth-token: shortpw')).toBe('[redacted]: [redacted]');
+    expect(redactCredentials('{"X-Organization-Auth-Token":"shortpw"}')).toBe('{"[redacted]":[redacted]}');
+    expect(redactCredentials("'X-Organization-Auth-Token': 'shortpw'")).toBe("'[redacted]': [redacted]");
+  });
+
+  it('redacts an all-caps programmatic name that ends in a credential word', () => {
+    const key = 'Zz9Qw8Er7Ty6Ui5Op4As3Df2Gh1JkAccountSecretKey';
+    // The bare-token rule takes the trailing `=` with the key, as base64 padding.
+    expect(redactCredentials(`${key.toUpperCase()}=shortpw`)).toBe('[redacted][redacted]');
+    expect(redactCredentials(`${key.toUpperCase()}: shortpw`)).toBe('[redacted]: [redacted]');
+    // A short word that merely ends in the letters is still not a credential.
+    expect(redactCredentials('MONKEY=zoo')).toBe('MONKEY=zoo');
+    expect(redactCredentials('KEYBOARD=us')).toBe('KEYBOARD=us');
+  });
+
+  it('redacts a long key that ends in a credential word, in every form', () => {
+    const key = 'aaaaaaaaaaaaaaaaaaaaaaaaaaAuthToken';
+    expect(key.length).toBeGreaterThanOrEqual(24);
+    // The bare-token rule treats a trailing `=` as base64 padding, so it goes with the key.
+    expect(redactCredentials(`${key}=shortpw`)).toBe('[redacted][redacted]');
+    expect(redactCredentials(`${key}: shortpw`)).toBe('[redacted]: [redacted]');
+    expect(redactCredentials(`{"${key}":"shortpw"}`)).toBe('{"[redacted]":[redacted]}');
+  });
+});
+
+describe('a scheme under a credential key redacts the whole value (#902 round 4)', () => {
+  it('takes repeated scheme words as one value', () => {
+    expect(redactCredentials('token=Bearer Bearer shortpw')).toBe('token=Bearer [redacted]');
+    expect(redactCredentials('apiSecret: Basic Basic shortpw')).toBe('apiSecret: Basic [redacted]');
+  });
+
+  it('stops at the end of the line', () => {
+    expect(redactCredentials('token=Bearer Bearer shortpw\nnext line')).toBe('token=Bearer [redacted]\nnext line');
+  });
+});
+
+describe('a cut never exposes part of a credential (#902 round 4)', () => {
+  const cap = MAX_REDACT_LENGTH;
+  const token = 'abcdefghijklmnopqrstuvwx';
+
+  it('drops a bare token that straddles the cap', () => {
+    const out = redactCredentials(`${'!'.repeat(cap - 11)}${token}`);
+    expect(out.endsWith(TRUNCATED_MARKER)).toBe(true);
+    expect(out).not.toContain(token.slice(0, 4));
+    expect(redactCredentials(out)).toBe(out);
+  });
+
+  it('drops a URL whose password straddles the cap', () => {
+    const out = redactCredentials(`${'!'.repeat(cap - 8)}postgres://u:shortpw@host`);
+    expect(out.endsWith(TRUNCATED_MARKER)).toBe(true);
+    expect(out).not.toContain('shortpw');
+    expect(redactCredentials(out)).toBe(out);
+  });
+
+  it('redacts a pair that sits at the cap, and keeps its marker', () => {
+    const out = redactCredentials(`token=${'!'.repeat(cap)}`);
+    expect(out).toBe(`token=[redacted]${TRUNCATED_MARKER}`);
+    expect(redactCredentials(out)).toBe(out);
+  });
+
+  it('backs the cut up to a whitespace boundary', () => {
+    const out = redactCredentials(`${'word '.repeat(20_000)}token=shortpw`);
+    expect(out.endsWith(TRUNCATED_MARKER)).toBe(true);
+    expect(out).not.toContain('shortpw');
+    expect(redactCredentials(out)).toBe(out);
+  });
+
+  it('drops a long token that straddles the cap entirely', () => {
+    const out = redactCredentials(`${'!'.repeat(cap - 5_000)}${'Z'.repeat(10_240)}`);
+    expect(out).not.toContain('Z');
+    expect(out.endsWith(TRUNCATED_MARKER)).toBe(true);
+  });
+
+  it('keeps the cap when redaction makes the text longer, and stays stable', () => {
+    const out = redactCredentials('token=a '.repeat(12_000));
+    expect(out.length).toBeLessThanOrEqual(MAX_REDACT_LENGTH);
+    expect(out.endsWith(TRUNCATED_MARKER)).toBe(true);
+    expect(out.split(TRUNCATED_MARKER)).toHaveLength(2);
+    expect(redactCredentials(out)).toBe(out);
+  });
+
+  it('never splits a surrogate pair', () => {
+    for (const offset of [0, 1, 2, 3]) {
+      const out = redactCredentials(`${'!'.repeat(cap - 1 + offset)}\u{1F600}${'!'.repeat(64)}`);
+      expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u);
+      expect(out).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+    }
+  });
+});
+
 describe('safeErrorText (#885 round 5)', () => {
   const token = 'abcdef0123456789'.repeat(3);
 
