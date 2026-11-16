@@ -2,7 +2,8 @@ import { type Db, schema } from '@agentic-marketing/db';
 import { eq, sql } from 'drizzle-orm';
 import { describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
-import { reserveTokens, settleReservation } from '../src/providers';
+import { aiUsage } from '../src/commands';
+import { reserveTokens, settleReservation, usedThisMonth } from '../src/providers';
 import { finishIn, rememberReservation, settleStaleReservation } from '../src/steps';
 
 // #941 review: a retry that took over an expired lease must not overwrite the original attempt's
@@ -187,6 +188,111 @@ suite('recovery first and actual settlement reconcile exactly once (#941 round 3
         tx.select({ id: schema.aiTokenReservations.id }).from(schema.aiTokenReservations).where(sql`true`),
       );
       expect(holds).toHaveLength(0);
+    } finally {
+      await d.close().catch(() => undefined);
+    }
+  });
+});
+
+suite('the first settlement fixes a call’s billing period (#941 round 4)', () => {
+  it('keeps a November estimate, retry and December correction in November, and bills a plain December call in December', async () => {
+    const d = await createDisposableDb('ai_billing_period');
+    try {
+      const db: Db = d.db;
+      const workspace = d.workspace;
+      await db.admin.query(
+        `INSERT INTO ai_providers (workspace_id, id, name, kind, base_url, models, use_for, region)
+         VALUES ($1, $2, 'Budgeted', 'openai-compatible', 'https://llm.example.com/v1', '{"default":"m"}'::jsonb, '{}', '')`,
+        [workspace, providerId],
+      );
+      const now = new Date();
+      const previousMonthDay = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
+      const previousDay = previousMonthDay.toISOString().slice(0, 10);
+      const currentDay = now.toISOString().slice(0, 10);
+      const id = `aic_${'d'.repeat(32)}`;
+      const originalHold = `rsv_${'e'.repeat(32)}`;
+      // November recovery: the estimate is already on the row and the hold is marked estimated.
+      await db.withWorkspace(workspace, async (tx) => {
+        await tx.insert(schema.aiCalls).values({
+          workspaceId: workspace,
+          id,
+          kind: 'test',
+          status: 'running',
+          attempts: 2,
+          model: 'november-probe',
+          providerId,
+          inputTokens: 500,
+          outputTokens: 0,
+          usageEstimated: true,
+          billedAt: previousMonthDay,
+          input: {},
+        });
+        await tx.insert(schema.aiTokenReservations).values({
+          workspaceId: workspace,
+          id: originalHold,
+          providerId,
+          tokens: 500,
+          estimatedTokens: 500,
+          expiresAt: new Date(Date.now() + 30 * 86_400_000),
+        });
+      });
+      const base = (await db.withWorkspace(workspace, (tx) => tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, id))))[0]!;
+
+      // November retry: +200 tokens must stay in November.
+      const retryHold = await reserveTokens(db, workspace, providerId, 500, 60_000);
+      await settleReservation(
+        db,
+        workspace,
+        retryHold,
+        (tx) =>
+          finishIn(tx, base, null, {
+            status: 'fallback',
+            inputTokens: 120,
+            outputTokens: 80,
+            model: 'november-probe',
+            providerId,
+          }),
+        { providerId },
+      );
+
+      // December correction: 70/30 replaces the 500 estimate, still in November.
+      let writerRan = false;
+      await settleReservation(
+        db,
+        workspace,
+        originalHold,
+        async () => {
+          writerRan = true;
+        },
+        { providerId, callId: id, usage: { inputTokens: 70, outputTokens: 30 } },
+      );
+      expect(writerRan).toBe(false);
+
+      const scenario = (await db.withWorkspace(workspace, (tx) => tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, id))))[0]!;
+      expect(scenario.inputTokens + scenario.outputTokens).toBe(300);
+      expect(scenario.billedAt?.toISOString().slice(0, 10)).toBe(previousDay);
+
+      // A plain call first settled in December lands in December.
+      const plainId = `aic_${'f'.repeat(32)}`;
+      await db.withWorkspace(workspace, (tx) =>
+        tx.insert(schema.aiCalls).values({ workspaceId: workspace, id: plainId, kind: 'test', status: 'running', attempts: 1, input: {} }),
+      );
+      const plain = (await db.withWorkspace(workspace, (tx) => tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, plainId))))[0]!;
+      const plainHold = await reserveTokens(db, workspace, providerId, 100, 60_000);
+      await settleReservation(
+        db,
+        workspace,
+        plainHold,
+        (tx) => finishIn(tx, plain, null, { status: 'fallback', inputTokens: 50, outputTokens: 0, model: 'december-probe', providerId }),
+        { providerId },
+      );
+
+      expect(await db.withWorkspace(workspace, (tx) => usedThisMonth(tx, providerId))).toBe(50);
+      const usage = await db.withWorkspace(workspace, (tx) => aiUsage.handler({ days: 60 }, { tx } as never));
+      const scenarioRows = usage.days.filter((row) => row.model === 'november-probe');
+      expect(scenarioRows).toEqual([expect.objectContaining({ day: previousDay, inputTokens: 190, outputTokens: 110 })]);
+      const plainRows = usage.days.filter((row) => row.model === 'december-probe');
+      expect(plainRows).toEqual([expect.objectContaining({ day: currentDay, inputTokens: 50, outputTokens: 0 })]);
     } finally {
       await d.close().catch(() => undefined);
     }

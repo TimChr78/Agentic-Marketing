@@ -138,7 +138,7 @@ async function addUsageOnly(tx: Tx, c: CallRow, out: UsageFields) {
     .set({
       inputTokens: sql`${schema.aiCalls.inputTokens} + ${out.inputTokens ?? 0}`,
       outputTokens: sql`${schema.aiCalls.outputTokens} + ${out.outputTokens ?? 0}`,
-      billedAt: new Date(),
+      billedAt: sql`coalesce(${schema.aiCalls.billedAt}, now())`,
       usageEstimated: sql`${schema.aiCalls.usageEstimated} OR ${out.usageEstimated === true || c.usageEstimated}`,
       providerId: sql`coalesce(${schema.aiCalls.providerId}, ${out.providerId ?? c.providerId ?? null})`,
     })
@@ -272,7 +272,7 @@ export async function finishIn(
       // added its tokens, and both attempts were billed (#941 review).
       inputTokens: sql`${schema.aiCalls.inputTokens} + ${out.inputTokens ?? 0}`,
       outputTokens: sql`${schema.aiCalls.outputTokens} + ${out.outputTokens ?? 0}`,
-      billedAt: new Date(),
+      billedAt: sql`coalesce(${schema.aiCalls.billedAt}, now())`,
       usageEstimated: sql`${schema.aiCalls.usageEstimated} OR ${out.usageEstimated === true || c.usageEstimated}`,
       reservationId: null,
       latencyMs: out.latencyMs ?? null,
@@ -321,7 +321,7 @@ export async function settleStaleReservation(db: Db, c: CallRow): Promise<CallRo
             providerId: sql`coalesce(${schema.aiCalls.providerId}, ${live.providerId})`,
             inputTokens: sql`${schema.aiCalls.inputTokens} + ${live.tokens}`,
             usageEstimated: true,
-            billedAt: new Date(),
+            billedAt: sql`coalesce(${schema.aiCalls.billedAt}, now())`,
           })
           .where(
             and(
@@ -546,7 +546,7 @@ function rowRecorder(db: Db, c: CallRow) {
         ...rest,
         leaseUntil: null,
         finishedAt: new Date(),
-        billedAt: new Date(),
+        billedAt: sql`coalesce(${schema.aiCalls.billedAt}, now())`,
         reservationId: null,
         // SQL addition, not a value computed from the claim snapshot (#941 review).
         inputTokens: sql`${schema.aiCalls.inputTokens} + ${inputTokens ?? 0}`,

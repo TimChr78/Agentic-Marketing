@@ -49,7 +49,9 @@ export async function usedThisMonth(tx: Tx, providerId: string): Promise<number>
   // One statement, one snapshot: settlement inserts the usage row and deletes the hold in one
   // transaction, so summing both in two statements can see neither at the moment in between (#941).
   // Usage is attributed to the month it was billed in; rows from before `billed_at` fall back to
-  // their queue time.
+  // their queue time. A call's first settlement fixes its billing period: later corrections and
+  // later attempts of the same call keep that `billed_at` (see the coalesce in every settlement
+  // write), so correcting an estimate in a later month does not move the call's whole usage.
   const { rows } = await tx.execute<{ n: string }>(sql`
     SELECT coalesce((
              SELECT sum(input_tokens + output_tokens) FROM ai_calls
@@ -277,7 +279,8 @@ export async function settleReservation(
             .set({
               inputTokens: sql`GREATEST(0, ${schema.aiCalls.inputTokens} - ${hold.estimatedTokens} + ${opts.usage.inputTokens})`,
               outputTokens: sql`${schema.aiCalls.outputTokens} + ${opts.usage.outputTokens}`,
-              billedAt: new Date(),
+              // The first settlement fixed the billing period; a correction never moves it.
+              billedAt: sql`coalesce(${schema.aiCalls.billedAt}, now())`,
             })
             .where(and(eq(schema.aiCalls.workspaceId, workspaceId), eq(schema.aiCalls.id, opts.callId)));
         await tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, reservationId));
