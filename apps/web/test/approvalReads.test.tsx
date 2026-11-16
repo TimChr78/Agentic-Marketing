@@ -109,6 +109,7 @@ const base = {
   holdUntil: null,
   artifactLatestVersion: 2,
   artifactPublishedVersion: null,
+  archived: false,
   publishedVersion: null,
   reviewUrl: null,
   bundle: null,
@@ -199,6 +200,11 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('one exact preview read across the whole review (#498 review)', () => {
+  it('says an archived artifact can never publish (#957)', async () => {
+    renderDrawer({ ...templateDetail, archived: true });
+    expect(await screen.findByText('This artifact is archived')).toBeTruthy();
+  });
+
   it('reads an e-mail preview and its checks once for the summary and the renderer', async () => {
     renderDrawer(templateDetail);
     expect(await screen.findByText('Preview subject')).toBeTruthy();

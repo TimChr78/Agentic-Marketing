@@ -174,6 +174,7 @@ function approval(artifactId: string, name: string, type: string, note: string, 
     holdUntil: null,
     artifactLatestVersion: 1,
     artifactPublishedVersion: null,
+    archived: false,
     reviewUrl: null,
     bundle: null,
   };

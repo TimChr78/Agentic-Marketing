@@ -15,7 +15,7 @@ import {
   newId,
   safeErrorText,
 } from '@agentic-marketing/core';
-import { type AgentUndo, schema, type VersionState } from '@agentic-marketing/db';
+import { type AgentUndo, type Db, schema, type Tx, type VersionState } from '@agentic-marketing/db';
 import { and, asc, count, desc, eq, gt, inArray, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { diffJson } from './diff';
@@ -158,21 +158,16 @@ async function loadArtifact(ctx: CommandContext, artifactId: string) {
  * config.import does when an explicit id is archived.
  */
 async function archiveProblem(
-  ctx: CommandContext,
+  tx: Tx,
+  workspaceId: string,
   a: { id: string; type: string; name: string; archived: boolean },
 ): Promise<string | null> {
   if (!a.archived) return null;
   if (isSingleton(a.type)) {
-    const [active] = await ctx.tx
+    const [active] = await tx
       .select({ id: schema.artifacts.id })
       .from(schema.artifacts)
-      .where(
-        and(
-          eq(schema.artifacts.workspaceId, ctx.principal.workspaceId),
-          eq(schema.artifacts.type, a.type),
-          eq(schema.artifacts.archived, false),
-        ),
-      )
+      .where(and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.type, a.type), eq(schema.artifacts.archived, false)))
       .limit(1);
     if (active)
       return `${a.id} is an archived ${a.type}, but this workspace already has the active ${a.type} ${active.id}. A workspace can have only one active ${a.type}; publish ${active.id} instead of ${a.id}.`;
@@ -182,7 +177,7 @@ async function archiveProblem(
 
 /** Refuses a publish on an archived artifact with the conflict a person or agent can act on (#900). */
 async function assertNotArchived(ctx: CommandContext, a: { id: string; type: string; name: string; archived: boolean }) {
-  const problem = await archiveProblem(ctx, a);
+  const problem = await archiveProblem(ctx.tx, ctx.principal.workspaceId, a);
   if (problem) throw new AppError('conflict', problem);
 }
 
@@ -201,17 +196,21 @@ async function loadVersion(ctx: CommandContext, artifactId: string, number: numb
   return v;
 }
 
-async function setVersionState(ctx: CommandContext, artifactId: string, number: number, state: VersionState) {
-  await ctx.tx
+async function setVersionStateIn(tx: Tx, workspaceId: string, artifactId: string, number: number, state: VersionState) {
+  await tx
     .update(schema.artifactVersions)
     .set({ state, updatedAt: new Date() })
     .where(
       and(
-        eq(schema.artifactVersions.workspaceId, ctx.principal.workspaceId),
+        eq(schema.artifactVersions.workspaceId, workspaceId),
         eq(schema.artifactVersions.artifactId, artifactId),
         eq(schema.artifactVersions.number, number),
       ),
     );
+}
+
+async function setVersionState(ctx: CommandContext, artifactId: string, number: number, state: VersionState) {
+  await setVersionStateIn(ctx.tx, ctx.principal.workspaceId, artifactId, number, state);
 }
 
 async function checkPublishable(ctx: CommandContext, type: string, content: unknown, artifactId: string) {
@@ -1228,6 +1227,9 @@ const Approval = z.object({
 
   artifactLatestVersion: z.number().int(),
   artifactPublishedVersion: z.number().int().nullable(),
+  archived: z
+    .boolean()
+    .describe('True when the artifact is archived, so this request can never publish; the startup sweep closes it as rejected (#957)'),
   reviewUrl: z.string().nullable().describe('Admin UI page for this approval request'),
   bundle: z
     .object({ id: z.string(), members: z.array(BundleMember).describe('In the order they are published') })
@@ -1248,6 +1250,14 @@ interface ApprovalDirectory {
 const directoryOf = (ctx: CommandContext) => (ctx.services as { directory?: ApprovalDirectory }).directory;
 
 const nameOf = (p: { email: string; name: string } | undefined, fallback: string) => p?.name || p?.email || fallback;
+
+/**
+ * Who decided a request, as the history shows it: a person, or the platform itself for a `policy:`
+ * decision such as a held change that ran (`policy:hold`) or an archived artifact's request that
+ * was closed (`policy:archived`, #957). The raw sentinel is never shown as a person's name.
+ */
+const deciderName = (id: string, person: { email: string; name: string } | undefined) =>
+  id.startsWith('policy:') ? 'System (policy)' : nameOf(person, id);
 
 /** Resolves raw requester ids to names: people, API tokens (with their owner) and OAuth clients. */
 export interface ActorRef {
@@ -1377,6 +1387,7 @@ const approvalOut = (ctx: CommandContext, r: ApprovalRow, a: ArtifactRow, reques
   holdUntil: r.holdUntil?.toISOString() ?? null,
   artifactLatestVersion: a.latestVersion,
   artifactPublishedVersion: a.publishedVersion,
+  archived: a.archived,
   reviewUrl: approvalUrl(ctx.services.publicUrl, r.id),
   bundle: r.bundleId ? { id: r.bundleId, members: bundles.get(r.bundleId) ?? [] } : null,
 });
@@ -1512,7 +1523,7 @@ export const getApproval = defineCommand({
         ? [
             {
               at: (row.r.decidedAt ?? row.r.createdAt).toISOString(),
-              by: { id: row.r.decidedBy, name: nameOf(decider, row.r.decidedBy) },
+              by: { id: row.r.decidedBy, name: deciderName(row.r.decidedBy, decider) },
               status: row.r.status,
               note: row.r.decisionNote,
             },
@@ -1657,7 +1668,7 @@ export const approve = defineCommand({
     // a paused or revoked requester must not keep an impossible request pending forever (#922 A3).
     const problems: string[] = [];
     for (const m of members) {
-      const problem = await archiveProblem(ctx, await loadArtifact(ctx, m.artifactId));
+      const problem = await archiveProblem(ctx.tx, ctx.principal.workspaceId, await loadArtifact(ctx, m.artifactId));
       if (problem) problems.push(problem);
     }
     if (problems.length) {
@@ -1695,22 +1706,180 @@ export const approve = defineCommand({
 
 /**
  * Closes pending requests whose change can never be published (#900): the versions become rejected
- * and the requests end as rejected with the reason, so nothing waits for a person forever.
+ * and the requests end as rejected with the reason, so nothing waits for a person forever. The
+ * `policy:archived` decider is the platform's own decision, not a person's (#957).
  */
 async function closeRejected(ctx: CommandContext, members: { id: string; artifactId: string; version: number }[], reason: string) {
-  for (const m of members) await setVersionState(ctx, m.artifactId, m.version, 'rejected');
-  await ctx.tx
-    .update(schema.approvalRequests)
-    .set({ status: 'rejected', decidedBy: 'policy:archived', decidedAt: new Date(), decisionNote: reason, holdUntil: null })
-    .where(
-      and(
-        eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId),
-        inArray(
-          schema.approvalRequests.id,
-          members.map((m) => m.id),
-        ),
-      ),
-    );
+  await closeRejectedRows(
+    ctx.tx,
+    ctx.principal.workspaceId,
+    members.map((m) => ({ ...m, reason })),
+  );
+}
+
+/** `closeRejected` for a caller that has no command context (the startup sweep, #957). */
+async function closeRejectedRows(tx: Tx, workspaceId: string, rows: { id: string; artifactId: string; version: number; reason: string }[]) {
+  for (const r of rows) await setVersionStateIn(tx, workspaceId, r.artifactId, r.version, 'rejected');
+  for (const r of rows)
+    await tx
+      .update(schema.approvalRequests)
+      .set({ status: 'rejected', decidedBy: 'policy:archived', decidedAt: new Date(), decisionNote: r.reason, holdUntil: null })
+      .where(and(eq(schema.approvalRequests.workspaceId, workspaceId), eq(schema.approvalRequests.id, r.id)));
+}
+
+/**
+ * The pending requests that can never publish because an artifact they name is archived, closed
+ * inside one workspace transaction (#957). `approvals.approve` and the held runner already reject
+ * such a request when a person decides or a veto window ends; this covers the ones nobody touched.
+ *
+ * A bundle is closed whole, exactly as `approvals.approve` does: closing only the archived member's
+ * request would leave the others undecidable, because `bundleMembers` refuses a partly decided
+ * bundle. Lock order: approval rows (in id order), then the artifact rows (in id order) — the same
+ * order the approve path takes, so the two cannot deadlock.
+ */
+async function closeArchivedRequestsIn(tx: Tx, workspaceId: string): Promise<number> {
+  const archivedArtifact = and(
+    eq(schema.artifacts.workspaceId, workspaceId),
+    eq(schema.artifacts.id, schema.approvalRequests.artifactId),
+    eq(schema.artifacts.archived, true),
+  );
+  const candidates = await tx
+    .select({ id: schema.approvalRequests.id, bundleId: schema.approvalRequests.bundleId })
+    .from(schema.approvalRequests)
+    .innerJoin(schema.artifacts, archivedArtifact)
+    .where(and(eq(schema.approvalRequests.workspaceId, workspaceId), eq(schema.approvalRequests.status, 'pending')));
+  if (!candidates.length) return 0;
+  const bundleIds = [...new Set(candidates.map((c) => c.bundleId).filter((id): id is string => !!id))];
+  const expanded = bundleIds.length
+    ? await tx
+        .select({ id: schema.approvalRequests.id })
+        .from(schema.approvalRequests)
+        .where(
+          and(
+            eq(schema.approvalRequests.workspaceId, workspaceId),
+            eq(schema.approvalRequests.status, 'pending'),
+            inArray(schema.approvalRequests.bundleId, bundleIds),
+          ),
+        )
+    : [];
+  const ids = [...new Set([...candidates.map((c) => c.id), ...expanded.map((e) => e.id)])];
+
+  // Approval rows first, in id order, then the artifact rows: the order every decider follows.
+  await tx
+    .select({ id: schema.approvalRequests.id })
+    .from(schema.approvalRequests)
+    .where(and(eq(schema.approvalRequests.workspaceId, workspaceId), inArray(schema.approvalRequests.id, ids)))
+    .orderBy(asc(schema.approvalRequests.id))
+    .for('update');
+  const pendingIn = and(eq(schema.approvalRequests.workspaceId, workspaceId), inArray(schema.approvalRequests.id, ids));
+  const locked = await tx
+    .select({ r: schema.approvalRequests, a: schema.artifacts })
+    .from(schema.approvalRequests)
+    .innerJoin(
+      schema.artifacts,
+      and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, schema.approvalRequests.artifactId)),
+    )
+    .where(and(pendingIn, eq(schema.approvalRequests.status, 'pending')));
+  const artifactIds = [...new Set(locked.map((x) => x.a.id))];
+  if (!artifactIds.length) return 0;
+  await tx
+    .select({ id: schema.artifacts.id })
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, artifactIds)))
+    .orderBy(asc(schema.artifacts.id))
+    .for('update');
+  // Re-read after both locks: a decision or a restore that committed while this waited wins.
+  const rows = await tx
+    .select({ r: schema.approvalRequests, a: schema.artifacts })
+    .from(schema.approvalRequests)
+    .innerJoin(
+      schema.artifacts,
+      and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, schema.approvalRequests.artifactId)),
+    )
+    .where(and(pendingIn, eq(schema.approvalRequests.status, 'pending')));
+  const archivedIds = [...new Set(rows.filter((x) => x.a.archived).map((x) => x.a.id))];
+  if (!archivedIds.length) return 0;
+  const bundleReason = `${archivedIds.join(', ')} in the same review is archived, so nothing in this bundle can be published.`;
+  const toClose: { id: string; artifactId: string; version: number; reason: string }[] = [];
+  for (const { r, a } of rows) {
+    const own = a.archived ? await archiveProblem(tx, workspaceId, a) : null;
+    toClose.push({ id: r.id, artifactId: r.artifactId, version: r.version, reason: own ?? bundleReason });
+  }
+  await closeRejectedRows(tx, workspaceId, toClose);
+  return toClose.length;
+}
+
+/** How often the scheduler looks again for a request an artifact archived after start-up (#957). */
+export const ARCHIVED_APPROVAL_SWEEP_INTERVAL_MS = 6 * 60 * 60_000;
+
+export interface ArchivedApprovalSweep {
+  /** Workspaces that had a pending request on an archived artifact when the pass began. */
+  workspaces: number;
+  /** Requests closed by this pass. */
+  closed: number;
+}
+
+/**
+ * Closes every pending approval request that names an archived artifact (#957), across workspaces,
+ * in one transaction per workspace. Cheap and idempotent: when nothing is waiting it is two indexed
+ * queries, so the scheduler runs it at start and every few hours. A workspace that fails is logged
+ * and left for the next pass; one failure never stops the others.
+ */
+export async function sweepArchivedApprovals(
+  db: Db,
+  opts: { log?: (msg: string) => void; onError?: (err: unknown) => void } = {},
+): Promise<ArchivedApprovalSweep> {
+  const { rows } = await db.admin.query<{ workspace_id: string }>(
+    `SELECT DISTINCT ar.workspace_id
+       FROM approval_requests ar
+       JOIN artifacts a ON a.workspace_id = ar.workspace_id AND a.id = ar.artifact_id
+      WHERE ar.status = 'pending' AND a.archived = true
+      ORDER BY ar.workspace_id`,
+  );
+  let closed = 0;
+  for (const { workspace_id: ws } of rows) {
+    try {
+      closed += await db.withWorkspace(ws, (tx) => closeArchivedRequestsIn(tx, ws));
+    } catch (err) {
+      opts.log?.(`archived approval sweep: workspace ${ws} was left for the next pass (${(err as Error)?.message ?? err})`);
+      opts.onError?.(err);
+    }
+  }
+  return { workspaces: rows.length, closed };
+}
+
+/**
+ * The scheduler job: one pass at start, then the same cheap pass every few hours, so an artifact
+ * archived at runtime (config.import, or a future archive command) does not leave a request pending
+ * until the next restart.
+ */
+export async function runArchivedApprovalSweep(
+  deps: { db: Db },
+  signal: AbortSignal,
+  opts: { log?: (msg: string) => void; onError?: (err: unknown) => void; tickMs?: number } = {},
+): Promise<void> {
+  const tickMs = opts.tickMs ?? ARCHIVED_APPROVAL_SWEEP_INTERVAL_MS;
+  while (!signal.aborted) {
+    try {
+      const result = await sweepArchivedApprovals(deps.db, { log: opts.log, onError: opts.onError });
+      if (result.closed) opts.log?.(`archived approval sweep: closed ${result.closed} request(s) in ${result.workspaces} workspace(s)`);
+    } catch (err) {
+      // A database still missing a table (SKIP_MIGRATIONS) reports here; the next pass retries.
+      opts.onError?.(err);
+    }
+    if (signal.aborted) return;
+    await new Promise<void>((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, tickMs);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
 }
 
 /**
@@ -1908,7 +2077,7 @@ export async function runHeldChange(
   // or one config.import restored. Close the request with the reason instead of retrying every tick.
   const archivedProblems: string[] = [];
   for (const m of members) {
-    const problem = await archiveProblem(ctx, await loadArtifact(ctx, m.artifactId));
+    const problem = await archiveProblem(ctx.tx, ctx.principal.workspaceId, await loadArtifact(ctx, m.artifactId));
     if (problem) archivedProblems.push(problem);
   }
   if (archivedProblems.length) {
