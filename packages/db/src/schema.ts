@@ -948,6 +948,8 @@ export const aiTokenReservations = pgTable(
     id: text('id').notNull(),
     providerId: text('provider_id').notNull(),
     tokens: integer('tokens').notNull(),
+    /** The held tokens already recorded as an estimate after a crashed attempt (#941). */
+    estimatedTokens: integer('estimated_tokens'),
     expiresAt: ts('expires_at').notNull(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
@@ -978,6 +980,12 @@ export const aiCalls = pgTable(
     error: text('error'),
     inputTokens: integer('input_tokens').notNull().default(0),
     outputTokens: integer('output_tokens').notNull().default(0),
+    /** When the usage was settled; budget accounting uses coalesce(billed_at, created_at) (#941). */
+    billedAt: ts('billed_at'),
+    /** The provider usage was unknown, so the reserved estimate was recorded (#941). */
+    usageEstimated: boolean('usage_estimated').notNull().default(false),
+    /** The budget hold this attempt created, so a retry can clear a crashed attempt's hold (#941). */
+    reservationId: text('reservation_id'),
     latencyMs: integer('latency_ms'),
     principalId: text('principal_id'),
     createdAt: ts('created_at').notNull().defaultNow(),

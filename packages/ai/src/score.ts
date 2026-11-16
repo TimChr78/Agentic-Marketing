@@ -74,7 +74,7 @@ export const score = defineCommand({
   name: 'ai.score',
   title: 'Score with a decision model',
   description:
-    'Ask a decision provider typed questions about a state and get probabilities and confidence, never text: noul (yes/no probability), choice (label and probabilities) or score (number and confidence). With profileId the person’s AI consent is checked and, unless a state is given, the state is built from non-personal data only (segment ids, event counts, agent-visible non-personal traits). A state with personal data is refused unless the provider is marked allowPersonalData under a no-retention agreement. With store, the first answer is saved as a named score for the person.',
+    'Ask a decision provider typed questions about a state and get probabilities and confidence, never text: noul (yes/no probability), choice (label and probabilities) or score (number and confidence). With profileId the person’s AI consent is checked and, unless a state is given, the state is built from non-personal data only (segment ids, event counts, agent-visible non-personal traits). A state with personal data is refused unless the provider is marked allowPersonalData under a no-retention agreement. With store, the first answer is saved as a named score for the person. Spends the workspace’s LLM budget: agents need a mandate with a spend level.',
   input: z.object({
     providerId: ProviderId.optional().describe('A decision provider; default: the enabled provider used for decisions'),
     questions: decisionQuestions,
@@ -101,7 +101,7 @@ export const score = defineCommand({
   }),
   permission: 'profiles:write',
   effect: 'write',
-  actionClass: 'draft',
+  actionClass: 'spend',
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     if (input.store && !input.profileId) throw new AppError('invalid_input', 'store needs profileId: a score is stored for a person.');
@@ -159,6 +159,15 @@ export const score = defineCommand({
             outputTokens: r.outputTokens,
             latencyMs: r.latencyMs,
           }),
+        // Even a refused or unreadable answer may have been billed; record what the provider says,
+        // or the reserved estimate, in the transaction that releases the hold (#941).
+        recordFailure: (tx, usage, error, estimated) =>
+          insertCall(tx, ctx.principal, callId, provider, input, state, {
+            status: 'failed',
+            error,
+            ...usage,
+            usageEstimated: estimated,
+          }),
       });
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
@@ -213,6 +222,7 @@ async function insertCall(
     answers?: unknown;
     inputTokens?: number;
     outputTokens?: number;
+    usageEstimated?: boolean;
     latencyMs?: number;
     error?: string;
   },
@@ -238,6 +248,8 @@ async function insertCall(
       error: out.error ?? null,
       inputTokens: out.inputTokens ?? 0,
       outputTokens: out.outputTokens ?? 0,
+      billedAt: new Date(),
+      usageEstimated: out.usageEstimated ?? false,
       latencyMs: out.latencyMs ?? null,
       principalId: principal.userId,
       finishedAt: new Date(),

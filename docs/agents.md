@@ -178,6 +178,8 @@ The workspace's limits apply to every agent, with or without a mandate. Read the
 
 At run time the engine uses the **lower** of the mandate's level and the workspace ceiling. Raising a ceiling takes effect for existing mandates; lowering one takes effect at once.
 
+Paid model commands are **spend** actions: `prompts.test`, `ai.classify` and `ai.score` call the workspace's provider, so an agent needs a mandate that grants `spend`; a person runs them as before. Publishing a journey, segment or message that later uses AI stays classified by that publish action: its paid calls happen inside the journey, the decision step or the independent check, not as a separate command the agent invokes.
+
 To let the weekly newsletter agent send at level 3, a person raises that one ceiling first:
 
 ```text

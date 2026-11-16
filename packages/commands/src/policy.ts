@@ -279,6 +279,12 @@ export function decide(input: PolicyInput): PolicyOutcome {
     return out('deny', [
       'Agents are switched off in this workspace: they can only read. A person can switch them on in Settings → Agents.',
     ]);
+  // Spending the workspace's money or paid LLM budget is never a draft: an agent may only do it
+  // under a mandate that grants the spend class (#942).
+  if (actionClass === 'spend' && !mandate)
+    return out('deny', [
+      `Spending needs an agent mandate: give this agent a mandate with a spend level in Settings → Agents, or let a person run ${input.command}.`,
+    ]);
   if (mandate && inShadow(mandate, actionClass))
     return actionClass === 'draft' ? decide({ ...input, mandate: undefined }) : decideInShadow(input, mandate);
   if (mandate && (mandate.levels.draft ?? 1) === 0 && actionClass === 'draft')

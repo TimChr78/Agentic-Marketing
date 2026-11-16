@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { type DecisionQuestion, decisionQuestions, publishedSingleton } from '@agentic-marketing/artifacts';
-import { providerDiagnostic, redactCredentials } from '@agentic-marketing/core';
+import { providerDiagnostic, redactCredentials, safeErrorText } from '@agentic-marketing/core';
 import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -9,7 +9,16 @@ import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, sql } from 'drizzle-orm';
 import { personalDataIn } from './context';
-import { AiUnavailable, billingReservationTtlMs, estimateTokens, releaseTokens, reserveTokens, settleReservation } from './providers';
+import {
+  AiUnavailable,
+  billingReservationTtlMs,
+  estimatedUsage,
+  estimateTokens,
+  releaseTokens,
+  reserveTokens,
+  settleReservation,
+  usageOfError,
+} from './providers';
 
 // The decision-model adapter (#194): TypeSafe's System One API, reached through CommandCode
 // (https://api.commandcode.ai/provider/v1) or TypeSafe directly (https://api.typesafe.ai/v1).
@@ -370,6 +379,11 @@ export async function decisionCall(
     record: (tx: Tx, result: Omit<DecisionResult, 'providerId' | 'model'>) => Promise<void>;
     /** Writes the same usage in its own transaction when `record` fails. */
     recordUsage?: (result: Omit<DecisionResult, 'providerId' | 'model'>) => Promise<void>;
+    /**
+     * Writes a failed call's usage when the provider may already have billed it. Without it a
+     * failed call releases its hold (no usage is known).
+     */
+    recordFailure?: (tx: Tx, usage: { inputTokens: number; outputTokens: number }, error: string, estimated: boolean) => Promise<void>;
   },
 ): Promise<Omit<DecisionResult, 'providerId' | 'model'>> {
   // A successful provider call must never be released without its usage. The type requires a
@@ -377,27 +391,37 @@ export async function decisionCall(
   if (typeof opts.record !== 'function')
     throw new DecisionError('invalid_request', 'decisionCall needs a record writer: a reservation is never released without its usage.');
   const request = systemOneRequest(provider.model, state, questions);
-  const reservation = await reserveTokens(
-    db,
-    workspaceId,
-    provider.providerId,
-    estimateTokens(request, 20 * questions.length + 50),
-    billingReservationTtlMs(),
-  );
+  const maxOutput = 20 * questions.length + 50;
+  const estimated = estimateTokens(request, maxOutput);
+  const reservation = await reserveTokens(db, workspaceId, provider.providerId, estimated, billingReservationTtlMs());
   const started = Date.now();
   let result: Omit<DecisionResult, 'providerId' | 'model'>;
   try {
     result = { ...(await callSystemOne(provider, state, questions, opts)), latencyMs: Date.now() - started };
   } catch (err) {
-    // No usage is known: the provider refused the request or it never completed. The caller
-    // records a failed row with zero tokens, so the hold can go.
-    await releaseTokens(db, workspaceId, reservation).catch((releaseErr) =>
-      logger.error({ err: releaseErr, providerId: provider.providerId }, 'decision budget reservation could not be released'),
-    );
+    // A provider that answered (even badly) may have billed the call. An answerless transport
+    // failure has no usage: settle the reserved estimate rather than zero, so the month cannot
+    // spend the same budget again (#941). `recordFailure` writes it in the settling transaction.
+    const known = usageOfError(err);
+    const usage = known ?? estimatedUsage(estimated, maxOutput);
+    if (opts.recordFailure) {
+      const message = safeErrorText(err instanceof Error ? err.message : String(err), 1000);
+      const outcome = await settleReservation(db, workspaceId, reservation, (tx) => opts.recordFailure!(tx, usage, message, !known), {
+        providerId: provider.providerId,
+        label: 'decision call failure',
+      });
+      if (outcome === 'held')
+        logger.error({ providerId: provider.providerId }, 'failed decision call usage could not be recorded; holding its reservation');
+    } else {
+      await releaseTokens(db, workspaceId, reservation).catch((releaseErr) =>
+        logger.error({ err: releaseErr, providerId: provider.providerId }, 'decision budget reservation could not be released'),
+      );
+    }
     throw err;
   }
   const outcome = await settleReservation(db, workspaceId, reservation, (tx) => opts.record(tx, result), {
     fallback: opts.recordUsage ? () => opts.recordUsage!(result) : undefined,
+    providerId: provider.providerId,
     label: 'decision call',
   });
   // 'fallback' means the usage is durable even though the caller's own row could not commit in
