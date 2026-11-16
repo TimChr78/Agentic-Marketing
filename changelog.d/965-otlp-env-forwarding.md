@@ -1,8 +1,0 @@
----
-section: Fixed
-issues: [965]
----
-- Docker Compose and the Helm chart forward the OTLP tracing settings the server actually reads: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and the header lists `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_TRACES_HEADERS` now reach the container instead of being a silent no-op in `.env`. In the chart the endpoint is a `config` value and the headers are documented as `secrets.values` entries (or part of an existing Secret), because a collector Authorization header is a credential.
-- The guard behind that fix parses the server-side source instead of matching one spelling, so an environment read through a variable (including a chain of aliases), a default parameter, an environment-typed parameter, a destructuring pattern, a constant key, `globalThis.process.env` or a helper that takes the variable name is checked too; an access it cannot resolve — including reads through an `env` imported from another module — fails until it is named with a reason.
-- What it found is fixed as well: `BACKUP_KEEP_DAYS`, `BACKUP_CRON` and `BETTER_AUTH_TRUSTED_ORIGINS` reach the Compose app container, and the chart gains `config` values for the backup settings, `PUBLIC_PORT`, `APP_DB_ROLE`, `BETTER_AUTH_TRUSTED_ORIGINS`, the OpenBao/AWS KMS location settings, with `OPENBAO_TOKEN`, the AWS keys and `MASTER_KEY_PREVIOUS` documented as Secret values (they were only settable through `extraEnv` before). Compose's host-side `AM_BIND`, `AM_PORT`, `PUBLIC_BIND` and the Postgres superuser `POSTGRES_PASSWORD` stay out of the app container on purpose, and the guard says why.
-- `.env.example` mentions `BETTER_AUTH_TRUSTED_ORIGINS` next to `TRUSTED_ORIGINS` (the documented list) and that a wildcard in it is refused at start-up.
