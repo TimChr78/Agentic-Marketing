@@ -1,7 +1,9 @@
 import { newId, newUuid } from '@agentic-marketing/core';
-import { schema } from '@agentic-marketing/db';
+import { type Db, schema } from '@agentic-marketing/db';
 import {
   assertNoProviderCalls,
+  cachedKeyProvider,
+  type KeyProvider,
   KeysChangedError,
   localKeyProvider,
   prepareKeys,
@@ -37,6 +39,61 @@ async function rotateActive(purpose: 'identity' | 'matching') {
      VALUES ($1, $2, $3, $4, $5, true)`,
     [d.workspace, newId('dk'), kp.id, wrapped, purpose],
   );
+}
+
+async function createWorkspace() {
+  const id = newUuid();
+  await d.db.admin.query('INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, $2, $3)', [id, 'Prepared keys', 'none']);
+  return id;
+}
+
+/** Releases when `parties` callers arrive, or after `timeoutMs` so a skipped call cannot hang the test. */
+function barrier(parties: number, timeoutMs = 0) {
+  let arrived = 0;
+  let released = false;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = () => {
+      released = true;
+      resolve();
+    };
+  });
+  if (timeoutMs) setTimeout(release, timeoutMs).unref();
+  return async () => {
+    if (released) return;
+    arrived++;
+    if (arrived >= parties) release();
+    await gate;
+  };
+}
+
+/** Pauses the first wrap until both preparers have selected their first missing key. */
+function gatedProvider(inner: KeyProvider, wait: () => Promise<void>): KeyProvider {
+  let first = true;
+  return {
+    id: inner.id,
+    ...(inner.owns ? { owns: (kekId: string) => Boolean(inner.owns?.(kekId)) } : {}),
+    async wrap(dataKey) {
+      if (first) {
+        first = false;
+        await wait();
+      }
+      return inner.wrap(dataKey);
+    },
+    unwrap: (wrapped, kekId) => inner.unwrap(wrapped, kekId),
+  };
+}
+
+/** Holds both provisioning transactions at their start, so neither can commit before the other begins. */
+function gatedDb(base: Db, wait: () => Promise<void>): Pick<Db, 'withWorkspace'> {
+  let first = true;
+  return {
+    withWorkspace: (workspaceId, fn, opts) => {
+      if (!first) return base.withWorkspace(workspaceId, fn, opts);
+      first = false;
+      return wait().then(() => base.withWorkspace(workspaceId, fn, opts));
+    },
+  };
 }
 
 beforeAll(async () => {
@@ -138,8 +195,7 @@ describe.skipIf(!hasTestDatabase())('prepared keys (#978 part 1)', () => {
   });
 
   it('provisions missing active keys in a short transaction before the protected block', async () => {
-    const fresh = newUuid();
-    await d.db.admin.query('INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, $2, $3)', [fresh, 'Prepared keys', 'none']);
+    const fresh = await createWorkspace();
     recorder.reset();
     const prepared = await prepareKeys(d.db, fresh, recorder, { purposes: ['identity', 'matching'] });
     expect(prepared.dataKeyIds).toHaveLength(2);
@@ -153,5 +209,67 @@ describe.skipIf(!hasTestDatabase())('prepared keys (#978 part 1)', () => {
       d.db.withWorkspace(fresh, (tx) => personCrypto(tx, fresh, prepared.provider).matchHash('email', 'fresh@example.com')),
     );
     expect(hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('provisions concurrent first uses in one deterministic order without deadlock', async () => {
+    const fresh = await createWorkspace();
+    const started = barrier(2);
+    const firstWrap = barrier(2, 2_000);
+    // Opposite caller orders: the sorted preparation must still use one global order.
+    const [a, b] = await Promise.all([
+      prepareKeys(gatedDb(d.db, started), fresh, gatedProvider(localKeyProvider(MASTER_KEY), firstWrap), {
+        purposes: ['identity', 'matching'],
+      }),
+      prepareKeys(gatedDb(d.db, started), fresh, gatedProvider(localKeyProvider(MASTER_KEY), firstWrap), {
+        purposes: ['matching', 'identity'],
+      }),
+    ]);
+    expect(a.dataKeyIds).toHaveLength(2);
+    expect(b.dataKeyIds).toHaveLength(2);
+    const active = await d.db.admin.query<{ purpose: string; n: number }>(
+      'SELECT purpose, count(*)::int AS n FROM data_keys WHERE workspace_id = $1 AND active GROUP BY purpose ORDER BY purpose',
+      [fresh],
+    );
+    expect(active.rows).toEqual([
+      { purpose: 'identity', n: 1 },
+      { purpose: 'matching', n: 1 },
+    ]);
+  });
+
+  it('zeros only its own copies when disposed, leaving a cached provider usable', async () => {
+    const cached = cachedKeyProvider(localKeyProvider(MASTER_KEY), 60_000);
+    const prepared = await prepareKeys(d.db, d.workspace, cached, { purposes: ['identity', 'matching'] });
+    const [row] = (
+      await d.db.admin.query<{ wrapped_key: Buffer; kek_id: string }>(
+        'SELECT wrapped_key, kek_id FROM data_keys WHERE workspace_id = $1 AND purpose = $2 AND active',
+        [d.workspace, 'identity'],
+      )
+    ).rows;
+    const before = Buffer.from(await cached.unwrap(row.wrapped_key, row.kek_id));
+    prepared.provider.dispose();
+    const after = await cached.unwrap(row.wrapped_key, row.kek_id);
+    expect(after).toEqual(before);
+    expect(after.some((byte) => byte !== 0)).toBe(true);
+    // The disposed provider cannot be used again.
+    await expect(prepared.provider.unwrap(row.wrapped_key, row.kek_id)).rejects.toBeInstanceOf(KeysChangedError);
+  });
+
+  it('does not zero buffers returned by the provider when preparation fails partway', async () => {
+    const fresh = await createWorkspace();
+    await prepareKeys(d.db, fresh, kp, { purposes: ['identity', 'matching'] });
+    const first = Buffer.alloc(32, 9);
+    let calls = 0;
+    const failing: KeyProvider = {
+      id: kp.id,
+      async wrap() {
+        throw new Error('unexpected wrap');
+      },
+      async unwrap() {
+        if (calls++ === 0) return first;
+        throw new Error('partway failure');
+      },
+    };
+    await expect(prepareKeys(d.db, fresh, failing, { purposes: ['identity', 'matching'] })).rejects.toThrow('partway failure');
+    expect(first.every((byte) => byte === 9)).toBe(true);
   });
 });

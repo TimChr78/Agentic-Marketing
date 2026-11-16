@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isDeadlock, isSerializationFailure } from '@agentic-marketing/commands';
 import { type Db, schema } from '@agentic-marketing/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { KeyProvider } from './keys';
@@ -34,6 +35,15 @@ export function isKeysChangedError(error: unknown): error is KeysChangedError {
   );
 }
 
+/**
+ * Preparation can collide with itself on a fresh workspace: two first uses of different purposes
+ * each insert a key, and a serialization failure or deadlock means one rolled back. It is safe to
+ * prepare again in a fresh transaction, so `withPreparedKeys` treats these like a changed key.
+ */
+export function isRetryablePreparationError(error: unknown): boolean {
+  return isKeysChangedError(error) || isSerializationFailure(error) || isDeadlock(error);
+}
+
 export interface PrepareKeysOptions {
   /** The profiles the protected transaction will open or reseal; their per-person keys are prepared. */
   profileIds?: Iterable<string>;
@@ -44,11 +54,21 @@ export interface PrepareKeysOptions {
   purposes?: readonly DataKeyPurpose[];
 }
 
+/** A memory-only provider whose plaintext copies can be zeroed when the protected block ends. */
+export interface PreparedKeyProvider extends KeyProvider {
+  /** Zeroes this provider's own copies of the unwrapped keys. Idempotent. */
+  dispose(): void;
+}
+
+// TODO(#978 part 3): a protected call site that uses `readSecret` or `dataKeyById` for a historical
+// secrets key must prepare that exact data-key id too, and any profile references discovered while
+// the batch is being built must be recomputed on every retry (a merge can move them).
+
 /** The result of preparation: a memory-only provider plus what it was prepared from. */
 export interface PreparedKeys {
   readonly workspaceId: string;
   /** Safe to pass to `personCrypto` or any other code that accepts a `KeyProvider`. */
-  readonly provider: KeyProvider;
+  readonly provider: PreparedKeyProvider;
   readonly purposes: readonly DataKeyPurpose[];
   readonly dataKeyIds: readonly string[];
   readonly profileIds: readonly string[];
@@ -62,7 +82,8 @@ const reference = (wrapped: Buffer, kekId: string) => `${kekId}:${createHash('sh
  * been provisioned by preparation, never created under the protected transaction. `unwrap` never
  * reaches the configured provider; a key it does not hold is a retryable `KeysChangedError`.
  */
-function preparedProvider(kp: KeyProvider, entries: ReadonlyMap<string, Buffer>): KeyProvider {
+function preparedProvider(kp: KeyProvider, entries: Map<string, Buffer>): PreparedKeyProvider {
+  let disposed = false;
   return {
     id: kp.id,
     ...(kp.owns ? { owns: (kekId: string) => Boolean(kp.owns?.(kekId)) } : {}),
@@ -72,9 +93,16 @@ function preparedProvider(kp: KeyProvider, entries: ReadonlyMap<string, Buffer>)
       );
     },
     async unwrap(wrapped, kekId) {
+      if (disposed) throw new KeysChangedError('The prepared keys were disposed. Prepare the workspace again before using them.');
       const key = entries.get(reference(wrapped, kekId));
       if (!key) throw new KeysChangedError('A prepared transaction needed a data key that was not prepared (or changed since).');
       return key;
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      for (const key of entries.values()) key.fill(0);
+      entries.clear();
     },
   };
 }
@@ -92,7 +120,9 @@ export async function prepareKeys(
   kp: KeyProvider,
   options: PrepareKeysOptions = {},
 ): Promise<PreparedKeys> {
-  const purposes = [...new Set(options.purposes ?? DEFAULT_PREPARED_PURPOSES)];
+  // One deterministic order for every preparer: two concurrent first uses must take the same
+  // purposes in the same order, or each can hold the lock the other waits for (a deadlock).
+  const purposes = [...new Set(options.purposes ?? DEFAULT_PREPARED_PURPOSES)].sort();
   const profileIds = [...new Set(options.profileIds ?? [])];
 
   // Provisioning is its own short transaction: first use of a purpose wraps a new data key, which
@@ -133,9 +163,20 @@ export async function prepareKeys(
   });
 
   // Unwrap after the read transaction closed, one at a time so a large batch does not burst a
-  // remote KMS, and count exactly one provider call per distinct data key.
+  // remote KMS, and count exactly one provider call per distinct data key. Copy each buffer:
+  // `cachedKeyProvider` hands out the same buffer to every caller, so the prepared set must own
+  // its copies before `dispose()` zeroes them.
   const entries = new Map<string, Buffer>();
-  for (const row of rows.dataKeys) entries.set(reference(row.wrappedKey, row.kekId), await kp.unwrap(row.wrappedKey, row.kekId));
+  try {
+    for (const row of rows.dataKeys) {
+      const key = await kp.unwrap(row.wrappedKey, row.kekId);
+      entries.set(reference(row.wrappedKey, row.kekId), Buffer.from(key));
+    }
+  } catch (error) {
+    // A later unwrap failed: the keys already copied must not be left in memory.
+    for (const key of entries.values()) key.fill(0);
+    throw error;
+  }
 
   return {
     workspaceId,
@@ -158,11 +199,22 @@ export async function withPreparedKeys<T>(
 ): Promise<T> {
   const attempts = Math.max(1, Math.trunc(options.attempts ?? 3));
   for (let attempt = 1; ; attempt++) {
-    const prepared = await prepare();
+    let prepared: PreparedKeys | undefined;
     try {
-      return await run(prepared);
-    } catch (error) {
-      if (!isKeysChangedError(error) || attempt >= attempts) throw error;
+      try {
+        prepared = await prepare();
+      } catch (error) {
+        // A concurrent first use can lose a serialization/deadlock race while provisioning.
+        if (!isRetryablePreparationError(error) || attempt >= attempts) throw error;
+        continue;
+      }
+      try {
+        return await run(prepared);
+      } catch (error) {
+        if (!isKeysChangedError(error) || attempt >= attempts) throw error;
+      }
+    } finally {
+      prepared?.provider.dispose();
     }
   }
 }
@@ -204,11 +256,21 @@ export function recordingKeyProvider(inner: KeyProvider): RecordingKeyProvider {
  */
 export async function assertNoProviderCalls<T>(provider: RecordingKeyProvider, fn: () => Promise<T>): Promise<T> {
   const before = provider.calls.length;
-  const result = await fn();
+  const failure = (calls: readonly KeyProviderCall[], cause?: unknown) =>
+    new Error(`A protected block made ${calls.length} key-provider call(s): ${calls.map((c) => `${c.method}(${c.kekId})`).join(', ')}.`, {
+      cause,
+    });
+  let result: T;
+  try {
+    result = await fn();
+  } catch (error) {
+    const calls = provider.calls.slice(before);
+    // A failing block is no excuse: if it also touched the provider, report both, with the
+    // block's own error as the cause.
+    if (calls.length) throw failure(calls, error);
+    throw error;
+  }
   const calls = provider.calls.slice(before);
-  if (calls.length)
-    throw new Error(
-      `A protected block made ${calls.length} key-provider call(s): ${calls.map((c) => `${c.method}(${c.kekId})`).join(', ')}.`,
-    );
+  if (calls.length) throw failure(calls);
   return result;
 }
