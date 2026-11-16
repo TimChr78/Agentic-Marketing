@@ -10,6 +10,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 
 ### Fixed
 
+- The journey canvas no longer loses its node measurements on every re-render. The graph rebuilt its nodes each time it rendered without warnings, so React Flow could re-adopt them unmeasured and leave them hidden: the builder or read-only canvas could show no visible steps until something else made it measure again. The node list is now stable, and the canvas marks itself ready (`data-journey-ready`) once every node has been measured.
 - `campaigns.holdoutResult` chooses each person's winning holdout assignment in PostgreSQL over `profiles.merged_into`, in the same microsecond-then-profile-id order the send path uses, and computes the entrant counts and time bounds in SQL. The conversion-event and unsubscribe reads now run one bounded page of people at a time, fold each event page as it arrives, and keep only per-currency buyer counts saturating at k, so a long-running campaign's report no longer holds its whole assignment history, every conversion or every unsubscriber in memory.
 
 ### Security
@@ -25,7 +26,7 @@ All notable changes to Agentic Marketing. Versions follow [semantic versioning](
 - **Manual steps:** none.
 - **Upgrade:** download `agentic-marketing-compose-0.14.27.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.27 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.27` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.27). Run `docker compose exec app am doctor`.
 
-<!-- issues: 972, 976, 980, 981 -->
+<!-- issues: 972, 976, 980, 981, 990 -->
 
 ## [0.14.26] - 2026-11-16
 
