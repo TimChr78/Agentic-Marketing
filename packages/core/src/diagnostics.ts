@@ -798,13 +798,46 @@ function redactShortSchemeValues(text: string): string {
   return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), schemeValueSpan);
 }
 
+/** Opening typographic quotes and the character that closes each. */
+const UNICODE_QUOTE_CLOSERS = new Map<string, string>([
+  ['\u201c', '\u201d'],
+  ['\u2018', '\u2019'],
+  ['\u00ab', '\u00bb'],
+  ['\u201e', '\u201c'],
+  ['\u2039', '\u203a'],
+]);
+
+/**
+ * A value in typographic quotes: `token: “short pw”`, `‘…’`, `«…»`. The rules see only up to the
+ * first space (`“short`), which leaves the rest of the value; this consumes the whole pair. An
+ * unterminated quote runs to the end of its line, so a value broken across lines never survives
+ * and the next line stays readable.
+ */
+function unicodeValueSpan(text: string, start: number): ValueSpan | null {
+  const close = UNICODE_QUOTE_CLOSERS.get(text.charAt(start));
+  if (close === undefined) return null;
+  let index = start + 1;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (char === '\n') return { start, end: index };
+    if (char === close) return { start, end: index + 1 };
+    index += 1;
+  }
+  return { start, end: text.length };
+}
+
+function redactUnicodeQuotedValues(text: string): string {
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), unicodeValueSpan);
+}
+
 /**
  * The passes that must see a shape before the rules do, because they consume a delimiter the rules
  * would otherwise take (`[`, a Unicode opening quote, `>`, `-----BEGIN`, an inner `=`). Each one
  * replaces a whole delimited span, so it cannot leave a nested pair's value behind.
  */
 function redactIntactValueShapes(text: string): string {
-  const out = redactStructuredValues(text);
+  let out = redactStructuredValues(text);
+  out = redactUnicodeQuotedValues(out);
   return out;
 }
 

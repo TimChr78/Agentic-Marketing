@@ -7,6 +7,29 @@ import { redactCredentials } from '../src/diagnostics';
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
 
+describe('a typographic-quoted value under a credential key (#937)', () => {
+  it('replaces the whole quoted value in every quote pair', () => {
+    const pairs: [string, string][] = [
+      ['\u201c', '\u201d'],
+      ['\u2018', '\u2019'],
+      ['\u00ab', '\u00bb'],
+      ['\u201e', '\u201c'],
+      ['\u2039', '\u203a'],
+    ];
+    for (const [open, close] of pairs)
+      expect(redactCredentials(`token: ${open}${SECRET} with spaces${close}`), open).toBe('token: [redacted]');
+  });
+
+  it('stops at the end of the line for an unterminated quote', () => {
+    expect(redactCredentials(`token: \u201c${SECRET}\nnext line`)).toBe('token: [redacted]\nnext line');
+  });
+
+  it('leaves prose containing quotes alone', () => {
+    for (const input of ['the provider said \u201cnothing useful\u201d', 'a \u2018quote\u2019 in prose'])
+      expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
 describe('a short Authorization value under a credential key (#937)', () => {
   it('replaces the token after the scheme and keeps the scheme word', () => {
     expect(redactCredentials('authToken=Bearer abc')).toBe('authToken=Bearer [redacted]');

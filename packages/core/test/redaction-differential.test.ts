@@ -383,6 +383,10 @@ const SHAPES: [string, (key: string, value: string) => string][] = [
   ['object', (key, value) => `{"${key}":{"v":"${value}"}}`],
   ['bare array', (key, value) => `${key}=[${value}]`],
   ['bare object', (key, value) => `${key}: {"v":"${value}"}`],
+  ['unicode double', (key, value) => `${key}: \u201c${value}\u201d`],
+  ['unicode single', (key, value) => `${key}: \u2018${value}\u2019`],
+  ['unicode guillemet', (key, value) => `${key}: \u00ab${value}\u00bb`],
+  ['unicode unclosed', (key, value) => `${key}: \u201c${value}`],
 ];
 /** Shapes whose point is a value too short for the rules to see, so only the marker goes in. */
 const SHORT_SHAPES: [string, (key: string, value: string) => string][] = [
