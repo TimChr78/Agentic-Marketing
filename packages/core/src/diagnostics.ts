@@ -528,6 +528,45 @@ const prefixedStart: CandidateStart = (text, runStart) => {
 /** A run beginning with a letter, for a joined provider name such as `lmStudioKey`. */
 const joinedStart: CandidateStart = (text, runStart) => (isRunLetter(text.charAt(runStart)) ? runStart : -1);
 
+/** Characters that end a bare value in `PAIR_VALUE`'s third alternative. */
+const BARE_VALUE_STOP = new Set([',', ';', '&', '}', ']', '"', "'"]);
+
+/**
+ * The end of the value `PAIR_VALUE` would match at `start`, or -1 when it matches nothing: a
+ * double-quoted string with backslash escapes, a single-quoted string, or a bare run (which may
+ * contain `[redacted]`). A hand-written scan of the same grammar, so the additive passes do not
+ * hand a sticky regex to text CodeQL treats as uncontrolled (#946 review); main's pass keeps the
+ * regex unchanged.
+ */
+function pairValueEnd(text: string, start: number): number {
+  const first = text.charAt(start);
+  if (first === '"') {
+    for (let index = start + 1; index < text.length; index += 1) {
+      const char = text.charAt(index);
+      if (char === '\\') {
+        if (index + 1 >= text.length) return -1;
+        index += 1;
+      } else if (char === '"') return index + 1;
+    }
+    return -1;
+  }
+  if (first === "'") {
+    const close = text.indexOf("'", start + 1);
+    return close < 0 ? -1 : close + 1;
+  }
+  let index = start;
+  while (index < text.length) {
+    if (text.startsWith('[redacted]', index)) {
+      index += '[redacted]'.length;
+      continue;
+    }
+    const char = text.charAt(index);
+    if (isSpace(char) || BARE_VALUE_STOP.has(char)) break;
+    index += 1;
+  }
+  return index > start ? index : -1;
+}
+
 /** Scans each name run once and replaces values with the same grammar `redactCompoundKeys` uses. */
 function redactCompoundRuns(text: string, candidateStart: CandidateStart, accept: (name: string) => boolean): string {
   let out = '';
@@ -550,11 +589,10 @@ function redactCompoundRuns(text: string, candidateStart: CandidateStart, accept
     if (start < 0 || !accept(name)) continue;
     SCHEME_START.lastIndex = start;
     if (SCHEME_START.test(text)) continue;
-    PAIR_VALUE.lastIndex = start;
-    const value = PAIR_VALUE.exec(text);
-    if (!value) continue;
-    const valueEnd = start + value[0].length;
-    if (value[0] === '[redacted]' || PLAIN_LITERAL.test(value[0])) continue;
+    const valueEnd = pairValueEnd(text, start);
+    if (valueEnd < 0) continue;
+    const value = text.slice(start, valueEnd);
+    if (value === '[redacted]' || PLAIN_LITERAL.test(value)) continue;
     out += `${text.slice(copied, start)}[redacted]`;
     copied = valueEnd;
     index = valueEnd;

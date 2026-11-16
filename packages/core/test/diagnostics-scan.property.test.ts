@@ -283,6 +283,10 @@ describe('the scanner stays linear on very large input (#902 round 5)', () => {
   }, 120_000);
 });
 
+// A shared CI runner takes ~1.2 s for the slowest linear megabyte; the quadratic shapes this guards
+// against took minutes. Growth itself is pinned by the scaling assertion.
+const SLOW_MS = 5_000;
+
 describe('the leading-separator scan stays linear (#946 review)', () => {
   const MB = 1024 * 1024;
   const repeatTo = (unit: string, bytes: number): string => unit.repeat(Math.ceil(bytes / unit.length));
@@ -292,7 +296,7 @@ describe('the leading-separator scan stays linear (#946 review)', () => {
     return performance.now() - started;
   };
 
-  it('finishes every uninterrupted megabyte in well under a second, with and without a pair', () => {
+  it('finishes every uninterrupted megabyte in a few seconds at most, with and without a pair', () => {
     const shapes = [
       // A long run of separators before the only candidate.
       '_',
@@ -314,7 +318,7 @@ describe('the leading-separator scan stays linear (#946 review)', () => {
       for (const suffix of ['', '=x']) {
         const input = `${repeatTo(shape, MB)}${suffix}`;
         const elapsed = measure(input);
-        if (elapsed >= 1_000) slow.push(`${JSON.stringify(shape)}${suffix} ${elapsed.toFixed(0)}ms`);
+        if (elapsed >= SLOW_MS) slow.push(`${JSON.stringify(shape)}${suffix} ${elapsed.toFixed(0)}ms`);
       }
     // A handful of separator-prefixed names, with and without a pair, so the classifier runs often.
     for (const input of [
@@ -327,7 +331,7 @@ describe('the leading-separator scan stays linear (#946 review)', () => {
       repeatTo('a.b_secretKey=abc ', MB),
     ]) {
       const elapsed = measure(input);
-      if (elapsed >= 1_000) slow.push(`${JSON.stringify(input.slice(0, 12))} ${elapsed.toFixed(0)}ms`);
+      if (elapsed >= SLOW_MS) slow.push(`${JSON.stringify(input.slice(0, 12))} ${elapsed.toFixed(0)}ms`);
     }
     expect(slow).toEqual([]);
   }, 120_000);
