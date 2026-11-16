@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { providerDiagnostic, redactCredentials, redactedText, safeErrorText } from '../src/diagnostics';
+import { redactCredentials as redactCredentials01423 } from './redaction-01423-reference';
 
 // #885: a provider's error body is copied into an AppError whose message reaches the caller, the
 // audit log and the agent ledger. Only its own code and message fields may survive, and a token
@@ -326,7 +327,6 @@ describe('the prefixed pass keeps what main redacted (#968 review)', () => {
       'XAI',
       'BEDROCK',
       'VERTEX',
-      'AZUREOPENAI',
     ];
     for (const qualifier of qualifiers) {
       const input = `${qualifier}KEY=apiSecret='probe-secret'`;
@@ -337,6 +337,21 @@ describe('the prefixed pass keeps what main redacted (#968 review)', () => {
     }
     // The exact review input: main leaves MISTRALKEY alone and redacts the inner value.
     expect(redactCredentials(`MISTRALKEY=apiSecret='swordfish'`)).toBe('MISTRALKEY=[redacted]');
+  });
+
+  it('keeps every all-capitals name main recognised in main, even when an added name ends the same way (#968 round 4)', () => {
+    // main matched AZUREOPENAIKEY through its `openai` ending and redacted the nested value; the
+    // prefixed pass must not reach that inner key first. Every case compares with the released
+    // 0.14.23 function: nothing it removed may survive.
+    expect(redactCredentials(`_secretKey=AZUREOPENAIKEY='swordfish'`)).not.toContain('swordfish');
+    for (const outer of ['_secretKey', '__authToken', '$$SIGNINGKEY', 'SIGNINGKEY', 'mistralKey', 'secretKey'])
+      for (const inner of ['AZUREOPENAIKEY', 'OPENAIKEY', 'AZUREKEY', 'GOOGLEKEY', 'ANTHROPICKEY'])
+        for (const value of [`'swordfish'`, `"swordfish"`, 'swordfish']) {
+          const input = `${outer}=${inner}=${value}`;
+          const out = redactCredentials(input);
+          if (!redactCredentials01423(input).includes('swordfish')) expect(out, input).not.toContain('swordfish');
+          expect(redactCredentials(out), input).toBe(out);
+        }
   });
 
   it('defers a value only when the following token is itself a credential key (#968 round 3)', () => {

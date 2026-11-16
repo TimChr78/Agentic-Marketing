@@ -316,9 +316,6 @@ function isUpperCredentialKey(name: string): boolean {
   if (UPPER_SUFFIXES.some((word) => lower.length > word.length && lower.endsWith(word))) return true;
   if (!lower.endsWith('key')) return false;
   const stem = lower.slice(0, -3);
-  // A provider name this batch added (`AZUREOPENAIKEY`) may also end in an older qualifier
-  // (`openai`); leave it to the additive pass so main cannot swallow its inner pair.
-  for (const qualifier of ADDED_PROVIDER_QUALIFIERS) if (stem.endsWith(qualifier)) return false;
   for (const qualifier of MAIN_KEY_QUALIFIERS) if (stem.endsWith(qualifier)) return true;
   return false;
 }
