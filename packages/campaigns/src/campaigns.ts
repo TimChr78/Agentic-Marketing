@@ -2,10 +2,9 @@ import {
   analyseHoldout,
   artifactTypes,
   type CampaignDefinition,
-  canonicalPeople,
-  earlierAssignment,
   holdoutBelowK,
   holdoutHashVersion,
+  holdoutWinners,
   K,
   publishedSingleton,
   publishValidators,
@@ -16,7 +15,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/events';
-import { and, eq, inArray, isNotNull, max, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, max } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
 import { goalEventsFor } from './goal';
@@ -447,59 +446,27 @@ export const campaignHoldoutResult = defineCommand({
     const hashVersion = holdoutHashVersion(cg.percent);
     const from = input.from ? new Date(input.from) : undefined;
     const to = input.to ? new Date(input.to) : undefined;
-    // The whole scope version, not just the requested window: a person's arm is their earliest
-    // assignment, and applying the date range first would let a later row on another of their
-    // profiles decide the arm while the send used the earlier one (#944).
-    const assignments = await ctx.tx
-      .select({
-        profileId: schema.holdoutAssignments.profileId,
-        arm: schema.holdoutAssignments.arm,
-        assignedAt: schema.holdoutAssignments.assignedAt,
-        // Full precision for the earliest-wins order (see HoldoutStamp.assignedMicros).
-        assignedMicros: sql<string>`(extract(epoch from ${schema.holdoutAssignments.assignedAt}) * 1000000)::bigint::text`,
-      })
-      .from(schema.holdoutAssignments)
-      .where(
-        and(
-          eq(schema.holdoutAssignments.workspaceId, ws),
-          eq(schema.holdoutAssignments.scopeType, 'campaign'),
-          eq(schema.holdoutAssignments.scopeId, input.campaignId),
-          eq(schema.holdoutAssignments.hashVersion, hashVersion),
-        ),
-      );
+    // Each person's winning assignment is chosen in SQL over the whole scope version, and the
+    // requested window is applied to that winner only. Applying the window to the input first would
+    // let a later row on another of their profiles decide the arm while the send used the earlier
+    // one (#944). The winners stay in a transaction-scoped table: the entrant counts and time bounds
+    // are SQL aggregates and the event pass reads the people in bounded pages (#972).
+    const winners = await holdoutWinners(ctx.tx, ws, { type: 'campaign', id: input.campaignId }, hashVersion, {
+      ...(from ? { from } : {}),
+      ...(to ? { to } : {}),
+    });
     const counts = {
-      control: { entered: 0, converted: 0, unsubscribed: 0 },
-      treatment: { entered: 0, converted: 0, unsubscribed: 0 },
+      control: { entered: winners.control, converted: 0, unsubscribed: 0 },
+      treatment: { entered: winners.treatment, converted: 0, unsubscribed: 0 },
     };
     const revenue: Record<'control' | 'treatment', Record<string, number | null>> = { control: {}, treatment: {} };
-    // Distinct converters per arm per currency, the same population the measure layer keys its
+    // Distinct buyers per arm per currency, the same population the measure layer keys its
     // revenue k floor on (k_revenue_group): a currency with fewer than k buyers has its amount
-    // suppressed even when the arm itself clears k (#901).
-    const converters: Record<'control' | 'treatment', Map<string, Set<string>>> = { control: new Map(), treatment: new Map() };
-    // One person, one arm (#944). An assignment can sit on a profile the person was merged from — a
-    // run that selected a stale alias wrote it there — so each row is resolved to the person and the
-    // earliest arm is theirs (`earlierAssignment`, the same order `assignHoldout` reads), which also
-    // breaks a timestamp tie the same way, so the send and the report cannot disagree. The requested
-    // window then applies to that winning assignment, never to a row that did not decide the arm.
-    const personOf = await canonicalPeople(
-      ctx.tx,
-      ws,
-      assignments.map((a) => a.profileId),
-    );
-    const decided = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date; assignedMicros: bigint; profileId: string }>();
-    for (const r of assignments) {
-      const person = personOf.get(r.profileId) ?? r.profileId;
-      const current = decided.get(person);
-      const candidate = { arm: r.arm, assignedAt: r.assignedAt, assignedMicros: BigInt(r.assignedMicros), profileId: r.profileId };
-      if (!current || earlierAssignment(candidate, current)) decided.set(person, candidate);
-    }
-    const people = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date }>();
-    for (const [person, win] of decided) {
-      if (from && win.assignedAt < from) continue;
-      if (to && win.assignedAt > to) continue;
-      people.set(person, { arm: win.arm, assignedAt: win.assignedAt });
-    }
-    for (const person of people.values()) counts[person.arm].entered++;
+    // suppressed even when the arm itself clears k (#901). A person is in exactly one people page,
+    // so per-page distinct counts add up; only "at least k" matters, so each count saturates at K
+    // and this stays a map over currencies, not over people (#972 review).
+    const buyers: Record<'control' | 'treatment', Map<string, number>> = { control: new Map(), treatment: new Map() };
+    const entered = winners.control + winners.treatment;
 
     // Goal events and revenue, when there are people to measure. ClickHouse joins in code to the
     // Postgres assignments: a person counts once, and only events inside their own attribution
@@ -517,6 +484,8 @@ export const campaignHoldoutResult = defineCommand({
       : [];
     const sendingIds = sends.filter((s) => SENDING_TYPES.has(s.type)).map((s) => s.id);
     const conversionMap = await publishedSingleton(ctx.tx, 'conversion_map');
+    const rules = new Map<string, NonNullable<typeof conversionMap>['rules'][number]>();
+    for (const rule of conversionMap?.rules ?? []) if (!rules.has(rule.event)) rules.set(rule.event, rule);
     // A revenue goal counts the map's events and the campaign's own goal.event; with no map
     // published that is the goal event alone (#632).
     const names = goalEventsFor(
@@ -524,12 +493,13 @@ export const campaignHoldoutResult = defineCommand({
       (conversionMap?.rules ?? []).map((r) => r.event),
     );
     let identityLimit: number | null = null;
-    if (people.size && names.length) {
-      // A loop, not Math.min(...times): a spread of 100k+ arguments overflows the call stack.
-      const bounds = assignedTimeBounds(people.values());
-      const first = new Date(bounds.first);
-      const last = new Date(bounds.last + c.goal.attributionDays * 86_400_000);
-      const windowTo = to && to < last ? to : last;
+    if (entered && names.length) {
+      // The SQL aggregates above bound the event window: the earliest winning assignment, and the
+      // latest one plus the goal's attribution days, never past the report's `to`.
+      const first = winners.first!;
+      const last = winners.last!;
+      const end = new Date(last.getTime() + c.goal.attributionDays * 86_400_000);
+      const windowTo = to && to < end ? to : end;
       // One identity map, shared with the campaign summary and the measure queries (#590): sent
       // recipients union this campaign's holdout assignments, both arms. The union is what keeps
       // the headline and the holdout on the same side of the bound; above it both omit the map and
@@ -548,78 +518,111 @@ export const campaignHoldoutResult = defineCommand({
       const userProfiles = new Map(pairs.filter((p) => p.kind === 'user_id').map((p) => [p.key, p.profileId]));
       const anonymousProfiles = new Map(pairs.filter((p) => p.kind === 'anonymous_id').map((p) => [p.key, p.profileId]));
       const mergedProfiles = new Map(pairs.filter((p) => p.kind === 'profile').map((p) => [p.key, p.profileId]));
-      // The event query is scoped to the campaign's people (profile ids plus their identifiers) and
-      // pages the whole attribution window, so a busy workspace cannot hide a late conversion behind
-      // an unrelated 100k-event cap (#366). The merged-away profile ids are part of that scope: an
-      // event that still carries only the historical id would otherwise be filtered out before
-      // mergedProfiles can resolve it (#590).
-      const events = await ctx.services.events.conversionEvents(ws, {
-        names,
-        from: first,
-        to: windowTo,
-        profileIds: [...new Set([...people.keys(), ...mergedProfiles.keys()])],
-        identifiers: {
-          anonymousIds: [...new Set(pairs.filter((p) => p.kind === 'anonymous_id').map((p) => p.key))],
-          userIds: [...new Set(pairs.filter((p) => p.kind === 'user_id').map((p) => p.key))],
-        },
-      });
-      const conversions = new Map<string, { timestamp: number; name: string; properties: Record<string, unknown> }[]>();
-      for (const e of events) {
-        // Event profile ids are historical; identifiers and merged ids lead to the survivor.
-        const profileId =
-          userProfiles.get(e.userId) ??
-          anonymousProfiles.get(e.anonymousId) ??
-          mergedProfiles.get(e.profileId) ??
-          (people.has(e.profileId) ? e.profileId : undefined);
-        if (!profileId || !people.has(profileId)) continue;
-        const list = conversions.get(profileId) ?? [];
-        list.push(e);
-        conversions.set(profileId, list);
+      // Each person's identifiers, so a page ships only its own: a campaign's map is bounded by the
+      // platform's campaign size, but the people list is not bounded by the page until this is split.
+      const pairsByPerson = new Map<string, { anonymousIds: string[]; userIds: string[]; profileIds: string[] }>();
+      for (const pair of pairs) {
+        const entry = pairsByPerson.get(pair.profileId) ?? { anonymousIds: [], userIds: [], profileIds: [] };
+        if (pair.kind === 'anonymous_id') entry.anonymousIds.push(pair.key);
+        else if (pair.kind === 'user_id') entry.userIds.push(pair.key);
+        else entry.profileIds.push(pair.key);
+        pairsByPerson.set(pair.profileId, entry);
       }
-      if (c.goal.kind === 'revenue') {
-        const rules = new Map<string, NonNullable<typeof conversionMap>['rules'][number]>();
-        for (const rule of conversionMap?.rules ?? []) if (!rules.has(rule.event)) rules.set(rule.event, rule);
-        for (const [profileId, person] of people) {
-          const end = Math.min(person.assignedAt.getTime() + c.goal.attributionDays * 86_400_000, windowTo.getTime());
-          let converted = false;
-          for (const e of conversions.get(profileId) ?? []) {
-            if (e.timestamp < person.assignedAt.getTime() || e.timestamp > end) continue;
-            if (!converted) {
-              counts[person.arm].converted++;
-              converted = true;
+      // Feed the report one bounded page of people at a time (#972). Each page is scoped to its
+      // profile ids plus their identifiers and merged-away ids, and both the conversion events and
+      // the guardrail read only that page, so a long-running campaign's memory is its page size,
+      // not its whole assignment history.
+      const pageSize = holdoutReportPageSize;
+      let after: string | undefined;
+      for (;;) {
+        const page = await winners.page(after, pageSize);
+        if (!page.length) break;
+        after = page[page.length - 1]!.person;
+        const people = new Map(page.map((winner) => [winner.person, winner]));
+        const profileIds = new Set(people.keys());
+        const anonymousIds = new Set<string>();
+        const userIds = new Set<string>();
+        for (const person of people.keys()) {
+          const mine = pairsByPerson.get(person);
+          if (!mine) continue;
+          // The merged-away profile ids are part of the scope: an event that still carries only the
+          // historical id would otherwise be filtered out before mergedProfiles can resolve it (#590).
+          for (const id of mine.profileIds) profileIds.add(id);
+          for (const id of mine.anonymousIds) anonymousIds.add(id);
+          for (const id of mine.userIds) userIds.add(id);
+        }
+        // The guardrail covers the campaign's own sends only: messages from unrelated journeys or
+        // broadcasts are not the campaign's doing. It is scoped to this page's people as well, so
+        // the report never loads every unsubscribe in the campaign (#972 review).
+        const unsubscribed = sendingIds.length
+          ? new Set(
+              (
+                await ctx.services.events.unsubscribedProfiles(ws, {
+                  journeyIds: sendingIds,
+                  from,
+                  to,
+                  profileIds: [...profileIds],
+                })
+              ).map(
+                // The guardrail resolves through the same merge map: an unsubscribe stored under the
+                // historical profile still belongs to the survivor who is being measured (#590).
+                (id) => mergedProfiles.get(id) ?? id,
+              ),
+            )
+          : new Set<string>();
+        // Fold each event page as it arrives instead of collecting the page's whole event set: one
+        // person with a large history cannot make the report's memory grow with their events (#972
+        // review). A person is in exactly one people page, so per-page conversion flags and per-page
+        // distinct buyer counts add up to the campaign totals.
+        const converted = new Set<string>();
+        const buyersInPage = new Map<string, Set<string>>();
+        await ctx.services.events.conversionEvents(ws, {
+          names,
+          from: first,
+          to: windowTo,
+          profileIds: [...profileIds],
+          identifiers: { anonymousIds: [...anonymousIds], userIds: [...userIds] },
+          onPage: (events) => {
+            for (const e of events) {
+              // Event profile ids are historical; identifiers and merged ids lead to the survivor.
+              const profileId =
+                userProfiles.get(e.userId) ??
+                anonymousProfiles.get(e.anonymousId) ??
+                mergedProfiles.get(e.profileId) ??
+                (people.has(e.profileId) ? e.profileId : undefined);
+              if (!profileId || !people.has(profileId)) continue;
+              const person = people.get(profileId)!;
+              const personEnd = Math.min(person.assignedAt.getTime() + c.goal.attributionDays * 86_400_000, windowTo.getTime());
+              if (e.timestamp < person.assignedAt.getTime() || e.timestamp > personEnd) continue;
+              if (!converted.has(profileId)) {
+                converted.add(profileId);
+                counts[person.arm].converted++;
+              }
+              if (c.goal.kind !== 'revenue') continue;
+              const rule = rules.get(e.name);
+              const value = rule?.value ? numericProperty(e.properties, rule.value) : 0;
+              const currency =
+                rule?.currency ??
+                (rule?.currencyProperty ? String(stringProperty(e.properties, rule.currencyProperty) ?? '').toUpperCase() : '') ??
+                '';
+              const code = currency || 'UNKNOWN';
+              revenue[person.arm][code] = (revenue[person.arm][code] ?? 0) + value;
+              const codes = buyersInPage.get(profileId) ?? new Set<string>();
+              codes.add(code);
+              buyersInPage.set(profileId, codes);
             }
-            const rule = rules.get(e.name);
-            const value = rule?.value ? numericProperty(e.properties, rule.value) : 0;
-            const currency =
-              rule?.currency ??
-              (rule?.currencyProperty ? String(stringProperty(e.properties, rule.currencyProperty) ?? '').toUpperCase() : '') ??
-              '';
-            const code = currency || 'UNKNOWN';
-            revenue[person.arm][code] = (revenue[person.arm][code] ?? 0) + value;
-            const buyers = converters[person.arm].get(code) ?? new Set<string>();
-            buyers.add(profileId);
-            converters[person.arm].set(code, buyers);
+          },
+        });
+        for (const [profileId, codes] of buyersInPage) {
+          const arm = people.get(profileId)!.arm;
+          for (const code of codes) {
+            const n = buyers[arm].get(code) ?? 0;
+            if (n < K) buyers[arm].set(code, n + 1);
           }
         }
-      } else {
-        for (const [profileId, person] of people) {
-          const end = Math.min(person.assignedAt.getTime() + c.goal.attributionDays * 86_400_000, windowTo.getTime());
-          if ((conversions.get(profileId) ?? []).some((e) => e.timestamp >= person.assignedAt.getTime() && e.timestamp <= end))
-            counts[person.arm].converted++;
-        }
+        for (const person of page) if (unsubscribed.has(person.person)) counts[person.arm].unsubscribed++;
+        if (page.length < pageSize) break;
       }
-      // The guardrail covers the campaign's own sends only: messages from unrelated journeys or
-      // broadcasts are not the campaign's doing.
-      const unsubscribed = sendingIds.length
-        ? new Set(
-            (await ctx.services.events.unsubscribedProfiles(ws, { journeyIds: sendingIds, from, to })).map(
-              // The guardrail resolves through the same merge map: an unsubscribe stored under the
-              // historical profile still belongs to the survivor who is being measured (#590).
-              (id) => mergedProfiles.get(id) ?? id,
-            ),
-          )
-        : new Set<string>();
-      for (const [profileId, person] of people) if (unsubscribed.has(profileId)) counts[person.arm].unsubscribed++;
     }
 
     // The revenue floor is per currency, not per arm (#901): one buyer in EUR must never have their
@@ -629,7 +632,7 @@ export const campaignHoldoutResult = defineCommand({
     const suppressedRevenue: string[] = [];
     for (const arm of ['control', 'treatment'] as const) {
       for (const currency of Object.keys(revenue[arm])) {
-        if ((converters[arm].get(currency)?.size ?? 0) >= K) continue;
+        if ((buyers[arm].get(currency) ?? 0) >= K) continue;
         revenue[arm][currency] = null;
         suppressedRevenue.push(`${currency} in ${arm}`);
       }
@@ -762,14 +765,16 @@ export const campaignCommands = [
   campaignFromBrief,
 ] as const;
 
-/** The earliest and latest assignment time in milliseconds, in one pass over any number of people. */
-export function assignedTimeBounds(people: Iterable<{ assignedAt: Date }>): { first: number; last: number } {
-  let first = Number.POSITIVE_INFINITY;
-  let last = Number.NEGATIVE_INFINITY;
-  for (const person of people) {
-    const time = person.assignedAt.getTime();
-    if (time < first) first = time;
-    if (time > last) last = time;
-  }
-  return { first, last };
+const DEFAULT_HOLDOUT_REPORT_PAGE_SIZE = 10_000;
+
+/** The internal people page size; tests override it, production keeps the default (never env). */
+let holdoutReportPageSize = DEFAULT_HOLDOUT_REPORT_PAGE_SIZE;
+
+/**
+ * Test-only override for the holdout report's people page size (#972). The value is an internal
+ * bound, not configuration, so it is not read from the environment; a test sets it to cross a page
+ * boundary without a large fixture and passes null to restore the default.
+ */
+export function setHoldoutReportPageSizeForTests(size: number | null): void {
+  holdoutReportPageSize = size === null ? DEFAULT_HOLDOUT_REPORT_PAGE_SIZE : Math.max(1, Math.trunc(size));
 }
