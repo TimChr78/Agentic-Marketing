@@ -1,7 +1,7 @@
 import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
-import { runActiveMandateRepair } from '@agentic-marketing/artifacts';
+import { runActiveMandateRepair, runArchivedApprovalSweep } from '@agentic-marketing/artifacts';
 import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
 import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
@@ -102,6 +102,12 @@ export function startScheduler(
     runActiveMandateRepair({ db: srv.db }, signal, {
       log: (message) => logger.info(message),
       onError: (err) => logger.error({ err }, 'single active mandate repair failed'),
+    }),
+    // One pass at start, then every few hours: a request that names an archived artifact can never
+    // publish, so it is closed as rejected instead of sitting in the queue (#957).
+    runArchivedApprovalSweep({ db: srv.db }, signal, {
+      log: (message) => logger.info(message),
+      onError: (err) => logger.error({ err }, 'archived approval sweep failed'),
     }),
     runSegmentScheduler(
       {
