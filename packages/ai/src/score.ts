@@ -159,6 +159,15 @@ export const score = defineCommand({
             outputTokens: r.outputTokens,
             latencyMs: r.latencyMs,
           }),
+        // Even a refused or unreadable answer may have been billed; record what the provider says,
+        // or the reserved estimate, in the transaction that releases the hold (#941).
+        recordFailure: (tx, usage, error, estimated) =>
+          insertCall(tx, ctx.principal, callId, provider, input, state, {
+            status: 'failed',
+            error,
+            ...usage,
+            usageEstimated: estimated,
+          }),
       });
     } catch (err) {
       await logCall(db, ctx.principal, callId, provider, input, state, {
@@ -213,6 +222,7 @@ async function insertCall(
     answers?: unknown;
     inputTokens?: number;
     outputTokens?: number;
+    usageEstimated?: boolean;
     latencyMs?: number;
     error?: string;
   },
@@ -238,6 +248,8 @@ async function insertCall(
       error: out.error ?? null,
       inputTokens: out.inputTokens ?? 0,
       outputTokens: out.outputTokens ?? 0,
+      billedAt: new Date(),
+      usageEstimated: out.usageEstimated ?? false,
       latencyMs: out.latencyMs ?? null,
       principalId: principal.userId,
       finishedAt: new Date(),

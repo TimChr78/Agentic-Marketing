@@ -5,7 +5,15 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { generateText } from 'ai';
 import { z } from 'zod';
 import { redact } from './context';
-import { billingReservationTtlMs, estimateTokens, modelFor, releaseTokens, reserveTokens, settleReservation } from './providers';
+import {
+  billingReservationTtlMs,
+  estimatedUsage,
+  estimateTokens,
+  modelFor,
+  reserveTokens,
+  settleReservation,
+  usageOfError,
+} from './providers';
 
 // The independent check (ADR-0016 §4.5, #231): before an autonomous or held action, a second
 // model compares what the agent says it is doing with the action itself and the mandate that
@@ -165,13 +173,8 @@ export async function independentCheck(
   const model = await modelFor(tx, deps.kp, 'journeys', 'fast');
   const prompt = checkPrompt(input);
   const id = newId('aic');
-  const reservation = await reserveTokens(
-    deps.db,
-    workspaceId,
-    model.providerId,
-    estimateTokens({ system: SYSTEM, prompt }, MAX_OUTPUT_TOKENS),
-    billingReservationTtlMs(),
-  );
+  const estimate = estimateTokens({ system: SYSTEM, prompt }, MAX_OUTPUT_TOKENS);
+  const reservation = await reserveTokens(deps.db, workspaceId, model.providerId, estimate, billingReservationTtlMs());
   const started = Date.now();
   /** The usage row for this call; it commits in the same transaction that releases the hold. */
   const rowValues = (values: {
@@ -181,6 +184,7 @@ export async function independentCheck(
     error?: string | null;
     inputTokens?: number;
     outputTokens?: number;
+    usageEstimated?: boolean;
   }) => ({
     workspaceId,
     id,
@@ -202,13 +206,14 @@ export async function independentCheck(
     error: values.error ?? null,
     inputTokens: values.inputTokens ?? 0,
     outputTokens: values.outputTokens ?? 0,
+    usageEstimated: values.usageEstimated ?? false,
+    billedAt: new Date(),
     latencyMs: Date.now() - started,
     finishedAt: new Date(),
   });
   const record = async (logTx: Tx, values: Parameters<typeof rowValues>[0]) => {
     await logTx.insert(schema.aiCalls).values(rowValues(values));
   };
-  const logged = (values: Parameters<typeof rowValues>[0]) => deps.db.withWorkspace(workspaceId, (logTx) => record(logTx, values));
   let answer: Awaited<ReturnType<typeof generateText>>;
   try {
     answer = await generateText({
@@ -221,11 +226,18 @@ export async function independentCheck(
       timeout: 60_000,
     });
   } catch (err) {
-    // No usage is known: the provider refused the request or it never completed. Log it and let the
-    // hold go, like decisionCall does before the provider has billed anything.
+    // The provider may have billed the call before throwing (an SDK error can carry its usage).
+    // Nothing is known otherwise, so settle the reserved estimate rather than zero (#941).
     const message = safeErrorText((err as Error).message, 1000);
-    await logged({ status: 'failed', error: message }).catch(() => undefined);
-    await releaseTokens(deps.db, workspaceId, reservation);
+    const known = usageOfError(err);
+    const usage = known ?? estimatedUsage(estimate, MAX_OUTPUT_TOKENS);
+    await settleReservation(
+      deps.db,
+      workspaceId,
+      reservation,
+      (logTx) => record(logTx, { status: 'failed', error: message, ...usage, usageEstimated: !known }),
+      { providerId: model.providerId, label: 'independent check failure' },
+    );
     // Rethrow the sanitized text: the executor interpolates it into the policy reasons and the
     // caller's message, which end up in the agent ledger (#885).
     throw new Error(message, { cause: err });
@@ -239,6 +251,7 @@ export async function independentCheck(
     // with its real usage; a failed write keeps and extends the hold (#642).
     const message = safeErrorText((err as Error).message, 1000);
     await settleReservation(deps.db, workspaceId, reservation, (logTx) => record(logTx, { status: 'failed', error: message, ...usage }), {
+      providerId: model.providerId,
       label: 'independent check',
     });
     throw new Error(message, { cause: err });
@@ -251,7 +264,7 @@ export async function independentCheck(
     workspaceId,
     reservation,
     (logTx) => record(logTx, { status: 'done', output: { match: verdict.match, reason }, rationale: reason, ...usage }),
-    { label: 'independent check' },
+    { providerId: model.providerId, label: 'independent check' },
   );
   // 'held' means the provider billed the call but neither the usage row nor its release committed.
   // The hold is the only remaining record of those tokens, so the caller must fail closed.

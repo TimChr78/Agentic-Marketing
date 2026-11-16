@@ -581,6 +581,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
             ...usage,
             latencyMs: Date.now() - started,
             principalId: acting ? acting.agent.id : user.userId,
+            billedAt: new Date(),
             finishedAt: new Date(),
           };
           await settleReservation(
@@ -594,6 +595,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
               fallback: async () => {
                 await recordAiCall(deps.db, ws, call);
               },
+              providerId: model.providerId,
               label: 'copilot turn',
             },
           );

@@ -17,7 +17,19 @@ import {
   stateHash,
 } from './decision';
 import { promptVersion, runClassify, runPrompt, runTestCase } from './prompts';
-import { AiUnavailable, estimateTokens, modelFor, type ReadyModel, releaseTokens, reserveTokens } from './providers';
+import {
+  AiUnavailable,
+  billingReservationTtlMs,
+  estimatedUsage,
+  estimateTokens,
+  lockBudget,
+  modelFor,
+  type ReadyModel,
+  releaseTokens,
+  reserveTokens,
+  settleReservation,
+  usageOfError,
+} from './providers';
 
 // The AI worker: answers the AI steps of journeys. A step is a pending row in ai_calls; the
 // worker claims it with a lease, builds the context and checks consent in one transaction,
@@ -123,6 +135,8 @@ async function finishIn(
     error?: string;
     inputTokens?: number;
     outputTokens?: number;
+    /** The provider usage was unknown and the reserved estimate was recorded (#941). */
+    usageEstimated?: boolean;
     latencyMs?: number;
     cached?: boolean;
     providerId?: string;
@@ -210,8 +224,13 @@ async function finishIn(
       output: out.output ?? null,
       rationale: out.rationale ?? null,
       error: late ? 'too_late: the step had timed out and took its fallback' : (out.error ?? null),
-      inputTokens: out.inputTokens ?? 0,
-      outputTokens: out.outputTokens ?? 0,
+      // A retry of a crashed attempt starts from the estimated usage already on the row, so add the
+      // new attempt's tokens instead of replacing them (#941).
+      inputTokens: c.inputTokens + (out.inputTokens ?? 0),
+      outputTokens: c.outputTokens + (out.outputTokens ?? 0),
+      billedAt: new Date(),
+      usageEstimated: out.usageEstimated === true || c.usageEstimated,
+      reservationId: null,
       latencyMs: out.latencyMs ?? null,
       cached: out.cached ?? false,
       reviewStatus: !late && out.status === 'done' && sampled(prep?.def) ? 'pending' : null,
@@ -229,7 +248,94 @@ async function finish(
   await db.withWorkspace(c.workspaceId, (tx) => finishIn(tx, c, prep, out));
 }
 
+/**
+ * A crashed attempt may have left its budget hold on this row (#941). Move that hold to estimated
+ * usage before the retry reserves again, so a retry never holds twice: the provider may already
+ * have billed that attempt, and releasing it would free budget it spent. The estimate becomes the
+ * row's base usage; the retry's own tokens are added to it when it settles.
+ */
+async function settleStaleReservation(db: Db, c: CallRow): Promise<CallRow> {
+  if (!c.reservationId) return c;
+  let held = 0;
+  await db.withWorkspace(c.workspaceId, async (tx) => {
+    const [first] = await tx
+      .select({ providerId: schema.aiTokenReservations.providerId })
+      .from(schema.aiTokenReservations)
+      .where(eq(schema.aiTokenReservations.id, c.reservationId!));
+    if (!first) {
+      await tx
+        .update(schema.aiCalls)
+        .set({ reservationId: null })
+        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
+      return;
+    }
+    await lockBudget(tx, first.providerId);
+    const [live] = await tx
+      .select({ tokens: schema.aiTokenReservations.tokens })
+      .from(schema.aiTokenReservations)
+      .where(eq(schema.aiTokenReservations.id, c.reservationId!));
+    if (!live) {
+      await tx
+        .update(schema.aiCalls)
+        .set({ reservationId: null })
+        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
+      return;
+    }
+    held = live.tokens;
+    await tx
+      .update(schema.aiCalls)
+      .set({
+        reservationId: null,
+        inputTokens: sql`${schema.aiCalls.inputTokens} + ${held}`,
+        usageEstimated: true,
+        billedAt: new Date(),
+      })
+      .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
+    await tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, c.reservationId!));
+  });
+  return { ...c, reservationId: null, inputTokens: c.inputTokens + held, usageEstimated: c.usageEstimated || held > 0 };
+}
+
+/** Reserve for one step with the billing-period hold, not the five-minute default (#941). */
+const reserveForStep = (db: Db, workspaceId: string, providerId: string, tokens: number) =>
+  reserveTokens(db, workspaceId, providerId, tokens, billingReservationTtlMs());
+
+/** Tie the hold to its ai_calls row so a retry can settle a crashed attempt's hold (#941). */
+async function rememberReservation(db: Db, c: CallRow, reservationId: string) {
+  try {
+    await db.withWorkspace(c.workspaceId, (tx) =>
+      tx
+        .update(schema.aiCalls)
+        .set({ reservationId, status: 'running' })
+        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id))),
+    );
+  } catch (err) {
+    // Without the row link a retry cannot find the hold; release it now rather than leak it.
+    await releaseTokens(db, c.workspaceId, reservationId).catch((releaseErr) =>
+      logger.error({ err: releaseErr, callId: c.id }, 'AI budget reservation could not be released after a failed row link'),
+    );
+    throw err;
+  }
+}
+
+/** Settle a step's usage and release its hold in one locked transaction. */
+async function settleStep(db: Db, c: CallRow, reservationId: string, providerId: string, write: (tx: Tx) => Promise<void>, label: string) {
+  const outcome = await settleReservation(db, c.workspaceId, reservationId, write, { providerId, label });
+  if (outcome === 'held')
+    logger.error(
+      { workspaceId: c.workspaceId, callId: c.id, label },
+      'AI step usage could not be recorded; the budget hold is kept through the billing period',
+    );
+  return outcome;
+}
+
+const usageFromErrorOrEstimate = (err: unknown, estimate: number, maxOutput: number) => {
+  const known = usageOfError(err);
+  return known ? { ...known, usageEstimated: false } : { ...estimatedUsage(estimate, maxOutput), usageEstimated: true };
+};
+
 async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
+  c = await settleStaleReservation(db, c);
   const prep = await db.withWorkspace(c.workspaceId, (tx) => prepare(tx, c, deps));
   if (!prep) return finish(db, c, null, { status: 'failed', error: 'no_prompt: the prompt has no published version' });
   if (prep.fallback || !prep.model || !prep.person) return finish(db, c, prep, { status: 'fallback', error: prep.fallback });
@@ -240,72 +346,73 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
       output: { slots: prep.cache.slots, cached: true },
       cached: true,
     });
+  const estimate = estimateTokens({ def: prep.def, person: prep.person }, prep.def.maxOutputTokens);
   let reservation: string;
   try {
-    reservation = await reserveTokens(
-      db,
-      c.workspaceId,
-      prep.model.providerId,
-      estimateTokens({ def: prep.def, person: prep.person }, prep.def.maxOutputTokens),
-    );
+    reservation = await reserveForStep(db, c.workspaceId, prep.model.providerId, estimate);
   } catch (err) {
     if (err instanceof AiUnavailable) return finish(db, c, prep, { status: 'fallback', error: `${err.reason}: ${err.message}` });
     throw err;
   }
+  await rememberReservation(db, c, reservation);
   const started = Date.now();
-  let recorded = false;
+  let out: Parameters<typeof finishIn>[3];
   try {
     const r = await runPrompt(prep.model, prep.def, prep.person, { timeoutMs: 60_000 });
     const usage = { ...r.usage, latencyMs: Date.now() - started };
     if (r.kind === 'decide') {
-      await finish(db, c, prep, { status: 'done', option: r.option, rationale: r.rationale, output: { option: r.option }, ...usage });
-      recorded = true;
-      return;
+      out = { status: 'done', option: r.option, rationale: r.rationale, output: { option: r.option }, ...usage };
+    } else {
+      const rejected = Object.entries(r.rejected).map(([k, v]) => `${k}: ${v}`);
+      // Only text that passed every check is worth reusing. A cache write is best effort: the
+      // model has been billed, so its usage must settle even when caching fails.
+      if (prep.cache && prep.def.cache && !rejected.length)
+        await db
+          .withWorkspace(c.workspaceId, (tx) =>
+            tx
+              .insert(schema.aiTextCache)
+              .values({
+                workspaceId: c.workspaceId,
+                promptId: c.promptId ?? '',
+                promptVersion: prep.version,
+                cacheKey: prep.cache!.key,
+                slots: r.slots,
+                expiresAt: new Date(Date.now() + prep.def.cache!.ttlHours * 3_600_000),
+              })
+              .onConflictDoUpdate({
+                target: [
+                  schema.aiTextCache.workspaceId,
+                  schema.aiTextCache.promptId,
+                  schema.aiTextCache.promptVersion,
+                  schema.aiTextCache.cacheKey,
+                ],
+                set: {
+                  slots: r.slots,
+                  createdAt: new Date(),
+                  expiresAt: new Date(Date.now() + prep.def.cache!.ttlHours * 3_600_000),
+                },
+              }),
+          )
+          .catch((err) => logger.error({ err, callId: c.id }, 'AI text cache write failed; the call still settles'));
+      out = {
+        status: 'done',
+        slots: r.slots,
+        output: { slots: r.slots, rejected: r.rejected },
+        error: rejected.length ? `fallback text for ${rejected.join('; ')}` : undefined,
+        ...usage,
+      };
     }
-    const rejected = Object.entries(r.rejected).map(([k, v]) => `${k}: ${v}`);
-    // Only text that passed every check is worth reusing.
-    if (prep.cache && prep.def.cache && !rejected.length)
-      await db.withWorkspace(c.workspaceId, (tx) =>
-        tx
-          .insert(schema.aiTextCache)
-          .values({
-            workspaceId: c.workspaceId,
-            promptId: c.promptId ?? '',
-            promptVersion: prep.version,
-            cacheKey: prep.cache!.key,
-            slots: r.slots,
-            expiresAt: new Date(Date.now() + prep.def.cache!.ttlHours * 3_600_000),
-          })
-          .onConflictDoUpdate({
-            target: [
-              schema.aiTextCache.workspaceId,
-              schema.aiTextCache.promptId,
-              schema.aiTextCache.promptVersion,
-              schema.aiTextCache.cacheKey,
-            ],
-            set: { slots: r.slots, createdAt: new Date(), expiresAt: new Date(Date.now() + prep.def.cache!.ttlHours * 3_600_000) },
-          }),
-      );
-    await finish(db, c, prep, {
-      status: 'done',
-      slots: r.slots,
-      output: { slots: r.slots, rejected: r.rejected },
-      error: rejected.length ? `fallback text for ${rejected.join('; ')}` : undefined,
-      ...usage,
-    });
-    recorded = true;
   } catch (err) {
-    await finish(db, c, prep, { status: 'fallback', error: modelErrorText(err), latencyMs: Date.now() - started });
-    recorded = true;
-  } finally {
-    // The call's real usage is in ai_calls now (finish ran first), so the hold can go. If the
-    // write failed, the hold stays: freeing it would let the month spend the same budget twice.
-    if (recorded)
-      await releaseTokens(db, c.workspaceId, reservation).catch((err) =>
-        logger.error({ err }, 'AI budget reservation could not be released'),
-      );
-    else logger.error({ workspaceId: c.workspaceId, callId: c.id }, 'AI step usage not recorded; keeping the budget reservation');
+    // The provider may have billed a call that threw before it returned an answer; recover its
+    // usage from the error, or settle the reserved estimate rather than zero (#941).
+    out = {
+      status: 'fallback',
+      error: modelErrorText(err),
+      latencyMs: Date.now() - started,
+      ...usageFromErrorOrEstimate(err, estimate, prep.def.maxOutputTokens),
+    };
   }
+  await settleStep(db, c, reservation, prep.model.providerId, (tx) => finishIn(tx, c, prep, out), 'AI step');
 }
 
 /** The `error` of a failed AI call: redacted while it is complete, then cut (#885). */
@@ -313,15 +420,34 @@ export function modelErrorText(err: unknown): string {
   return `model_error: ${safeErrorText(err instanceof Error ? err.message : String(err), 500)}`;
 }
 
+/** Row writers for the test/classify workers: settlement adds to a crashed attempt's estimate. */
+function rowRecorder(db: Db, c: CallRow) {
+  const recordIn = async (tx: Tx, values: Partial<CallRow>): Promise<void> => {
+    const { inputTokens, outputTokens, usageEstimated, ...rest } = values;
+    await tx
+      .update(schema.aiCalls)
+      .set({
+        ...rest,
+        leaseUntil: null,
+        finishedAt: new Date(),
+        billedAt: new Date(),
+        reservationId: null,
+        inputTokens: c.inputTokens + (inputTokens ?? 0),
+        outputTokens: c.outputTokens + (outputTokens ?? 0),
+        usageEstimated: usageEstimated === true || c.usageEstimated,
+      })
+      .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
+  };
+  return {
+    recordIn,
+    record: (values: Partial<CallRow>) => db.withWorkspace(c.workspaceId, (tx) => recordIn(tx, values)),
+  };
+}
+
 /** One queued prompt test case (prompts.test): run outside any transaction, then recorded. */
 async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
-  const record = (values: Partial<CallRow>) =>
-    db.withWorkspace(c.workspaceId, (tx) =>
-      tx
-        .update(schema.aiCalls)
-        .set({ leaseUntil: null, finishedAt: new Date(), ...values })
-        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id))),
-    );
+  c = await settleStaleReservation(db, c);
+  const { record, recordIn } = rowRecorder(db, c);
   const index = Number((c.input as { index?: number }).index);
   const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
     const p = await promptVersion(tx, c.promptId ?? '', c.promptVersion ?? undefined);
@@ -336,51 +462,42 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
   });
   if (!ready) return record({ status: 'failed', error: 'the prompt version or test case is gone' });
   if ('error' in ready) return record({ status: 'failed', error: ready.error ?? null });
+  const estimate = estimateTokens({ def: ready.def, test: ready.test }, ready.def.maxOutputTokens);
   let reservation: string;
   try {
-    reservation = await reserveTokens(
-      db,
-      c.workspaceId,
-      ready.model.providerId,
-      estimateTokens({ def: ready.def, test: ready.test }, ready.def.maxOutputTokens),
-    );
+    reservation = await reserveForStep(db, c.workspaceId, ready.model.providerId, estimate);
   } catch (err) {
     if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
     throw err;
   }
+  await rememberReservation(db, c, reservation);
   const started = Date.now();
-  let recorded = false;
-  try {
-    const r = await runTestCase(ready.model, ready.def, ready.test);
-    await record({
-      status: r.problems.length ? 'failed' : 'done',
-      providerId: ready.model.providerId,
-      model: ready.model.modelId,
-      input: { ...c.input, person: r.person },
-      output: r.answer,
-      error: r.problems.length ? safeErrorText(r.problems.join('; '), 1000) : null,
-      ...r.usage,
-      latencyMs: Date.now() - started,
-    });
-    recorded = true;
-  } finally {
-    if (recorded)
-      await releaseTokens(db, c.workspaceId, reservation).catch((err) =>
-        logger.error({ err }, 'AI budget reservation could not be released'),
-      );
-    else logger.error({ workspaceId: c.workspaceId, callId: c.id }, 'AI test usage not recorded; keeping the budget reservation');
-  }
+  const r = await runTestCase(ready.model, ready.def, ready.test, { reservedTokens: estimate });
+  await settleStep(
+    db,
+    c,
+    reservation,
+    ready.model.providerId,
+    (tx) =>
+      recordIn(tx, {
+        status: r.problems.length ? 'failed' : 'done',
+        providerId: ready.model.providerId,
+        model: ready.model.modelId,
+        input: { ...c.input, person: r.person },
+        output: r.answer,
+        error: r.problems.length ? safeErrorText(r.problems.join('; '), 1000) : null,
+        ...r.usage,
+        usageEstimated: r.estimated,
+        latencyMs: Date.now() - started,
+      }),
+    'AI test',
+  );
 }
 
 /** One ai.classify call: label the text, store the label on the person if the prompt says so. */
 async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
-  const record = (values: Partial<CallRow>) =>
-    db.withWorkspace(c.workspaceId, (tx) =>
-      tx
-        .update(schema.aiCalls)
-        .set({ leaseUntil: null, finishedAt: new Date(), ...values })
-        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id))),
-    );
+  c = await settleStaleReservation(db, c);
+  const { record, recordIn } = rowRecorder(db, c);
   const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
     const p = await promptVersion(tx, c.promptId ?? '', c.promptVersion ?? undefined);
     if (p?.def.kind !== 'classify') return { error: 'no_prompt: the classify prompt version is gone' };
@@ -397,55 +514,67 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
   });
   if ('error' in ready) return record({ status: 'failed', error: ready.error ?? null });
   const text = String((c.input as { text?: string }).text ?? '');
+  const estimate = estimateTokens({ def: ready.def, text }, ready.def.maxOutputTokens);
   let reservation: string;
   try {
-    reservation = await reserveTokens(
-      db,
-      c.workspaceId,
-      ready.model.providerId,
-      estimateTokens({ def: ready.def, text }, ready.def.maxOutputTokens),
-    );
+    reservation = await reserveForStep(db, c.workspaceId, ready.model.providerId, estimate);
   } catch (err) {
     if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
     throw err;
   }
+  await rememberReservation(db, c, reservation);
   const started = Date.now();
-  let recorded = false;
+  let out: Parameters<typeof recordIn>[1];
+  let r: Awaited<ReturnType<typeof runClassify>> | undefined;
   try {
-    const r = await runClassify(ready.model, ready.def, text, { timeoutMs: 60_000 });
-    let trait: string | null = null;
-    if (ready.def.trait && c.profileId)
-      trait = await db.withWorkspace(c.workspaceId, async (tx) => {
-        // Like a journey's updateProfile step: never into a trait the tracking plan marks personal.
-        const plan = await publishedSingleton(tx, 'tracking_plan');
-        const def = plan?.traits.find((x) => x.name === ready.def.trait);
-        if (def && def.pii !== 'none') return null;
-        await tx.execute(sql`
-          UPDATE profiles SET traits = jsonb_set(traits, ARRAY[${ready.def.trait}], ${JSON.stringify(r.label)}::jsonb), updated_at = now()
-          WHERE workspace_id = ${c.workspaceId} AND id = ${c.profileId} AND merged_into IS NULL`);
-        return ready.def.trait ?? null;
-      });
-    await record({
-      status: 'done',
-      providerId: ready.model.providerId,
-      model: ready.model.modelId,
-      output: { label: r.label, ...(trait ? { trait } : {}) },
-      rationale: r.rationale,
-      ...r.usage,
-      latencyMs: Date.now() - started,
-      reviewStatus: sampled(ready.def) ? 'pending' : null,
-    });
-    recorded = true;
+    r = await runClassify(ready.model, ready.def, text, { timeoutMs: 60_000 });
   } catch (err) {
-    await record({ status: 'failed', error: modelErrorText(err), latencyMs: Date.now() - started });
-    recorded = true;
-  } finally {
-    if (recorded)
-      await releaseTokens(db, c.workspaceId, reservation).catch((err) =>
-        logger.error({ err }, 'AI budget reservation could not be released'),
-      );
-    else logger.error({ workspaceId: c.workspaceId, callId: c.id }, 'AI classify usage not recorded; keeping the budget reservation');
+    out = {
+      status: 'failed',
+      error: modelErrorText(err),
+      latencyMs: Date.now() - started,
+      ...usageFromErrorOrEstimate(err, estimate, ready.def.maxOutputTokens),
+    };
   }
+  if (r) {
+    try {
+      let trait: string | null = null;
+      if (ready.def.trait && c.profileId)
+        trait = await db.withWorkspace(c.workspaceId, async (tx) => {
+          // Like a journey's updateProfile step: never into a trait the tracking plan marks personal.
+          const plan = await publishedSingleton(tx, 'tracking_plan');
+          const def = plan?.traits.find((x) => x.name === ready.def.trait);
+          if (def && def.pii !== 'none') return null;
+          await tx.execute(sql`
+            UPDATE profiles SET traits = jsonb_set(traits, ARRAY[${ready.def.trait}], ${JSON.stringify(r!.label)}::jsonb), updated_at = now()
+            WHERE workspace_id = ${c.workspaceId} AND id = ${c.profileId} AND merged_into IS NULL`);
+          return ready.def.trait ?? null;
+        });
+      out = {
+        status: 'done',
+        providerId: ready.model.providerId,
+        model: ready.model.modelId,
+        output: { label: r.label, ...(trait ? { trait } : {}) },
+        rationale: r.rationale,
+        ...r.usage,
+        usageEstimated: false,
+        latencyMs: Date.now() - started,
+        reviewStatus: sampled(ready.def) ? 'pending' : null,
+      };
+    } catch (err) {
+      // The model was billed even though storing its label failed.
+      out = {
+        status: 'failed',
+        providerId: ready.model.providerId,
+        model: ready.model.modelId,
+        error: modelErrorText(err),
+        ...r.usage,
+        usageEstimated: false,
+        latencyMs: Date.now() - started,
+      };
+    }
+  }
+  await settleStep(db, c, reservation, ready.model.providerId, (tx) => recordIn(tx, out!), 'AI classify');
 }
 
 /**
@@ -529,6 +658,8 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
       stateTokens: Math.ceil(JSON.stringify(ready.state ?? null).length / 4),
     },
   };
+  /** decisionCall settled the failed row itself (with its usage); do not overwrite it. */
+  let failureRecorded = false;
   try {
     await decisionCall(db, c.workspaceId, ready.provider, ready.state, questions, {
       egress: deps.egress,
@@ -550,9 +681,22 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
             model: r.modelVersion,
           }),
         ),
+      // A provider that answered before throwing may have billed the call; settle its usage or the
+      // reserved estimate instead of recording zero (#941).
+      recordFailure: (tx, usage, error, estimated) =>
+        finishIn(tx, call, null, {
+          status: 'fallback',
+          error,
+          ...usage,
+          usageEstimated: estimated,
+          providerId: ready.provider.providerId,
+          model: ready.provider.model,
+        }).then(() => {
+          failureRecorded = true;
+        }),
     });
   } catch (err) {
-    return finish(db, c, null, { status: 'fallback', error: modelErrorText(err) });
+    return failureRecorded ? undefined : finish(db, c, null, { status: 'fallback', error: modelErrorText(err) });
   }
 }
 
@@ -586,7 +730,7 @@ export async function answerSteps(db: Db, deps: AiStepDeps, opts: { batch?: numb
     await Promise.all(
       claimed.map((c) =>
         (c.attempts > 3
-          ? finish(db, c, null, { status: 'failed', error: 'gave up after 3 attempts' })
+          ? settleStaleReservation(db, c).then((clean) => finish(db, clean, null, { status: 'failed', error: 'gave up after 3 attempts' }))
           : c.kind === 'test'
             ? handleTest(db, c, deps)
             : c.kind === 'classify'

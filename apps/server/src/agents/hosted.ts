@@ -1,6 +1,7 @@
 import {
   AiUnavailable,
   billingReservationTtlMs,
+  estimatedUsage,
   languageModel,
   modelFor,
   recordAiCall,
@@ -8,6 +9,7 @@ import {
   releaseTokens,
   reserveTokens,
   settleReservation,
+  usageOfError,
 } from '@agentic-marketing/ai';
 import type { NotifyDeps } from '@agentic-marketing/alerts';
 import { sendMemberEmails } from '@agentic-marketing/alerts';
@@ -645,6 +647,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
 
   const attemptStarted = Date.now();
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0 };
+  let usageEstimated = false;
   let error: string | null = null;
   /** Whether the provider may have billed this run: false means no request left the server. */
   let providerCalled = false;
@@ -688,6 +691,20 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     );
     return disabled ? ('disabled' as const) : ('ok' as const);
   } catch (err) {
+    // An SDK error may carry the usage of the step that failed; onStepEnd only saw the steps that
+    // finished. If the provider was called and nothing at all is known, settle the reserved run
+    // allowance as an estimate rather than zero (#941).
+    const fromError = usageOfError(err);
+    if (fromError) {
+      usage.inputTokens += fromError.inputTokens;
+      usage.outputTokens += fromError.outputTokens;
+    }
+    if (providerCalled && usage.inputTokens + usage.outputTokens === 0) {
+      const estimate = estimatedUsage(loaded.hosted.maxTokensPerRun, MAX_OUTPUT_TOKENS);
+      usage.inputTokens = estimate.inputTokens;
+      usage.outputTokens = estimate.outputTokens;
+      usageEstimated = true;
+    }
     // Same rule as the two setup failures above: an AppError is written for people, everything
     // else is stored as a fixed failure so no driver text or secret reaches the run history.
     error = (err instanceof AppError ? err.message : 'The run failed with an unexpected error.').slice(0, 2000);
@@ -724,6 +741,8 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
         error,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
+        usageEstimated,
+        billedAt: new Date(),
         latencyMs: Date.now() - attemptStarted,
         principalId: loaded.agent.sponsorUserId,
         finishedAt: new Date(),
@@ -751,6 +770,7 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
             fallback: async () => {
               await recordAiCall(deps.db, workspaceId, call, { idempotent: true });
             },
+            providerId: model.providerId,
             label: 'hosted run',
           },
         );

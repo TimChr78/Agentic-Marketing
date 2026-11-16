@@ -6,7 +6,7 @@ import { generateText, Output } from 'ai';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import type { PersonContext } from './context';
-import { AiUnavailable, modelFor, type ReadyModel } from './providers';
+import { AiUnavailable, estimatedUsage, modelFor, type ReadyModel, usageOfError } from './providers';
 
 // Running a prompt: the instructions as system prompt, the person as delimited JSON data, and a
 // schema-validated answer. A decision can only be one of the configured options; generated text
@@ -224,11 +224,12 @@ function runSummary(rows: CallRow[]) {
 type TestCase = PromptDefinition['tests'][number];
 
 /** Runs one test case and checks its expectations. */
-export async function runTestCase(m: ReadyModel, def: PromptDefinition, t: TestCase) {
+export async function runTestCase(m: ReadyModel, def: PromptDefinition, t: TestCase, opts: { reservedTokens?: number } = {}) {
   const person = { id: 'prf_sample', traits: t.traits, recentEvents: t.events.map((e) => ({ ...e, at: '' })) };
   const problems: string[] = [];
   let answer: unknown = null;
   let usage: Usage = { inputTokens: 0, outputTokens: 0 };
+  let estimated = false;
   try {
     if (def.kind === 'classify') {
       const c = await runClassify(m, def, t.text ?? '');
@@ -236,7 +237,7 @@ export async function runTestCase(m: ReadyModel, def: PromptDefinition, t: TestC
       answer = { label: c.label, rationale: c.rationale };
       if (t.expect.options && !t.expect.options.includes(c.label))
         problems.push(`labelled "${c.label}", expected one of ${t.expect.options.join(', ')}`);
-      return { person: { text: t.text ?? '' }, answer, problems, usage };
+      return { person: { text: t.text ?? '' }, answer, problems, usage, estimated };
     }
     const r = await runPrompt(m, def, person as unknown as PersonContext);
     usage = r.usage;
@@ -253,8 +254,17 @@ export async function runTestCase(m: ReadyModel, def: PromptDefinition, t: TestC
     }
   } catch (err) {
     problems.push(`model call failed: ${safeErrorText((err as Error).message, 500)}`);
+    // The provider may have billed the call even though no usable answer came back. The AI SDK's
+    // NoObjectGeneratedError carries the usage of the invalid answer; when nothing is known, the
+    // reservation's estimate is recorded rather than zero (#941).
+    const known = usageOfError(err);
+    if (known) usage = known;
+    else if (opts.reservedTokens !== undefined) {
+      usage = estimatedUsage(opts.reservedTokens, def.maxOutputTokens);
+      estimated = true;
+    }
   }
-  return { person, answer, problems, usage };
+  return { person, answer, problems, usage, estimated };
 }
 
 // Test runs are jobs: model calls take seconds each and must not hold a database transaction open.
