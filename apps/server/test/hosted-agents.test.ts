@@ -34,6 +34,10 @@ let blockReachedPromise: Promise<void> = Promise.resolve();
 let blockReleasePromise: Promise<void> = Promise.resolve();
 
 function answer(r: FakeRequest) {
+  if (r.messages.some((m) => m.text.includes('[bigfail]'))) {
+    if (r.toolResults.length === 0) return { toolCalls: [{ name: 'artifacts__types', input: {} }] };
+    return { status: 500, error: 'the model failed after a large tool result' };
+  }
   if (r.messages.some((m) => m.text.includes('[stepfail]'))) {
     if (r.toolResults.length === 0) return { toolCalls: [{ name: 'agents__get', input: {} }] };
     return { status: 500, error: 'the model failed after the first step' };
@@ -129,6 +133,8 @@ let shrinking: Setup;
 let tooBigBudget: Setup;
 let failing: Setup;
 let stepFailed: Setup;
+let bigFailed: Setup;
+let persistFailed: Setup;
 let billingHeld: Setup;
 let billingFallback: Setup;
 let overlapping: Setup;
@@ -154,6 +160,9 @@ beforeAll(async () => {
   });
   failing = await setup('[fail] This run always fails.');
   stepFailed = await setup('[stepfail] This run fails after its first step.', { maxTokensPerRun: 20_000 });
+  // A large tool result is part of the next request: the failed step's estimate must reflect it.
+  bigFailed = await setup('[bigfail] Read the full schema, then fail.', { maxTokensPerRun: 60_000, maxToolCallsPerRun: 5 });
+  persistFailed = await setup('Answer briefly.', { name: 'Persistence failure', maxTokensPerRun: 20_000 });
   // The whole monthly allowance is the run's reservation, so a retained hold really does make the
   // rest of the month unavailable.
   billingHeld = await setup('[billing-hold] A run whose usage cannot be recorded.', {
@@ -313,7 +322,7 @@ describe('hosted agents (#258)', () => {
     // is added rather than dropping the step.
     expect(runs.runs[0]).toMatchObject({ status: 'failed' });
     expect(runs.runs[0]!.tokens).toBeGreaterThan(STEP_TOKENS);
-    expect(runs.runs[0]!.tokens).toBeLessThan(20_000);
+    expect(runs.runs[0]!.tokens).toBeLessThanOrEqual(20_000);
     const calls = await stepFailed.api.call('ai.calls', { kind: 'hosted' });
     expect(calls.calls).toHaveLength(1);
     expect(calls.calls[0]).toMatchObject({ status: 'failed' });
@@ -326,6 +335,62 @@ describe('hosted agents (#258)', () => {
     const providers = await stepFailed.api.call('aiProviders.list', {});
     expect(providers.providers[0]!.usedThisMonth).toBe(runs.runs[0]!.tokens);
   }, 60_000);
+
+  it('estimates the failed step from the actual request after a large tool result (#941 round 3)', async () => {
+    await onlyDue(bigFailed.agentId);
+    const summary = await runAt(DUE());
+    expect(summary).toMatchObject({ due: 1, ok: 0, failed: 1 });
+    const runs = await bigFailed.api.call('agents.hostedRuns', { agentId: bigFailed.agentId });
+    expect(runs.runs[0]).toMatchObject({ status: 'failed' });
+    // The full artifacts.types schema is far beyond the old instructions+context estimate (~2k).
+    expect(runs.runs[0]!.tokens).toBeGreaterThan(10_000);
+    expect(runs.runs[0]!.tokens).toBeLessThan(60_000);
+    const calls = await bigFailed.api.call('ai.calls', { kind: 'hosted' });
+    expect(calls.calls[0].inputTokens + calls.calls[0].outputTokens).toBe(runs.runs[0]!.tokens);
+    const estimated = await t.srv.db.admin.query<{ usage_estimated: boolean }>(
+      `SELECT usage_estimated FROM ai_calls WHERE workspace_id = $1 AND kind = 'hosted' ORDER BY created_at DESC LIMIT 1`,
+      [bigFailed.ws],
+    );
+    expect(estimated.rows[0]?.usage_estimated).toBe(true);
+  }, 90_000);
+
+  it('does not estimate a model step when only the post-run persistence fails (#941 round 3)', async () => {
+    await t.srv.db.admin.query('DROP SEQUENCE IF EXISTS hosted_run_fail_once');
+    await t.srv.db.admin.query('CREATE SEQUENCE hosted_run_fail_once START 1');
+    await t.srv.db.admin.query('GRANT USAGE, SELECT ON SEQUENCE hosted_run_fail_once TO am_app_test');
+    await t.srv.db.admin.query(`CREATE OR REPLACE FUNCTION hosted_run_fail_once_fn() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.agent_id = '${persistFailed.agentId}' AND nextval('hosted_run_fail_once') = 1
+          THEN RAISE EXCEPTION 'injected hosted run failure';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await t.srv.db.admin.query('DROP TRIGGER IF EXISTS hosted_run_fail_once_trg ON hosted_agent_runs');
+    await t.srv.db.admin.query(
+      'CREATE TRIGGER hosted_run_fail_once_trg BEFORE INSERT ON hosted_agent_runs FOR EACH ROW EXECUTE FUNCTION hosted_run_fail_once_fn()',
+    );
+    try {
+      await onlyDue(persistFailed.agentId);
+      await runAt(DUE());
+      const calls = await persistFailed.api.call('ai.calls', { kind: 'hosted' });
+      const row = (
+        await t.srv.db.admin.query<{ input_tokens: number; output_tokens: number; usage_estimated: boolean }>(
+          `SELECT input_tokens, output_tokens, usage_estimated FROM ai_calls
+           WHERE workspace_id = $1 AND kind = 'hosted' ORDER BY created_at DESC LIMIT 1`,
+          [persistFailed.ws],
+        )
+      ).rows[0]!;
+      // Two completed steps of 120 tokens. The persistence failure happened after the turn, so no
+      // failed-step estimate is added.
+      expect(row.input_tokens + row.output_tokens).toBe(240);
+      expect(row.usage_estimated).toBe(false);
+      expect(calls.calls[0].inputTokens + calls.calls[0].outputTokens).toBe(240);
+    } finally {
+      await t.srv.db.admin.query('DROP TRIGGER IF EXISTS hosted_run_fail_once_trg ON hosted_agent_runs');
+      await t.srv.db.admin.query('DROP FUNCTION IF EXISTS hosted_run_fail_once_fn()');
+      await t.srv.db.admin.query('DROP SEQUENCE IF EXISTS hosted_run_fail_once');
+    }
+  }, 90_000);
 
   // #420: the old finally block swallowed a failed ai_calls insert and then released the hold, so
   // a billed run was counted nowhere and the month could spend the same allowance again.

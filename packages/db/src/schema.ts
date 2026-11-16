@@ -948,6 +948,8 @@ export const aiTokenReservations = pgTable(
     id: text('id').notNull(),
     providerId: text('provider_id').notNull(),
     tokens: integer('tokens').notNull(),
+    /** The held tokens already recorded as an estimate after a crashed attempt (#941). */
+    estimatedTokens: integer('estimated_tokens'),
     expiresAt: ts('expires_at').notNull(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],

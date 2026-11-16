@@ -265,6 +265,8 @@ async function runHostedTurn(opts: {
   maxToolCalls: number;
   /** Accumulated by the steps that finish; the caller records it even if the turn throws. */
   usage: TurnUsage;
+  /** The input+output estimate of the request that is about to be made (#941 round 3). */
+  onRequestEstimate?: (tokens: number) => void;
   /** Called just before the provider is asked: from then on, tokens may be billed. */
   onProviderCall?: () => void;
 }): Promise<TurnResult> {
@@ -309,6 +311,12 @@ async function runHostedTurn(opts: {
       ...(opts.context ? [opts.context, ''] : []),
       `Budgets for this run: at most ${opts.maxToolCalls} tool calls and at most ${opts.maxTokens} tokens. Stop and summarise what you found when either is used up.`,
     ].join('\n');
+    // Estimate the actual request the model will receive: system prompt, the prompt so far, and
+    // the tool schemas (which can be large). prepareStep updates it as messages and tool results
+    // accumulate, so a failed step with a big tool result is not estimated from instructions alone.
+    const toolSchemas = tools.map((t) => ({ name: t.name, description: t.description ?? t.title ?? '', inputSchema: t.inputSchema }));
+    const initialMaxOutput = Math.max(1, Math.min(MAX_OUTPUT_TOKENS, opts.maxTokens));
+    opts.onRequestEstimate?.(estimateTokens({ system: SYSTEM, prompt, tools: toolSchemas }, initialMaxOutput));
     opts.onProviderCall?.();
     const result = await generateText({
       model: opts.model.model,
@@ -325,9 +333,11 @@ async function runHostedTurn(opts: {
         ({ steps }) => opts.maxTokens - tokensOf(steps) < MIN_STEP_TOKENS,
         ({ steps }) => steps.reduce((n, s) => n + s.toolCalls.length, 0) >= opts.maxToolCalls,
       ],
-      prepareStep: ({ steps }) => ({
-        maxOutputTokens: Math.max(1, Math.min(MAX_OUTPUT_TOKENS, opts.maxTokens - tokensOf(steps))),
-      }),
+      prepareStep: ({ steps, messages, instructions }) => {
+        const maxOutputTokens = Math.max(1, Math.min(MAX_OUTPUT_TOKENS, opts.maxTokens - tokensOf(steps)));
+        opts.onRequestEstimate?.(estimateTokens({ system: instructions ?? SYSTEM, messages, tools: toolSchemas }, maxOutputTokens));
+        return { maxOutputTokens };
+      },
       maxOutputTokens: Math.max(1, Math.min(MAX_OUTPUT_TOKENS, opts.maxTokens)),
       maxRetries: 1,
       timeout: 120_000,
@@ -654,6 +664,10 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
   let context = '';
   /** Whether the provider may have billed this run: false means no request left the server. */
   let providerCalled = false;
+  /** The estimate of the request in flight, captured before each model call. */
+  let requestEstimate = 0;
+  /** True once runHostedTurn returned: its usage is complete, so a later failure is not a model step. */
+  let turnCompleted = false;
 
   try {
     context = await deps.db.withWorkspace(workspaceId, (tx) => loadRunContext(tx, loaded));
@@ -669,10 +683,14 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
       maxTokens: loaded.hosted.maxTokensPerRun,
       maxToolCalls: loaded.hosted.maxToolCallsPerRun,
       usage,
+      onRequestEstimate: (tokens) => {
+        requestEstimate = tokens;
+      },
       onProviderCall: () => {
         providerCalled = true;
       },
     });
+    turnCompleted = true;
     const summary =
       turn.text ||
       (turn.stoppedAtBudget
@@ -696,17 +714,18 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
   } catch (err) {
     // An SDK error may carry the usage of the step that failed; onStepEnd only saw the steps that
     // finished. When it does not, estimate that one failed step on top of the completed steps
-    // (#941 review): its input (instructions + context) plus the output cap, never past what the
-    // run's reservation still covers.
+    // (#941 review): the actual next request (messages, tool results, tool schemas, system) plus
+    // the output cap. If no request was captured, the whole remaining reservation is the estimate.
+    // A turn that already returned has complete usage; a later persistence failure is not a model
+    // call and must not add an estimate (#941 round 3).
     const fromError = usageOfError(err);
     if (fromError) {
       usage.inputTokens += fromError.inputTokens;
       usage.outputTokens += fromError.outputTokens;
-    } else if (providerCalled) {
+    } else if (providerCalled && !turnCompleted) {
       const used = usage.inputTokens + usage.outputTokens;
       const remaining = Math.max(0, loaded.hosted.maxTokensPerRun - used);
-      const perStep = MAX_OUTPUT_TOKENS + estimateTokens({ instructions: loaded.hosted.instructions, context }, 0);
-      const estimateTotal = Math.min(remaining, perStep);
+      const estimateTotal = Math.min(remaining, requestEstimate > 0 ? requestEstimate : remaining);
       if (estimateTotal > 0) {
         const estimate = estimatedUsage(estimateTotal, Math.min(MAX_OUTPUT_TOKENS, estimateTotal));
         usage.inputTokens += estimate.inputTokens;

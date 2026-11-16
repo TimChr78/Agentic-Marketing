@@ -189,15 +189,21 @@ describe('step holds use the billing period (#941)', () => {
       30_000,
     );
     expect(run?.status).toBe('done');
-    // The crashed attempt's 500-token hold was settled as estimated usage, then the retry's own
-    // 50 tokens were added: the hold is gone and nothing was freed.
+    // The crashed attempt never returned, so its 500-token estimate stands; the retry's real 50
+    // tokens are added on top because it is a different attempt (and a different hold).
     expect(run!.input_tokens + run!.output_tokens).toBe(550);
     expect(run!.usage_estimated).toBe(true);
-    const held = await t.srv.db.admin.query('SELECT id FROM ai_token_reservations WHERE workspace_id = $1 AND id = $2', [
-      ws,
-      reservationId,
-    ]);
-    expect(held.rows).toHaveLength(0);
+    const held = await t.srv.db.admin.query<{ estimated_tokens: number | null }>(
+      'SELECT estimated_tokens FROM ai_token_reservations WHERE workspace_id = $1 AND id = $2',
+      [ws, reservationId],
+    );
+    // The estimate is kept for reconciliation, but it is no longer a live hold.
+    expect(held.rows[0]?.estimated_tokens).toBe(500);
+    const live = await t.srv.db.admin.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM ai_token_reservations WHERE workspace_id = $1 AND estimated_tokens IS NULL',
+      [ws],
+    );
+    expect(live.rows[0]?.n).toBe(0);
     expect((await api.call('ai.calls', { kind: 'test' })).calls.length).toBeGreaterThan(0);
   }, 60_000);
 });

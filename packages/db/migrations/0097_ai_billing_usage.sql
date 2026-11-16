@@ -11,6 +11,15 @@ ALTER TABLE ai_calls ADD COLUMN IF NOT EXISTS billed_at timestamptz;
 ALTER TABLE ai_calls ADD COLUMN IF NOT EXISTS usage_estimated boolean NOT NULL DEFAULT false;
 ALTER TABLE ai_calls ADD COLUMN IF NOT EXISTS reservation_id text;
 
+-- A hold recovered after its attempt crashed is kept as an estimate until the attempt can replace
+-- it with actual usage. `estimated_tokens` marks such a row: it no longer counts as a live hold,
+-- and a later real settlement reconciles the estimate exactly once under the budget lock (#941
+-- round 3).
+ALTER TABLE ai_token_reservations ADD COLUMN IF NOT EXISTS estimated_tokens integer;
+
+COMMENT ON COLUMN ai_token_reservations.estimated_tokens IS
+  'The held tokens already recorded as an estimate after a crashed attempt; null for a live hold (#941).';
+
 COMMENT ON COLUMN ai_calls.billed_at IS
   'When the call''s usage was settled; monthly budget accounting uses coalesce(billed_at, created_at) (#941).';
 COMMENT ON COLUMN ai_calls.usage_estimated IS

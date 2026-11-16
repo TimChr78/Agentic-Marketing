@@ -58,7 +58,7 @@ export async function usedThisMonth(tx: Tx, providerId: string): Promise<number>
            ), 0)
          + coalesce((
              SELECT sum(tokens) FROM ai_token_reservations
-             WHERE provider_id = ${providerId} AND expires_at >= now()
+             WHERE provider_id = ${providerId} AND expires_at >= now() AND estimated_tokens IS NULL
            ), 0) AS n`);
   return Number(rows[0]?.n ?? 0);
 }
@@ -66,6 +66,13 @@ export async function usedThisMonth(tx: Tx, providerId: string): Promise<number>
 /** Take the per-provider budget lock. Callers take it before touching a hold or its usage row. */
 export const lockBudget = (tx: Tx, providerId: string) =>
   tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`ai-budget:${providerId}`}))`);
+
+/** Remove estimates a crashed attempt left past their billing deadline; they no longer count. */
+const cleanupExpiredEstimates = (tx: Tx, providerId: string) =>
+  tx.execute(
+    sql`DELETE FROM ai_token_reservations
+        WHERE provider_id = ${providerId} AND estimated_tokens IS NOT NULL AND expires_at < now()`,
+  );
 
 /** The provider a reservation belongs to; its id is immutable, so reading it before the lock is safe. */
 async function reservationProvider(tx: Tx, id: string): Promise<string | null> {
@@ -86,7 +93,8 @@ export const estimateTokens = (input: unknown, maxOutput: number) => Math.ceil(J
  */
 export async function reserveTokens(db: Db, workspaceId: string, providerId: string, tokens: number, ttlMs = 5 * 60_000): Promise<string> {
   return db.withWorkspace(workspaceId, async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`ai-budget:${providerId}`}))`);
+    await lockBudget(tx, providerId);
+    await cleanupExpiredEstimates(tx, providerId);
     const [row] = await tx.select().from(schema.aiProviders).where(eq(schema.aiProviders.id, providerId));
     if (
       row?.monthlyTokenBudget !== null &&
@@ -168,7 +176,8 @@ export async function reserveUpToTokens(
   ttlMs = 5 * 60_000,
 ): Promise<TokenReservation> {
   return db.withWorkspace(workspaceId, async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`ai-budget:${providerId}`}))`);
+    await lockBudget(tx, providerId);
+    await cleanupExpiredEstimates(tx, providerId);
     const [row] = await tx.select().from(schema.aiProviders).where(eq(schema.aiProviders.id, providerId));
     const used = await usedThisMonth(tx, providerId);
     const budget = row?.monthlyTokenBudget;
@@ -234,7 +243,14 @@ export async function settleReservation(
   workspaceId: string,
   reservationId: string,
   write: (tx: Tx) => Promise<void>,
-  opts: { fallback?: () => Promise<void>; label?: string; providerId?: string } = {},
+  opts: {
+    fallback?: () => Promise<void>;
+    label?: string;
+    providerId?: string;
+    /** The call row the estimate was recorded on, and the real usage replacing it (#941 round 3). */
+    callId?: string;
+    usage?: { inputTokens: number; outputTokens: number };
+  } = {},
 ): Promise<SettleOutcome> {
   try {
     await db.withWorkspace(workspaceId, async (tx) => {
@@ -243,11 +259,30 @@ export async function settleReservation(
       await lockBudget(tx, providerId);
       // Another settlement may have committed while this one waited for the lock. Its usage row
       // is already written, so writing again would count the call twice.
-      const [live] = await tx
-        .select({ id: schema.aiTokenReservations.id })
+      const [hold] = await tx
+        .select({
+          id: schema.aiTokenReservations.id,
+          estimatedTokens: schema.aiTokenReservations.estimatedTokens,
+        })
         .from(schema.aiTokenReservations)
-        .where(eq(schema.aiTokenReservations.id, reservationId));
-      if (!live) return;
+        .where(eq(schema.aiTokenReservations.id, reservationId))
+        .for('update');
+      if (!hold) return;
+      if (hold.estimatedTokens !== null) {
+        // Crash recovery already recorded the estimate and kept this row. Replace it with the
+        // real usage exactly once, independent of the attempt/status fence, then delete the row.
+        if (opts.callId && opts.usage)
+          await tx
+            .update(schema.aiCalls)
+            .set({
+              inputTokens: sql`GREATEST(0, ${schema.aiCalls.inputTokens} - ${hold.estimatedTokens} + ${opts.usage.inputTokens})`,
+              outputTokens: sql`${schema.aiCalls.outputTokens} + ${opts.usage.outputTokens}`,
+              billedAt: new Date(),
+            })
+            .where(and(eq(schema.aiCalls.workspaceId, workspaceId), eq(schema.aiCalls.id, opts.callId)));
+        await tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, reservationId));
+        return;
+      }
       await write(tx);
       await tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, reservationId));
     });

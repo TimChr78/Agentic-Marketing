@@ -330,7 +330,10 @@ export async function settleStaleReservation(db: Db, c: CallRow): Promise<CallRo
               eq(schema.aiCalls.reservationId, c.reservationId!),
             ),
           );
-        await tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, c.reservationId!));
+        await tx
+          .update(schema.aiTokenReservations)
+          .set({ estimatedTokens: live.tokens })
+          .where(eq(schema.aiTokenReservations.id, c.reservationId!));
       } else {
         await tx
           .update(schema.aiCalls)
@@ -370,14 +373,31 @@ const reserveForStep = (db: Db, workspaceId: string, providerId: string, tokens:
   reserveTokens(db, workspaceId, providerId, tokens, billingReservationTtlMs());
 
 /** Tie the hold to its ai_calls row, with its provider, so a retry can settle a crashed hold. */
-async function rememberReservation(db: Db, c: CallRow, reservationId: string, providerId: string) {
+export async function rememberReservation(db: Db, c: CallRow, reservationId: string, providerId: string): Promise<boolean> {
   try {
-    await db.withWorkspace(c.workspaceId, (tx) =>
-      tx
+    const linked = await db.withWorkspace(c.workspaceId, async (tx) => {
+      const rows = await tx
         .update(schema.aiCalls)
         .set({ reservationId, providerId, status: 'running' })
-        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id))),
-    );
+        .where(
+          and(
+            eq(schema.aiCalls.workspaceId, c.workspaceId),
+            eq(schema.aiCalls.id, c.id),
+            // Fence: an attempt whose lease expired must not pull a completed retry back to
+            // running. Only the attempt that still owns a running row may link its hold (#941
+            // round 3).
+            eq(schema.aiCalls.attempts, c.attempts),
+            eq(schema.aiCalls.status, 'running'),
+          ),
+        )
+        .returning({ id: schema.aiCalls.id });
+      return rows.length > 0;
+    });
+    if (!linked)
+      await releaseTokens(db, c.workspaceId, reservationId).catch((err) =>
+        logger.error({ err, callId: c.id }, 'AI budget reservation could not be released after losing the attempt fence'),
+      );
+    return linked;
   } catch (err) {
     // Without the row link a retry cannot find the hold; release it now rather than leak it.
     await releaseTokens(db, c.workspaceId, reservationId).catch((releaseErr) =>
@@ -388,8 +408,21 @@ async function rememberReservation(db: Db, c: CallRow, reservationId: string, pr
 }
 
 /** Settle a step's usage and release its hold in one locked transaction. */
-async function settleStep(db: Db, c: CallRow, reservationId: string, providerId: string, write: (tx: Tx) => Promise<void>, label: string) {
-  const outcome = await settleReservation(db, c.workspaceId, reservationId, write, { providerId, label });
+async function settleStep(
+  db: Db,
+  c: CallRow,
+  reservationId: string,
+  providerId: string,
+  write: (tx: Tx) => Promise<void>,
+  usage: { inputTokens: number; outputTokens: number },
+  label: string,
+) {
+  const outcome = await settleReservation(db, c.workspaceId, reservationId, write, {
+    providerId,
+    label,
+    callId: c.id,
+    usage,
+  });
   if (outcome === 'held')
     logger.error(
       { workspaceId: c.workspaceId, callId: c.id, label },
@@ -423,7 +456,7 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
     if (err instanceof AiUnavailable) return finish(db, c, prep, { status: 'fallback', error: `${err.reason}: ${err.message}` });
     throw err;
   }
-  await rememberReservation(db, c, reservation, prep.model.providerId);
+  if (!(await rememberReservation(db, c, reservation, prep.model.providerId))) return;
   const started = Date.now();
   let out: Parameters<typeof finishIn>[3];
   try {
@@ -481,7 +514,15 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
       ...usageFromErrorOrEstimate(err, estimate, prep.def.maxOutputTokens),
     };
   }
-  await settleStep(db, c, reservation, prep.model.providerId, (tx) => finishIn(tx, c, prep, out), 'AI step');
+  await settleStep(
+    db,
+    c,
+    reservation,
+    prep.model.providerId,
+    (tx) => finishIn(tx, c, prep, out),
+    { inputTokens: out.inputTokens ?? 0, outputTokens: out.outputTokens ?? 0 },
+    'AI step',
+  );
 }
 
 /** The `error` of a failed AI call: redacted while it is complete, then cut (#885). */
@@ -546,7 +587,7 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
     if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
     throw err;
   }
-  await rememberReservation(db, c, reservation, ready.model.providerId);
+  if (!(await rememberReservation(db, c, reservation, ready.model.providerId))) return;
   const started = Date.now();
   const r = await runTestCase(ready.model, ready.def, ready.test, { reservedTokens: estimate });
   await settleStep(
@@ -566,6 +607,7 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
         usageEstimated: r.estimated,
         latencyMs: Date.now() - started,
       }),
+    { inputTokens: r.usage.inputTokens, outputTokens: r.usage.outputTokens },
     'AI test',
   );
 }
@@ -598,7 +640,7 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
     if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
     throw err;
   }
-  await rememberReservation(db, c, reservation, ready.model.providerId);
+  if (!(await rememberReservation(db, c, reservation, ready.model.providerId))) return;
   const started = Date.now();
   let out: Parameters<typeof recordIn>[1];
   let r: Awaited<ReturnType<typeof runClassify>> | undefined;
@@ -650,7 +692,15 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
       };
     }
   }
-  await settleStep(db, c, reservation, ready.model.providerId, (tx) => recordIn(tx, out!), 'AI classify');
+  await settleStep(
+    db,
+    c,
+    reservation,
+    ready.model.providerId,
+    (tx) => recordIn(tx, out!),
+    { inputTokens: out!.inputTokens ?? 0, outputTokens: out!.outputTokens ?? 0 },
+    'AI classify',
+  );
 }
 
 /**
