@@ -123,10 +123,12 @@ called while a consent write holds its locks. Delivery is at-least-once with sta
 - **Retries and dead letters.** Transient failures (ClickHouse or the database unavailable) are
   retried for about 27 hours before the row is marked `failed`; malformed payloads fail at once.
   `am doctor` warns on `queue.outbox` when rows are waiting too long or any row is failed.
-- **Requeue.** After an outage is fixed, `am outbox` puts every failed row back in the queue with a
-  fresh attempt budget; `am outbox --kind message_event` (or `doi_send`) limits it to one kind. The
-  scheduler publishes them at its next round; duplicates are harmless (message events collapse on
-  their ClickHouse key and a confirmation replays on its message key).
+- **Requeue.** After an outage is fixed, `am outbox` puts failed rows back in the queue with a fresh
+  attempt budget; `am outbox --kind message_event` (or `doi_send`) limits it to one kind. Rows that
+  failed permanently (a payload the dispatcher cannot parse, such as a malformed event) are skipped
+  and counted; `--permanent` requeues those too, which is only useful after a payload was repaired
+  by hand. The scheduler publishes requeued rows at its next round; duplicates are harmless (message
+  events collapse on their ClickHouse key and a confirmation replays on its message key).
 - **Retention.** Delivered rows are pruned after seven days. Failed rows are kept until requeued, so
   they can be inspected.
 

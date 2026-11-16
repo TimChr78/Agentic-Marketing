@@ -12,9 +12,10 @@ import {
   sanitiseOutboxError,
 } from '@agentic-marketing/db';
 import { type EmailRequest, requestEmail } from '@agentic-marketing/email';
-import type { EventStore, MessageEvent } from '@agentic-marketing/events';
+import type { EventStore } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
+import { z } from 'zod';
 
 // The outbox dispatcher (#978 part 2). Claiming is one short transaction; the handler performs its
 // I/O after it commits. A crashed dispatcher leaves a lease that expires, so the row is delivered
@@ -42,21 +43,83 @@ export interface OutboxDispatchResult {
 /** A row this version can never deliver: failing it immediately beats eight identical attempts. */
 class PermanentOutboxError extends Error {}
 
+const MESSAGE_EVENT_TYPES = [
+  'queued',
+  'sent',
+  'suppressed',
+  'failed',
+  'delivered',
+  'bounced',
+  'deferred',
+  'complained',
+  'opened',
+  'clicked',
+  'unsubscribed',
+] as const;
+
+/** Complete shape of one ClickHouse message event; a partial object would fail inside ClickHouse. */
+const messageEventSchema = z.object({
+  workspaceId: z.string().min(1),
+  messageId: z.string().min(1),
+  eventId: z.string().min(1),
+  type: z.enum(MESSAGE_EVENT_TYPES),
+  at: z.string().min(1),
+  profileId: z.string(),
+  channel: z.string().min(1),
+  purpose: z.string(),
+  provider: z.string(),
+  templateId: z.string(),
+  templateVersion: z.number().int().nonnegative(),
+  journeyId: z.string(),
+  variant: z.string().optional(),
+  reason: z.string(),
+  url: z.string(),
+});
+const messageEventPayload = z.object({ events: z.array(messageEventSchema).min(1) });
+
+/**
+ * A confirmation send intent. `idempotencyKey` is required (and checked against the row's
+ * operation key): a missing key must never fall back to a random one, or overlapping claims would
+ * queue two confirmations.
+ */
+const doiPayload = z.object({
+  profileId: z.string().min(1),
+  templateId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  requestHash: z.string().min(1),
+  data: z.record(z.string(), z.unknown()).optional(),
+});
+
+function parseOrPermanent<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    const fields = parsed.error.issues
+      .map((issue) => issue.path.join('.') || '(root)')
+      .slice(0, 5)
+      .join(', ');
+    throw new PermanentOutboxError(`${label} payload is invalid: ${fields}`);
+  }
+  return parsed.data;
+}
+
 /** Runs one handler. Throws when the work has to be retried; the row then backs off. */
 async function deliver(deps: OutboxDispatcherDeps, claim: OutboxClaim): Promise<void> {
   if (claim.kind === 'message_event') {
-    const events = claim.payload.events;
-    if (!Array.isArray(events) || !events.length) throw new PermanentOutboxError('message_event payload has no events array');
-    await deps.events.insertMessageEvents(events as MessageEvent[]);
+    const { events } = parseOrPermanent(messageEventPayload, claim.payload, 'message_event');
+    if (events.some((event) => event.workspaceId !== claim.workspaceId))
+      throw new PermanentOutboxError('message_event payload names another workspace');
+    await deps.events.insertMessageEvents(events);
     return;
   }
   if (claim.kind === 'doi_send') {
-    const req = claim.payload as unknown as EmailRequest;
-    if (typeof req.profileId !== 'string' || typeof req.templateId !== 'string' || typeof req.requestHash !== 'string')
-      throw new PermanentOutboxError('doi_send payload is incomplete');
+    const req = parseOrPermanent(doiPayload, claim.payload, 'doi_send');
+    if (req.idempotencyKey !== claim.operationKey)
+      throw new PermanentOutboxError('doi_send idempotency key does not match its operation key');
     // requestEmail re-checks the recipient and keeps the `doi:<message>` key, so a redelivery
     // replays the message instead of sending a second confirmation.
-    const decision = await deps.db.withWorkspace(claim.workspaceId, (tx) => requestEmail(tx, claim.workspaceId, deps.kp, req));
+    const decision = await deps.db.withWorkspace(claim.workspaceId, (tx) =>
+      requestEmail(tx, claim.workspaceId, deps.kp, req as EmailRequest),
+    );
     if (decision.status !== 'queued' && !decision.duplicate)
       logger.warn(
         { outboxId: claim.id, messageId: decision.messageId, status: decision.status, reason: decision.reason },
@@ -93,8 +156,10 @@ export async function dispatchOutboxOnce(deps: OutboxDispatcherDeps, opts: Outbo
       if (await ackOutbox(deps.db, claim)) result.delivered++;
       else logger.debug({ outboxId: claim.id, kind: claim.kind }, 'outbox ack was stale; another claim owns the row');
     } catch (err) {
+      const permanent = err instanceof PermanentOutboxError;
       const state = await failOutbox(deps.db, claim, err, {
-        maxAttempts: err instanceof PermanentOutboxError ? 0 : (opts.maxAttempts ?? OUTBOX_MAX_ATTEMPTS),
+        permanent,
+        ...(permanent ? {} : { maxAttempts: opts.maxAttempts ?? OUTBOX_MAX_ATTEMPTS }),
       });
       if (state === 'stale') {
         logger.debug({ outboxId: claim.id, kind: claim.kind }, 'outbox failure was stale; another claim owns the row');

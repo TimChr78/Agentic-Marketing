@@ -68,6 +68,7 @@ describe('am without configuration', { timeout: 60_000 }, () => {
     expect(outbox.code).toBe(0);
     expect(outbox.stdout).toContain('usage: am outbox');
     expect(outbox.stdout).toContain('--kind');
+    expect(outbox.stdout).toContain('--permanent');
   });
 
   it('prints the version', async () => {

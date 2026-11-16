@@ -22,9 +22,9 @@ const outboxCheck = async () => (await operationalHealthChecks(d.db)).find((chec
 describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', () => {
   it('warns on failed rows and on a queue that has waited too long', async () => {
     await d.db.admin.query(
-      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts, created_at, last_error)
-       VALUES ($1, 'obx_ops_pending', 'message_event', '{}', 'ops-pending', 'pending', 1, now() - interval '20 minutes', NULL),
-              ($1, 'obx_ops_failed', 'doi_send', '{}', 'ops-failed', 'failed', 36, now() - interval '2 hours', 'ClickHouse unavailable')`,
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts, failure_kind, created_at, last_error)
+       VALUES ($1, 'obx_ops_pending', 'message_event', '{}', 'ops-pending', 'pending', 1, NULL, now() - interval '20 minutes', NULL),
+              ($1, 'obx_ops_failed', 'doi_send', '{}', 'ops-failed', 'failed', 36, 'exhausted', now() - interval '2 hours', 'ClickHouse unavailable')`,
       [d.workspace],
     );
     const check = await outboxCheck();
@@ -35,8 +35,8 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     expect(check?.hint).toContain('am outbox');
   });
 
-  it('requeues dead letters for one kind and then reports an empty queue', async () => {
-    await expect(requeueFailedOutbox(d.db, { kind: 'doi_send' })).resolves.toBe(1);
+  it('requeues transient failures, reports a skipped permanent one and then reports an empty queue', async () => {
+    await expect(requeueFailedOutbox(d.db, { kind: 'doi_send' })).resolves.toEqual({ requeued: 1, skippedPermanent: 0 });
     await d.db.admin.query(`UPDATE outbox SET created_at = now() WHERE workspace_id = $1`, [d.workspace]);
     const { rows } = await d.db.admin.query<{ state: string; attempts: number }>(
       `SELECT state, attempts FROM outbox WHERE workspace_id = $1 AND operation_key = 'ops-failed'`,
@@ -49,5 +49,14 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     const check = await outboxCheck();
     expect(check?.status).toBe('ok');
     expect(check?.message).toContain('2 outbox row(s) publishing');
+
+    // A malformed payload is dead-lettered as permanent and left alone unless explicitly included.
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts, failure_kind, last_error)
+       VALUES ($1, 'obx_ops_bad', 'message_event', '{"events":[{}]}', 'ops-bad', 'failed', 1, 'permanent', 'message_event payload is invalid: events.0')`,
+      [d.workspace],
+    );
+    await expect(requeueFailedOutbox(d.db)).resolves.toEqual({ requeued: 0, skippedPermanent: 1 });
+    await expect(requeueFailedOutbox(d.db, { includePermanent: true })).resolves.toEqual({ requeued: 1, skippedPermanent: 0 });
   });
 });

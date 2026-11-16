@@ -1,5 +1,5 @@
 import { newId } from '@agentic-marketing/core';
-import { schema } from '@agentic-marketing/db';
+import { enqueueOutbox, schema } from '@agentic-marketing/db';
 import { linkSigner } from '@agentic-marketing/email';
 import type { BusEvent, EventStore, MessageEvent } from '@agentic-marketing/events';
 import { personCrypto } from '@agentic-marketing/profiles';
@@ -220,6 +220,57 @@ describe.skipIf(!hasTestDatabase())('double opt-in send intents (#978 part 2)', 
     await dispatchOutboxOnce({ db: d.db, kp, events });
     expect(await messagesForKey(key)).toHaveLength(1);
     expect(sent.map((e) => e.eventId)).toEqual([eventId, eventId]);
+  });
+
+  it('two overlapping dispatchers send one confirmation', async () => {
+    const event = formEvent(true);
+    const key = `doi:${event.messageId}`;
+    await hook()(d.workspace, [{ event, profileId }]);
+    clickhouseBlocked = false;
+    // Both rounds claim with SKIP LOCKED, and whichever runs the handler uses the intent's own
+    // `doi:<message>` key, which requestEmail serialises and replays.
+    await Promise.all([dispatchOutboxOnce({ db: d.db, kp, events }), dispatchOutboxOnce({ db: d.db, kp, events })]);
+    expect(await messagesForKey(key)).toHaveLength(1);
+  });
+
+  it('fails a DOI intent without an idempotency key permanently, without sending', async () => {
+    await d.db.withWorkspace(d.workspace, (tx) =>
+      enqueueOutbox(tx, d.workspace, {
+        kind: 'doi_send',
+        operationKey: 'doi:missing-key',
+        payload: { profileId, templateId, requestHash: 'hash-without-key' },
+      }),
+    );
+    clickhouseBlocked = false;
+    const result = await dispatchOutboxOnce({ db: d.db, kp, events });
+    expect(result.failed).toBe(1);
+    expect(await messagesForKey('doi:missing-key')).toHaveLength(0);
+    const { rows } = await d.db.admin.query<{ state: string; failure_kind: string }>(
+      `SELECT state, failure_kind FROM outbox WHERE workspace_id = $1 AND operation_key = 'doi:missing-key'`,
+      [d.workspace],
+    );
+    expect(rows[0]).toEqual({ state: 'failed', failure_kind: 'permanent' });
+    // A permanent failure is not retried on a later round.
+    expect((await dispatchOutboxOnce({ db: d.db, kp, events })).claimed).toBe(0);
+  });
+
+  it('fails a malformed message-event payload permanently instead of retrying it', async () => {
+    await d.db.withWorkspace(d.workspace, (tx) =>
+      enqueueOutbox(tx, d.workspace, {
+        kind: 'message_event',
+        operationKey: 'malformed-message-event',
+        payload: { events: [{}] },
+      }),
+    );
+    clickhouseBlocked = false;
+    const result = await dispatchOutboxOnce({ db: d.db, kp, events });
+    expect(result.failed).toBe(1);
+    expect(sent).toHaveLength(0);
+    const { rows } = await d.db.admin.query<{ state: string; failure_kind: string }>(
+      `SELECT state, failure_kind FROM outbox WHERE workspace_id = $1 AND operation_key = 'malformed-message-event'`,
+      [d.workspace],
+    );
+    expect(rows[0]).toEqual({ state: 'failed', failure_kind: 'permanent' });
   });
 
   it('fails an unknown kind once instead of retrying forever', async () => {
