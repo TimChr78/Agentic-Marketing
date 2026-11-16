@@ -3,7 +3,7 @@ import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { bodyLimit } from '@agentic-marketing/ingest';
-import { personCrypto, recordConsent } from '@agentic-marketing/profiles';
+import { personCrypto, recordConsentEvidence } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
@@ -96,7 +96,7 @@ export function smsRoutes(deps: Deps) {
           const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
           const smsMarketing = purposes.filter((p) => isMarketing(p.basis) && p.channels.includes('sms'));
           for (const profileId of profileIds)
-            await recordConsent(
+            await recordConsentEvidence(
               tx,
               target.ws,
               profileId,

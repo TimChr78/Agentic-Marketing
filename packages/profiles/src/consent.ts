@@ -124,6 +124,77 @@ export function consentProofFor(
   return { proof: visible, proofWithheld: withheld };
 }
 
+const consentEventKey = (record: ConsentInput) => `${record.purpose}\u0000${record.channel ?? ''}\u0000${record.messageId}`;
+const consentActionKey = (record: { purpose: string; channel: string; status: ConsentStatus; source: ConsentSource; recordedAt: Date }) =>
+  `${record.purpose}\u0000${record.channel}\u0000${record.status}\u0000${record.source}\u0000${record.recordedAt.getTime()}`;
+
+/** Existing ledger rows reduced to what the exact-duplicate fold needs. */
+export interface ConsentEvidenceRow {
+  purpose: string;
+  channel: string;
+  status: ConsentStatus;
+  source: ConsentSource;
+  recordedAt: Date;
+}
+
+/**
+ * Keeps the records that add evidence to the ledger (#936). Deduplicating by current status alone
+ * dropped a signup that arrived while the person was already granted, so a delayed withdrawal
+ * with an older action time could win although the person's latest action was the signup.
+ *
+ * Every distinct action is kept, whatever its status, source, age or relation to the newest row:
+ * the decisive action can be processed after the action it must outrank, so folding by time is
+ * never safe. Only the same event id or an exact duplicate is folded. Millisecond precision is the
+ * system's precision end to end (events and `recorded_at` are both millisecond timestamps), so two
+ * actions in the same millisecond with the same scope, status and source count as one. Genuinely
+ * repeated signups grow the ledger by one row each; that is accepted so no action is lost.
+ */
+export function newConsentEvidence<T extends ConsentInput>(records: T[], existing: ConsentEvidenceRow[]): T[] {
+  const seenEvents = new Set<string>();
+  const seenActions = new Set(existing.map((row) => consentActionKey(row)));
+  const kept: T[] = [];
+  for (const record of records) {
+    if (record.messageId) {
+      const event = consentEventKey(record);
+      if (seenEvents.has(event)) continue;
+      seenEvents.add(event);
+    }
+    const action = consentActionKey({ ...record, channel: record.channel ?? '' });
+    if (seenActions.has(action)) continue;
+    seenActions.add(action);
+    kept.push(record);
+  }
+  return kept;
+}
+
+/**
+ * Records the evidence a write adds (#936): every distinct action, with exact duplicates and event
+ * redeliveries folded. Use this in every writer that knows the person's action time; `recordConsent`
+ * remains the raw append. This helper adds no lock of its own: it keeps the same concurrency
+ * behaviour as `recordConsent` on main.
+ */
+export async function recordConsentEvidence(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
+  if (!records.length) return 0;
+  const family = await mergedFamily(tx, workspaceId, profileId);
+  const existing = await tx
+    .select({
+      purpose: schema.consentRecords.purpose,
+      channel: schema.consentRecords.channel,
+      status: schema.consentRecords.status,
+      source: schema.consentRecords.source,
+      recordedAt: schema.consentRecords.recordedAt,
+    })
+    .from(schema.consentRecords)
+    .where(
+      and(
+        eq(schema.consentRecords.workspaceId, workspaceId),
+        inArray(schema.consentRecords.profileId, family),
+        inArray(schema.consentRecords.purpose, [...new Set(records.map((r) => r.purpose))]),
+      ),
+    );
+  return recordConsent(tx, workspaceId, profileId, purposes, newConsentEvidence(records, existing));
+}
+
 export async function recordConsent(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
   if (!records.length) return 0;
   const inserted = await tx

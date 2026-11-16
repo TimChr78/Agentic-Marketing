@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { MessageEvent } from '@agentic-marketing/events';
-import { profileForMessage, recordConsent } from '@agentic-marketing/profiles';
+import { profileForMessage, recordConsentEvidence } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq, sql } from 'drizzle-orm';
@@ -35,7 +35,16 @@ export function messageEvent(
   };
 }
 
-export async function withdraw(tx: Tx, m: Msg, source: 'unsubscribe', proof: Record<string, unknown>, kp: KeyProvider, recordedAt: Date) {
+export async function withdraw(
+  tx: Tx,
+  m: Msg,
+  source: 'unsubscribe',
+  proof: Record<string, unknown>,
+  kp: KeyProvider,
+  recordedAt: Date,
+  /** The provider event's id, when there is one, so a redelivery adds no evidence row (#936). */
+  eventId?: string,
+) {
   if (!m.profileId) return;
   const person = await profileForMessage(tx, m.workspaceId, m.profileId, kp);
   if (!person) return;
@@ -44,13 +53,14 @@ export async function withdraw(tx: Tx, m: Msg, source: 'unsubscribe', proof: Rec
   // Under legitimate interest an unsubscribe is an objection; under consent, a withdrawal.
   // `recordedAt` is when the provider says the person unsubscribed (a webhook can be delayed or
   // retried), never when this callback happened to be processed (#928).
-  await recordConsent(tx, m.workspaceId, person.id, purposes, [
+  await recordConsentEvidence(tx, m.workspaceId, person.id, purposes, [
     {
       purpose: m.purpose,
       channel: m.channel,
       status: basis === 'legitimate_interest' ? 'objected' : 'withdrawn',
       source,
       proof,
+      messageId: eventId,
       recordedAt,
     },
   ]);
@@ -168,7 +178,7 @@ export async function applyDeliveryEvents(
     }
     if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
       // The same clamped instant, so the consent record cannot post-date the event either.
-      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp, atDate);
+      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp, atDate, `evt:${e.eventId}`);
   }
   return { events: out, escalations };
 }

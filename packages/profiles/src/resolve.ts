@@ -5,7 +5,7 @@ import { type BusEvent, CONSENT_EVENT } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { consentStateOf, currentConsent, recomputeConsentState, recordConsent } from './consent';
+import { consentStateOf, currentConsent, recomputeConsentState, recordConsentEvidence } from './consent';
 import { type PersonCrypto, personCrypto } from './crypto';
 import { lockIdentity } from './identity';
 
@@ -359,9 +359,10 @@ async function recordSdkConsent(tx: Tx, workspaceId: string, profileId: string, 
       page: (e.context.page as { url?: string } | undefined)?.url,
     },
   }));
-  // Only changes are worth a record; a page load repeating the same choice is not one.
-  const changed = records.filter(
-    (r) => current.get(r.purpose) !== r.status && !(r.status === 'denied' && current.get(r.purpose) === 'withdrawn'),
-  );
-  await recordConsent(tx, workspaceId, profileId, purposes, changed);
+  // Every action is passed to the evidence helper (#936). The SDK labels a negative action
+  // "withdrawn" when the ledger currently says granted and "denied" when it already says
+  // withdrawn; ADR-0014 treats both as refusals, so neither may be filtered on the status that
+  // happened to be current when the event arrived. A delayed grant must not outrank a later
+  // refusal.
+  await recordConsentEvidence(tx, workspaceId, profileId, purposes, records);
 }

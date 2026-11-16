@@ -209,13 +209,16 @@ describe('profiles, identity and consent', () => {
       batch: [change({ analytics: true, marketing_email: false }, 'c2'), change({ analytics: true, marketing_email: false }, 'c2')],
     });
     const api = t.api(owner);
+    // Every distinct SDK action is evidence (#936): the c2 event restates the unchanged analytics
+    // choice, so it is kept too, while the duplicate c2 event id (sent twice in the batch) is not.
     const history = await eventually(
       () => api.call('consent.history', { profileId }),
-      (h) => h.records.length === 3,
+      (h) => h.records.length === 4,
     );
     expect(history.records.map((r) => `${r.purpose}:${r.status}:${r.source}`)).toEqual([
       'analytics:granted:sdk',
       'marketing_email:granted:sdk',
+      'analytics:granted:sdk',
       'marketing_email:withdrawn:sdk',
     ]);
     expect(history.records[0].proof).toMatchObject({ messageId: 'c1', userAgent: 'test' });
@@ -257,7 +260,7 @@ describe('profiles, identity and consent', () => {
     const out = await t.api(owner).call('profiles.export', { profileId });
     expect(out.profile.personal).toMatchObject({ email: 'Ada@Example.com', firstName: 'Ada' });
     expect(out.events.length).toBeGreaterThanOrEqual(4);
-    expect(out.consentRecords.length).toBe(5);
+    expect(out.consentRecords.length).toBe(6);
     const { entries } = await t.api(owner).call('audit.list', { limit: 50 });
     expect(entries.some((e) => e.command === 'profiles.export' && e.target === profileId)).toBe(true);
   });
@@ -269,7 +272,7 @@ describe('profiles, identity and consent', () => {
     const family = [profileId, ...before.mergedFrom];
 
     const res = await api.call('profiles.erase', { profileId, reason: 'Erasure request by e-mail' });
-    expect(res).toMatchObject({ profiles: 2, consentRecords: 5 });
+    expect(res).toMatchObject({ profiles: 2, consentRecords: 6 });
 
     expect((await api.call('profiles.find', { type: 'email', value: 'ada@example.com' })).profileId).toBeNull();
     expect((await rejects(api.call('profiles.get', { profileId }))).status).toBe(404);
@@ -290,7 +293,7 @@ describe('profiles, identity and consent', () => {
       (await t.srv.db.admin.query(`SELECT reason FROM suppressions WHERE workspace_id = $1 AND channel = 'email'`, [ws])).rows,
     ).toEqual([{ reason: 'erased' }]);
     const { rows } = await t.srv.db.admin.query('SELECT counts, reason FROM erasures WHERE workspace_id = $1', [ws]);
-    expect(rows).toEqual([{ counts: { profiles: 2, identifiers: 5, consentRecords: 5 }, reason: 'Erasure request by e-mail' }]);
+    expect(rows).toEqual([{ counts: { profiles: 2, identifiers: 5, consentRecords: 6 }, reason: 'Erasure request by e-mail' }]);
   });
 });
 
