@@ -461,6 +461,33 @@ function* review(): Generator<Generated> {
       secrets: [token],
     };
   }
+  // Round 2: a mixed arrow/glue chain, the over-redaction inputs, and PEM marker/header runs.
+  {
+    const token = marker();
+    yield {
+      input: `token => ${'\'a\'"b" '.repeat(16)}'secret${token}' ${sentinel()}`,
+      name: 'review mixed chain',
+      secrets: [token],
+    };
+  }
+  for (const spaces of [0, 64, 256])
+    yield {
+      input: `token=[redacted]${' '.repeat(spaces)}"status":"ok" ${sentinel()}`,
+      name: `review marker prose ${spaces}`,
+      secrets: [],
+    };
+  for (const count of [1, 64, 256])
+    yield {
+      input: `${'[redacted] '.repeat(count)} PRIVATE KEY ${sentinel()}`,
+      name: `review marker pem run ${count}`,
+      secrets: [],
+    };
+  for (const header of ['-----BEGIN PUBLIC KEY-----\n', '-----BEGIN X\n', '-----BEGIN -----\n'])
+    yield {
+      input: `${header.repeat(16)} PRIVATE KEY ${sentinel()}`,
+      name: `review invalid pem ${header.trim()}`,
+      secrets: [],
+    };
 }
 
 function* generated(): Generator<Generated> {
@@ -551,6 +578,24 @@ describe('the new redactor never keeps what an earlier release removed (#937)', 
     }
     expect(unstable.slice(0, 10)).toEqual([]);
     expect(unstable).toHaveLength(0);
+  });
+
+  // Round 2: these are either skipped shapes or text after a marker that the released pipeline
+  // leaves alone. The new passes must not remove anything here.
+  it('leaves text the released pipeline leaves unchanged', () => {
+    const unchanged = [
+      'token: [redacted] ordinary diagnostics; operator said \u201cok\u201d.',
+      'token=[redacted] "status":"ok"',
+      'token=[redacted] "service recovered" "request completed"',
+      'note="-----BEGIN PRIVATE KEY-----" status="ok"\nmore ordinary diagnostics',
+      'see -----BEGIN RSA PRIVATE KEY-----\nS3cr3tV4l\n-----END RSA PRIVATE KEY----- here',
+      'token: \u201cshort pw\u201d',
+      "'password' => 'x'",
+      ':password => "x"',
+      'apiSecret => xyz',
+      `token => ${'\'a\'"b" '.repeat(16)}'S3cr3tV4l'`,
+    ];
+    for (const input of unchanged) expect(redactCredentials(input), input).toBe(redact01424(input));
   });
 });
 

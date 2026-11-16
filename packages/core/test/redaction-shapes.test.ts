@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { redactCredentials } from '../src/diagnostics';
+import { redactCredentials as released } from './redaction-01424-reference';
 
 // #937: the value shapes the released rules leave behind. Every case here is a shape the issue
 // lists, plus the negative cases that must keep their text and the shapes a post-pass cannot take
-// safely (documented here and in the pull request).
+// safely (documented by asserting the released output, and listed in the pull request).
 
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
@@ -55,6 +56,8 @@ describe('text glued to an existing marker (#937)', () => {
     for (const count of [17, 100, 10_000]) {
       const input = `token=[redacted]${"'x'".repeat(count - 1)}'${SECRET}'`;
       expect(idempotent(input), `fragments ${count}`).toBe('token=[redacted]');
+      const mixed = `token=[redacted]${'\'a\'"b"'.repeat(count)}'${SECRET}'`;
+      expect(idempotent(mixed), `mixed fragments ${count}`).toBe('token=[redacted]');
     }
   });
 
@@ -79,8 +82,11 @@ describe('a credential pair nested in another pair (#937)', () => {
   });
 });
 
-describe('a typographic-quoted value under a credential key (#937)', () => {
-  it('removes the remainder in every quote pair', () => {
+describe('a typographic-quoted value is skipped (#937 follow-up)', () => {
+  // The post-pipeline output (`token: [redacted] pw”`) has lost the opening quote, so a pass cannot
+  // tell the remainder from ordinary text. These assert the released output exactly; a follow-up
+  // needs the original input context (#937 review round 2).
+  it('leaves the released output for every quote pair', () => {
     const pairs: [string, string][] = [
       ['\u201c', '\u201d'],
       ['\u2018', '\u2019'],
@@ -88,59 +94,68 @@ describe('a typographic-quoted value under a credential key (#937)', () => {
       ['\u201e', '\u201c'],
       ['\u2039', '\u203a'],
     ];
-    for (const [open, close] of pairs) expect(idempotent(`token: ${open}${SECRET} with spaces${close}`), open).toBe('token: [redacted]');
+    for (const [open, close] of pairs) {
+      const input = `token: ${open}${SECRET} with spaces${close}`;
+      expect(idempotent(input), open).toBe(released(input));
+    }
+    expect(idempotent(`token: \u201cshort pw\nnext`)).toBe(released(`token: \u201cshort pw\nnext`));
   });
 
-  it('skips an unterminated quote with spaces, leaving the released output (#937 follow-up)', () => {
-    // No closer on the line means the remainder cannot be bounded; a post-pass cannot tell it from
-    // ordinary text, so the released output stands (the first word is still redacted).
-    expect(idempotent(`token: \u201cshort pw\nnext`)).toBe('token: [redacted] pw\nnext');
-  });
-
-  it('leaves prose containing quotes alone', () => {
-    for (const input of ['the provider said \u201cnothing useful\u201d', 'a \u2018quote\u2019 in prose'])
-      expect(idempotent(input), input).toBe(input);
+  it('does not over-redact ordinary text after a marker', () => {
+    const input = 'token: [redacted] ordinary diagnostics; operator said \u201cok\u201d.';
+    expect(idempotent(input)).toBe(released(input));
   });
 });
 
-describe('`=>` as the separator (#937)', () => {
-  it('removes the quoted value the released rule damages to a marker', () => {
-    expect(idempotent(`'password' => '${SECRET}'`)).toBe("'password' =[redacted]");
-    expect(idempotent(`:password => "${SECRET}"`)).toBe(':password =[redacted]');
-    expect(idempotent(`token => '${SECRET} with spaces'`)).toBe('token =[redacted]');
+describe('`=>` is skipped (#937 follow-up)', () => {
+  // The released rule takes `>` as the value, leaving `key =[redacted] 'x'`; nothing in that output
+  // proves the separator was `=>`, so a follow-up needs the original input. These assert the
+  // released output exactly.
+  it('leaves the released output for quoted, bare and nested arrow values', () => {
+    for (const input of [
+      `'password' => '${SECRET}'`,
+      `:password => "${SECRET}"`,
+      `token => '${SECRET} with spaces'`,
+      `apiSecret => ${SECRET}`,
+      `'password' => organizationSecondaryAuthToken="${SECRET}"`,
+    ])
+      expect(idempotent(input), input).toBe(released(input));
   });
 
-  it('removes a quoted nested pair after the arrow', () => {
-    expect(idempotent(`'password' => organizationSecondaryAuthToken="${SECRET}"`)).not.toContain(SECRET);
-  });
-
-  it('skips a bare arrow value, which looks like prose after a marker (#937 follow-up)', () => {
-    expect(idempotent(`apiSecret => ${SECRET}`)).toBe(`apiSecret =[redacted] ${SECRET}`);
+  it('does not over-redact ordinary markers', () => {
+    for (const input of ['token=[redacted] "status":"ok"', 'token=[redacted] "service recovered" "request completed"'])
+      expect(idempotent(input), input).toBe(released(input));
   });
 
   it('leaves an arrow without a credential key alone', () => {
     for (const input of ['result => value', 'const f = (a) => a + 1', 'callback => response', 'entryKey => ascending'])
-      expect(idempotent(input), input).toBe(input);
+      expect(idempotent(input), input).toBe(released(input));
   });
 });
 
 describe('a PEM private key block (#937)', () => {
   const block = (name: string, body: string): string => `-----BEGIN ${name}-----\n${body}\n-----END ${name}-----`;
 
-  it('replaces the whole block, with or without a credential key', () => {
+  it('replaces a line-start block, standalone or under a credential key', () => {
     expect(idempotent(block('PRIVATE KEY', SECRET))).toBe('[redacted]');
     expect(idempotent(block('RSA PRIVATE KEY', SECRET))).toBe('[redacted]');
+    expect(idempotent(`see\n${block('OPENSSH PRIVATE KEY', SECRET)}`)).toBe('see\n[redacted]');
     expect(idempotent(`password=${block('EC PRIVATE KEY', SECRET)}`)).toBe('password=[redacted]');
-    expect(idempotent(`see ${block('OPENSSH PRIVATE KEY', SECRET)} here`)).toBe('see [redacted] here');
   });
 
-  it('replaces an unterminated block to the end of the text', () => {
+  it('replaces an unterminated line-start block to the end of the text', () => {
     expect(idempotent(`-----BEGIN PRIVATE KEY-----\n${SECRET}`)).toBe('[redacted]');
   });
 
-  it('leaves public blocks and prose alone', () => {
-    for (const input of [block('CERTIFICATE', SECRET), block('PUBLIC KEY', SECRET), 'the header -----BEGIN CERTIFICATE----- is public'])
-      expect(idempotent(input), input).toBe(input);
+  it('leaves a mid-line header, a quoted mention, public blocks and prose alone', () => {
+    for (const input of [
+      `see ${block('RSA PRIVATE KEY', SECRET)} here`,
+      'note="-----BEGIN PRIVATE KEY-----" status="ok"\nmore ordinary diagnostics',
+      block('CERTIFICATE', SECRET),
+      block('PUBLIC KEY', SECRET),
+      'the header -----BEGIN CERTIFICATE----- is public',
+    ])
+      expect(idempotent(input), input).toBe(released(input));
   });
 });
 
