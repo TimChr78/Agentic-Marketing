@@ -1,4 +1,4 @@
-import { subjectAssignment } from '@agentic-marketing/audience';
+import { dispatchOutboxOnce, subjectAssignment } from '@agentic-marketing/audience';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
@@ -278,6 +278,7 @@ describe('subject A/B test', () => {
     expect(mailTo(withdrawnEmail)).toHaveLength(0);
 
     // messages.stats can narrow to a variant.
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
     const stats = await eventually(
       () => api().call('messages.stats', { days: 1, templateId: template, variant: 'B' }),
       (s) => (s.counts.clicked ?? 0) >= b.length,

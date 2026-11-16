@@ -1,4 +1,5 @@
 import { clearAnalyticsCache } from '@agentic-marketing/analytics';
+import { dispatchOutboxOnce } from '@agentic-marketing/audience';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { connectAgent, eventually, startTestServer, testPort, type User } from './harness';
@@ -262,6 +263,7 @@ describe('the pilot loop over MCP', () => {
 
     // ClickHouse is written asynchronously; analytics.query caches per input for a minute, so
     // clear it between attempts instead of re-reading a stale zero.
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 200 });
     const from = new Date(Date.now() - 3_600_000).toISOString();
     const byBroadcast = await eventually(
       () => {

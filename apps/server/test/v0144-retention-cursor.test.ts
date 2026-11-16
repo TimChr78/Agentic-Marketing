@@ -6,7 +6,8 @@ import { startTestServer, testPort, type User } from './harness';
 
 // Sol's P2 reproducer: 200 kept candidates share one microsecond-precision created_at, then an
 // eligible signup. A cursor that saves milliseconds sees every kept row as still after it and
-// repeats the first page forever; the cursor must carry PostgreSQL's full precision.
+// repeats the first page forever; the cursor must carry PostgreSQL's full precision. The scan still
+// reports the eligible signup; pruning is paused since #978 part 2, so it is not deleted.
 
 const PORT = testPort(4334);
 const SHARED = '2026-01-01 00:00:00.123456+00';
@@ -90,15 +91,16 @@ describe('retention cursor precision (#627 review)', () => {
     await seedProfile(anon, 'precise-eligible@example.com', SHARED, eligible);
     await t.srv.events.insert([storedEvent(anon, 'Form Submitted')]);
 
-    let removed = 0;
+    let found = 0;
     let rounds = 0;
-    while (removed === 0 && rounds < 10) {
-      removed += (await runRetentionOnce({ db: t.srv.db, events: t.srv.events, hot: t.srv.hot, unconfirmedDays: 30, logDays: 180 }))
-        .profiles;
+    while (found === 0 && rounds < 10) {
+      found += (await runRetentionOnce({ db: t.srv.db, events: t.srv.events, hot: t.srv.hot, unconfirmedDays: 30, logDays: 180 }))
+        .unconfirmedSignups;
       rounds++;
     }
-    expect(removed).toBe(1);
+    // The cursor reached the eligible signup (and reported it); pruning is paused, so it stays.
+    expect(found).toBe(1);
     expect(rounds).toBeLessThanOrEqual(3);
-    expect(await exists(eligible)).toBe(false);
+    expect(await exists(eligible)).toBe(true);
   }, 120_000);
 });
