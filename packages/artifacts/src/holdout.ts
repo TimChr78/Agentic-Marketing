@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { and, eq, sql } from 'drizzle-orm';
 
@@ -26,28 +26,6 @@ export interface HoldoutAssignment {
   arm: HoldoutArm;
   hashVersion: string;
   percent: number;
-}
-
-/** Where a stored arm came from and when: the two fields every holdout read orders by. */
-export interface HoldoutStamp {
-  profileId: string;
-  /**
-   * `assigned_at` in microseconds since the epoch, as PostgreSQL stores it. A JavaScript Date keeps
-   * only milliseconds, so two rows inside one millisecond would compare equal here while the
-   * database orders them, and the send and the report could pick different arms (#944 review).
-   */
-  assignedMicros: bigint;
-}
-
-/**
- * Whether `a` is the person's decision before `b` (#944): the earliest `assigned_at` wins, and the
- * lower profile id breaks a tie. `assignHoldout` (sending) and `campaigns.holdoutResult` (reporting)
- * both use this order, so a tie cannot let the send and the report pick different arms.
- */
-export function earlierAssignment(a: HoldoutStamp, b: HoldoutStamp): boolean {
-  if (a.assignedMicros !== b.assignedMicros) return a.assignedMicros < b.assignedMicros;
-  // Code-unit order, the same as the SQL side's `COLLATE "C"`.
-  return a.profileId < b.profileId;
 }
 
 /**
@@ -149,12 +127,143 @@ async function oldestArm(
     JOIN person ON person.id = a.profile_id
     WHERE a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type} AND a.scope_id = ${scope.id}
       AND a.hash_version = ${hashVersion}
-    -- The shared order (earlierAssignment): earliest decision to the microsecond, then the lower
-    -- profile id in code-unit order.
+    -- The shared order (also used by holdoutWinners and campaigns.holdoutResult): earliest decision
+    -- to the microsecond, then the lower profile id in code-unit order.
     ORDER BY a.assigned_at, a.profile_id COLLATE "C"
     LIMIT 1`);
   const row = res.rows[0];
   return { person, arm: row ? { profileId: row.profile_id, arm: row.arm, assignedAt: new Date(row.assigned_at) } : null };
+}
+
+/** One person's winning assignment, as a report reads it. */
+export interface HoldoutWinner {
+  person: string;
+  arm: HoldoutArm;
+  assignedAt: Date;
+}
+
+/**
+ * The winning assignments of one scope version, materialised in the transaction and readable in
+ * bounded pages. `control`, `treatment`, `first` and `last` are the SQL aggregates over the same
+ * winners after the report window, so a caller never holds the campaign's whole history in memory.
+ */
+export interface HoldoutWinnerSet {
+  control: number;
+  treatment: number;
+  /** The earliest winning assignment in the window; null when no winner falls inside it. */
+  first: Date | null;
+  /** The latest winning assignment in the window; null when no winner falls inside it. */
+  last: Date | null;
+  /**
+   * The next page of winners ordered by person id, after `after` (exclusive). Keep passing the last
+   * person of each page until a short page comes back. Reads are per transaction: the temporary
+   * table is dropped when it commits.
+   */
+  page(after: string | undefined, limit: number): Promise<HoldoutWinner[]>;
+}
+
+/**
+ * Chooses each person's winning assignment in PostgreSQL (#972). Each assignment's profile is
+ * resolved to the person it belongs to today over `profiles.merged_into` (the same bounded, cycle-safe
+ * walk as `canonicalPeople`), then `DISTINCT ON (person)` takes the earliest `assigned_at` and, on a
+ * tie, the lower profile id — the order `oldestArm` uses for the send and `assignHoldout` reads:
+ * `assigned_at, profile_id COLLATE "C"`. Keep the two in step; `holdout-winners.test.ts` asserts the
+ * SQL winner and the send path pick the same arm for ties and sub-millisecond differences.
+ *
+ * The requested window is applied to the winners, never to their input: an alias row inside the
+ * window must not decide an arm whose earliest assignment is outside it (#944). The winners land in
+ * a transaction-scoped temporary table, so one query chooses them, the aggregates stay in SQL and
+ * the report pages the people it still needs instead of loading the whole campaign (#972).
+ */
+export async function holdoutWinners(
+  tx: Tx,
+  workspaceId: string,
+  scope: HoldoutScope,
+  hashVersion: string,
+  window: { from?: Date; to?: Date } = {},
+): Promise<HoldoutWinnerSet> {
+  const table = `holdout_winners_${randomBytes(6).toString('hex')}`;
+  const temp = sql.raw(table);
+  await tx.execute(sql`
+    CREATE TEMP TABLE ${temp} (
+      person text COLLATE "C" PRIMARY KEY,
+      arm text NOT NULL,
+      assigned_at timestamptz NOT NULL
+    ) ON COMMIT DROP`);
+  await tx.execute(sql`
+    WITH RECURSIVE scoped AS (
+      SELECT a.profile_id, a.arm, a.assigned_at
+      FROM holdout_assignments a
+      WHERE a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type}
+        AND a.scope_id = ${scope.id} AND a.hash_version = ${hashVersion}
+    ), resolved(profile_id, person_id, path, depth) AS (
+      SELECT DISTINCT s.profile_id, s.profile_id, ARRAY[s.profile_id], 0
+      FROM scoped s
+      UNION ALL
+      SELECT r.profile_id, p.merged_into, array_append(r.path, p.merged_into), r.depth + 1
+      FROM resolved r
+      JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = r.person_id
+      -- Bounded like canonicalPeople's 20 hops, and the path stops a corrupted cycle.
+      WHERE p.merged_into IS NOT NULL AND r.depth < 20 AND NOT (p.merged_into = ANY(r.path))
+    ), person_of AS (
+      SELECT DISTINCT ON (profile_id) profile_id, person_id
+      FROM resolved
+      ORDER BY profile_id, depth DESC
+    ), winner AS (
+      SELECT DISTINCT ON (person_id COLLATE "C") person_id, arm, assigned_at, profile_id
+      FROM (
+        SELECT po.person_id, s.arm, s.assigned_at, s.profile_id
+        FROM scoped s
+        JOIN person_of po ON po.profile_id = s.profile_id
+      ) resolved_assignments
+      -- The send's order (oldestArm): earliest to the microsecond, then the lower profile id.
+      ORDER BY person_id COLLATE "C", assigned_at, profile_id COLLATE "C"
+    )
+    INSERT INTO ${temp} (person, arm, assigned_at)
+    SELECT person_id, arm, assigned_at FROM winner`);
+  const summary = await tx.execute<{ arm: HoldoutArm; entered: number; first_micros: string | null; last_micros: string | null }>(sql`
+    SELECT arm, count(*)::int AS entered,
+      (extract(epoch from min(assigned_at)) * 1000000)::bigint::text AS first_micros,
+      (extract(epoch from max(assigned_at)) * 1000000)::bigint::text AS last_micros
+    FROM ${temp}
+    WHERE (${window.from ?? null}::timestamptz IS NULL OR assigned_at >= ${window.from ?? null})
+      AND (${window.to ?? null}::timestamptz IS NULL OR assigned_at <= ${window.to ?? null})
+    GROUP BY arm`);
+  let control = 0;
+  let treatment = 0;
+  let first: Date | null = null;
+  let last: Date | null = null;
+  for (const row of summary.rows) {
+    if (row.arm === 'control') control = row.entered;
+    else treatment = row.entered;
+    // Microseconds in SQL, milliseconds for the JS comparison (a Date keeps only milliseconds).
+    const rowFirst = row.first_micros === null ? null : new Date(Number(BigInt(row.first_micros) / 1000n));
+    const rowLast = row.last_micros === null ? null : new Date(Number(BigInt(row.last_micros) / 1000n));
+    if (rowFirst && (!first || rowFirst < first)) first = rowFirst;
+    if (rowLast && (!last || rowLast > last)) last = rowLast;
+  }
+  return {
+    control,
+    treatment,
+    first,
+    last,
+    async page(after, limit) {
+      const size = Math.max(1, Math.trunc(limit));
+      const res = await tx.execute<{ person: string; arm: HoldoutArm; assigned_micros: string }>(sql`
+        SELECT person, arm, (extract(epoch from assigned_at) * 1000000)::bigint::text AS assigned_micros
+        FROM ${temp}
+        WHERE (${window.from ?? null}::timestamptz IS NULL OR assigned_at >= ${window.from ?? null})
+          AND (${window.to ?? null}::timestamptz IS NULL OR assigned_at <= ${window.to ?? null})
+          ${after === undefined ? sql`` : sql`AND person > ${after}`}
+        ORDER BY person
+        LIMIT ${size}`);
+      return res.rows.map((row) => ({
+        person: row.person,
+        arm: row.arm,
+        assignedAt: new Date(Number(BigInt(row.assigned_micros) / 1000n)),
+      }));
+    },
+  };
 }
 
 /**
