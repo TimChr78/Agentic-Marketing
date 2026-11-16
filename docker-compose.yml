@@ -109,6 +109,9 @@ services:
       STEP_UP_WINDOW_SECONDS: ${STEP_UP_WINDOW_SECONDS:-}
       STEP_UP_LOCKOUT_SECONDS: ${STEP_UP_LOCKOUT_SECONDS:-}
       TRUSTED_ORIGINS: ${TRUSTED_ORIGINS:-}
+      # Better Auth appends its own list verbatim, outside the bounded matcher; config.ts reads it
+      # to refuse a wildcard there (#947). TRUSTED_ORIGINS is the documented setting.
+      BETTER_AUTH_TRUSTED_ORIGINS: ${BETTER_AUTH_TRUSTED_ORIGINS:-}
       # POSTGRES_PASSWORD is interpolated raw: Compose has no percent-encoding. Use a hex password
       # (`openssl rand -hex 32`, as `am init` does); base64 can contain `/`, which breaks the URL.
       DATABASE_URL: postgres://am:${POSTGRES_PASSWORD}@postgres:5432/am
@@ -146,6 +149,10 @@ services:
       OTEL_EXPORTER_OTLP_TRACES_HEADERS: ${OTEL_EXPORTER_OTLP_TRACES_HEADERS:-}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
       BACKUP_DIR: /backups
+      # The scheduled `am backup --schedule` reads these too, so `docker compose exec app am backup
+      # --schedule` (and the backup service of compose.override.yaml) share one .env (#965 review).
+      BACKUP_CRON: ${BACKUP_CRON:-}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-}
       BACKUP_VERIFY_MAX_AGE_DAYS: ${BACKUP_VERIFY_MAX_AGE_DAYS:-}
       SKIP_PRE_UPGRADE_BACKUP: ${SKIP_PRE_UPGRADE_BACKUP:-false}
     volumes:

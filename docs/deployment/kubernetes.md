@@ -115,6 +115,8 @@ Secrets (provider API keys, OAuth tokens) and personal data are encrypted with p
 
 Unwrapped data keys are cached in memory for ten minutes, so the KEK is called about once per data key and interval, not per request.
 
+With the chart, the location settings are plain `config` values (`OPENBAO_ADDR`, `OPENBAO_TOKEN_FILE`, `OPENBAO_TRANSIT_MOUNT`, `OPENBAO_TRANSIT_KEY`, `OPENBAO_NAMESPACE`, `AWS_KMS_KEY_ID`, `AWS_REGION`, `AWS_KMS_ENDPOINT`) and the credentials are Secret values (`OPENBAO_TOKEN`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `MASTER_KEY`), so a key never lands in the rendered ConfigMap. The `BACKUP_*` settings are `config` values too: the chart runs no backup job, but they reach a pod you run `am backup` or `am doctor` in.
+
 **Moving from `MASTER_KEY`:** set `KEY_PROVIDER` and its settings while keeping `MASTER_KEY`. Data keys wrapped by the local key keep working, and new ones are wrapped by the provider. Run `cli rotate-keys` once to re-wrap every existing data key, then remove `MASTER_KEY` (and `MASTER_KEY_PREVIOUS`).
 
 **Rolling out a Secret change.** The pod template carries a `checksum/secret` annotation. With `secrets.values` the rendered Secret is part of that hash, so a changed value rolls the four Deployments on `helm upgrade`. Helm cannot read a `secrets.existingSecret` (sealed-secrets, External Secrets, Vault agent, a manual `kubectl create secret`), so changing that object in place does not change the pod template and the running pods keep the old environment. After changing it, bump `secrets.revision` in the same upgrade, for example:

@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import type { Dirent } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ENV_KEYS } from '../src/config';
+import { scanServerSources } from './env-reads';
 
 // The repository root, so this test reads the deployment files an operator sees (no Docker, no network).
 const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -90,43 +90,6 @@ function helmSection(text: string, name: string): string {
   const body = text.slice(start + marker.length);
   const end = body.search(/\n(?=\S)/);
   return end < 0 ? body : body.slice(0, end);
-}
-
-/**
- * Every `process.env.X` and `process.env['X']` read in the code the server image runs
- * (apps/server/src and packages' src), with the files that read it. Tests are not deployed and the
- * admin UI runs in the browser, so both are out of scope.
- */
-async function processEnvReads(): Promise<Map<string, string[]>> {
-  const reads = new Map<string, string[]>();
-  const walk = async (dir: string): Promise<void> => {
-    let entries: Dirent[];
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return; // a package without src/
-    }
-    for (const entry of entries) {
-      if (entry.name === 'node_modules' || entry.name === 'test' || entry.name === 'dist') continue;
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(path);
-        continue;
-      }
-      if (!/\.tsx?$/.test(entry.name) || entry.name.endsWith('.test.ts')) continue;
-      const source = await readFile(path, 'utf8');
-      for (const match of source.matchAll(/process\.env(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[['"]([A-Za-z_][A-Za-z0-9_]*)['"]\])/g)) {
-        const key = match[1] ?? match[2];
-        const where = path.replace(`${root}/`, '');
-        reads.set(key, [...(reads.get(key) ?? []), where]);
-      }
-    }
-  };
-  await walk(join(root, 'apps/server/src'));
-  for (const space of await readdir(join(root, 'packages'), { withFileTypes: true })) {
-    if (space.isDirectory()) await walk(join(root, 'packages', space.name, 'src'));
-  }
-  return reads;
 }
 
 describe('compose deployment configuration', () => {
@@ -299,7 +262,9 @@ describe('compose environment completeness (#385)', () => {
 // #965: the #385 guard above keys off config.ts's Env schema, so a variable the server reads from
 // process.env directly (the three OTLP settings #931 introduced, for example) could be documented
 // and still never reach the container. Compose without env_file and the chart's ConfigMap are
-// explicit allow-lists, so this scans the source instead of a schema.
+// explicit allow-lists, so this scans the source instead of a schema. The scan follows a variable,
+// a default parameter, a parameter typed as an environment map, destructuring and constant keys
+// (apps/server/test/env-reads.ts); an access it cannot resolve fails until it is named below.
 describe('every environment read reaches the containers (#965)', () => {
   // Read by the server-side source but deliberately not part of a deployment's configuration.
   const NOT_FORWARDED = new Map([
@@ -313,20 +278,59 @@ describe('every environment read reaches the containers (#965)', () => {
       'CAMPAIGN_IDENTITY_SCOPE_LIMIT',
       'a test-only override of the campaign identity scope bound (packages/campaigns/src/identity.ts); production never sets it.',
     ],
+    [
+      'AM_BOOTSTRAP_PASSWORD',
+      'a CLI-only input to `am bootstrap` (apps/server/src/cli.ts, via resolvePassword): .env.example documents it as not server configuration, and putting an admin password into every container buys nothing.',
+    ],
+    ['AM_RESET_PASSWORD', 'the CLI-only counterpart for `am reset-password`; same reason. Neither is read by the running server.'],
+    [
+      'AM_BIND',
+      'the host address the admin port is published on: a Compose interpolation value for `ports:`, not what the container binds (PORT). The doctor reads it only to describe the host side and falls back to docker-compose.yml, so forwarding it would report the host port as the container port.',
+    ],
+    [
+      'AM_PORT',
+      'the published admin port, the same Compose host-side setting as AM_BIND. The container listens on PORT; AM_PORT never reaches it.',
+    ],
+    [
+      'PUBLIC_BIND',
+      'the host:port the public listener is published on; the container sees PUBLIC_PORT. The doctor describes the host side from it and falls back to docker-compose.yml.',
+    ],
+    [
+      'POSTGRES_PASSWORD',
+      'the Postgres superuser password, which Compose interpolates into DATABASE_URL. The app connects as APP_DB_ROLE under row-level security and never needs this password, so it stays out of the app container (least privilege); the doctor says when it is not set here.',
+    ],
   ]);
 
-  // Credentials travel in the Secret the roles read through envFrom, not in the ConfigMap.
-  const HELM_SECRET_KEYS = new Map([
-    ['OTEL_EXPORTER_OTLP_HEADERS', 'a collector Authorization header is a credential'],
-    ['OTEL_EXPORTER_OTLP_TRACES_HEADERS', 'the trace-specific collector Authorization header'],
+  // An environment access the syntax scan cannot reduce to a name. Each needs a reason here, and
+  // the test fails if an entry stops matching a real finding, so this cannot become a blanket pass.
+  const DYNAMIC_READS = new Map([
+    [
+      'apps/server/src/config.ts|enumerate',
+      'loadConfig enumerates the whole environment once and validates it with the Env schema. Every name it accepts is an ENV_KEYS entry, and the completeness tests above require each of those in Compose and the chart, so the names are known even though this access is not.',
+    ],
   ]);
 
-  it('forwards every process.env read through Compose and the chart', async () => {
-    const reads = await processEnvReads();
-    // The scanner must find the reads this guard was written for, so a broken pattern cannot pass.
-    for (const key of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', ...HELM_SECRET_KEYS.keys()]) {
+  const id = (file: string, kind: string) => `${file}|${kind}`;
+
+  it('forwards every environment read through Compose and the chart', async () => {
+    const scan = await scanServerSources(root);
+    const reads = new Set(scan.reads.map((read) => read.key));
+    // The scan must find the reads this guard was written for, by every spelling, or a broken
+    // resolver would pass silently: a property access, a constant-keyed access, and a helper call.
+    for (const key of [
+      'OTEL_EXPORTER_OTLP_ENDPOINT',
+      'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+      'OTEL_EXPORTER_OTLP_HEADERS',
+      'OTEL_EXPORTER_OTLP_TRACES_HEADERS',
+      'BACKUP_KEEP_DAYS',
+      'BETTER_AUTH_TRUSTED_ORIGINS',
+      'AM_BOOTSTRAP_PASSWORD',
+      'AM_RESET_PASSWORD',
+    ]) {
       expect(reads.has(key), `${key} was not found in the server-side source`).toBe(true);
     }
+    // A key reached through a bound environment object, not a literal `process.env.X` (#965 review).
+    expect(scan.reads.find((read) => read.key === 'BACKUP_KEEP_DAYS')?.file).toBe('apps/server/src/ops/backup-lib.ts');
 
     const composeKeys = new Set([...service(compose, 'app').matchAll(/^ {6}([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]));
     const helmConfig = new Set([...helmSection(helmValues, 'config').matchAll(/^ {2}([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]));
@@ -335,18 +339,34 @@ describe('every environment read reaches the containers (#965)', () => {
     );
 
     const missing: string[] = [];
-    for (const key of reads.keys()) {
+    for (const key of [...reads].sort()) {
       if (NOT_FORWARDED.has(key)) continue;
       if (!composeKeys.has(key)) missing.push(`docker-compose.yml app environment: ${key}`);
-      if (!helmConfig.has(key) && !HELM_SECRET_KEYS.has(key)) missing.push(`Helm config (or a documented Secret value): ${key}`);
+      // A key is forwarded by the chart either as a plain `config` value or through the Secret the
+      // roles read with envFrom: `secrets.values` accepts any key, and its documented examples are
+      // the chart's statement of what belongs there (a credential stays out of the ConfigMap).
+      if (!helmConfig.has(key) && !helmSecretExamples.has(key)) missing.push(`Helm config (or a documented secrets.values key): ${key}`);
     }
     expect(missing).toEqual([]);
 
     // Every exception must still describe a real read, so the lists cannot rot into a blanket pass.
     expect([...NOT_FORWARDED.keys()].filter((key) => !reads.has(key))).toEqual([]);
-    for (const key of HELM_SECRET_KEYS.keys()) {
+    // The credential keys that motivated the Secret rule (#965) stay documented there.
+    for (const key of ['OTEL_EXPORTER_OTLP_HEADERS', 'OTEL_EXPORTER_OTLP_TRACES_HEADERS']) {
       expect(helmSecretExamples.has(key), `${key} must be documented under secrets.values`).toBe(true);
     }
+  });
+
+  it('names every environment access the scan cannot resolve', async () => {
+    const scan = await scanServerSources(root);
+    const findings = scan.dynamic.map((read) => ({ id: id(read.file, read.kind), where: `${read.file}:${read.line}`, text: read.text }));
+
+    const unexplained = findings
+      .filter((finding) => !DYNAMIC_READS.has(finding.id))
+      .map((finding) => `${finding.where} (${finding.id}): ${finding.text}`);
+    expect(unexplained).toEqual([]);
+    // And an entry that no longer matches a finding is stale, not permission for the next one.
+    expect([...DYNAMIC_READS.keys()].filter((entry) => !findings.some((finding) => finding.id === entry))).toEqual([]);
   });
 });
 
