@@ -55,6 +55,8 @@ config:
   WORKSPACE_QUOTA: "10"
   EGRESS_ALLOWED_HOSTS: ""
   OTEL_EXPORTER_OTLP_ENDPOINT: ""
+  # Used as-is for the traces exporter; the generic endpoint always gets /v1/traces appended.
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ""
 
 # Secret settings: DATABASE_URL, APP_DB_PASSWORD, AUTH_SECRET, and MASTER_KEY or the OpenBao /
 # AWS KMS credentials. Prefer an existing Secret (sealed-secrets, External Secrets, Vault agent…);
@@ -73,6 +75,8 @@ secrets:
   #   AUTH_SECRET: …
   #   MASTER_KEY: …
   #   METRICS_TOKEN: …   # openssl rand -hex 24; scrape /metrics with Bearer $METRICS_TOKEN
+  #   OTEL_EXPORTER_OTLP_HEADERS: …          # OTLP collector auth: a header list, a credential
+  #   OTEL_EXPORTER_OTLP_TRACES_HEADERS: …   # the trace-specific variant of the same
 
 # Extra environment for every role, e.g. a token file mounted by an OpenBao agent. The migration
 # hook uses these too, so on a first install any Secret or ConfigMap they reference must already

@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import type { Dirent } from 'node:fs';
+import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -79,6 +80,53 @@ function serviceNames(text: string): string[] {
   const end = rest.search(/^\S/m);
   const body = end < 0 ? rest : rest.slice(0, end);
   return [...body.matchAll(/^ {2}([a-z][\w-]*):$/gm)].map((match) => match[1]);
+}
+
+/** One top-level block of values.yaml, up to the next line that starts at column 0. */
+function helmSection(text: string, name: string): string {
+  const marker = `\n${name}:\n`;
+  const start = text.indexOf(marker);
+  if (start < 0) throw new Error(`values.yaml has no ${name} block`);
+  const body = text.slice(start + marker.length);
+  const end = body.search(/\n(?=\S)/);
+  return end < 0 ? body : body.slice(0, end);
+}
+
+/**
+ * Every `process.env.X` and `process.env['X']` read in the code the server image runs
+ * (apps/server/src and packages' src), with the files that read it. Tests are not deployed and the
+ * admin UI runs in the browser, so both are out of scope.
+ */
+async function processEnvReads(): Promise<Map<string, string[]>> {
+  const reads = new Map<string, string[]>();
+  const walk = async (dir: string): Promise<void> => {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // a package without src/
+    }
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === 'test' || entry.name === 'dist') continue;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(path);
+        continue;
+      }
+      if (!/\.tsx?$/.test(entry.name) || entry.name.endsWith('.test.ts')) continue;
+      const source = await readFile(path, 'utf8');
+      for (const match of source.matchAll(/process\.env(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[['"]([A-Za-z_][A-Za-z0-9_]*)['"]\])/g)) {
+        const key = match[1] ?? match[2];
+        const where = path.replace(`${root}/`, '');
+        reads.set(key, [...(reads.get(key) ?? []), where]);
+      }
+    }
+  };
+  await walk(join(root, 'apps/server/src'));
+  for (const space of await readdir(join(root, 'packages'), { withFileTypes: true })) {
+    if (space.isDirectory()) await walk(join(root, 'packages', space.name, 'src'));
+  }
+  return reads;
 }
 
 describe('compose deployment configuration', () => {
@@ -245,6 +293,60 @@ describe('compose environment completeness (#385)', () => {
 
   it('documents that Compose now forwards every documented variable', () => {
     expect(composeDoc).toContain('Every variable the server reads is passed into the `app` container');
+  });
+});
+
+// #965: the #385 guard above keys off config.ts's Env schema, so a variable the server reads from
+// process.env directly (the three OTLP settings #931 introduced, for example) could be documented
+// and still never reach the container. Compose without env_file and the chart's ConfigMap are
+// explicit allow-lists, so this scans the source instead of a schema.
+describe('every environment read reaches the containers (#965)', () => {
+  // Read by the server-side source but deliberately not part of a deployment's configuration.
+  const NOT_FORWARDED = new Map([
+    [
+      'INIT_CWD',
+      'pnpm sets it to the directory the command ran in; the CLI resolves .env, CHANGELOG and --env-file paths from it. Compose and Helm run `am` directly, so no pnpm and no value.',
+    ],
+    ['AM_TOKEN', 'an input to the `am smoke` helper only (apps/server/src/ops/smoke.ts); the server itself never reads it.'],
+    ['AM_GIT_SHA', 'baked into the image by the Dockerfile (ARG GIT_SHA), so the build sets it, never the operator.'],
+    [
+      'CAMPAIGN_IDENTITY_SCOPE_LIMIT',
+      'a test-only override of the campaign identity scope bound (packages/campaigns/src/identity.ts); production never sets it.',
+    ],
+  ]);
+
+  // Credentials travel in the Secret the roles read through envFrom, not in the ConfigMap.
+  const HELM_SECRET_KEYS = new Map([
+    ['OTEL_EXPORTER_OTLP_HEADERS', 'a collector Authorization header is a credential'],
+    ['OTEL_EXPORTER_OTLP_TRACES_HEADERS', 'the trace-specific collector Authorization header'],
+  ]);
+
+  it('forwards every process.env read through Compose and the chart', async () => {
+    const reads = await processEnvReads();
+    // The scanner must find the reads this guard was written for, so a broken pattern cannot pass.
+    for (const key of ['OTEL_EXPORTER_OTLP_ENDPOINT', 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', ...HELM_SECRET_KEYS.keys()]) {
+      expect(reads.has(key), `${key} was not found in the server-side source`).toBe(true);
+    }
+
+    const composeKeys = new Set([...service(compose, 'app').matchAll(/^ {6}([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]));
+    const helmConfig = new Set([...helmSection(helmValues, 'config').matchAll(/^ {2}([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]));
+    const helmSecretExamples = new Set(
+      [...helmSection(helmValues, 'secrets').matchAll(/^ {2}#\s+([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]),
+    );
+
+    const missing: string[] = [];
+    for (const key of reads.keys()) {
+      if (NOT_FORWARDED.has(key)) continue;
+      if (!composeKeys.has(key)) missing.push(`docker-compose.yml app environment: ${key}`);
+      if (!helmConfig.has(key) && !HELM_SECRET_KEYS.has(key)) missing.push(`Helm config (or a documented Secret value): ${key}`);
+    }
+    expect(missing).toEqual([]);
+
+    // Every exception must still describe a real read, so the lists cannot rot into a blanket pass.
+    expect([...NOT_FORWARDED.keys()].filter((key) => !reads.has(key))).toEqual([]);
+    for (const key of HELM_SECRET_KEYS.keys()) {
+      expect(helmSecretExamples.has(key), `${key} must be documented under secrets.values`).toBe(true);
+    }
   });
 });
 

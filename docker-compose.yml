@@ -139,6 +139,11 @@ services:
       VALKEY_URL: redis://valkey:6379
       VALKEY_PREFIX: ${VALKEY_PREFIX:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-}
+      # OTLP header lists can carry an Authorization credential. `.env` stays on the host, so they
+      # are forwarded exactly like the other secrets here (#965).
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS:-}
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: ${OTEL_EXPORTER_OTLP_TRACES_HEADERS:-}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
       BACKUP_DIR: /backups
       BACKUP_VERIFY_MAX_AGE_DAYS: ${BACKUP_VERIFY_MAX_AGE_DAYS:-}

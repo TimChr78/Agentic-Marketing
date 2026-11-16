@@ -126,6 +126,8 @@ helm upgrade am deploy/helm/agentic-marketing --reuse-values \
 
 Alternatively, run `kubectl rollout restart deploy/am-agentic-marketing-api deploy/am-agentic-marketing-ingest deploy/am-agentic-marketing-worker deploy/am-agentic-marketing-scheduler` (use your release name). Do one of these for every Secret-only rotation, including `MASTER_KEY`, `METRICS_TOKEN` and a `KEY_PROVIDER` switch; otherwise the rotation silently does not take effect until the next unrelated rollout.
 
+**OTLP tracing.** Set `config.OTEL_EXPORTER_OTLP_ENDPOINT` to the collector (the exporter appends `/v1/traces`), or `config.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to use a traces URL exactly as given. A collector that wants an `Authorization` header takes it from the Secret instead of the ConfigMap: put `OTEL_EXPORTER_OTLP_HEADERS` (or its trace-specific `OTEL_EXPORTER_OTLP_TRACES_HEADERS`) in `secrets.values` or in the `secrets.existingSecret` you already manage, in the same `name=value,other=value` form `.env.example` documents. The header wins over credentials embedded in the endpoint URL, and a changed `secrets.values` rolls the four roles through the Secret checksum.
+
 ## Sizing
 
 Measured with `cli loadtest` on one 4-vCPU, 16 GB machine with everything on it (see the [wave 2 roadmap](../architecture/roadmap-wave-2.md#phase-10-scale-and-operations-the-original-phase-6)): 1M profiles refresh a segment in 2 to 34 seconds; the scheduler peaked at about 1.1 GB during a first refresh that moved 500,000 people. A starting point:
