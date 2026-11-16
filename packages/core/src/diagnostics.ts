@@ -55,6 +55,8 @@ export function redactCredentials(text: string): string {
   // A long camelCase credential key is replaced as a token by the rules below, after which its
   // value can no longer be told from any other text. So the plain value of such a key is replaced
   // first (#898); see redactLongKeyValues for why that cannot change what the rules below remove.
+  // The #937 passes do not run before the pipeline: they read its output only, so nothing they do
+  // can hide a value a released rule or pass would have removed.
   let out = applyRules(redactLongKeyValues(text));
   // Main's 0.14.23 passes converge first, on exactly the release's rules and qualifiers. Only then
   // do the #946/#956 additions run, so they can add redaction but can never consume a key main's
@@ -79,9 +81,11 @@ export function redactCredentials(text: string): string {
   };
   out = settleMain(out);
   for (let round = 0; round < 16; round += 1) {
-    const added = settleAdded(out);
-    if (added === out) break;
-    out = settleMain(added);
+    // The #937 passes that survive the rules run on the output of everything above, then main
+    // settles again so an addition that exposes a main match is still handled.
+    const shaped = redactSettledValueShapes(settleAdded(out));
+    if (shaped === out) break;
+    out = settleMain(shaped);
   }
   return out;
 }
@@ -608,6 +612,448 @@ function redactPrefixedCompoundKeys(text: string): string {
 function redactJoinedCompoundKeys(text: string): string {
   if (!/[A-Z]/.test(text)) return text;
   return redactCompoundRuns(text, joinedStart, isAddedProviderKey);
+}
+
+/**
+ * The value shapes #937 collects, as additive passes on the OUTPUT of the complete released
+ * pipeline (the 0.14.20 rules plus the 0.14.23/0.14.24 passes). Nothing here runs before them: each
+ * pass only replaces more of what the pipeline left behind, so it can never hide a value a released
+ * pass would have removed. Each pass reads the text once.
+ */
+const MAX_SHAPE_KEY_CHARS = 256;
+
+const isShapeNameChar = (char: string): boolean =>
+  (char >= 'a' && char <= 'z') ||
+  (char >= 'A' && char <= 'Z') ||
+  (char >= '0' && char <= '9') ||
+  char === '_' ||
+  char === '.' ||
+  char === '-';
+
+const isShapeNameStart = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
+
+/**
+ * A credential name as the rules and the compound classifier read it, plus this batch's own
+ * additions: a name that ENDS in a credential word (`token`, `api_key`, `X-Auth-Token`), a
+ * camelCase/PascalCase or all-capitals compound, a provider qualifier from #956, or a `Pwd`/`Pass`
+ * ending. Ending matters: `token_count` and `tokens_count` are ordinary counters.
+ */
+const PLAIN_CREDENTIAL_SUFFIX = new RegExp(`(?:${CREDENTIAL_KEY})$`, 'i');
+
+function isPwdPassKey(name: string): boolean {
+  const trimmed = withoutTrailingDigits(name);
+  if (trimmed.length > 4 && trimmed.endsWith('Pwd') && /[a-z0-9]/.test(trimmed.charAt(trimmed.length - 4))) return true;
+  if (trimmed.length > 5 && trimmed.endsWith('Pass') && /[a-z0-9]/.test(trimmed.charAt(trimmed.length - 5))) return true;
+  const parts = trimmed.split(/[_.-]+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  const last = parts[parts.length - 1]!.toLowerCase();
+  return last === 'pwd' || last === 'pass';
+}
+
+function isShapesCredentialKey(name: string): boolean {
+  return isCompoundCredentialKey(name) || isAddedProviderKey(name) || isPwdPassKey(name) || PLAIN_CREDENTIAL_SUFFIX.test(name);
+}
+
+interface ValueSpan {
+  start: number;
+  end: number;
+}
+
+/**
+ * Replaces each credential pair's value span with `replacement` (normally the marker; a marker
+ * remainder is removed instead). A candidate may start only where the previous one ended, so each
+ * suffix is read once, like a global regex's scan.
+ */
+function redactPairValues(
+  text: string,
+  separator: (text: string, nameEnd: number) => number,
+  valueSpan: (text: string, valueStart: number) => ValueSpan | null,
+  accept: (name: string) => boolean = isShapesCredentialKey,
+  replacement = '[redacted]',
+): string {
+  let out = '';
+  let copied = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (!isShapeNameStart(text.charAt(index))) {
+      index += 1;
+      continue;
+    }
+    let nameEnd = index + 1;
+    while (nameEnd < text.length && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
+    // The separator is the cheap test and almost no word has one; classify only then, so a long
+    // text of ordinary words does not run the name classifier for each of them.
+    const valueStart = separator(text, nameEnd);
+    if (valueStart < 0) {
+      index = nameEnd;
+      continue;
+    }
+    const name = text.slice(index, nameEnd);
+    if (name.length > MAX_SHAPE_KEY_CHARS || !accept(name)) {
+      index = nameEnd;
+      continue;
+    }
+    const span = valueSpan(text, valueStart);
+    if (!span || span.end <= span.start) {
+      index = nameEnd;
+      continue;
+    }
+    const value = text.slice(span.start, span.end);
+    if (value === '[redacted]' || PLAIN_LITERAL.test(value)) {
+      index = nameEnd;
+      continue;
+    }
+    out += text.slice(copied, span.start) + replacement;
+    copied = span.end;
+    index = Math.max(span.end, nameEnd);
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/** The end of the line a value started on. */
+function lineEnd(text: string, start: number): number {
+  const newline = text.indexOf('\n', start);
+  return newline < 0 ? text.length : newline;
+}
+
+const isWordChar = (char: string): boolean =>
+  (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char === '_';
+
+/**
+ * The first position in [from, to) that another pass needs as an anchor: a credential key followed
+ * by `:`/`=` or an Authorization scheme word. A remainder pass must not consume one, because the
+ * key's value (or the scheme's token) would then never be redacted. The scan covers the WHOLE span
+ * the caller asks about, so a long run cannot hide an anchor past a fixed lookahead.
+ */
+function shapeAnchor(text: string, from: number, to: number): number {
+  const limit = Math.min(text.length, to);
+  let index = from;
+  while (index < limit) {
+    const char = text.charAt(index);
+    if ((char === 'b' || char === 'B') && (index === 0 || !isWordChar(text.charAt(index - 1)))) {
+      const word = text.slice(index, Math.min(limit, index + 7)).toLowerCase();
+      if (word.startsWith('bearer') && isSpace(text.charAt(index + 6))) return index;
+      if (word.startsWith('basic') && isSpace(text.charAt(index + 5))) return index;
+    }
+    if (!isShapeNameStart(char)) {
+      index += 1;
+      continue;
+    }
+    let nameEnd = index + 1;
+    while (nameEnd < limit && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
+    if (separatorEnd(text, nameEnd, false) >= 0) {
+      const name = text.slice(index, nameEnd);
+      if (name.length <= MAX_SHAPE_KEY_CHARS && isShapesCredentialKey(name)) return index;
+    }
+    index = nameEnd;
+  }
+  return -1;
+}
+
+const MARKER = '[redacted]';
+
+/**
+ * A short Authorization value under a key: `authToken=Bearer abc`, `password: Basic xyz`. The
+ * scheme rule needs six characters, so a short token is left behind; the scheme word is kept and
+ * only the token after it is replaced.
+ */
+function schemeValueSpan(text: string, start: number): ValueSpan | null {
+  let index = start;
+  let schemes = 0;
+  for (;;) {
+    SCHEME_START.lastIndex = index;
+    const scheme = SCHEME_START.exec(text);
+    if (!scheme) break;
+    index += scheme[0].length;
+    schemes += 1;
+    while (isSpace(text.charAt(index))) index += 1;
+  }
+  if (schemes === 0) return null;
+  const end = pairValueEnd(text, index);
+  return end < 0 ? null : { start: index, end };
+}
+
+function redactShortSchemeValues(text: string): string {
+  if (!/bearer|basic/i.test(text)) return text;
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), schemeValueSpan);
+}
+
+const ESCAPED_QUOTE = '\\"';
+
+/**
+ * JSON written inside a string, where every quote is escaped: `{\"password\":\"x\"}`. The rules do
+ * not recognise the key because an escaped quote sits where the separator starts, so this reads
+ * `\"name\"`, the colon and the `\"value\"` pair by hand. Only the value between the escaped quotes
+ * is replaced; the rest of the text keeps its escapes.
+ */
+function redactEscapedJsonPairs(text: string): string {
+  if (!text.includes(ESCAPED_QUOTE)) return text;
+  let out = '';
+  let copied = 0;
+  let index = 0;
+  while (index < text.length) {
+    const open = text.indexOf(ESCAPED_QUOTE, index);
+    if (open < 0) break;
+    const nameStart = open + ESCAPED_QUOTE.length;
+    let nameEnd = nameStart;
+    while (nameEnd < text.length && isRunChar(text.charAt(nameEnd))) nameEnd += 1;
+    const name = text.slice(nameStart, nameEnd);
+    if (
+      name.length === 0 ||
+      name.length > MAX_SHAPE_KEY_CHARS ||
+      !isShapesCredentialKey(name) ||
+      !text.startsWith(ESCAPED_QUOTE, nameEnd)
+    ) {
+      index = nameStart;
+      continue;
+    }
+    let cursor = nameEnd + ESCAPED_QUOTE.length;
+    while (isSpace(text.charAt(cursor))) cursor += 1;
+    if (text.charAt(cursor) !== ':') {
+      index = nameStart;
+      continue;
+    }
+    cursor += 1;
+    while (isSpace(text.charAt(cursor))) cursor += 1;
+    if (!text.startsWith(ESCAPED_QUOTE, cursor)) {
+      index = nameStart;
+      continue;
+    }
+    const valueStart = cursor + ESCAPED_QUOTE.length;
+    const close = text.indexOf(ESCAPED_QUOTE, valueStart);
+    if (close < 0) {
+      index = valueStart;
+      continue;
+    }
+    const value = text.slice(valueStart, close);
+    if (value === '[redacted]' || PLAIN_LITERAL.test(value)) {
+      index = close + ESCAPED_QUOTE.length;
+      continue;
+    }
+    out += `${text.slice(copied, valueStart)}[redacted]`;
+    copied = close;
+    index = close + ESCAPED_QUOTE.length;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/** The end of a name run that may carry percent-encoded characters, stopping at an encoded separator. */
+function urlNameEnd(text: string, start: number): number {
+  let index = start;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (isShapeNameChar(char)) {
+      index += 1;
+      continue;
+    }
+    if (char === '%' && index + 2 < text.length) {
+      const hex = text.slice(index + 1, index + 3).toLowerCase();
+      if (hex === '3d' || hex === '3a') break;
+      // Only an encoded NAME character continues the run; `%22` and the other delimiters end it.
+      if (/^[0-9a-f]{2}$/.test(hex) && isShapeNameChar(String.fromCharCode(Number.parseInt(hex, 16)))) {
+        index += 3;
+        continue;
+      }
+    }
+    break;
+  }
+  return index;
+}
+
+/** The name with its `%XX` sequences decoded, so only the matching sees the readable letters. */
+function decodeUrlName(name: string): string {
+  let out = '';
+  for (let index = 0; index < name.length; index += 1) {
+    const char = name.charAt(index);
+    if (char === '%' && index + 2 < name.length && /^[0-9a-f]{2}$/i.test(name.slice(index + 1, index + 3))) {
+      out += String.fromCharCode(Number.parseInt(name.slice(index + 1, index + 3), 16));
+      index += 2;
+      continue;
+    }
+    out += char;
+  }
+  return out;
+}
+
+/** The next `%XX` at or after `from`, compared case-insensitively (`hex` is two digits), or -1. */
+function indexOfEncoded(text: string, hex: string, from: number): number {
+  let index = from;
+  while (index + 2 < text.length) {
+    if (text.charAt(index) === '%' && text.slice(index + 1, index + 3).toLowerCase() === hex) return index;
+    index += 1;
+  }
+  return -1;
+}
+
+/** A bare URL-encoded value ends at an encoded or plain delimiter. */
+function urlValueEnd(text: string, start: number): number {
+  if (text.startsWith('[redacted]', start)) return start + '[redacted]'.length;
+  let index = start;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (isSpace(char) || '&,;}]"\''.includes(char)) break;
+    if (char === '%') {
+      const hex = text.slice(index + 1, index + 3).toLowerCase();
+      if (hex === '26' || hex === '3b' || hex === '2c' || hex === '7d' || hex === '5d' || hex === '22' || hex === '27') break;
+      if (/^[0-9a-f]{2}$/.test(hex)) {
+        index += 3;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return index > start ? index : -1;
+}
+
+/**
+ * URL-encoded pairs: `password%3Dsecret`, `token%22%3A%22abc`, and `api%5Fkey=`, whose NAME is
+ * encoded but whose separator is not. The name is decoded only to decide whether it is a
+ * credential; the text keeps its encoding and only the value is replaced.
+ */
+function redactUrlEncodedPairs(text: string): string {
+  if (!text.includes('%')) return text;
+  let out = '';
+  let copied = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (!isShapeNameStart(text.charAt(index))) {
+      index += 1;
+      continue;
+    }
+    const nameEnd = urlNameEnd(text, index);
+    const name = decodeUrlName(text.slice(index, nameEnd));
+    if (name.length > MAX_SHAPE_KEY_CHARS || !isShapesCredentialKey(name)) {
+      index = nameEnd;
+      continue;
+    }
+    const quoted = text.slice(nameEnd, nameEnd + 9).toLowerCase();
+    const encoded = text.slice(nameEnd, nameEnd + 3).toLowerCase();
+    let valueStart: number;
+    let valueEnd: number;
+    if (quoted === '%22%3a%22' || quoted === '%22%3d%22') {
+      valueStart = nameEnd + 9;
+      const close = indexOfEncoded(text, '22', valueStart);
+      valueEnd = close < 0 ? lineEnd(text, valueStart) : close;
+    } else if (encoded === '%3d' || encoded === '%3a') {
+      valueStart = nameEnd + 3;
+      valueEnd = urlValueEnd(text, valueStart);
+    } else {
+      valueStart = separatorEnd(text, nameEnd, true);
+      valueEnd = valueStart < 0 ? -1 : pairValueEnd(text, valueStart);
+    }
+    if (valueStart < 0 || valueEnd <= valueStart) {
+      index = Math.max(nameEnd, valueStart);
+      continue;
+    }
+    const value = text.slice(valueStart, valueEnd);
+    if (value === '[redacted]' || PLAIN_LITERAL.test(value)) {
+      index = Math.max(valueEnd, nameEnd);
+      continue;
+    }
+    out += `${text.slice(copied, valueStart)}[redacted]`;
+    copied = valueEnd;
+    index = Math.max(valueEnd, nameEnd);
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/**
+ * `userPwd`, `dbPwd`, `dbPass`, `user_pass`: a `Pwd`/`Pass` ending the name after a camel boundary
+ * or a separator. The rules do not know the abbreviation, so this pass carries its own classifier
+ * (`isPwdPassKey`) and never widens the rules' one. A bare `pass` or `bypass` is an ordinary word
+ * and is not matched.
+ */
+function redactPwdKeys(text: string): string {
+  if (!/[a-z0-9](?:Pwd|Pass)/.test(text) && !/[_.-](?:pwd|pass)(?![A-Za-z0-9])/i.test(text)) return text;
+  const span = (value: string, start: number): ValueSpan | null => {
+    SCHEME_START.lastIndex = start;
+    if (SCHEME_START.test(value)) return null;
+    const end = pairValueEnd(value, start);
+    return end < 0 ? null : { start, end };
+  };
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), span, isPwdPassKey);
+}
+
+/**
+ * The end of the run ATTACHED to a marker: quoted fragments with their escapes and the `:`/`,`
+ * directly between them (`"v":"x"`, `"a","b"`), or one bare token (`shortpw`). It stops at
+ * whitespace (so `[redacted] "status":"ok"` is not glue), a closing bracket and at field
+ * punctuation (`&`, `;`), so `?token=[redacted]&x=1` keeps its next field. It reads the whole run in
+ * one scan, so a marker with many fragments reaches its fixed point in a single call.
+ */
+function gluedRunEnd(text: string, start: number): number {
+  let index = start;
+  let afterQuote = false;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (char === '"' || char === "'") {
+      const end = pairValueEnd(text, index);
+      if (end < 0) break;
+      index = end;
+      afterQuote = true;
+      continue;
+    }
+    if (afterQuote) {
+      if (char !== ':' && char !== ',') break;
+      const next = text.charAt(index + 1);
+      if (next !== '"' && next !== "'") break;
+      index += 1;
+      afterQuote = false;
+      continue;
+    }
+    if (isSpace(char) || char === ']' || char === '}' || '&;=,:'.includes(char)) break;
+    index += 1;
+  }
+  return index;
+}
+
+/**
+ * A value the released pipeline replaced only in part, with the rest glued to the marker:
+ * `token=[redacted]shortpw`, `{"token":[redacted]"shortpw"]}`, `{"secret":[redacted]"v":"x"}}`,
+ * `SIGNINGKEY=[redacted]'x'`. Only the attached run is removed, in one scan; it stops before a
+ * credential key or scheme anchor, which a later pass still needs.
+ */
+function gluedMarkerSpan(text: string, valueStart: number): ValueSpan | null {
+  if (!text.startsWith(MARKER, valueStart)) return null;
+  const start = valueStart + MARKER.length;
+  const char = text.charAt(start);
+  if (char === '' || isSpace(char) || char === ']' || char === '}') return null;
+  let end = gluedRunEnd(text, start);
+  const anchor = shapeAnchor(text, start, end);
+  if (anchor >= 0) end = anchor;
+  return end > start ? { start, end } : null;
+}
+
+/** Whether a marker is immediately followed by something glued (`\` starts escaped JSON, not glue). */
+function hasGluedMarker(text: string): boolean {
+  let index = 0;
+  for (;;) {
+    const marker = text.indexOf(MARKER, index);
+    if (marker < 0) return false;
+    const char = text.charAt(marker + MARKER.length);
+    if (char !== '' && char !== '\\' && !isSpace(char) && char !== ']' && char !== '}') return true;
+    index = marker + 1;
+  }
+}
+
+function redactMarkerGlue(text: string): string {
+  if (!hasGluedMarker(text)) return text;
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), gluedMarkerSpan, isShapesCredentialKey, '');
+}
+
+/**
+ * Every #937 pass, on the released pipeline's output. Each reads the text once, reaches its fixed
+ * point in that one call, and only replaces more of what the pipeline left. The typographic-quote,
+ * `=>` and PEM shapes are deliberately absent: their post-pipeline text has lost the evidence they
+ * need (see the pull request and the skipped-shape tests).
+ */
+function redactSettledValueShapes(text: string): string {
+  let out = redactShortSchemeValues(text);
+  out = redactEscapedJsonPairs(out);
+  out = redactUrlEncodedPairs(out);
+  out = redactPwdKeys(out);
+  out = redactMarkerGlue(out);
+  return out;
 }
 
 /**
