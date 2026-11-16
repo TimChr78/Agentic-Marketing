@@ -299,9 +299,15 @@ function report(result: CleanResult) {
   }
 }
 
+/** The arguments after dropping npm/pnpm's `--` separator. */
+export function parseCleanArgs(argv: readonly string[]): string[] {
+  return argv.filter((arg) => arg !== '--');
+}
+
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
 if (import.meta.url === invokedPath) {
-  const args = process.argv.slice(2);
+  // `pnpm test:clean -- --templates` forwards the `--` separator; it is not an argument (#987 review).
+  const args = parseCleanArgs(process.argv.slice(2));
   const known = new Set(['--all-stale', '--templates']);
   const unknown = args.filter((arg) => !known.has(arg));
   if (unknown.length > 0) {

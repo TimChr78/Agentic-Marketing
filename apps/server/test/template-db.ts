@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,8 +49,26 @@ export const STALE_RUN_DATABASE_MS = 6 * 60 * 60 * 1000;
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const MIGRATIONS_DIR = join(REPO_ROOT, 'packages/db/migrations');
 
-/** Source files whose behaviour shapes the template: the migrator/role setup and the auth schema. */
-const RECIPE_FILES = ['packages/db/src/migrate.ts', 'packages/auth/src/index.ts'];
+/**
+ * Source inputs whose behaviour shapes the template: the migrator and role setup, the whole auth
+ * package source (`migrateAuth` → `authOptions` reads plugin modules such as `sso.ts`, which add
+ * columns), and the lockfile, which pins every schema-producing dependency (Better Auth and its SSO,
+ * MCP/OAuth and CIMD plugins). A directory entry stands for every file under it (#987 review).
+ */
+const RECIPE_FILES = ['packages/db/src/migrate.ts', 'packages/auth/src', 'pnpm-lock.yaml'];
+
+/** Expands directory entries to the sorted list of files under them, relative to the repository root. */
+export function recipeFiles(entries: readonly string[] = RECIPE_FILES): string[] {
+  const out: string[] = [];
+  const visit = (relative: string) => {
+    const absolute = resolve(REPO_ROOT, relative);
+    if (statSync(absolute).isDirectory()) {
+      for (const entry of readdirSync(absolute).sort()) visit(join(relative, entry));
+    } else out.push(relative);
+  };
+  for (const entry of entries) visit(entry);
+  return out.sort();
+}
 
 /** Whether a database is a template, including the old run-scoped `am_<run>_test_template` names. */
 export function isTemplateDatabase(name: string): boolean {
@@ -101,7 +119,7 @@ export function templateFingerprint(options: TemplateFingerprintOptions = {}): s
     .filter((entry) => entry.endsWith('.sql'))
     .sort())
     add(`migration:${name}`, readFileSync(join(migrationsDir, name), 'utf8'));
-  for (const file of [...files].sort()) add(`file:${file}`, readFileSync(resolve(REPO_ROOT, file), 'utf8'));
+  for (const file of recipeFiles(files)) add(`file:${file}`, readFileSync(resolve(REPO_ROOT, file), 'utf8'));
   for (const [name, version] of Object.entries(versions).sort(([a], [b]) => a.localeCompare(b))) add(`version:${name}`, version);
   add('role:appRole', role.appRole);
   add('role:appRolePassword', role.appRolePassword);

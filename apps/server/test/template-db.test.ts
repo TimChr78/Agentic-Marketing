@@ -12,6 +12,7 @@ import {
   ensureTemplateDatabase,
   hasTestStackMarker,
   quoteIdent,
+  recipeFiles,
   sweepRunDatabases,
   templateDatabaseName,
   templateFingerprint,
@@ -35,6 +36,18 @@ async function connect() {
 
 afterAll(async () => {
   await Promise.all(clients.map((client) => client.end().catch(() => {})));
+});
+
+describe('the template recipe inputs (#987 review)', () => {
+  it('fingerprints the whole auth source and the lockfile, not only named files', () => {
+    const files = recipeFiles();
+    // migrateAuth → authOptions reads plugin modules such as sso.ts, which add auth columns.
+    expect(files).toContain('packages/auth/src/sso.ts');
+    expect(files).toContain('packages/auth/src/index.ts');
+    expect(files).toContain('packages/db/src/migrate.ts');
+    // The lockfile pins every schema-producing dependency (Better Auth and its plugins).
+    expect(files).toContain('pnpm-lock.yaml');
+  });
 });
 
 describe('the template database', () => {
