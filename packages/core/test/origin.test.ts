@@ -131,6 +131,20 @@ describe('a wildcard entry normalises its default port (#943)', () => {
     expect(matches('https://192.168.evil.com', 'https://192.168.*.*:443')).toBe(false);
   });
 
+  it('normalises a port with leading zeros, as `URL` does for an exact entry', () => {
+    expect(matches('https://a.example.com', 'https://*.example.com:0443')).toBe(true);
+    expect(matches('https://a.example.com:443', 'https://*.example.com:0443')).toBe(true);
+    expect(matches('https://a.example.com:8443', 'https://*.example.com:08443')).toBe(true);
+    expect(matches('https://a.example.com', 'https://*.example.com:08443')).toBe(false);
+    expect(matches('http://a.example.com', 'http://*.example.com:080')).toBe(true);
+    expect(matches('http://a.example.com:8080', 'http://*.example.com:08080')).toBe(true);
+    expect(matches('https://192.168.1.5', 'https://192.168.*.*:0443')).toBe(true);
+    // The wildcard port is not a number and stays exactly as written.
+    expect(matches('https://a.example.com:8443', 'https://*.example.com:*')).toBe(true);
+    expect(matches('https://a.example.com:8443', 'https://*.example.com:8*')).toBe(true);
+    expect(matches('https://a.example.com:8443', 'https://*.example.com:9*')).toBe(false);
+  });
+
   it('leaves a host-only pattern unchanged', () => {
     expect(matches('https://a.example.com', '*.example.com')).toBe(true);
     expect(matches('https://a.example.com', '*.example.com/')).toBe(true);
@@ -151,6 +165,15 @@ describe('a wildcard entry is normalised in its spelling only', () => {
 });
 
 describe('matching is bounded', () => {
+  it('refuses a candidate origin that carries a wildcard character', () => {
+    // A candidate is never a pattern: `new URL` keeps `*` and decodes `%2a` to `*`, so a request
+    // could otherwise have its own Origin returned as an entry another matcher compiles (#947).
+    expect(matches('https://*.*.*.*.example.com', 'https://*.example.com')).toBe(false);
+    expect(matches('https://*.example.com', 'https://*.example.com')).toBe(false);
+    expect(matches('https://a?.example.com', 'https://*.example.com')).toBe(false);
+    expect(matches('https://%2a.example.com', 'https://*.example.com')).toBe(false);
+  });
+
   it('refuses an Origin header longer than any browser sends', () => {
     const long = `https://${'a'.repeat(MAX_ORIGIN_LENGTH)}.example.com`;
     expect(long.length).toBeGreaterThan(MAX_ORIGIN_LENGTH);

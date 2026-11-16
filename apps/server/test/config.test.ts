@@ -73,6 +73,23 @@ describe('configuration', () => {
     expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://192.168.*.*:*' })).not.toThrow();
   });
 
+  // #947 review: Better Auth appends BETTER_AUTH_TRUSTED_ORIGINS verbatim, outside the bounded
+  // matcher, so a wildcard in it would reintroduce the RegExp this release removes. Refuse it at
+  // start-up rather than let it through.
+  it('refuses a wildcard in BETTER_AUTH_TRUSTED_ORIGINS (#947)', () => {
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: 'https://*.example.com' })).toThrow(
+      /BETTER_AUTH_TRUSTED_ORIGINS entry "https:\/\/\*\.example\.com" has a wildcard/,
+    );
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: 'https://?.example.com' })).toThrow(/has a wildcard/);
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: 'https://app.example.com,https://*.example.com' })).toThrow(
+      /BETTER_AUTH_TRUSTED_ORIGINS entry "https:\/\/\*\.example\.com"/,
+    );
+    // An exact entry is safe: Better Auth compares it verbatim, compiling nothing.
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: 'https://app.example.com' })).not.toThrow();
+    // Compose passes an unset variable as an empty string, which is not an entry.
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: '' })).not.toThrow();
+  });
+
   it('accepts a percent-encoded password in DATABASE_URL (#647)', () => {
     const c = loadConfig({ ...base, DATABASE_URL: 'postgres://am:abc%2Fdef@postgres:5432/am' });
     // The app role replaces the owner credentials, and the URL setter encodes them.
