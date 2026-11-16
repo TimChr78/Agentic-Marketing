@@ -63,7 +63,7 @@ describe('the template database', () => {
       migrationsDir: migrations,
       files: [recipe],
       versions: { 'better-auth': '1.0.0' },
-      role: { appRole: 'am_app_test', appRolePassword: 'secret' },
+      role: { appRole: 'am_app_test' },
     };
 
     try {
@@ -88,7 +88,7 @@ describe('the template database', () => {
       writeFileSync(recipe, 'export const recipe = 1;\n');
 
       expect(templateFingerprint({ ...options, versions: { 'better-auth': '1.0.1' } }), 'the Better Auth version').not.toBe(base);
-      expect(templateFingerprint({ ...options, role: { appRole: 'other', appRolePassword: 'secret' } }), 'the app role').not.toBe(base);
+      expect(templateFingerprint({ ...options, role: { appRole: 'other' } }), 'the app role').not.toBe(base);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -99,7 +99,8 @@ export interface TemplateFingerprintOptions {
   /** Version inputs that shape the schema but are no repository file. */
   versions?: Record<string, string>;
   /** The migration role the template is built for. */
-  role?: { appRole: string; appRolePassword: string };
+  /** Only the role name: grants in the template name it. Its password lives in the cluster-wide role, not the template. */
+  role?: { appRole: string };
 }
 
 /**
@@ -111,7 +112,7 @@ export function templateFingerprint(options: TemplateFingerprintOptions = {}): s
   const migrationsDir = options.migrationsDir ?? MIGRATIONS_DIR;
   const files = options.files ?? RECIPE_FILES;
   const versions = options.versions ?? { 'better-auth': betterAuthVersion() };
-  const role = options.role ?? { appRole: '', appRolePassword: '' };
+  const role = options.role ?? { appRole: '' };
   const hash = createHash('sha256');
   const add = (label: string, value: string) => hash.update(`${label}\0${value}\0`);
 
@@ -122,7 +123,6 @@ export function templateFingerprint(options: TemplateFingerprintOptions = {}): s
   for (const file of recipeFiles(files)) add(`file:${file}`, readFileSync(resolve(REPO_ROOT, file), 'utf8'));
   for (const [name, version] of Object.entries(versions).sort(([a], [b]) => a.localeCompare(b))) add(`version:${name}`, version);
   add('role:appRole', role.appRole);
-  add('role:appRolePassword', role.appRolePassword);
 
   return hash.digest('hex').slice(0, 12);
 }
