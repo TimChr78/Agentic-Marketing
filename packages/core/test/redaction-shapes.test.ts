@@ -1,124 +1,86 @@
 import { describe, expect, it } from 'vitest';
 import { redactCredentials } from '../src/diagnostics';
 
-// #937: the value shapes the 0.14.20-0.14.24 rules do not consume. Every case here is a shape the
-// issue lists, plus the negative cases that must keep their text.
+// #937: the value shapes the released rules leave behind. Every case here is a shape the issue
+// lists, plus the negative cases that must keep their text and the shapes a post-pass cannot take
+// safely (documented here and in the pull request).
 
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
 
-describe('a credential pair nested in another pair (#937)', () => {
-  it('replaces the whole nested pair', () => {
-    expect(redactCredentials(`SIGNINGKEY=AZUREOPENAIKEY='${SECRET}'`)).toBe('SIGNINGKEY=[redacted]');
-    expect(redactCredentials(`AZUREOPENAIKEY=apiSecret='${SECRET}'`)).toBe('AZUREOPENAIKEY=[redacted]');
-    expect(redactCredentials(`authToken=apiSecret="${SECRET}"`)).toBe('authToken=[redacted]');
+const idempotent = (input: string): string => {
+  const once = redactCredentials(input);
+  expect(redactCredentials(once), input).toBe(once);
+  return once;
+};
+
+describe('a structured value under a credential key (#937)', () => {
+  // The released pipeline takes the opening bracket as the value and leaves the rest glued to the
+  // marker; the marker-glue pass removes that remainder. The closing brackets it does not need stay.
+  it('removes an array value', () => {
+    expect(idempotent(`{"token":["${SECRET}"]}`)).toBe('{"token":[redacted]]}');
+    expect(idempotent(`{"token":["${SECRET}","more"]}`)).toBe('{"token":[redacted]]}');
+    expect(idempotent(`token=[${SECRET}]`)).toBe('token=[redacted]]');
   });
 
-  it('leaves ordinary quoted values alone', () => {
-    for (const input of [`entryKey='ascending'`, `sortKey="asc"`, `note='x'`]) expect(redactCredentials(input), input).toBe(input);
+  it('removes an object value', () => {
+    expect(idempotent(`{"secret":{"v":"${SECRET}"}}`)).toBe('{"secret":[redacted]}}');
+    expect(idempotent(`password={"v":"${SECRET}"}`)).toBe('password=[redacted]}');
+  });
+
+  it('does not stop at brackets inside a quoted string', () => {
+    expect(idempotent(`{"token":["a]b","${SECRET}"]}`)).toBe('{"token":[redacted]]}');
+    expect(idempotent(`{"token":{"note":"}","v":"${SECRET}"}}`)).toBe('{"token":[redacted]}}');
+  });
+
+  it('removes an unbalanced value', () => {
+    expect(idempotent(`{"token":["${SECRET}"`)).toBe('{"token":[redacted]');
+    expect(idempotent(`{"token":["${SECRET}",\n"next":1`)).toBe('{"token":[redacted],\n"next":1');
+  });
+
+  it('leaves ordinary JSON and counters alone', () => {
+    for (const input of ['{"a":["b"],"c":{"d":"e"}}', '{"tokens": 1234}', '{"tokenCount": 12}', 'the list [1,2,3] was returned'])
+      expect(idempotent(input), input).toBe(input);
   });
 });
 
 describe('text glued to an existing marker (#937)', () => {
-  it('removes the text after the marker', () => {
-    expect(redactCredentials(`token=[redacted]${SECRET}`)).toBe('token=[redacted]');
-    expect(redactCredentials(`token=[redacted]${SECRET} more`)).toBe('token=[redacted] more');
+  it('removes the whole glued run in one scan', () => {
+    expect(idempotent(`token=[redacted]${SECRET}`)).toBe('token=[redacted]');
+    expect(idempotent(`token=[redacted]${SECRET} more`)).toBe('token=[redacted] more');
+    expect(idempotent("token=[redacted]'x''y''z'")).toBe('token=[redacted]');
+  });
+
+  it('reaches the fixed point with 17, 100 and 10,000 fragments in one call', () => {
+    for (const count of [17, 100, 10_000]) {
+      const input = `token=[redacted]${"'x'".repeat(count - 1)}'${SECRET}'`;
+      expect(idempotent(input), `fragments ${count}`).toBe('token=[redacted]');
+    }
+  });
+
+  it('stops before a credential key it must not consume', () => {
+    expect(idempotent(`token=[redacted]apiSecret="${SECRET}"`)).toBe('token=[redacted]apiSecret=[redacted]');
   });
 
   it('leaves a finished marker alone', () => {
-    for (const input of ['token=[redacted]', 'token=[redacted], next', 'token=[redacted]\nnext'])
-      expect(redactCredentials(input), input).toBe(input);
+    for (const input of ['token=[redacted]', 'token=[redacted]\nnext']) expect(idempotent(input), input).toBe(input);
   });
 });
 
-describe('a Pwd or Pass camel ending (#937)', () => {
-  it('replaces the value of a Pwd or Pass key', () => {
-    expect(redactCredentials(`userPwd=${SECRET}`)).toBe('userPwd=[redacted]');
-    expect(redactCredentials(`dbPwd: ${SECRET}`)).toBe('dbPwd: [redacted]');
-    expect(redactCredentials(`dbPass="${SECRET}"`)).toBe('dbPass=[redacted]');
-    expect(redactCredentials(`user_pwd=${SECRET}`)).toBe('user_pwd=[redacted]');
-    expect(redactCredentials(`db-pass=${SECRET}`)).toBe('db-pass=[redacted]');
+describe('a credential pair nested in another pair (#937)', () => {
+  it('replaces the whole nested pair', () => {
+    expect(idempotent(`SIGNINGKEY=AZUREOPENAIKEY='${SECRET}'`)).toBe('SIGNINGKEY=[redacted]');
+    expect(idempotent(`AZUREOPENAIKEY=apiSecret='${SECRET}'`)).toBe('AZUREOPENAIKEY=[redacted]');
+    expect(idempotent(`authToken=apiSecret="${SECRET}"`)).toBe('authToken=[redacted]');
   });
 
-  it('leaves ordinary pass and pwd words alone', () => {
-    for (const input of ['pass=2', 'bypass=on', 'compass=123', 'surpass=true', 'passwordPolicy=strict'])
-      expect(redactCredentials(input), input).toBe(input);
-  });
-});
-
-describe('escaped JSON inside a string (#937)', () => {
-  it('replaces the escaped value', () => {
-    expect(redactCredentials(`{\\"password\\":\\"${SECRET}\\"}`)).toBe('{\\"password\\":\\"[redacted]\\"}');
-    expect(redactCredentials(`\\"token\\":\\"${SECRET}\\"`)).toBe('\\"token\\":\\"[redacted]\\"');
-    expect(redactCredentials(`\\"apiSecret\\": \\"${SECRET}\\"`)).toBe('\\"apiSecret\\": \\"[redacted]\\"');
-  });
-
-  it('leaves ordinary escaped JSON and prose alone', () => {
-    for (const input of ['{\\"note\\":\\"x\\"}', 'a \\"quoted\\" word', '\\"tokens\\":1234'])
-      expect(redactCredentials(input), input).toBe(input);
-  });
-});
-
-describe('URL-encoded pairs (#937)', () => {
-  it('replaces the value of an encoded pair', () => {
-    expect(redactCredentials(`password%3D${SECRET}`)).toBe('password%3D[redacted]');
-    expect(redactCredentials(`a=1&password%3D${SECRET}&b=2`)).toBe('a=1&password%3D[redacted]&b=2');
-    expect(redactCredentials(`token%22%3A%22${SECRET}`)).toBe('token%22%3A%22[redacted]');
-    expect(redactCredentials(`token%22%3A%22${SECRET}%22`)).toBe('token%22%3A%22[redacted]%22');
-  });
-
-  it('decodes an encoded name only to match it', () => {
-    expect(redactCredentials(`api%5Fkey=${SECRET}`)).toBe('api%5Fkey=[redacted]');
-    expect(redactCredentials(`apiSecret%3D${SECRET}`)).toBe('apiSecret%3D[redacted]');
-  });
-
-  it('leaves ordinary encoded text alone', () => {
-    for (const input of ['progress%3D50', '100%25done', 'the%20query%20was%20empty', 'note%3Dhello'])
-      expect(redactCredentials(input), input).toBe(input);
-  });
-});
-
-describe('a PEM private key block (#937)', () => {
-  const block = (name: string, body: string): string => `-----BEGIN ${name}-----\n${body}\n-----END ${name}-----`;
-
-  it('replaces the whole block, with or without a credential key', () => {
-    expect(redactCredentials(block('PRIVATE KEY', SECRET))).toBe('[redacted]');
-    expect(redactCredentials(block('RSA PRIVATE KEY', SECRET))).toBe('[redacted]');
-    expect(redactCredentials(`password=${block('EC PRIVATE KEY', SECRET)}`)).toBe('password=[redacted]');
-    expect(redactCredentials(`see ${block('OPENSSH PRIVATE KEY', SECRET)} here`)).toBe('see [redacted] here');
-  });
-
-  it('replaces an unterminated block to the end of the text', () => {
-    expect(redactCredentials(`-----BEGIN PRIVATE KEY-----\n${SECRET}`)).toBe('[redacted]');
-  });
-
-  it('leaves public blocks and prose alone', () => {
-    for (const input of [block('CERTIFICATE', SECRET), block('PUBLIC KEY', SECRET), 'the header -----BEGIN CERTIFICATE----- is public'])
-      expect(redactCredentials(input), input).toBe(input);
-  });
-});
-
-describe('`=>` as the separator (#937)', () => {
-  it('replaces the value after the arrow', () => {
-    expect(redactCredentials(`'password' => '${SECRET}'`)).toBe("'password' [redacted]");
-    expect(redactCredentials(`:password => "${SECRET}"`)).toBe(':password [redacted]');
-    expect(redactCredentials(`token => '${SECRET} with spaces'`)).toBe('token [redacted]');
-    expect(redactCredentials(`apiSecret => ${SECRET}`)).toBe('apiSecret [redacted]');
-  });
-
-  it('replaces a nested pair after the arrow whole', () => {
-    const out = redactCredentials(`'password' => organizationSecondaryAuthToken="${SECRET}"`);
-    expect(out).not.toContain(SECRET);
-  });
-
-  it('leaves an arrow without a credential key alone', () => {
-    for (const input of ['result => value', 'const f = (a) => a + 1', 'callback => response', 'entryKey => ascending'])
-      expect(redactCredentials(input), input).toBe(input);
+  it('leaves ordinary quoted values alone', () => {
+    for (const input of [`entryKey='ascending'`, `sortKey="asc"`, `note='x'`]) expect(idempotent(input), input).toBe(input);
   });
 });
 
 describe('a typographic-quoted value under a credential key (#937)', () => {
-  it('replaces the whole quoted value in every quote pair', () => {
+  it('removes the remainder in every quote pair', () => {
     const pairs: [string, string][] = [
       ['\u201c', '\u201d'],
       ['\u2018', '\u2019'],
@@ -126,56 +88,116 @@ describe('a typographic-quoted value under a credential key (#937)', () => {
       ['\u201e', '\u201c'],
       ['\u2039', '\u203a'],
     ];
-    for (const [open, close] of pairs)
-      expect(redactCredentials(`token: ${open}${SECRET} with spaces${close}`), open).toBe('token: [redacted]');
+    for (const [open, close] of pairs) expect(idempotent(`token: ${open}${SECRET} with spaces${close}`), open).toBe('token: [redacted]');
   });
 
-  it('stops at the end of the line for an unterminated quote', () => {
-    expect(redactCredentials(`token: \u201c${SECRET}\nnext line`)).toBe('token: [redacted]\nnext line');
+  it('skips an unterminated quote with spaces, leaving the released output (#937 follow-up)', () => {
+    // No closer on the line means the remainder cannot be bounded; a post-pass cannot tell it from
+    // ordinary text, so the released output stands (the first word is still redacted).
+    expect(idempotent(`token: \u201cshort pw\nnext`)).toBe('token: [redacted] pw\nnext');
   });
 
   it('leaves prose containing quotes alone', () => {
     for (const input of ['the provider said \u201cnothing useful\u201d', 'a \u2018quote\u2019 in prose'])
-      expect(redactCredentials(input), input).toBe(input);
+      expect(idempotent(input), input).toBe(input);
+  });
+});
+
+describe('`=>` as the separator (#937)', () => {
+  it('removes the quoted value the released rule damages to a marker', () => {
+    expect(idempotent(`'password' => '${SECRET}'`)).toBe("'password' =[redacted]");
+    expect(idempotent(`:password => "${SECRET}"`)).toBe(':password =[redacted]');
+    expect(idempotent(`token => '${SECRET} with spaces'`)).toBe('token =[redacted]');
+  });
+
+  it('removes a quoted nested pair after the arrow', () => {
+    expect(idempotent(`'password' => organizationSecondaryAuthToken="${SECRET}"`)).not.toContain(SECRET);
+  });
+
+  it('skips a bare arrow value, which looks like prose after a marker (#937 follow-up)', () => {
+    expect(idempotent(`apiSecret => ${SECRET}`)).toBe(`apiSecret =[redacted] ${SECRET}`);
+  });
+
+  it('leaves an arrow without a credential key alone', () => {
+    for (const input of ['result => value', 'const f = (a) => a + 1', 'callback => response', 'entryKey => ascending'])
+      expect(idempotent(input), input).toBe(input);
+  });
+});
+
+describe('a PEM private key block (#937)', () => {
+  const block = (name: string, body: string): string => `-----BEGIN ${name}-----\n${body}\n-----END ${name}-----`;
+
+  it('replaces the whole block, with or without a credential key', () => {
+    expect(idempotent(block('PRIVATE KEY', SECRET))).toBe('[redacted]');
+    expect(idempotent(block('RSA PRIVATE KEY', SECRET))).toBe('[redacted]');
+    expect(idempotent(`password=${block('EC PRIVATE KEY', SECRET)}`)).toBe('password=[redacted]');
+    expect(idempotent(`see ${block('OPENSSH PRIVATE KEY', SECRET)} here`)).toBe('see [redacted] here');
+  });
+
+  it('replaces an unterminated block to the end of the text', () => {
+    expect(idempotent(`-----BEGIN PRIVATE KEY-----\n${SECRET}`)).toBe('[redacted]');
+  });
+
+  it('leaves public blocks and prose alone', () => {
+    for (const input of [block('CERTIFICATE', SECRET), block('PUBLIC KEY', SECRET), 'the header -----BEGIN CERTIFICATE----- is public'])
+      expect(idempotent(input), input).toBe(input);
   });
 });
 
 describe('a short Authorization value under a credential key (#937)', () => {
   it('replaces the token after the scheme and keeps the scheme word', () => {
-    expect(redactCredentials('authToken=Bearer abc')).toBe('authToken=Bearer [redacted]');
-    expect(redactCredentials('password: Basic xyz')).toBe('password: Basic [redacted]');
-    expect(redactCredentials('authorization: bearer abc')).toBe('authorization: bearer [redacted]');
+    expect(idempotent('authToken=Bearer abc')).toBe('authToken=Bearer [redacted]');
+    expect(idempotent('password: Basic xyz')).toBe('password: Basic [redacted]');
+    expect(idempotent('authorization: bearer abc')).toBe('authorization: bearer [redacted]');
   });
 
   it('leaves a scheme without a value, and prose, alone', () => {
-    for (const input of ['sent with Bearer abc', 'the Basic plan is fine']) expect(redactCredentials(input), input).toBe(input);
+    for (const input of ['sent with Bearer abc', 'the Basic plan is fine']) expect(idempotent(input), input).toBe(input);
   });
 });
 
-describe('a structured value under a credential key (#937)', () => {
-  it('replaces an array value whole', () => {
-    expect(redactCredentials(`{"token":["${SECRET}"]}`)).toBe('{"token":[redacted]}');
-    expect(redactCredentials(`{"token":["${SECRET}","more"]}`)).toBe('{"token":[redacted]}');
-    expect(redactCredentials(`token=[${SECRET}]`)).toBe('token=[redacted]');
+describe('a Pwd or Pass camel ending (#937)', () => {
+  it('replaces the value of a Pwd or Pass key', () => {
+    expect(idempotent(`userPwd=${SECRET}`)).toBe('userPwd=[redacted]');
+    expect(idempotent(`dbPwd: ${SECRET}`)).toBe('dbPwd: [redacted]');
+    expect(idempotent(`dbPass="${SECRET}"`)).toBe('dbPass=[redacted]');
+    expect(idempotent(`user_pwd=${SECRET}`)).toBe('user_pwd=[redacted]');
+    expect(idempotent(`db-pass=${SECRET}`)).toBe('db-pass=[redacted]');
   });
 
-  it('replaces an object value whole', () => {
-    expect(redactCredentials(`{"secret":{"v":"${SECRET}"}}`)).toBe('{"secret":[redacted]}');
-    expect(redactCredentials(`password={"v":"${SECRET}"}`)).toBe('password=[redacted]');
+  it('leaves ordinary pass and pwd words alone', () => {
+    for (const input of ['pass=2', 'bypass=on', 'compass=123', 'surpass=true', 'passwordPolicy=strict'])
+      expect(idempotent(input), input).toBe(input);
+  });
+});
+
+describe('escaped JSON inside a string (#937)', () => {
+  it('replaces the escaped value', () => {
+    expect(idempotent(`{\\"password\\":\\"${SECRET}\\"}`)).toBe('{\\"password\\":\\"[redacted]\\"}');
+    expect(idempotent(`\\"token\\":\\"${SECRET}\\"`)).toBe('\\"token\\":\\"[redacted]\\"');
+    expect(idempotent(`\\"apiSecret\\": \\"${SECRET}\\"`)).toBe('\\"apiSecret\\": \\"[redacted]\\"');
   });
 
-  it('skips brackets inside a quoted string', () => {
-    expect(redactCredentials(`{"token":["a]b","${SECRET}"]}`)).toBe('{"token":[redacted]}');
-    expect(redactCredentials(`{"token":{"note":"}","v":"${SECRET}"}}`)).toBe('{"token":[redacted]}');
+  it('leaves ordinary escaped JSON and prose alone', () => {
+    for (const input of ['{\\"note\\":\\"x\\"}', 'a \\"quoted\\" word', '\\"tokens\\":1234']) expect(idempotent(input), input).toBe(input);
+  });
+});
+
+describe('URL-encoded pairs (#937)', () => {
+  it('replaces the value of an encoded pair', () => {
+    expect(idempotent(`password%3D${SECRET}`)).toBe('password%3D[redacted]');
+    expect(idempotent(`a=1&password%3D${SECRET}&b=2`)).toBe('a=1&password%3D[redacted]&b=2');
+    expect(idempotent(`token%22%3A%22${SECRET}`)).toBe('token%22%3A%22[redacted]');
+    expect(idempotent(`token%22%3A%22${SECRET}%22`)).toBe('token%22%3A%22[redacted]%22');
   });
 
-  it('replaces an unbalanced value to the end of its line, never leaving the secret', () => {
-    expect(redactCredentials(`{"token":["${SECRET}"`)).toBe('{"token":[redacted]');
-    expect(redactCredentials(`{"token":["${SECRET}",\n"next":1`)).toBe('{"token":[redacted]\n"next":1');
+  it('decodes an encoded name only to match it', () => {
+    expect(idempotent(`api%5Fkey=${SECRET}`)).toBe('api%5Fkey=[redacted]');
+    expect(idempotent(`apiSecret%3D${SECRET}`)).toBe('apiSecret%3D[redacted]');
   });
 
-  it('leaves ordinary JSON and counters alone', () => {
-    for (const input of ['{"a":["b"],"c":{"d":"e"}}', '{"tokens": 1234}', '{"tokenCount": 12}', 'the list [1,2,3] was returned'])
-      expect(redactCredentials(input), input).toBe(input);
+  it('leaves ordinary encoded text alone', () => {
+    for (const input of ['progress%3D50', '100%25done', 'the%20query%20was%20empty', 'note%3Dhello'])
+      expect(idempotent(input), input).toBe(input);
   });
 });

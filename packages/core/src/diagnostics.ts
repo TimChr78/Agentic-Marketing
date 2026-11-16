@@ -55,9 +55,9 @@ export function redactCredentials(text: string): string {
   // A long camelCase credential key is replaced as a token by the rules below, after which its
   // value can no longer be told from any other text. So the plain value of such a key is replaced
   // first (#898); see redactLongKeyValues for why that cannot change what the rules below remove.
-  // The #937 value shapes have the same problem: a rule consumes the delimiter the shape needs
-  // (`[`, a Unicode opening quote, `>`, `-----BEGIN`), so those passes run first too.
-  let out = applyRules(redactLongKeyValues(redactIntactValueShapes(text)));
+  // The #937 passes do not run before the pipeline: they read its output only, so nothing they do
+  // can hide a value a released rule or pass would have removed.
+  let out = applyRules(redactLongKeyValues(text));
   // Main's 0.14.23 passes converge first, on exactly the release's rules and qualifiers. Only then
   // do the #946/#956 additions run, so they can add redaction but can never consume a key main's
   // next round would have needed. If an addition exposes a new main match, main settles again.
@@ -615,20 +615,12 @@ function redactJoinedCompoundKeys(text: string): string {
 }
 
 /**
- * The value shapes #937 collects: a structured value under a credential key, a short Authorization
- * value, a Unicode-quoted value, `=>` as the separator, a PEM block, escaped JSON, URL-encoded
- * pairs, a `Pwd`/`Pass` name and a nested all-capitals pair.
- *
- * Every pass below reads the text once and replaces a value with the marker, and only ever replaces
- * more. Some shapes need the rules' output (`redactSettledValueShapes`): they survive the rules
- * intact, and a pre-pass could end a value at a nested key and hide it. The others need the text
- * before the rules (`redactIntactValueShapes`), for the same reason `redactLongKeyValues` runs
- * first: the rules destroy the delimiter the shape needs (a Unicode quote's opening half, the `>`
- * of `=>`, the `-----BEGIN` of a PEM header, the `[` of an array). Each of those replaces a whole
- * delimited span, so it cannot leave a nested pair's value behind.
+ * The value shapes #937 collects, as additive passes on the OUTPUT of the complete released
+ * pipeline (the 0.14.20 rules plus the 0.14.23/0.14.24 passes). Nothing here runs before them: each
+ * pass only replaces more of what the pipeline left behind, so it can never hide a value a released
+ * pass would have removed. Each pass reads the text once.
  */
 const MAX_SHAPE_KEY_CHARS = 256;
-const MAX_SHAPE_DEPTH = 32;
 
 const isShapeNameChar = (char: string): boolean =>
   (char >= 'a' && char <= 'z') ||
@@ -668,14 +660,16 @@ interface ValueSpan {
 }
 
 /**
- * Replaces the value of every credential pair a shape pass recognises. A candidate may start only
- * where the previous one ended, so each suffix is read once, like a global regex's scan.
+ * Replaces each credential pair's value span with `replacement` (normally the marker; a marker
+ * remainder is removed instead). A candidate may start only where the previous one ended, so each
+ * suffix is read once, like a global regex's scan.
  */
 function redactPairValues(
   text: string,
   separator: (text: string, nameEnd: number) => number,
   valueSpan: (text: string, valueStart: number) => ValueSpan | null,
   accept: (name: string) => boolean = isShapesCredentialKey,
+  replacement = '[redacted]',
 ): string {
   let out = '';
   let copied = 0;
@@ -709,14 +703,14 @@ function redactPairValues(
       index = nameEnd;
       continue;
     }
-    out += `${text.slice(copied, span.start)}[redacted]`;
+    out += text.slice(copied, span.start) + replacement;
     copied = span.end;
     index = Math.max(span.end, nameEnd);
   }
   return copied === 0 ? text : out + text.slice(copied);
 }
 
-/** The end of the line a value started on, so an unbalanced shape never leaves the secret. */
+/** The end of the line a value started on. */
 function lineEnd(text: string, start: number): number {
   const newline = text.indexOf('\n', start);
   return newline < 0 ? text.length : newline;
@@ -726,10 +720,10 @@ const isWordChar = (char: string): boolean =>
   (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char === '_';
 
 /**
- * The first position in [from, to) a later pass needs as an anchor: a credential key followed by
- * `:`/`=` or an Authorization scheme word. A pre-pass must not consume one, because the key's value
- * (the next line's `=…`, or the `Bearer` rule's token) would then never be redacted. The search is
- * bounded by the caller, so this stays linear.
+ * The first position in [from, to) that another pass needs as an anchor: a credential key followed
+ * by `:`/`=` or an Authorization scheme word. A remainder pass must not consume one, because the
+ * key's value (or the scheme's token) would then never be redacted. The scan covers the WHOLE span
+ * the caller asks about, so a long run cannot hide an anchor past a fixed lookahead.
  */
 function shapeAnchor(text: string, from: number, to: number): number {
   const limit = Math.min(text.length, to);
@@ -756,79 +750,12 @@ function shapeAnchor(text: string, from: number, to: number): number {
   return -1;
 }
 
-/** Where an unbalanced structured value stops: before a later pass's anchor, else at the line end. */
-function unbalancedValueEnd(text: string, start: number): number {
-  const end = lineEnd(text, start);
-  const anchor = shapeAnchor(text, start + 1, Math.min(end, start + 1 + MAX_SHAPE_KEY_CHARS));
-  return anchor >= 0 ? anchor : end;
-}
-
-/**
- * A JSON array or object value under a credential key: `{"token":["shortpw"]}`,
- * `{"secret":{"v":"x"}}`. Brackets are scanned to a bounded depth and strings are skipped, so a
- * bracket inside a quoted string does not close the value. An unbalanced value is replaced up to
- * the end of its line, or up to a credential key or scheme word on that line: taking the key too
- * would leave the value it anchors (`{x-api-key\n=x…`) for no later pass to find.
- */
-function structuredValueEnd(text: string, start: number): number {
-  const open = text.charAt(start);
-  if (open !== '[' && open !== '{') return -1;
-  let depth = 0;
-  let quote = '';
-  let index = start;
-  while (index < text.length) {
-    const char = text.charAt(index);
-    if (quote !== '') {
-      if (char === '\\') {
-        index += 2;
-        continue;
-      }
-      if (char === quote) quote = '';
-      index += 1;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      index += 1;
-      continue;
-    }
-    if (char === '[' || char === '{') {
-      depth += 1;
-      if (depth > MAX_SHAPE_DEPTH) return unbalancedValueEnd(text, start);
-    } else if (char === ']' || char === '}') {
-      depth -= 1;
-      if (depth === 0) return index + 1;
-    }
-    index += 1;
-  }
-  return unbalancedValueEnd(text, start);
-}
-
-/** Characters that end a value cleanly: the rules' bare-value stops, and a closing paren. */
-const STRUCTURED_FOLLOW = new Set(['', ',', ';', '}', ']', '"', "'", ')']);
-
-function redactStructuredValues(text: string): string {
-  if (!/[[{]/.test(text)) return text;
-  const span = (value: string, start: number): ValueSpan | null => {
-    const end = structuredValueEnd(value, start);
-    if (end < 0) return null;
-    // Only a value followed by a delimiter or whitespace is taken. `{}$$nextKey: …` is a
-    // concatenation, not a JSON value: replacing its `}` would let a rule's greedy bare value
-    // swallow the next key and leave that key's value behind.
-    const next = value.charAt(end);
-    if (next !== '' && !isSpace(next) && !STRUCTURED_FOLLOW.has(next)) return null;
-    return { start, end };
-  };
-  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), span);
-}
+const MARKER = '[redacted]';
 
 /**
  * A short Authorization value under a key: `authToken=Bearer abc`, `password: Basic xyz`. The
- * scheme rule above needs six characters, so a short token is left behind; the scheme word is kept
- * (it says what was sent) and only the token after it is replaced. It runs after the rules, not
- * before them: a pre-pass value can end at a nested key (`Authorization: Basic
- * organizationSecondaryAuthToken="x"`), and replacing that key would hide the value from
- * `redactLongKeyValues`.
+ * scheme rule needs six characters, so a short token is left behind; the scheme word is kept and
+ * only the token after it is replaced.
  */
 function schemeValueSpan(text: string, start: number): ValueSpan | null {
   let index = start;
@@ -849,168 +776,6 @@ function schemeValueSpan(text: string, start: number): ValueSpan | null {
 function redactShortSchemeValues(text: string): string {
   if (!/bearer|basic/i.test(text)) return text;
   return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), schemeValueSpan);
-}
-
-/** Opening typographic quotes and the character that closes each. */
-const UNICODE_QUOTE_CLOSERS = new Map<string, string>([
-  ['\u201c', '\u201d'],
-  ['\u2018', '\u2019'],
-  ['\u00ab', '\u00bb'],
-  ['\u201e', '\u201c'],
-  ['\u2039', '\u203a'],
-]);
-
-/**
- * A value in typographic quotes: `token: “short pw”`, `‘…’`, `«…»`. The rules see only up to the
- * first space (`“short`), which leaves the rest of the value; this consumes the whole pair. An
- * unterminated quote runs to the end of its line, so a value broken across lines never survives
- * and the next line stays readable.
- */
-function unicodeValueSpan(text: string, start: number): ValueSpan | null {
-  const close = UNICODE_QUOTE_CLOSERS.get(text.charAt(start));
-  if (close === undefined) return null;
-  let index = start + 1;
-  while (index < text.length) {
-    const char = text.charAt(index);
-    if (char === '\n') return { start, end: index };
-    if (char === close) return { start, end: index + 1 };
-    index += 1;
-  }
-  return { start, end: text.length };
-}
-
-function redactUnicodeQuotedValues(text: string): string {
-  if (!/[\u201c\u2018\u00ab\u201e\u2039]/.test(text)) return text;
-  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), unicodeValueSpan);
-}
-
-/** The value after `=>`, the arrow PHP and Ruby arrays use (`'password' => 'x'`). */
-function arrowSeparatorEnd(text: string, nameEnd: number): number {
-  let index = nameEnd;
-  const quote = text.charAt(index);
-  if (quote === '"' || quote === "'") index += 1;
-  while (isSpace(text.charAt(index))) index += 1;
-  if (text.charAt(index) !== '=' || text.charAt(index + 1) !== '>') return -1;
-  index += 2;
-  while (isSpace(text.charAt(index))) index += 1;
-  return index;
-}
-
-/**
- * The span a pair after `=>` replaces. It starts at the arrow, not at the value: the rules read
- * `'password' => 'x'` as `password` = `>`, so leaving `=> [redacted]` would let the first rule
- * keep replacing that `>` and grow the text on every round. Removing the arrow costs a little
- * formatting and keeps the pass idempotent.
- */
-function arrowValueSpan(text: string, valueStart: number): ValueSpan | null {
-  // Walk back to the arrow. If it cannot be confirmed within the bound, skip: leaving a `=>`
-  // before the marker would let the first rule keep replacing its `>` and grow the text.
-  let index = valueStart - 1;
-  let budget = MAX_SHAPE_KEY_CHARS;
-  while (index >= 0 && isSpace(text.charAt(index)) && budget > 0) {
-    index -= 1;
-    budget -= 1;
-  }
-  if (text.charAt(index) !== '>') return null;
-  index -= 1;
-  if (text.charAt(index) !== '=') return null;
-  const start = index;
-  // A scheme value (`=> Bearer abc`) goes with the arrow, token included.
-  const scheme = schemeValueSpan(text, valueStart);
-  if (scheme) return { start, end: scheme.end };
-  const unicode = unicodeValueSpan(text, valueStart);
-  if (unicode) return { start, end: unicode.end };
-  let end = pairValueEnd(text, valueStart);
-  if (end < 0) return null;
-  // A bare value that ends at a quote (`inner="x"`) is a nested pair's key; extend through its
-  // value so this pre-pass cannot leave that value behind.
-  if ((text.charAt(end) === '"' || text.charAt(end) === "'") && /[:=]$/.test(text.slice(valueStart, end))) {
-    const inner = pairValueEnd(text, end);
-    if (inner > end) end = inner;
-  }
-  // A credential key or scheme word inside the value is another pass's anchor: leave the pair to
-  // the rules rather than consuming it here.
-  if (shapeAnchor(text, valueStart, end) >= 0) return null;
-  return { start, end };
-}
-
-function redactArrowPairs(text: string): string {
-  if (!text.includes('=>')) return text;
-  return redactPairValues(text, arrowSeparatorEnd, arrowValueSpan);
-}
-
-const PEM_BEGIN = '-----BEGIN ';
-const PEM_END = '-----END ';
-const PEM_DASHES = '-----';
-const PEM_HEADER_LIMIT = 64;
-
-/**
- * The end of a `[A-Z ]*PRIVATE KEY-----` header that starts just after `-----BEGIN `/`-----END `,
- * or -1. The name is bounded (64 characters) and only capitals and spaces are read, so a long run
- * of dashes or text cannot make the scan grow.
- */
-function pemKeyHeaderEnd(text: string, afterPrefix: number): number {
-  let index = afterPrefix;
-  const limit = Math.min(text.length, afterPrefix + PEM_HEADER_LIMIT);
-  while (index < limit) {
-    const char = text.charAt(index);
-    if ((char >= 'A' && char <= 'Z') || char === ' ') index += 1;
-    else break;
-  }
-  if (!text.slice(afterPrefix, index).endsWith('PRIVATE KEY')) return -1;
-  if (!text.startsWith(PEM_DASHES, index)) return -1;
-  return index + PEM_DASHES.length;
-}
-
-/**
- * A PEM private key block, whole: `-----BEGIN [A-Z ]*PRIVATE KEY-----` through its matching
- * `-----END …-----`. Public blocks (`BEGIN CERTIFICATE`, `BEGIN PUBLIC KEY`) are left alone because
- * the header must end in `PRIVATE KEY`. An unterminated block runs to the end of the text, so a
- * body line is never left behind.
- */
-function redactPemBlocks(text: string): string {
-  if (!text.includes(PEM_BEGIN)) return text;
-  let out = '';
-  let copied = 0;
-  let search = 0;
-  while (search < text.length) {
-    const begin = text.indexOf(PEM_BEGIN, search);
-    if (begin < 0) break;
-    const headerEnd = pemKeyHeaderEnd(text, begin + PEM_BEGIN.length);
-    if (headerEnd < 0) {
-      search = begin + 1;
-      continue;
-    }
-    let end = text.length;
-    let cursor = headerEnd;
-    for (;;) {
-      const close = text.indexOf(PEM_END, cursor);
-      if (close < 0) break;
-      const closeEnd = pemKeyHeaderEnd(text, close + PEM_END.length);
-      if (closeEnd >= 0) {
-        end = closeEnd;
-        break;
-      }
-      cursor = close + 1;
-    }
-    out += `${text.slice(copied, begin)}[redacted]`;
-    copied = end;
-    search = end;
-  }
-  return copied === 0 ? text : out + text.slice(copied);
-}
-
-/**
- * The passes that must see a shape before the rules do, because they consume a delimiter the rules
- * would otherwise take (`[`, a Unicode opening quote, `>`, `-----BEGIN`, an inner `=`). Each one
- * replaces a whole delimited span, so it cannot leave a nested pair's value behind.
- */
-function redactIntactValueShapes(text: string): string {
-  let out = redactStructuredValues(text);
-  out = redactUnicodeQuotedValues(out);
-  out = redactArrowPairs(out);
-  out = redactPemBlocks(out);
-  return out;
 }
 
 const ESCAPED_QUOTE = '\\"';
@@ -1210,42 +975,255 @@ function redactPwdKeys(text: string): string {
 }
 
 /**
- * A value the rules replaced only in part: the marker is followed by the rest of the value
- * (`token=[redacted]shortpw`), or by the quoted value of an inner pair whose key the outer pass
- * took as its value (`SIGNINGKEY=AZUREOPENAIKEY='x'` becomes `SIGNINGKEY=[redacted]'x'`). Only a
- * marker glued to a word or a quote is taken; a space or another delimiter means the value already
- * ended there.
+ * The end of the run glued to a marker: quoted fragments with their escapes and the `:`/`,` between
+ * them (`"v":"x"`, `"a","b"`), or one bare token (`shortpw`). It stops at whitespace, a closing
+ * bracket and at field punctuation (`&`, `;`), so `?token=[redacted]&x=1` keeps its next field. It
+ * reads the whole run in one scan, so a marker with many fragments reaches its fixed point in a
+ * single call.
  */
-function gluedMarkerSpan(text: string, start: number): ValueSpan | null {
-  const marker = '[redacted]';
-  if (!text.startsWith(marker, start)) return null;
-  const restStart = start + marker.length;
-  const char = text.charAt(restStart);
-  if (char === '"' || char === "'") {
-    const quotedEnd = pairValueEnd(text, restStart);
-    return quotedEnd < 0 ? null : { start, end: quotedEnd };
+function gluedRunEnd(text: string, start: number): number {
+  let index = start;
+  let afterQuote = false;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (char === '"' || char === "'") {
+      const end = pairValueEnd(text, index);
+      if (end < 0) break;
+      index = end;
+      afterQuote = true;
+      continue;
+    }
+    if (afterQuote) {
+      if (char !== ':' && char !== ',') break;
+      let next = index + 1;
+      while (text.charAt(next) === ' ') next += 1;
+      const nextChar = text.charAt(next);
+      if (nextChar !== '"' && nextChar !== "'") break;
+      index = next;
+      afterQuote = false;
+      continue;
+    }
+    if (isSpace(char) || char === ']' || char === '}' || '&;=,:'.includes(char)) break;
+    index += 1;
   }
-  if (char === '' || isSpace(char) || BARE_VALUE_STOP.has(char)) return null;
-  const end = pairValueEnd(text, restStart);
-  return end < 0 ? null : { start, end };
-}
-
-function redactGluedMarkers(text: string): string {
-  if (!text.includes('[redacted]')) return text;
-  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), gluedMarkerSpan);
+  return index;
 }
 
 /**
- * The passes that run on the rules' output: their shapes survive the rules intact, so they must not
- * run before them (a pre-pass value can end at a nested key and hide its value). Each reads the
- * text once.
+ * A value the released pipeline replaced only in part, with the rest glued to the marker:
+ * `token=[redacted]shortpw`, `{"token":[redacted]"shortpw"]}`, `{"secret":[redacted]"v":"x"}}`,
+ * `SIGNINGKEY=[redacted]'x'`. The whole attached run is removed in one scan; it stops before a
+ * credential key or scheme anchor, which a later pass still needs.
+ */
+function gluedMarkerSpan(text: string, valueStart: number): ValueSpan | null {
+  if (!text.startsWith(MARKER, valueStart)) return null;
+  const start = valueStart + MARKER.length;
+  const char = text.charAt(start);
+  if (char === '' || isSpace(char) || char === ']' || char === '}') return null;
+  let end = gluedRunEnd(text, start);
+  const anchor = shapeAnchor(text, start, end);
+  if (anchor >= 0) end = anchor;
+  return end > start ? { start, end } : null;
+}
+
+/** Whether a marker is immediately followed by something glued (`\` starts escaped JSON, not glue). */
+function hasGluedMarker(text: string): boolean {
+  let index = 0;
+  for (;;) {
+    const marker = text.indexOf(MARKER, index);
+    if (marker < 0) return false;
+    const char = text.charAt(marker + MARKER.length);
+    if (char !== '' && char !== '\\' && !isSpace(char) && char !== ']' && char !== '}') return true;
+    index = marker + 1;
+  }
+}
+
+function redactMarkerGlue(text: string): string {
+  if (!hasGluedMarker(text)) return text;
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), gluedMarkerSpan, isShapesCredentialKey, '');
+}
+
+/** Characters that close a typographic quote pair. */
+const TYPOGRAPHIC_CLOSERS = new Set(['\u201d', '\u2019', '\u00bb', '\u201c', '\u203a']);
+
+/**
+ * The rest of a typographic-quoted value the rules left behind: `token: “short pw”` becomes
+ * `token: [redacted] pw”` (the rules take only up to the first space). The text up to the LAST
+ * closing quote on the line is removed in one scan, so one call reaches the fixed point. The scan
+ * stops at the first anchor: one after a closer means the removal ends there (safe), and one
+ * before any closer means there is nothing safe to remove.
+ */
+function typographicRemainderSpan(text: string, valueStart: number): ValueSpan | null {
+  if (!text.startsWith(MARKER, valueStart)) return null;
+  const start = valueStart + MARKER.length;
+  let lastClose = -1;
+  let index = start;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (char === '\n') break;
+    if (TYPOGRAPHIC_CLOSERS.has(char)) {
+      lastClose = index + 1;
+      index += 1;
+      continue;
+    }
+    if (isShapeNameStart(char)) {
+      let nameEnd = index + 1;
+      while (nameEnd < text.length && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
+      if ((char === 'b' || char === 'B') && (index === 0 || !isWordChar(text.charAt(index - 1)))) {
+        const word = text.slice(index, nameEnd).toLowerCase();
+        if ((word === 'bearer' || word === 'basic') && isSpace(text.charAt(nameEnd))) {
+          return lastClose > start ? { start, end: lastClose } : null;
+        }
+      }
+      const name = text.slice(index, nameEnd);
+      if (name.length <= MAX_SHAPE_KEY_CHARS && separatorEnd(text, nameEnd, false) >= 0 && isShapesCredentialKey(name)) {
+        return lastClose > start ? { start, end: lastClose } : null;
+      }
+      index = nameEnd;
+      continue;
+    }
+    index += 1;
+  }
+  return lastClose > start ? { start, end: lastClose } : null;
+}
+
+function redactTypographicRemainders(text: string): string {
+  if (!/[\u201d\u2019\u00bb\u201c\u203a]/.test(text) || !text.includes(MARKER)) return text;
+  return redactPairValues(
+    text,
+    (value, nameEnd) => separatorEnd(value, nameEnd, true),
+    typographicRemainderSpan,
+    isShapesCredentialKey,
+    '',
+  );
+}
+
+/**
+ * The quoted value of a `=>` pair, which the first rule damages to `key =[redacted] 'x'` (it takes
+ * the `>` as the value). Every quoted fragment after the marker on the same line is removed in one
+ * scan. A bare value after `=>` is indistinguishable from prose after a redacted value, so it is
+ * left as the released pipeline leaves it (documented in the tests and the pull request).
+ */
+function arrowRemainderSpan(text: string, valueStart: number): ValueSpan | null {
+  if (!text.startsWith(MARKER, valueStart)) return null;
+  const start = valueStart + MARKER.length;
+  let index = start;
+  let end = -1;
+  for (;;) {
+    let cursor = index;
+    while (text.charAt(cursor) === ' ' || text.charAt(cursor) === '\t') cursor += 1;
+    if (cursor === index) return end < 0 ? null : { start, end };
+    const quote = text.charAt(cursor);
+    if (quote !== '"' && quote !== "'") return end < 0 ? null : { start, end };
+    const fragmentEnd = pairValueEnd(text, cursor);
+    if (fragmentEnd < 0 || text.slice(cursor, fragmentEnd).includes('\n')) return end < 0 ? null : { start, end };
+    end = fragmentEnd;
+    index = fragmentEnd;
+  }
+}
+
+function redactArrowRemainders(text: string): string {
+  if (!/\[redacted\][ \t]+["']/.test(text)) return text;
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), arrowRemainderSpan, isShapesCredentialKey, '');
+}
+
+const PEM_BEGIN = '-----BEGIN ';
+const PEM_END = '-----END ';
+const PEM_DASHES = '-----';
+const PEM_HEADER_LIMIT = 64;
+
+/**
+ * The end of a `[A-Z ]*PRIVATE KEY-----` header that starts just after `-----BEGIN `/`-----END `,
+ * or -1. The name is bounded (64 characters) and only capitals and spaces are read, so a long run
+ * of dashes or text cannot make the scan grow.
+ */
+function pemKeyHeaderEnd(text: string, afterPrefix: number): number {
+  let index = afterPrefix;
+  const limit = Math.min(text.length, afterPrefix + PEM_HEADER_LIMIT);
+  while (index < limit) {
+    const char = text.charAt(index);
+    if ((char >= 'A' && char <= 'Z') || char === ' ') index += 1;
+    else break;
+  }
+  if (!text.slice(afterPrefix, index).endsWith('PRIVATE KEY')) return -1;
+  if (!text.startsWith(PEM_DASHES, index)) return -1;
+  return index + PEM_DASHES.length;
+}
+
+/** The matching `-----END …-----` for a header that ended at `from`, or -1. */
+function pemFooterEnd(text: string, from: number): number {
+  let cursor = from;
+  for (;;) {
+    const close = text.indexOf(PEM_END, cursor);
+    if (close < 0) return -1;
+    const closeEnd = pemKeyHeaderEnd(text, close + PEM_END.length);
+    if (closeEnd >= 0) return closeEnd;
+    cursor = close + 1;
+  }
+}
+
+/**
+ * A PEM private key block the pipeline left: standalone, `-----BEGIN … PRIVATE KEY-----` through
+ * its matching `-----END …-----` (an unterminated block runs to the end of the text); under a
+ * credential key the first rule turned `-----BEGIN` into the marker, leaving
+ * `password=[redacted] RSA PRIVATE KEY-----\n…`, which is removed from the marker when a footer is
+ * found (without one it is left alone, because there is no end to bound it).
+ */
+function redactPemBlocks(text: string): string {
+  if (!text.includes('PRIVATE KEY')) return text;
+  let out = '';
+  let copied = 0;
+  let search = 0;
+  while (search < text.length) {
+    const begin = text.indexOf(PEM_BEGIN, search);
+    const marker = text.indexOf(MARKER, search);
+    const intact = begin >= 0 && (marker < 0 || begin < marker);
+    if (!intact && marker < 0) break;
+    if (intact) {
+      const headerEnd = pemKeyHeaderEnd(text, begin + PEM_BEGIN.length);
+      if (headerEnd < 0) {
+        search = begin + 1;
+        continue;
+      }
+      const footer = pemFooterEnd(text, headerEnd);
+      const end = footer < 0 ? text.length : footer;
+      out += `${text.slice(copied, begin)}[redacted]`;
+      copied = end;
+      search = end;
+      continue;
+    }
+    const afterMarker = marker + MARKER.length;
+    let cursor = afterMarker;
+    while (text.charAt(cursor) === ' ') cursor += 1;
+    const headerEnd = cursor === afterMarker ? -1 : pemKeyHeaderEnd(text, cursor);
+    if (headerEnd < 0) {
+      search = afterMarker;
+      continue;
+    }
+    const footer = pemFooterEnd(text, headerEnd);
+    // No footer after this one means none after any later marker either: stop, so a long run of
+    // marker-headed headers is not rescanned for every marker.
+    if (footer < 0) break;
+    out += `${text.slice(copied, marker)}${MARKER}`;
+    copied = footer;
+    search = footer;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/**
+ * Every #937 pass, on the released pipeline's output. Each reads the text once and only replaces
+ * more of it.
  */
 function redactSettledValueShapes(text: string): string {
   let out = redactShortSchemeValues(text);
   out = redactEscapedJsonPairs(out);
   out = redactUrlEncodedPairs(out);
   out = redactPwdKeys(out);
-  out = redactGluedMarkers(out);
+  out = redactPemBlocks(out);
+  out = redactTypographicRemainders(out);
+  out = redactArrowRemainders(out);
+  out = redactMarkerGlue(out);
   return out;
 }
 

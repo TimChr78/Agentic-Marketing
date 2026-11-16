@@ -375,26 +375,26 @@ describe('the #937 value-shape passes stay linear', () => {
   // Each shape is repeated to a megabyte; every pass reads one candidate at a time and never
   // rescans a suffix, so the whole text costs a few milliseconds to a few hundred.
   const SHAPES = [
-    'token:[',
-    'token:[x]',
-    'token:{',
-    'token:{"v":"x"}',
-    'token:\u201c',
-    'token:\u201cabc\u201d',
-    'token:\u00ababc\u00bb',
-    "'password' => 'x' ",
-    'password => ',
+    // Marker glue: one attached run, then many fragments.
+    'token=[redacted]shortpw ',
+    "token=[redacted]'x'",
+    '{"token":[redacted]"shortpw"]}',
+    // Typographic remainder.
+    'token: [redacted] pw\u201d ',
+    // Arrow remainder.
+    "password=[redacted] 'x' ",
+    // PEM, standalone and marker-headed.
     '-----BEGIN ',
     '-----BEGIN RSA PRIVATE KEY-----\n',
     'password=-----BEGIN RSA PRIVATE KEY-----\n',
+    // The passes that were already post-only.
     '{\\"password\\":\\"x\\"',
     'password%3D',
     'token%22%3A%22',
     'api%5Fkey=',
     'userPwd=',
     'dbPass=',
-    "SIGNINGKEY=apiSecret='x' ",
-    'token=[redacted]',
+    'token=Bearer abc ',
   ];
 
   it('finishes every repeated shape in a few seconds at most', () => {
@@ -410,8 +410,9 @@ describe('the #937 value-shape passes stay linear', () => {
   it('grows roughly linearly: 4× the input takes less than 8× the time', () => {
     const slow: string[] = [];
     for (const shape of SHAPES) {
-      const small = shape.repeat(2_000);
-      const large = shape.repeat(8_000);
+      // Large enough that JIT warm-up is not the measurement; 32,000 units is a few hundred KB.
+      const small = shape.repeat(8_000);
+      const large = shape.repeat(32_000);
       measure(small);
       const first = Math.min(measure(small), measure(small));
       const second = Math.min(measure(large), measure(large));

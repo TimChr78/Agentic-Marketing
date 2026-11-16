@@ -425,11 +425,50 @@ function* shapes(): Generator<Generated> {
     }
 }
 
+/**
+ * The three shapes a review of the first version found, plus variants on either side of the 256
+ * character search boundary that version had. The released pipeline removes the planted value in
+ * every one; the new passes must not hide it, and the glue case must reach its fixed point.
+ */
+function* review(): Generator<Generated> {
+  for (const gaps of [0, 255, 256, 257]) {
+    const token = marker();
+    yield {
+      input: `token: \u201cx ${' '.repeat(gaps)}password\n=secret${token} ${sentinel()}`,
+      name: `review typographic password ${gaps}`,
+      secrets: [token],
+    };
+    const scheme = marker();
+    yield {
+      input: `token: \u201cx ${' '.repeat(gaps)}Bearer\nabcdef${scheme} ${sentinel()}`,
+      name: `review typographic bearer ${gaps}`,
+      secrets: [scheme],
+    };
+  }
+  for (const spaces of [254, 255, 256, 257, 300]) {
+    const token = marker();
+    yield {
+      input: `token=[${' '.repeat(spaces)}password\n=secret${token} ${sentinel()}`,
+      name: `review structured ${spaces}`,
+      secrets: [token],
+    };
+  }
+  for (const count of [16, 17, 100]) {
+    const token = marker();
+    yield {
+      input: `token=[redacted]${"'x'".repeat(count)}'secret${token}' ${sentinel()}`,
+      name: `review glue ${count}`,
+      secrets: [token],
+    };
+  }
+}
+
 function* generated(): Generator<Generated> {
   yield* structured();
   yield* nested();
   yield* longKeys();
   yield* findings();
+  yield* review();
   yield* randomPairs();
   yield* random();
 }
