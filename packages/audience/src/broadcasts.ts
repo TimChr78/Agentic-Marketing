@@ -40,6 +40,7 @@ import {
   validateSubject,
 } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
+import { lockIdentity } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
@@ -279,18 +280,29 @@ async function publishedTemplateInfo(tx: Tx, templateId: string): Promise<{ vers
 }
 
 /**
- * Which of a batch's segment members already have a message for this broadcast (#944).
+ * Who each of a batch's segment members is, and whether that person already has a message for this
+ * broadcast (#944).
  *
  * The dedupe key alone is not merge-safe: it embeds the profile id, and identity resolution
  * rewrites that id on a merge (it also moves the person's messages to the survivor). So the run
- * asks the question by person instead: the member's id, or any profile it was merged into, already
- * has a row for this broadcast. One recursive walk covers both directions — a survivor the batch
- * has not visited yet, and a merged-away id the audience still lists. Test sends are excluded: they
- * are the sender's own copies, not this run's message to the person.
+ * asks the question by person instead. One recursive walk from every member gives the person the
+ * row will belong to (the survivors it was merged into) and whether any id on that walk already has
+ * a row for this broadcast. That covers the survivor a batch has not visited yet, the merged-away
+ * id an audience still lists, and two aliases of one person in one batch — they share a canonical
+ * id, so the run records one decision for the person, never one per alias.
+ *
+ * Test sends are excluded: they are the sender's own copies, not this run's message to the person.
  */
-async function handledMembers(tx: Tx, workspaceId: string, broadcastId: string, ids: string[]): Promise<Set<string>> {
-  if (!ids.length) return new Set();
-  const res = await tx.execute<{ member: string }>(sql`
+async function handledPeople(
+  tx: Tx,
+  workspaceId: string,
+  broadcastId: string,
+  ids: string[],
+): Promise<{ handled: Set<string>; canonical: Map<string, string> }> {
+  const handled = new Set<string>();
+  const canonical = new Map<string, string>();
+  if (!ids.length) return { handled, canonical };
+  const chain = await tx.execute<{ member: string; link: string; next_id: string | null }>(sql`
     WITH RECURSIVE chain(member, link, next_id) AS (
       SELECT p.id, p.id, p.merged_into FROM profiles p
       WHERE p.workspace_id = ${workspaceId} AND p.id IN (${sql.join(
@@ -303,10 +315,32 @@ async function handledMembers(tx: Tx, workspaceId: string, broadcastId: string, 
       JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = c.next_id
       WHERE c.next_id IS NOT NULL
     )
-    SELECT DISTINCT c.member FROM chain c
-    JOIN messages m ON m.workspace_id = ${workspaceId} AND m.journey_id = ${broadcastId}
-      AND m.profile_id = c.link AND m.test = false`);
-  return new Set(res.rows.map((r) => r.member));
+    SELECT member, link, next_id FROM chain`);
+  /** Every id a member's row for this broadcast can be stored under: the member and its survivors. */
+  const links = new Map<string, string[]>();
+  for (const row of chain.rows) {
+    links.set(row.member, [...(links.get(row.member) ?? []), row.link]);
+    // The walk ends at the profile with no survivor above it: the person this send reaches.
+    if (row.next_id === null) canonical.set(row.member, row.link);
+  }
+  const chainIds = [...new Set(chain.rows.map((row) => row.link))];
+  if (!chainIds.length) return { handled, canonical };
+  // One indexed lookup for the whole batch (`messages_journey_recipient`, migration 0099): the ids
+  // that already have this broadcast's message, independent of everything else the person received.
+  const seen = await tx
+    .selectDistinct({ profileId: schema.messages.profileId })
+    .from(schema.messages)
+    .where(
+      and(
+        eq(schema.messages.workspaceId, workspaceId),
+        eq(schema.messages.journeyId, broadcastId),
+        inArray(schema.messages.profileId, chainIds),
+        eq(schema.messages.test, false),
+      ),
+    );
+  const withMessage = new Set(seen.flatMap((row) => (row.profileId ? [row.profileId] : [])));
+  for (const [member, memberLinks] of links) if (memberLinks.some((link) => withMessage.has(link))) handled.add(member);
+  return { handled, canonical };
 }
 
 /**
@@ -1465,11 +1499,17 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       .orderBy(asc(schema.segmentMemberships.profileId))
       .limit(BATCH);
     const ids = members.map((m) => m.profileId);
-    // One message per person per broadcast (#944): a member whose person already has a row for this
-    // broadcast is left alone, in every pass. That is what keeps the sample and the rest apart, and
-    // it survives a merge, because the row is found under the member's id or under the profile it
-    // was merged into — the key alone could not, since a merge rewrites the profile id it embeds.
-    const handled = await handledMembers(tx, ws, broadcastId, ids);
+    // One message per person per broadcast (#944). Identity resolution holds the workspace identity
+    // lock while it rewrites a profile id and moves that person's messages to the survivor, so the
+    // batch takes the same lock before it resolves the person, checks and records: a merge either
+    // committed before this point (and the check sees its result) or waits for this transaction to
+    // commit, and can no longer land between the check and the insert. Lock order: the run row above,
+    // then this lock, then per member a send key and message rows (see `lockIdentity`).
+    if (ids.length) await lockIdentity(tx, ws);
+    const { handled, canonical } = await handledPeople(tx, ws, broadcastId, ids);
+    // Canonical ids this batch already recorded a decision for: a second alias of the same person
+    // (a dynamic segment keeps both until its next refresh) is the same recipient, not another one.
+    const recorded = new Set<string>();
     const traits =
       def.sendWindow && ids.length
         ? new Map(
@@ -1493,10 +1533,12 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     for (const m of members) {
       if (canaryPass && stage && !canaryAssignment(m.profileId, broadcastId, stage.canaryPercent)) continue;
       if (test?.state === 'sampling' && !subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length)) continue;
-      if (handled.has(m.profileId)) {
+      const person = canonical.get(m.profileId) ?? m.profileId;
+      if (handled.has(m.profileId) || recorded.has(person)) {
         // The person's message for this broadcast exists: a sample send, a rest pass, a replayed
-        // chunk, a control suppression, or a chunk that ran before a merge. Not a second send, and
-        // not counted again: the run counted this person when the row was written.
+        // chunk, a control suppression, or a chunk that ran before a merge — or this batch just
+        // recorded one for another alias of the same person. Not a second send, and not counted
+        // again: the run counted this person when the row was written.
         continue;
       }
       const variant =
@@ -1525,7 +1567,10 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       // Control gets no message from any of the campaign's sending members. A suppression with
       // its own reason keeps the decision visible without counting it as a failed send.
       if (campaign && controlTemplate && holdout?.assignment.arm === 'control') {
-        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, m.profileId, variant, campaign.id, artifact.ownerAgentId);
+        // Under the canonical id, so a later batch that reaches the person by another alias finds
+        // this decision through their own id as well as through the merge chain.
+        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, person, variant, campaign.id, artifact.ownerAgentId);
+        recorded.add(person);
         skipped++;
         continue;
       }
@@ -1579,9 +1624,11 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           { err, broadcast: broadcastId, profile: m.profileId },
           'broadcast member blocked by an idempotency key conflict; recorded as failed and the run continues',
         );
-        await recordSendConflict(tx, deps, ws, broadcastId, def, m.profileId, variant, artifact.ownerAgentId);
+        await recordSendConflict(tx, deps, ws, broadcastId, def, person, variant, artifact.ownerAgentId);
         return null;
       });
+      // One decision per person: every path below wrote (or found) that person's row for this run.
+      recorded.add(person);
       if (!d) {
         skipped++;
         continue;

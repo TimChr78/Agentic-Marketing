@@ -1,4 +1,9 @@
+import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
+import { schema } from '@agentic-marketing/db';
 import { sendRequestHash } from '@agentic-marketing/email';
+import type { BusEvent } from '@agentic-marketing/events';
+import { applyEvents } from '@agentic-marketing/profiles';
+import { drizzle } from 'drizzle-orm/node-postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -155,19 +160,69 @@ async function twoProfiles(suffix: string) {
   return { anon, user };
 }
 
+/** Makes `survivor` the older profile, so a merge of the two keeps it (the target is the oldest). */
+const survivorIsOlder = (survivor: string, loser: string) =>
+  t.srv.db.admin.query(
+    `UPDATE profiles SET created_at = CASE WHEN id = $2 THEN now() - interval '20 minutes' ELSE now() END
+     WHERE workspace_id = $1 AND id IN ($2, $3)`,
+    [ws, survivor, loser],
+  );
+
 /**
  * Makes `survivor` the older profile so the merge keeps it (the target is the oldest profile), and
  * links the two through the anonymous id plus the e-mail only the user profile carries.
  */
 async function mergeProfiles(suffix: string, survivor: string, loser: string) {
-  await t.srv.db.admin.query(
-    `UPDATE profiles SET created_at = CASE WHEN id = $2 THEN now() - interval '20 minutes' ELSE now() END
-     WHERE workspace_id = $1 AND id IN ($2, $3)`,
-    [ws, survivor, loser],
-  );
+  await survivorIsOlder(survivor, loser);
   await identify({ anonymousId: `anon-${suffix}`, traits: { email: `${suffix}@example.com` } });
   await mergedInto(loser, survivor);
 }
+
+/**
+ * A merge written but not committed, on its own connection: identity resolution takes the
+ * workspace's identity advisory lock and holds it until the transaction ends, so a broadcast batch
+ * has to queue behind it. The test commits when it wants the merge to land.
+ */
+async function heldMerge(suffix: string) {
+  const client = await t.srv.db.app.connect();
+  await client.query('BEGIN');
+  await client.query('SELECT set_config($1, $2, true)', ['app.workspace_id', ws]);
+  const event: BusEvent = {
+    workspaceId: ws,
+    sourceId: 'src_merge_race',
+    messageId: `msg-merge-race-${suffix}`,
+    type: 'identify',
+    name: 'identify',
+    anonymousId: `anon-${suffix}`,
+    userId: '',
+    timestamp: new Date().toISOString(),
+    receivedAt: new Date().toISOString(),
+    properties: {},
+    traits: {},
+    piiTraits: { email: `${suffix}@example.com` },
+    context: {},
+    consent: {},
+  };
+  await applyEvents(drizzle(client, { schema }), ws, [event], {
+    kp: t.srv.keyProvider,
+    purposes: async (tx) => (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES,
+  });
+  return {
+    async commit() {
+      await client.query('COMMIT');
+      client.release();
+    },
+    async rollback() {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+    },
+  };
+}
+
+/** Backends waiting on a transaction-scoped advisory lock; the dedicated database makes this exact. */
+const advisoryWaiters = async () =>
+  (await t.srv.db.admin.query<{ n: number }>('SELECT count(*)::int AS n FROM pg_locks WHERE locktype = $1 AND NOT granted', ['advisory']))
+    .rows[0]!.n;
 
 beforeAll(async () => {
   t = await startTestServer('test_v01424_broadcast_merge', PORT);
@@ -280,6 +335,67 @@ describe('a merge mid-broadcast still sends one message (#944)', () => {
     expect(new Set(rows.map((m) => m.profile_id))).toEqual(new Set(profiles));
     expect(rows.every((m) => m.idempotency_key.startsWith(`bct:${id}:`))).toBe(true);
   }, 90_000);
+
+  it('queues one message when the audience lists both aliases of a person', async () => {
+    const { anon, user } = await twoProfiles('alias');
+    const survivor = anon < user ? anon : user;
+    const loser = survivor === anon ? user : anon;
+    const segment = await audienceOf('alias', [survivor, loser]);
+    const id = await scheduledBroadcast('alias', segment);
+    await grant([survivor, loser]);
+    await mergeProfiles('alias', survivor, loser);
+    // A dynamic segment still holds both ids until its next refresh (and an imported list can name
+    // a merged-away id for good), so one batch selects the person twice before anything was sent.
+    await t.srv.db.admin.query(
+      `INSERT INTO segment_list_members (workspace_id, segment_id, profile_id, source) VALUES ($1, $2, $3, 'manual')
+       ON CONFLICT DO NOTHING`,
+      [ws, segment, loser],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO segment_memberships (workspace_id, segment_id, profile_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      [ws, segment, loser],
+    );
+
+    await startRunAt(id, '');
+    await awaitDone(id);
+    const rows = await messagesOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.profile_id).toBe(survivor);
+    expect((await runRow(id)).status).toBe('done');
+  }, 90_000);
+
+  it('serialises with a merge that commits while the batch is looking at the person', async () => {
+    const { anon, user } = await twoProfiles('race');
+    const survivor = anon > user ? anon : user;
+    const loser = survivor === anon ? user : anon;
+    const segment = await audienceOf('race', [survivor, loser]);
+    const id = await scheduledBroadcast('race', segment);
+    await grant([survivor, loser]);
+    // Chunk 1 queued the merged-away profile; its message is what a merge would move.
+    await chunkMessage(id, loser, broadcastHash(id, loser));
+    await survivorIsOlder(survivor, loser);
+
+    // The merge is written and holds the identity lock, but is not committed yet.
+    const merge = await heldMerge('race');
+    try {
+      await startRunAt(id, '');
+      // The batch cannot check or queue for this person until the merge is resolved: it waits on the
+      // identity lock the merge holds. (Before the fix it read past the uncommitted merge and
+      // queued a second copy.) No sleep: the wait is visible in `pg_locks`.
+      const waiting = await eventually(
+        () => advisoryWaiters(),
+        (n) => n >= 1,
+        20_000,
+      );
+      expect(waiting, 'the batch waits on the identity lock the merge holds').toBeGreaterThanOrEqual(1);
+    } finally {
+      await merge.commit();
+    }
+    await awaitDone(id);
+    const rows = await messagesOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.profile_id).toBe(survivor);
+  }, 120_000);
 
   it('replays a chunk whose messages committed without its cursor, without duplicating', async () => {
     const profiles: string[] = [];
