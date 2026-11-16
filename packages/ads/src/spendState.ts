@@ -22,6 +22,7 @@ export interface DateInterval {
 /** One stored gap, already keyed by workspace in the table. */
 export interface SpendGap {
   platform: 'meta' | 'google';
+  account: string;
   from: string;
   to: string;
 }
@@ -112,40 +113,51 @@ export function incompleteInWindow(intervals: readonly DateInterval[], window: D
   });
 }
 
-/** One platform's incomplete coverage for a report window. */
+/** One account's incomplete coverage for a report window. */
 export interface IncompleteSpend {
   platform: 'meta' | 'google';
+  account: string;
   intervals: DateInterval[];
 }
 
 /**
- * The incomplete spend ranges that affect one report. Every stored gap of a platform the report reads
- * contributes when it overlaps the window; there is no per-account filter on the spend table, so any
- * account's incomplete import can leave that platform's cost short. Rows come from the table under
- * row-level security, so another workspace's gaps are never visible.
+ * The incomplete spend ranges that affect one report, per (platform, account). A gap still describes
+ * the stored spend of its account, but only the accounts a current connection reads can be completed
+ * by a later import (#953): a gap left behind by a re-pointed or deleted connection is kept in the
+ * table (its partial rows still feed reports) yet warns nothing, because no import could ever clear
+ * it. Pass no `accounts` to consider every stored gap. Rows come from the table under row-level
+ * security, so another workspace's gaps are never visible.
  */
 export function incompleteSpendFor(
   gaps: readonly SpendGap[],
   window: { since: string; until: string; platform?: 'meta' | 'google' },
+  accounts?: readonly SpendKey[],
 ): IncompleteSpend[] {
   const platforms: ('meta' | 'google')[] =
     window.platform === 'meta' ? ['meta'] : window.platform === 'google' ? ['google'] : ['meta', 'google'];
+  const read = accounts ? new Set(accounts.map((key) => `${key.platform}:${key.account}`)) : null;
   const affected: IncompleteSpend[] = [];
   for (const platform of platforms) {
-    const intervals = incompleteInWindow(normalizeIntervals(gaps.filter((gap) => gap.platform === platform)), {
-      from: window.since,
-      to: window.until,
-    });
-    if (intervals.length) affected.push({ platform, intervals });
+    const byAccount = new Map<string, DateInterval[]>();
+    for (const gap of gaps) {
+      if (gap.platform !== platform) continue;
+      if (read && !read.has(`${gap.platform}:${gap.account}`)) continue;
+      byAccount.set(gap.account, [...(byAccount.get(gap.account) ?? []), { from: gap.from, to: gap.to }]);
+    }
+    for (const [account, stored] of byAccount) {
+      const intervals = incompleteInWindow(normalizeIntervals(stored), { from: window.since, to: window.until });
+      if (intervals.length) affected.push({ platform, account, intervals });
+    }
   }
   return affected;
 }
 
-/** A note naming every incomplete range, or null when the report's cost is complete. */
+/** A note naming every incomplete range and its account, or null when the report's cost is complete. */
 export function incompleteSpendNote(affected: readonly IncompleteSpend[]): string | null {
   if (!affected.length) return null;
   const ranges = affected.map(
-    (entry) => `${entry.platform} ${entry.intervals.map((i) => (i.from === i.to ? i.from : `${i.from} to ${i.to}`)).join(', ')}`,
+    (entry) =>
+      `${entry.platform} ${entry.account} ${entry.intervals.map((i) => (i.from === i.to ? i.from : `${i.from} to ${i.to}`)).join(', ')}`,
   );
-  return `Spend is incomplete for ${ranges.join('; ')}: an import stopped at the provider page limit for those days, so cost is missing, CPA is understated and ROAS is overstated. Import a narrower date range to fill the gap.`;
+  return `Spend is incomplete for ${ranges.join('; ')}: an import of those days did not complete (it reached the provider page limit, failed or was interrupted), so cost may be missing; where it is, CPA is understated and ROAS is overstated. Import those days again, as a narrower date range if the provider limit was the cause.`;
 }

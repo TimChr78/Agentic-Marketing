@@ -114,6 +114,8 @@ export function planJourneyFunnelSuppression(opts: {
   hiddenParents: string[];
   /** True when every step row was hidden (no graph, or a hidden step with no parent). */
   allStepsHidden: boolean;
+  /** Below-k steps that are their own hidden subtree: no parent, or only a self-loop (#959). */
+  selfHidden: string[];
   /** Every hidden node id, including published nodes without a row (printed as suppressed). */
   hiddenNodes: string[];
 } {
@@ -130,6 +132,7 @@ export function planJourneyFunnelSuppression(opts: {
   // (#917 review round 6).
   const hidden = new Set<string>(primary);
   const hiddenParents = new Set<string>();
+  const selfHidden = new Set<string>();
   let allStepsHidden = false;
 
   if (primary.length) {
@@ -142,10 +145,12 @@ export function planJourneyFunnelSuppression(opts: {
         if (!parents.length) {
           // An entry/trigger step has no parent to scope the change to.
           allStepsHidden = true;
+          selfHidden.add(step);
           break;
         }
         // A node whose only parent is itself is hidden above; its own cycle reveals no other term,
-        // so no further expansion is needed (the indistinguishability oracle covers this case).
+        // but it is a hidden subtree in its own right, so the note can name it (#959).
+        if (parents.every((id) => id === step)) selfHidden.add(step);
         for (const parent of parents.filter((id) => id !== step)) {
           hiddenParents.add(parent);
           // Every proper descendant of the parent; the parent itself seeds the visited set so a
@@ -199,7 +204,16 @@ export function planJourneyFunnelSuppression(opts: {
     (parent) => ![...hiddenParents].some((other) => other !== parent && descendantsOf(other).has(parent)),
   );
   const withheld = names.filter((name) => totals[name] === null && initial[name] !== null);
-  return { totals, steps, withheld, hiddenSteps, hiddenParents: roots.sort(), hiddenNodes: [...hidden].sort(), allStepsHidden };
+  return {
+    totals,
+    steps,
+    withheld,
+    hiddenSteps,
+    hiddenParents: roots.sort(),
+    hiddenNodes: [...hidden].sort(),
+    allStepsHidden,
+    selfHidden: [...selfHidden],
+  };
 }
 
 /**
@@ -407,11 +421,22 @@ export function buildJourneyFunnel(
   if (funnel.allStepsHidden)
     suppressionNotes.push(
       published
-        ? `Every step row is hidden because a step below k=${K} has no parent in the published graph.`
+        ? `Every step row is hidden because a step below k=${K} has no parent in the published graph other than itself${
+            funnel.selfHidden.length ? ` (${funnel.selfHidden.join(', ')})` : ''
+          }.`
         : `No published version is selected, and a step has fewer than k=${K} people, so every step row is hidden.`,
     );
-  else if (funnel.hiddenParents.length > 0)
-    suppressionNotes.push(`Steps after ${funnel.hiddenParents.join(', ')} are hidden because one of them has fewer than k=${K} people.`);
+  else {
+    if (funnel.hiddenParents.length > 0)
+      suppressionNotes.push(`Steps after ${funnel.hiddenParents.join(', ')} are hidden because one of them has fewer than k=${K} people.`);
+    // A disconnected self-loop has no parent whose subtree could be named, so it is its own (#959).
+    if (funnel.selfHidden.length > 0)
+      suppressionNotes.push(
+        funnel.selfHidden.length === 1
+          ? `Step ${funnel.selfHidden[0]} is its own hidden subtree because it has fewer than k=${K} people and no parent in the published graph other than itself.`
+          : `Steps ${funnel.selfHidden.join(', ')} are each their own hidden subtree because each has fewer than k=${K} people and no parent in the published graph other than itself.`,
+      );
+  }
   if (steps.some((step) => step.reached === null))
     suppressionNotes.push(
       'All totals are withheld because a step row is hidden: a headline minus the visible steps could name the hidden count.',

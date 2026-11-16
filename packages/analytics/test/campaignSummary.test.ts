@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { campaignNotStarted, planMemberSuppression, revenueTargetProgress, summaryRevenue, summaryWindow } from '../src/campaignSummary';
+import {
+  campaignNotStarted,
+  planMemberSuppression,
+  revenueTargetProgress,
+  summaryCurrency,
+  summaryRevenue,
+  summaryWindow,
+} from '../src/campaignSummary';
 
 // #747: a campaign whose recorded start is after the requested `to` has no sends in that window,
 // whether or not it has sent later. The default `from` must become an empty window instead of the
@@ -207,6 +214,28 @@ describe('campaign summary currency suppression (#909)', () => {
     expect(
       revenueTargetProgress({ goal: { kind: 'revenue', target: 1000 }, revenue: [{ currency: 'USD', amount: 400 }], converters: 9 }),
     ).toBeCloseTo(0.4, 8);
+  });
+
+  it('publishes meta.currency only for a single, visible, known currency (#958)', () => {
+    // A suppressed amount means the headline is withheld, so the currency is not usable either.
+    expect(summaryCurrency([{ currency: 'EUR', amount: null }])).toBeNull();
+    // UNKNOWN is not a currency, matching analytics.query's meta.currency.
+    expect(summaryCurrency([{ currency: 'UNKNOWN', amount: 10 }])).toBeNull();
+    expect(summaryCurrency([{ currency: 'EUR', amount: 400 }])).toBe('EUR');
+    // Two currency rows can never be added; even one suppressed row keeps it null (#909).
+    expect(
+      summaryCurrency([
+        { currency: 'EUR', amount: 400 },
+        { currency: 'USD', amount: 200 },
+      ]),
+    ).toBeNull();
+    expect(
+      summaryCurrency([
+        { currency: 'EUR', amount: null },
+        { currency: 'USD', amount: 200 },
+      ]),
+    ).toBeNull();
+    expect(summaryCurrency([])).toBeNull();
   });
 
   it('leaves a conversion goal’s target progress on the converter count', () => {

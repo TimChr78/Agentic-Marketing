@@ -73,18 +73,43 @@ export async function recordSpendGaps(
 
 /**
  * The gaps of any account of a platform whose spend a report reads, for its window. The report does
- * not filter `ad_spend` by account, so every account's gap can leave its cost short; the rows come
- * through the workspace transaction, so row-level security keeps other tenants out.
+ * not filter `ad_spend` by account, but only a gap whose (platform, account) a current connection
+ * still reads can be completed by a later import, so `incompleteSpendFor` filters by those accounts
+ * (#953). The rows come through the workspace transaction, so row-level security keeps other tenants
+ * out.
  */
 export async function readSpendGapsForReport(
   tx: Tx,
   window: { since: string; until: string; platform?: 'meta' | 'google' },
 ): Promise<SpendGap[]> {
   const rows = await tx
-    .select({ platform: schema.adSpendGaps.platform, fromDate: schema.adSpendGaps.fromDate, toDate: schema.adSpendGaps.toDate })
+    .select({
+      platform: schema.adSpendGaps.platform,
+      account: schema.adSpendGaps.account,
+      fromDate: schema.adSpendGaps.fromDate,
+      toDate: schema.adSpendGaps.toDate,
+    })
     .from(schema.adSpendGaps)
     .where(and(gte(schema.adSpendGaps.toDate, window.since), lte(schema.adSpendGaps.fromDate, window.until)));
   return rows
     .filter((row) => !window.platform || row.platform === window.platform)
-    .map((row) => ({ platform: row.platform, from: row.fromDate, to: row.toDate }));
+    .map((row) => ({ platform: row.platform, account: row.account, from: row.fromDate, to: row.toDate }));
+}
+
+/**
+ * Deletes one account's stored gap. The import cannot clear a gap for an account no connection reads
+ * any more, so a person can (#953); the spend rows themselves stay untouched.
+ */
+export async function clearSpendGaps(tx: Tx, workspaceId: string, key: SpendKey): Promise<number> {
+  const removed = await tx
+    .delete(schema.adSpendGaps)
+    .where(
+      and(
+        eq(schema.adSpendGaps.workspaceId, workspaceId),
+        eq(schema.adSpendGaps.platform, key.platform),
+        eq(schema.adSpendGaps.account, key.account),
+      ),
+    )
+    .returning({ fromDate: schema.adSpendGaps.fromDate });
+  return removed.length;
 }
