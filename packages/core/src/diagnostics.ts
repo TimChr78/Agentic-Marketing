@@ -1086,6 +1086,101 @@ export function safeErrorText(text: string, max: number): string {
   return redactCredentials(String(text)).split('\n')[0]!.trim().slice(0, max);
 }
 
+/** How much of one detail string survives (#996). */
+export const ERROR_DETAILS_MAX_CHARS = 1000;
+/** How deep `redactErrorDetails` walks before it replaces the rest (#996). */
+export const ERROR_DETAILS_MAX_DEPTH = 8;
+/** How many array items and object properties it keeps in total (#996). */
+export const ERROR_DETAILS_MAX_ELEMENTS = 1000;
+/** What a value cut by the depth or element limit becomes (#996). */
+export const ERROR_DETAILS_TRUNCATED = '[truncated]';
+
+/**
+ * Detail values that are an API contract rather than prose: a client switches on them
+ * (`details.reason`). The bare-token rule eats `idempotency_key_reversed` (24 characters, with
+ * separators allowed), so these exact values are kept. The list is exact, so a free-text value in
+ * the same field still goes through the redactor (#996).
+ */
+const STRUCTURAL_DETAIL_VALUES: ReadonlySet<string> = new Set([
+  'idempotency_key_reused',
+  'idempotency_key_reversed',
+  'idempotency_in_progress',
+]);
+
+/**
+ * The safe copy of an AppError's `details` (#996): every string redacted and bounded, nested arrays
+ * and objects walked with a depth and an element limit, object keys and the structure kept so
+ * `details.reason` or `details.problems[].path` stay machine-readable, and non-string primitives
+ * untouched. The original value is never mutated, and an unchanged value is returned as it is (so
+ * an error with nothing to redact keeps its identity). Redaction is idempotent, so a second pass at
+ * a serialisation point changes nothing.
+ */
+export function redactErrorDetails(details: unknown): unknown {
+  let remaining = ERROR_DETAILS_MAX_ELEMENTS;
+  const seen = new WeakSet<object>();
+
+  const walk = (value: unknown, depth: number): unknown => {
+    if (typeof value === 'string') {
+      // The marker and the API's own enum values are not text a redactor could improve.
+      if (value === ERROR_DETAILS_TRUNCATED || STRUCTURAL_DETAIL_VALUES.has(value)) return value;
+      // Redact while the value is complete; cutting first could leave a token prefix (#885).
+      return redactedText(value, ERROR_DETAILS_MAX_CHARS);
+    }
+    if (value === null || typeof value !== 'object') return value;
+    if (depth > ERROR_DETAILS_MAX_DEPTH) return ERROR_DETAILS_TRUNCATED;
+    // A value already walked is a cycle (or a shared node): do not walk it twice.
+    if (seen.has(value)) return ERROR_DETAILS_TRUNCATED;
+    seen.add(value);
+    const next = depth + 1;
+
+    if (Array.isArray(value)) {
+      const out: unknown[] = [];
+      let changed = false;
+      let index = 0;
+      for (; index < value.length; index += 1) {
+        const item: unknown = value[index];
+        // A marker this helper wrote does not count against the limit, so a second pass keeps it.
+        if (item === ERROR_DETAILS_TRUNCATED) {
+          out.push(item);
+          continue;
+        }
+        if (remaining <= 0) break;
+        remaining -= 1;
+        const clean = walk(item, next);
+        if (clean !== item) changed = true;
+        out.push(clean);
+      }
+      if (index < value.length) {
+        out.push(ERROR_DETAILS_TRUNCATED);
+        changed = true;
+      }
+      return changed ? out : value;
+    }
+
+    const out: Record<string, unknown> = {};
+    let changed = false;
+    let truncated = false;
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (key === ERROR_DETAILS_TRUNCATED && item === ERROR_DETAILS_TRUNCATED) {
+        out[key] = item;
+        continue;
+      }
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+      remaining -= 1;
+      const clean = walk(item, next);
+      if (clean !== item) changed = true;
+      out[key] = clean;
+    }
+    if (truncated) out[ERROR_DETAILS_TRUNCATED] = ERROR_DETAILS_TRUNCATED;
+    return changed || truncated ? out : value;
+  };
+
+  return walk(details, 0);
+}
+
 const CODE_FIELDS = ['code', 'status', 'type'] as const;
 const TEXT_FIELDS = ['message', 'error_description', 'detail', 'description'] as const;
 /** The keys a provider nests its error object under. */

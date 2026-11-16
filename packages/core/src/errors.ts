@@ -1,3 +1,5 @@
+import { redactCredentials, redactErrorDetails } from './diagnostics';
+
 export type ErrorCode = 'invalid_input' | 'unauthorized' | 'forbidden' | 'not_found' | 'conflict' | 'precondition_failed';
 
 const statusByCode: Record<ErrorCode, number> = {
@@ -27,7 +29,18 @@ export class AppError extends Error {
     return statusByCode[this.code];
   }
 
+  /**
+   * The body a caller sees: message and `details` redacted and bounded (#996). The executor
+   * sanitises every error it throws, but an AppError can also be raised before it (authentication,
+   * CSRF, a route's own validation), and REST and MCP both serialise through here. Redaction is
+   * idempotent, so the second pass changes nothing.
+   */
   toJSON() {
-    return { error: this.code, message: this.message, ...(this.details === undefined ? {} : { details: this.details }) };
+    const details = this.details === undefined ? undefined : redactErrorDetails(this.details);
+    return {
+      error: this.code,
+      message: redactCredentials(this.message),
+      ...(details === undefined ? {} : { details }),
+    };
   }
 }

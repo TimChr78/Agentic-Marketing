@@ -1,4 +1,13 @@
-import { AppError, canonicalJson, hashValue, redactCredentials, redactedText, safeErrorText, sha256 } from '@agentic-marketing/core';
+import {
+  AppError,
+  canonicalJson,
+  hashValue,
+  redactCredentials,
+  redactErrorDetails,
+  redactedText,
+  safeErrorText,
+  sha256,
+} from '@agentic-marketing/core';
 import { type AgentUndo, type Db, IDEMPOTENCY_RETENTION_DAYS, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
@@ -361,20 +370,22 @@ export async function appendAuditEntry(
 }
 
 /**
- * The sanitised copy of an AppError (#885): its message redacted while it is still complete, so a
- * command that built it from a provider's answer or an exception cannot leak a credential to the
- * caller, the audit log or the agent ledger. The executor is the last line of defence: it sanitises
- * once, here, rather than trusting every message a handler writes. An error with nothing to redact
- * is returned untouched, so its identity (and a PolicyDeniedError's outcome) survives.
+ * The sanitised copy of an AppError (#885, #996): its message and its `details` redacted while they
+ * are still complete, so a command that built them from a provider's answer, an exception or the
+ * caller's own input cannot leak a credential to the caller, the audit log, the agent ledger or a
+ * copilot tool result. The executor is the last line of defence: it sanitises once, here, rather
+ * than trusting every message or detail a handler writes. An error with nothing to redact is
+ * returned untouched, so its identity (and a PolicyDeniedError's outcome) survives.
  */
 export function sanitizeAppError(err: AppError): AppError {
   const message = redactCredentials(err.message);
+  const details = err.details === undefined ? undefined : redactErrorDetails(err.details);
   if (err instanceof PolicyDeniedError) {
     const reasons = err.outcome.reasons.map(redactCredentials);
     const changed = message !== err.message || reasons.some((r, i) => r !== err.outcome.reasons[i]);
     return changed ? new PolicyDeniedError({ ...err.outcome, reasons }) : err;
   }
-  return message === err.message ? err : new AppError(err.code, message, err.details);
+  return message === err.message && details === err.details ? err : new AppError(err.code, message, details);
 }
 
 export function createExecutor(db: Db, services: Services, options: ExecutorOptions = {}) {

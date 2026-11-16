@@ -17,13 +17,25 @@ let llm: Awaited<ReturnType<typeof fakeLlm>>;
 let owner: User;
 
 async function answer(r: FakeRequest) {
-  if (!r.user.includes('tool-error-redaction')) return { text: 'Nothing to do.' };
-  // The tool failed: answer, so the turn ends and the client stream is complete.
-  if (r.toolResults.at(-1)?.includes('"error"')) return { text: 'The tool failed; nothing to change.' };
-  // The newly enabled tool is called with a value a model can produce (or copy from the
-  // conversation); the command echoes it back in its not-found message.
-  if (r.toolResults.length) return { toolCalls: [{ name: 'approvals__get', input: { approvalId: `password=${SECRET}` } }] };
-  return { toolCalls: [{ name: 'tools__discover', input: { query: 'approvals get' } }] };
+  if (r.user.includes('tool-error-redaction')) {
+    // The tool failed: answer, so the turn ends and the client stream is complete.
+    if (r.toolResults.at(-1)?.includes('"error"')) return { text: 'The tool failed; nothing to change.' };
+    // The newly enabled tool is called with a value a model can produce (or copy from the
+    // conversation); the command echoes it back in its not-found message.
+    if (r.toolResults.length) return { toolCalls: [{ name: 'approvals__get', input: { approvalId: `password=${SECRET}` } }] };
+    return { toolCalls: [{ name: 'tools__discover', input: { query: 'approvals get' } }] };
+  }
+  if (r.user.includes('tool-error-details')) {
+    // #996: the unknown parameter's NAME holds the credential, and the recipe error reports the
+    // name in `details.problems` while its message is redacted.
+    if (r.toolResults.at(-1)?.includes('"error"')) return { text: 'The tool failed; nothing to change.' };
+    if (r.toolResults.length)
+      return {
+        toolCalls: [{ name: 'recipes__preview', input: { recipeId: 'weekly-newsletter', params: { [`password=${SECRET}`]: 'x' } } }],
+      };
+    return { toolCalls: [{ name: 'tools__discover', input: { query: 'recipes preview' } }] };
+  }
+  return { text: 'Nothing to do.' };
 }
 
 async function copilot(user: User, message: string) {
@@ -78,6 +90,23 @@ describe('a failing tool does not leak its error text to the copilot stream', ()
     expect(JSON.stringify(failed.output)).not.toContain(SECRET);
     expect(JSON.stringify(failed.output)).toContain('[redacted]');
     // The model is told what to fix, without the credential.
+    const request = llm.requests.filter((x) => x.user.includes(marker)).at(-1)!;
+    expect(JSON.stringify(request.messages.at(-1))).not.toContain(SECRET);
+  });
+
+  it('redacts a credential the model passed in a parameter name, not only in the message (#996)', async () => {
+    const marker = `tool-error-details-${Date.now()}`;
+    const r = await copilot(owner, `Try the recipe ${marker}`);
+    expect(r.status).toBe(200);
+
+    const failed = r.events.find((e) => e.type === 'toolResult' && e.name === 'recipes.preview');
+    expect(failed).toBeDefined();
+    expect(failed.ok).toBe(false);
+
+    // The error's details named the parameter the model passed; the client sees the redacted copy.
+    expect(JSON.stringify(failed.output)).toContain('Unknown parameter');
+    expect(JSON.stringify(failed.output)).not.toContain(SECRET);
+    expect(JSON.stringify(failed.output)).toContain('[redacted]');
     const request = llm.requests.filter((x) => x.user.includes(marker)).at(-1)!;
     expect(JSON.stringify(request.messages.at(-1))).not.toContain(SECRET);
   });
