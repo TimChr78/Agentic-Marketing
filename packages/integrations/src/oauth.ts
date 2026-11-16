@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, providerDiagnostic, redactCredentials, sha256 } from '@agentic-marketing/core';
+import { AppError, providerDiagnostic, safeErrorText, sha256 } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -64,10 +64,12 @@ function oauthOf(row: Row) {
 /** One line of provider text, credential-redacted and bounded: it reaches a callback page and the
  * `oauthError` that `connections.list` exposes, so it must never carry a raw exception or body. */
 const MAX_OAUTH_TEXT = 300;
-function safeOAuthText(text: string): string {
-  // Redact the whole text first: cutting at the first line can split a quoted credential from its
-  // closing quote, and the redaction rule would no longer recognise it (#885 round 3).
-  const first = redactCredentials(String(text)).split('\n')[0].trim();
+export function safeOAuthText(text: string): string {
+  // Redacted while it is still complete, then its first line and the bound (#885 round 3); the cut
+  // lives in `safeErrorText` so the guard in packages/core/test/error-text-bounds.test.ts sees it
+  // (#964). One character is taken past the limit so a diagnostic of exactly 300 is unchanged, as
+  // the pre-#964 code left it (#968 review).
+  const first = safeErrorText(String(text), MAX_OAUTH_TEXT + 1);
   return first.length > MAX_OAUTH_TEXT ? `${first.slice(0, MAX_OAUTH_TEXT - 1)}…` : first;
 }
 
