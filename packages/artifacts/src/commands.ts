@@ -536,7 +536,7 @@ export const archiveArtifact = defineCommand({
   name: 'artifacts.archive',
   title: 'Archive an artifact',
   description:
-    'Retires an artifact for good: nothing can be published on it again, the default artifacts.list hides it, and its pending approval requests are closed as rejected. Use it to retire one of two published mandates for the same agent (an agent can have only one active mandate). A workspace singleton (brand, business context, tracking plan, purposes, delivery policy, conversion map) cannot be archived because a workspace needs it; edit it instead. Archiving does not unpublish a live version or delete history, and there is no unarchive command: config.import can restore an archived singleton when the workspace has no active one. People only.',
+    'Retires an artifact for good: nothing can be published on it again, the default artifacts.list hides it, and its pending approval requests are closed as rejected. Use it to retire one of two published mandates for the same agent (an agent can have only one active mandate). A workspace singleton (brand, business context, tracking plan, purposes, delivery policy, conversion map) cannot be archived because a workspace needs it; edit it instead. Archiving does not unpublish a live version or delete history, and it does not stop a journey, a broadcast already scheduled or anything else already running on the published version; it only prevents further publishes. There is no unarchive command: config.import can restore an archived singleton when the workspace has no active one. People only.',
   input: z.object({
     artifactId: ArtifactId,
   }),
@@ -559,18 +559,11 @@ export const archiveArtifact = defineCommand({
         'conflict',
         `A workspace needs its ${current.type}, so it cannot be archived. Edit the active one with artifacts.updateDraft instead.`,
       );
-    if (current.archived)
-      return {
-        artifactId: current.id,
-        name: current.name,
-        archived: true as const,
-        closedApprovals: await closeArchivedRequestsIn(ctx.tx, ws),
-      };
-    // The request rows first, then the artifact row: the order every decider takes, so archiving
-    // cannot deadlock with a person's approval of one of these requests (#957).
-    const rows = await lockRequestsFor(ctx.tx, ws, [current.id]);
-    // Re-read under the lock: a concurrent archive or restore decides which branch applies.
-    const fresh = await loadArtifact(ctx, input.artifactId);
+    // The plan is re-read under the artifact lock, so a request that committed while this waited is
+    // closed too (see lockArchivePlan). The same artifact-scoped closure runs for a first and a
+    // repeated call: a repeated call must not sweep the workspace and report another artifact's
+    // requests as this one's.
+    const { rows, fresh } = await lockArchivePlan(ctx, current.id);
     if (fresh.archived)
       return {
         artifactId: fresh.id,
@@ -1789,7 +1782,16 @@ async function closeRejectedRows(tx: Tx, workspaceId: string, rows: { id: string
   for (const r of rows)
     await tx
       .update(schema.approvalRequests)
-      .set({ status: 'rejected', decidedBy: 'policy:archived', decidedAt: new Date(), decisionNote: r.reason, holdUntil: null })
+      // The reason quotes the artifact's name and ids, and a name is caller-supplied text: redact
+      // and bound it here, so every closing path (approve, the held runner, the sweep, archive)
+      // writes the same safe note (#950 review).
+      .set({
+        status: 'rejected',
+        decidedBy: 'policy:archived',
+        decidedAt: new Date(),
+        decisionNote: safeErrorText(r.reason, 1000),
+        holdUntil: null,
+      })
       .where(and(eq(schema.approvalRequests.workspaceId, workspaceId), eq(schema.approvalRequests.id, r.id)));
 }
 
@@ -1893,6 +1895,63 @@ async function closeArchivedRequestsIn(tx: Tx, workspaceId: string): Promise<num
   if (!archivedArtifactIds.length) return 0;
   const rows = await lockRequestsFor(tx, workspaceId, archivedArtifactIds);
   return closeArchivedAmong(tx, workspaceId, rows, new Set(rows.filter((x) => x.a.archived).map((x) => x.a.id)));
+}
+
+/** How often an archive restarts its lock plan when a request appeared while it waited (#950 review). */
+const ARCHIVE_PLAN_ATTEMPTS = 3;
+
+/** The plan changed between the unlocked read and the artifact lock: restart it in order. */
+class ArchivePlanChanged extends Error {}
+
+/** The artifact's pending requests, read after its row lock is held. */
+async function pendingRequestIdsFor(tx: Tx, workspaceId: string, artifactId: string): Promise<string[]> {
+  const rows = await tx
+    .select({ id: schema.approvalRequests.id })
+    .from(schema.approvalRequests)
+    .where(
+      and(
+        eq(schema.approvalRequests.workspaceId, workspaceId),
+        eq(schema.approvalRequests.artifactId, artifactId),
+        eq(schema.approvalRequests.status, 'pending'),
+      ),
+    );
+  return rows.map((r) => r.id);
+}
+
+/**
+ * Locks the archive's plan: the artifact's pending requests (and every request of their bundles)
+ * first, then the artifact row, and re-reads the request set under that lock. A `requestPublish`
+ * that committed between the first read and the artifact lock is closed too; because its approval
+ * row would now have to be locked after the artifact, the plan restarts from a savepoint instead —
+ * rolling back to it releases the locks taken since, so the documented order (approval rows, then
+ * artifacts) still holds for every attempt. Bounded, then a clean retryable conflict.
+ */
+async function lockArchivePlan(
+  ctx: CommandContext,
+  artifactId: string,
+): Promise<{ rows: { r: ApprovalRow; a: ArtifactRow }[]; fresh: ArtifactRow }> {
+  const ws = ctx.principal.workspaceId;
+  for (let attempt = 1; ; attempt++) {
+    await ctx.tx.execute(sql.raw('SAVEPOINT archive_plan'));
+    try {
+      const rows = await lockRequestsFor(ctx.tx, ws, [artifactId]);
+      const fresh = await loadArtifact(ctx, artifactId);
+      // Under the artifact lock no new request for it can be created (requestPublish locks it
+      // first), so this set is stable from here on.
+      const pending = await pendingRequestIdsFor(ctx.tx, ws, artifactId);
+      const lockedIds = new Set(rows.map((x) => x.r.id));
+      if (pending.some((id) => !lockedIds.has(id))) throw new ArchivePlanChanged();
+      await ctx.tx.execute(sql.raw('RELEASE SAVEPOINT archive_plan'));
+      return { rows, fresh };
+    } catch (err) {
+      await ctx.tx.execute(sql.raw('ROLLBACK TO SAVEPOINT archive_plan')).catch(() => {});
+      if (err instanceof ArchivePlanChanged) {
+        if (attempt < ARCHIVE_PLAN_ATTEMPTS) continue;
+        throw new AppError('conflict', 'The pending requests on this artifact changed while it was being archived. Try again.');
+      }
+      throw err;
+    }
+  }
 }
 
 /** How often the scheduler looks again for a request an artifact archived after start-up (#957). */

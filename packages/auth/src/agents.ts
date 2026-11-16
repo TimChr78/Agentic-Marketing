@@ -739,12 +739,32 @@ export async function undoAgentAction(tx: Tx, ctx: CommandContext, actionId: num
   const undoneAt = new Date();
   await tx.update(schema.agentActions).set({ undoneAt, undoneBy: by, undoResult: result }).where(eq(schema.agentActions.id, actionId));
   // A retry that presents the idempotency key of the action just undone must not receive its stored
-  // response: that response describes something the world no longer matches (#950). Only an agent
-  // write has a ledger row, so only its key can be reversed.
-  await tx
-    .update(schema.idempotencyKeys)
-    .set({ reversedAt: undoneAt })
-    .where(and(eq(schema.idempotencyKeys.workspaceId, ctx.principal.workspaceId), eq(schema.idempotencyKeys.agentActionId, actionId)));
+  // response: that response describes something the world no longer matches (#950). A command can
+  // have stored several ledger rows under one key (config.import publishes each artifact), so any
+  // one of those rows being undone reverses the key. Only an agent write has ledger rows, so a
+  // person's key can never be reversed.
+  const linked = await tx
+    .select({ key: schema.idempotencyKeyActions.key })
+    .from(schema.idempotencyKeyActions)
+    .where(
+      and(
+        eq(schema.idempotencyKeyActions.workspaceId, ctx.principal.workspaceId),
+        eq(schema.idempotencyKeyActions.agentActionId, actionId),
+      ),
+    );
+  if (linked.length)
+    await tx
+      .update(schema.idempotencyKeys)
+      .set({ reversedAt: undoneAt })
+      .where(
+        and(
+          eq(schema.idempotencyKeys.workspaceId, ctx.principal.workspaceId),
+          inArray(
+            schema.idempotencyKeys.key,
+            linked.map((r) => r.key),
+          ),
+        ),
+      );
   return { actionId, undoneAt: undoneAt.toISOString(), result, steps };
 }
 

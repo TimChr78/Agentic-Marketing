@@ -508,6 +508,10 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             async (tx) => {
               committed.length = 0;
               policy = undefined;
+              // Collect every ledger row this command writes, so its idempotency key can name all of
+              // them: config.import records one undoable publish per artifact besides its own row,
+              // and undoing any of them must reverse the stored response (#950 review).
+              ledgerActionsByTx.set(tx, []);
               // The agent-policy lock comes first for every agent write (#922 A2): before a
               // command's `impact`, which may lock artifacts for the independent check. Taking it
               // later is what let a held run and a publish request deadlock on the same artifact.
@@ -641,18 +645,19 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                   intentOf(parsed.data),
                   undo.get(),
                 );
-                // Link the stored response to its ledger row, so agents.undo can mark this key
-                // reversed and a replay stops describing an action that was undone (#950).
-                if (opts.idempotencyKey && actionId !== undefined)
-                  await tx
-                    .update(schema.idempotencyKeys)
-                    .set({ agentActionId: actionId })
-                    .where(
-                      and(
-                        eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
-                        eq(schema.idempotencyKeys.key, opts.idempotencyKey),
-                      ),
-                    );
+                // Link the stored response to every ledger row the command wrote, so agents.undo can
+                // mark this key reversed and a replay stops describing an action that was undone.
+                // `recordAgentAction` collected each row, including the ones nested handlers wrote
+                // (config.import records one undoable publish per artifact besides its own row).
+                const actionIds = ledgerActionsByTx.get(tx) ?? (actionId === undefined ? [] : [actionId]);
+                if (opts.idempotencyKey && actionIds.length)
+                  await tx.insert(schema.idempotencyKeyActions).values(
+                    actionIds.map((agentActionId) => ({
+                      workspaceId: principal.workspaceId,
+                      key: opts.idempotencyKey!,
+                      agentActionId,
+                    })),
+                  );
               }
               return out;
             },
@@ -942,6 +947,14 @@ export function redactPolicyReasons(policy: PolicyOutcome): PolicyOutcome {
   return { ...policy, reasons, ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}) };
 }
 
+/**
+ * The ledger rows each command transaction writes (#950 review). The executor registers a list for
+ * its transaction before the handler runs; `recordAgentAction` appends to it, so a nested handler
+ * (config.import's per-artifact publish) is linked to the same idempotency key as the outer command.
+ * A transaction without an entry (the scheduler, the held runner) records usually and links nothing.
+ */
+const ledgerActionsByTx = new WeakMap<object, number[]>();
+
 /** One agent write in the ledger (#218), with the decision that allowed, escalated or refused it. Returns the row id. */
 export async function recordAgentAction(
   tx: Tx,
@@ -981,6 +994,7 @@ export async function recordAgentAction(
       undo: undo ?? null,
     })
     .returning({ id: schema.agentActions.id });
+  if (row?.id !== undefined) ledgerActionsByTx.get(tx)?.push(row.id);
   return row?.id;
 }
 

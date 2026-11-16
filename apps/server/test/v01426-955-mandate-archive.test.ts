@@ -129,6 +129,26 @@ async function newAgent(api: ReturnType<typeof t.api>) {
   return me.id;
 }
 
+/** The part of a raw connection these checks use. */
+interface RawConn {
+  query<T extends Record<string, unknown>>(sql: string, values?: unknown[]): Promise<{ rows: T[] }>;
+}
+
+/** Waits (bounded) until a backend is queued for this transaction id. */
+async function waitForTransactionWaiter(conn: RawConn, xid: string, timeoutMs = 10_000) {
+  const started = Date.now();
+  for (;;) {
+    const { rows } = await conn.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_locks
+        WHERE locktype = 'transactionid' AND transactionid = $1::xid AND NOT granted`,
+      [xid],
+    );
+    if ((rows[0]?.n ?? 0) > 0) return;
+    if (Date.now() - started > timeoutMs) throw new Error('no backend waited for the archive transaction');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 describe('artifacts.archive (#955)', () => {
   it('archives the active mandate so a new one can be published, and the validator names it', async () => {
     const ws = await t.workspaceWith([[owner, 'owner']], 'none');
@@ -203,6 +223,94 @@ describe('artifacts.archive (#955)', () => {
     );
     expect(versions[0]?.state).toBe('rejected');
   });
+
+  it('redacts a credential in the artifact name before writing the decision note', async () => {
+    const ws = await t.workspaceWith([[owner, 'owner']], 'all_publishes');
+    const api = t.api(owner, ws);
+    const created = await api.call('artifacts.create', {
+      type: 'note',
+      name: 'Pending note password=review_dummy_secret',
+      content: { title: 'N', body: 'B' },
+    });
+    const request = await api.call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'Review me' });
+    expect(request.status).toBe('in_review');
+
+    const archived = await api.call('artifacts.archive', { artifactId: created.artifactId });
+    expect(archived.closedApprovals).toBe(1);
+    const { rows } = await t.srv.db.admin.query<{ decision_note: string }>(
+      'SELECT decision_note FROM approval_requests WHERE workspace_id = $1 AND id = $2',
+      [ws, request.approvalId as string],
+    );
+    expect(rows[0]?.decision_note).not.toContain('review_dummy_secret');
+    expect(rows[0]?.decision_note).toContain('[redacted]');
+  });
+
+  it('a repeated archive closes only its own artifact’s requests', async () => {
+    const ws = await t.workspaceWith([[owner, 'owner']], 'all_publishes');
+    const api = t.api(owner, ws);
+    const first = await api.call('artifacts.create', { type: 'note', name: 'Archived first', content: { title: 'A', body: 'A' } });
+    const other = await api.call('artifacts.create', { type: 'note', name: 'Archived elsewhere', content: { title: 'B', body: 'B' } });
+    const firstRequest = await api.call('artifacts.requestPublish', { artifactId: first.artifactId, note: 'First' });
+    const otherRequest = await api.call('artifacts.requestPublish', { artifactId: other.artifactId, note: 'Other' });
+    expect(firstRequest.status).toBe('in_review');
+    expect(otherRequest.status).toBe('in_review');
+    // Archived outside the command (migration 0092, the mandate repair, or config.import), with its
+    // request still pending: the repeated call must not sweep this workspace on its behalf.
+    await t.srv.db.admin.query('UPDATE artifacts SET archived = true WHERE workspace_id = $1 AND id = $2', [ws, other.artifactId]);
+
+    const archived = await api.call('artifacts.archive', { artifactId: first.artifactId });
+    expect(archived.closedApprovals).toBe(1);
+    const again = await api.call('artifacts.archive', { artifactId: first.artifactId });
+    expect(again).toMatchObject({ closedApprovals: 0, name: archived.name, archived: true });
+
+    // The second call must not close another archived artifact's request and report it as ours.
+    const { rows } = await t.srv.db.admin.query<{ status: string }>(
+      'SELECT status FROM approval_requests WHERE workspace_id = $1 AND id = $2',
+      [ws, otherRequest.approvalId as string],
+    );
+    expect(rows[0]?.status).toBe('pending');
+    const queue = await api.call('approvals.list', { status: 'pending' });
+    expect(queue.approvals.map((a) => a.id)).toEqual([otherRequest.approvalId]);
+  });
+
+  it('closes a request that committed while the archive waited for the artifact lock', async () => {
+    // A concurrent requestPublish can create its request after the archive's first read and before
+    // its artifact lock. The archive re-reads under the lock and closes the new request, restarting
+    // its plan so the approval-row lock still comes before the artifact lock.
+    const ws = await t.workspaceWith([[owner, 'owner']], 'all_publishes');
+    const api = t.api(owner, ws);
+    const created = await api.call('artifacts.create', { type: 'note', name: 'Racing note', content: { title: 'N', body: 'B' } });
+    const approvalId = newId('apr');
+    const holder = await t.srv.db.admin.connect();
+    let archive: Promise<{ archived: boolean; closedApprovals: number }> | undefined;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT 1 FROM artifacts WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [ws, created.artifactId]);
+      const xid = (await holder.query<{ xid: string }>('SELECT txid_current()::text AS xid')).rows[0]!.xid;
+      archive = api.call('artifacts.archive', { artifactId: created.artifactId });
+      await waitForTransactionWaiter(holder, xid);
+      // The publisher commits its request while the archive waits for the artifact row.
+      await t.srv.db.admin.query(
+        `INSERT INTO approval_requests (workspace_id, id, artifact_id, version, status, requested_by_type, requested_by_id, note)
+         VALUES ($1, $2, $3, 1, 'pending', 'user', $4, 'Raced request')`,
+        [ws, approvalId, created.artifactId, owner.id],
+      );
+      await t.srv.db.admin.query(
+        "UPDATE artifact_versions SET state = 'in_review' WHERE workspace_id = $1 AND artifact_id = $2 AND number = 1",
+        [ws, created.artifactId],
+      );
+    } finally {
+      await holder.query('COMMIT');
+      holder.release();
+    }
+    const out = await archive!;
+    expect(out).toMatchObject({ archived: true, closedApprovals: 1 });
+    const { rows } = await t.srv.db.admin.query<{ status: string; decided_by: string }>(
+      'SELECT status, decided_by FROM approval_requests WHERE workspace_id = $1 AND id = $2',
+      [ws, approvalId],
+    );
+    expect(rows[0]).toMatchObject({ status: 'rejected', decided_by: 'policy:archived' });
+  }, 60_000);
 
   it('refuses a workspace singleton and an agent', async () => {
     const ws = await t.workspaceWith([[owner, 'owner']], 'none');

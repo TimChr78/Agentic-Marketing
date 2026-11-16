@@ -152,6 +152,20 @@ describe('pending approvals on archived artifacts are swept (#957)', () => {
     expect(queue.total).toBe(0);
   });
 
+  it('redacts a credential in the archived artifact’s name before writing the reason', async () => {
+    // The reason quotes the artifact's name, and an artifact name is caller-supplied text: a
+    // credential pasted into it must not reach the decision note (#950 review).
+    const s = await pendingNote('Pending note password=review_dummy_secret');
+    await archive(s.ws, s.artifactId);
+    await sweepArchivedApprovals(t.srv.db);
+
+    const [row] = await approvalRows(s.ws, [s.approvalId]);
+    expect(row?.status).toBe('rejected');
+    expect(row?.decision_note).not.toContain('review_dummy_secret');
+    expect(row?.decision_note).toContain('[redacted]');
+    expect(row?.decision_note).toContain(s.artifactId);
+  });
+
   it('leaves requests whose artifacts are live alone', async () => {
     const s = await pendingNote('Nothing archived here');
     await sweepArchivedApprovals(t.srv.db);

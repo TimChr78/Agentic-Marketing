@@ -1,3 +1,4 @@
+import { newId } from '@agentic-marketing/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestServer, testPort, type User } from './harness';
 
@@ -51,11 +52,19 @@ async function agentCall(command: string, body: unknown = {}, key?: string) {
 
 const keyRow = async (key: string) =>
   (
-    await t.srv.db.admin.query<{ agent_action_id: string | null; reversed_at: Date | null }>(
-      'SELECT agent_action_id, reversed_at FROM idempotency_keys WHERE workspace_id = $1 AND key = $2',
+    await t.srv.db.admin.query<{ reversed_at: Date | null }>(
+      'SELECT reversed_at FROM idempotency_keys WHERE workspace_id = $1 AND key = $2',
       [ws, key],
     )
   ).rows[0];
+
+const linkedActions = async (key: string) =>
+  (
+    await t.srv.db.admin.query<{ agent_action_id: string }>(
+      'SELECT agent_action_id FROM idempotency_key_actions WHERE workspace_id = $1 AND key = $2 ORDER BY agent_action_id',
+      [ws, key],
+    )
+  ).rows.map((r) => r.agent_action_id);
 
 /** A draft the agent owns, ready for one idempotent publish. */
 async function draft(name: string) {
@@ -82,9 +91,8 @@ describe('a replay of an undone action answers 409 (#950)', () => {
     expect(first.body.status).toBe('published');
 
     // The response is linked to the ledger row that made it, so undo knows which key to reverse.
-    expect((await keyRow(key))?.agent_action_id).toBe(String((await actionFor(artifactId)).id));
-
     const action = await actionFor(artifactId);
+    expect(await linkedActions(key)).toContain(String(action.id));
     const undone = await t.api(owner, ws).call('agents.undo', { actionId: action.id, note: 'Wrong note' });
     expect(undone.result).toBeTruthy();
     expect((await keyRow(key))?.reversed_at).not.toBeNull();
@@ -112,6 +120,46 @@ describe('a replay of an undone action answers 409 (#950)', () => {
     expect(replay.body).toMatchObject({ status: 'published', version: first.body.version });
   });
 
+  it('links every ledger row the command wrote, so one undone publish reverses an import’s key', async () => {
+    // config.import with publish:true writes one undoable publish row per artifact (#239), separate
+    // from its own outer row. Undoing either publish must reverse the import's key.
+    const key = 'import-two-publishes-1';
+    const first = newId('not');
+    const second = newId('not');
+    const bundle = {
+      bundle: {
+        format: 'agentic-marketing/artifacts@1',
+        artifacts: [
+          { id: first, type: 'note', name: 'Imported one', content: { title: 'One', body: 'First import' } },
+          { id: second, type: 'note', name: 'Imported two', content: { title: 'Two', body: 'Second import' } },
+        ],
+      },
+      dryRun: false,
+      publish: true,
+      note: 'Import and publish both',
+    };
+    const imported = await agentCall('config.import', bundle, key);
+    expect(imported.status).toBe(200);
+    expect(imported.body.changes.map((c: { publish?: string }) => c.publish)).toEqual(['published', 'published']);
+
+    const { actions } = await t.api(owner, ws).call('agents.activity', { agentId, limit: 50 });
+    const publishes = actions.filter(
+      (a: { command: string; target: string | null }) =>
+        a.command === 'artifacts.requestPublish' && (a.target === first || a.target === second),
+    );
+    expect(publishes).toHaveLength(2);
+    // Both nested publishes are linked, not only the import's own outer ledger entry.
+    expect(await linkedActions(key)).toEqual(expect.arrayContaining(publishes.map((p: { id: number }) => String(p.id))));
+
+    const undone = await t.api(owner, ws).call('agents.undo', { actionId: publishes[0].id, note: 'Only one was wanted' });
+    expect(undone.result).toBeTruthy();
+    expect((await keyRow(key))?.reversed_at).not.toBeNull();
+
+    const replay = await agentCall('config.import', bundle, key);
+    expect(replay.status).toBe(409);
+    expect(replay.body.details?.reason).toBe('idempotency_key_reversed');
+  });
+
   it('leaves a person’s keys alone: they have no agent action to reverse', async () => {
     const api = t.api(owner, ws);
     const key = 'person-create-1';
@@ -121,7 +169,8 @@ describe('a replay of an undone action answers 409 (#950)', () => {
       body: JSON.stringify({ type: 'note', name: 'Person note', content: { title: 'Person', body: 'Body' } }),
     });
     expect(res.status).toBe(200);
-    expect((await keyRow(key))?.agent_action_id).toBeNull();
+    // A person's write has no ledger row: no key-to-action link, so no undo can reverse it.
+    expect(await linkedActions(key)).toEqual([]);
 
     const replay = await fetch(`${t.base}/v1/artifacts.create`, {
       method: 'POST',
