@@ -454,6 +454,11 @@ run may be cloning it). Ports come from `testPort()` in
 every block and the seeded e2e server's default port, so a second checkout can run at the same
 time even against another stack.
 
+The same setup pass, under the same lock, drops run databases that killed runs left behind: names
+in the run convention (`am_<run>_...`), no connection, and older than six hours. It never touches a
+template, its own run's databases, a younger one or a name outside the convention, and it prints how
+many it found and dropped.
+
 `AM_TEST_RUN` namespaces a whole run: every database, ClickHouse database, NATS namespace and
 Valkey prefix is written `am_<run>_...`, so two checkouts (or two delegates) can use one stack
 without dropping each other's data. `vitest.config.mts` derives it once per `pnpm test` from the

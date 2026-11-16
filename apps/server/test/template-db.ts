@@ -1,12 +1,12 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 
-// The migrated template database every test file copies. It is shared by every checkout and
-// delegate on the test stack, so it is built and dropped under one advisory lock (harness.ts takes
-// it around the work).
+// The migrated template database every test file copies, and the cleanup of run databases a killed
+// run left behind. Both are shared by every checkout and delegate on the test stack, so both run
+// under one advisory lock (harness.ts takes it around them).
 //
 // The template is named after a fingerprint of the migration files: a migration edit produces a new
 // template, and an unchanged tree reuses the one it built last time instead of replaying every
@@ -21,7 +21,7 @@ export function templateMarker(fingerprint: string): string {
   return `am-test-template:${fingerprint}`;
 }
 
-/** The advisory lock key shared by template builds and drops. */
+/** The advisory lock key shared by template builds, template drops and stale-run sweeps. */
 export const TEMPLATE_LOCK = 'am_test_template_maintenance';
 
 /**
@@ -36,6 +36,9 @@ export async function withTemplateLock<T>(client: pg.Client, fn: () => Promise<T
     await client.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [TEMPLATE_LOCK]);
   }
 }
+
+/** How long a run database must be idle before the sweeper drops it. */
+export const STALE_RUN_DATABASE_MS = 6 * 60 * 60 * 1000;
 
 /** How many templates to keep (the newest by creation time; the others are dropped). */
 export const KEEP_TEMPLATES = 3;
@@ -52,7 +55,11 @@ export function migrationsFingerprint(dir: string = MIGRATIONS_DIR): string {
     .filter((name) => name.endsWith('.sql'))
     .sort();
   for (const name of files) {
-    hash.update(name).update('\0').update(readFileSync(join(dir, name))).update('\0');
+    hash
+      .update(name)
+      .update('\0')
+      .update(readFileSync(join(dir, name)))
+      .update('\0');
   }
   return hash.digest('hex').slice(0, 12);
 }
@@ -144,9 +151,76 @@ export function templatesToDrop(rows: DatabaseRow[], keep: number = KEEP_TEMPLAT
     .map((row) => row.name);
 }
 
+export interface StaleRunOptions {
+  /** The run id of the calling run; its own databases are never candidates. */
+  run: string;
+  minAgeMs?: number;
+  now?: number;
+}
+
+export interface StaleRunResult {
+  found: number;
+  drop: string[];
+  skipped: { name: string; reason: string }[];
+}
+
+/** `am_<run>_<test name>`: the run namespace the harness writes, plus the e2e/backup/doctor names. */
+export const RUN_DATABASE = /^am_([a-z0-9]{1,16})_/;
+
+/**
+ * Run databases that are safe to drop: matching the run naming convention, not a template, not the
+ * calling run's own, idle, and older than the threshold. Everything else is reported.
+ */
+export function classifyRunDatabases(rows: DatabaseRow[], options: StaleRunOptions): StaleRunResult {
+  const minAgeMs = options.minAgeMs ?? STALE_RUN_DATABASE_MS;
+  const now = options.now ?? Date.now();
+  const hours = Math.round(minAgeMs / 3_600_000);
+  const own = options.run ? `am_${options.run}_` : null;
+  const result: StaleRunResult = { found: 0, drop: [], skipped: [] };
+  for (const row of rows) {
+    const match = RUN_DATABASE.exec(row.name);
+    if (!match || isTemplateDatabase(row.name)) continue;
+    result.found++;
+    if (own && row.name.startsWith(own)) {
+      result.skipped.push({ name: row.name, reason: "this run's own database" });
+    } else if (row.active > 0) {
+      result.skipped.push({ name: row.name, reason: `${row.active} active connection(s)` });
+    } else if (!row.created) {
+      result.skipped.push({ name: row.name, reason: 'age unknown' });
+    } else if (now - row.created.getTime() < minAgeMs) {
+      result.skipped.push({ name: row.name, reason: `younger than ${hours} hour(s)` });
+    } else {
+      result.drop.push(row.name);
+    }
+  }
+  return result;
+}
+
 /** Drops a stale database without FORCE: a run that reconnected makes the drop fail, not vanish. */
 export async function dropDatabase(client: pg.Client, name: string): Promise<void> {
   await client.query(`DROP DATABASE IF EXISTS ${quoteIdent(name)}`);
+}
+
+/**
+ * Drops the run databases of killed runs (see classifyRunDatabases). The caller holds TEMPLATE_LOCK
+ * and skips its own run's databases. A database that cannot be dropped is reported, never an error.
+ */
+export async function sweepRunDatabases(
+  client: pg.Client,
+  options: StaleRunOptions,
+): Promise<{ found: number; dropped: string[]; skipped: { name: string; reason: string }[] }> {
+  const result = classifyRunDatabases(await databaseRows(client), options);
+  const dropped: string[] = [];
+  const skipped = [...result.skipped];
+  for (const name of result.drop) {
+    try {
+      await dropDatabase(client, name);
+      dropped.push(name);
+    } catch (error) {
+      skipped.push({ name, reason: (error as Error).message });
+    }
+  }
+  return { found: result.found, dropped, skipped };
 }
 
 /** Drops all but the newest templates. A drop that fails is reported, never fatal. */

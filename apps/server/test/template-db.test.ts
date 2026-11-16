@@ -1,8 +1,12 @@
+import { randomBytes } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { testDatabaseUrl } from './harness';
 import {
+  classifyRunDatabases,
+  type DatabaseRow,
   ensureTemplateDatabase,
+  isTemplateDatabase,
   migrationsFingerprint,
   quoteIdent,
   templateDatabaseName,
@@ -40,7 +44,7 @@ describe('the template database', () => {
 
   it('refuses a database that claims to be a template but is not complete', async () => {
     const client = await connect();
-    const name = `am_tpl_probe_${Date.now().toString(36)}`;
+    const name = `am_tpl_probe_${randomBytes(4).toString('hex')}`;
     const marker = templateMarker('probe');
     let builds = 0;
     const build = async () => {
@@ -63,7 +67,7 @@ describe('the template database', () => {
   });
 
   it('builds once when two runs start at the same moment', async () => {
-    const name = `am_tpl_race_${Date.now().toString(36)}`;
+    const name = `am_tpl_race_${randomBytes(4).toString('hex')}`;
     const marker = templateMarker('race');
     const [first, second] = await Promise.all([connect(), connect()]);
     let builds = 0;
@@ -89,27 +93,60 @@ describe('the template database', () => {
       await first.query(`DROP DATABASE IF EXISTS ${quoteIdent(name)} WITH (FORCE)`);
     }
   }, 30_000);
+});
 
-  it('keeps the newest templates and never drops one whose age is unknown', () => {
-    const hour = 3_600_000;
-    const now = Date.parse('2026-11-16T12:00:00Z');
-    const row = (name: string, ageHours: number | null) => ({
-      name,
-      active: 0,
-      created: ageHours === null ? null : new Date(now - ageHours * hour),
-    });
+describe('the stale run database sweeper', () => {
+  const hour = 3_600_000;
+  const now = Date.parse('2026-11-16T12:00:00Z');
+  const row = (name: string, ageHours: number | null, active = 0): DatabaseRow => ({
+    name,
+    active,
+    created: ageHours === null ? null : new Date(now - ageHours * hour),
+  });
 
-    expect(
-      templatesToDrop(
-        [
-          row('am_tpl_aaaaaaaaaaaa', 30),
-          row('am_tpl_bbbbbbbbbbbb', 20),
-          row('am_tpl_cccccccccccc', 10),
-          row('am_tpl_dddddddddddd', 5),
-          row('am_tpl_eeeeeeeeeeee', null),
-        ],
-        3,
-      ),
-    ).toEqual(['am_tpl_aaaaaaaaaaaa']);
+  it('recognises templates, including the old run-scoped names', () => {
+    expect(isTemplateDatabase('am_tpl_0123456789ab')).toBe(true);
+    expect(isTemplateDatabase('am_rabc_test_template')).toBe(true);
+    expect(isTemplateDatabase('am_rabc_cli_session')).toBe(false);
+    expect(isTemplateDatabase('am_test')).toBe(false);
+  });
+
+  it('drops only old, idle run databases, never a template or its own run', () => {
+    const result = classifyRunDatabases(
+      [
+        row('am_other_test_p1', 7),
+        row('am_other_cli_session', 7),
+        row('am_other_test_young', 5),
+        row('am_other_test_busy', 7, 2),
+        row('am_other_test_undated', null),
+        row('am_tpl_0123456789ab', 999),
+        row('am_other_test_template', 999),
+        row('am_test', 999),
+        row('am_app', 999),
+        row('am_rabc_test_own', 7),
+      ],
+      { run: 'rabc', now },
+    );
+
+    expect(result.drop).toEqual(['am_other_test_p1', 'am_other_cli_session']);
+    expect(result.found).toBe(6);
+    expect(result.skipped.map((entry) => entry.name)).toEqual(
+      expect.arrayContaining(['am_other_test_young', 'am_other_test_busy', 'am_other_test_undated', 'am_rabc_test_own']),
+    );
+  });
+
+  it('keeps the newest templates and never an undated one', () => {
+    const names = templatesToDrop(
+      [
+        row('am_tpl_aaaaaaaaaaaa', 30),
+        row('am_tpl_bbbbbbbbbbbb', 20),
+        row('am_tpl_cccccccccccc', 10),
+        row('am_tpl_dddddddddddd', 5),
+        row('am_tpl_eeeeeeeeeeee', null),
+      ],
+      3,
+    );
+
+    expect(names).toEqual(['am_tpl_aaaaaaaaaaaa']);
   });
 });

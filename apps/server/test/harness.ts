@@ -18,6 +18,7 @@ import {
   ensureTemplateDatabase,
   migrationsFingerprint,
   pruneTemplateDatabases,
+  sweepRunDatabases,
   templateDatabaseName,
   templateMarker,
   withTemplateLock,
@@ -188,8 +189,8 @@ export function testDatabaseUrl(dbName: string) {
  * Builds the template: Postgres migrations, the app role and better-auth's tables, under the shared
  * maintenance advisory lock (test-setup.ts). The template is keyed on a hash of the migration files,
  * so a run reuses a completed one when nothing changed instead of replaying every migration, and the
- * lock keeps two concurrent runs from building or dropping it at once. Templates beyond the newest
- * few are dropped in the same pass. Returns the name.
+ * lock keeps two concurrent runs from building or dropping it at once. The same lock and pass sweep
+ * run databases that killed runs left behind and templates beyond the newest few. Returns the name.
  */
 export async function prepareTemplateDatabase(): Promise<string> {
   const fingerprint = migrationsFingerprint();
@@ -199,6 +200,8 @@ export async function prepareTemplateDatabase(): Promise<string> {
   await maint.connect();
   try {
     await withTemplateLock(maint, async () => {
+      const swept = await sweepRunDatabases(maint, { run: runId });
+      if (swept.found) console.log(`[test] swept ${swept.found} run database(s): dropped ${swept.dropped.length} older than 6 hours`);
       const { built } = await ensureTemplateDatabase(maint, {
         name: template,
         marker,
