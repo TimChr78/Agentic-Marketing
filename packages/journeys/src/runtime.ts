@@ -462,7 +462,7 @@ async function applyEffect(
     );
   if (eff.kind === 'email') {
     if (flags.control) return 'skipped: control';
-    const d = await requestEmail(tx, workspaceId, deps.kp, deps.events, {
+    const d = await requestEmail(tx, workspaceId, deps.kp, {
       profileId: p.profileId,
       templateId: eff.template,
       idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
@@ -475,7 +475,7 @@ async function applyEffect(
   }
   if (eff.kind === 'sms') {
     if (flags.control) return 'skipped: control';
-    const d = await requestSms(tx, workspaceId, deps.kp, deps.events, {
+    const d = await requestSms(tx, workspaceId, deps.kp, {
       profileId: p.profileId,
       templateId: eff.template,
       idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,
@@ -488,7 +488,7 @@ async function applyEffect(
   }
   if (eff.kind === 'push') {
     if (flags.control) return 'skipped: control';
-    const d = await requestPush(tx, workspaceId, deps.kp, deps.events, {
+    const d = await requestPush(tx, workspaceId, deps.kp, {
       profileId: p.profileId,
       templateId: eff.template,
       idempotencyKey: `jrn:${p.id}:${eff.node}:${eff.seq}`,

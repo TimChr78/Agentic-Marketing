@@ -150,7 +150,7 @@ const validZone = (tz: unknown): tz is string => {
 
 /** The request shape all three channels share; subject tests only reach the e-mail path. */
 type BroadcastRequest = EmailRequest;
-type RequestFor = (tx: Tx, ws: string, kp: KeyProvider, events: EventStore, req: BroadcastRequest) => Promise<Decision>;
+type RequestFor = (tx: Tx, ws: string, kp: KeyProvider, req: BroadcastRequest) => Promise<Decision>;
 
 async function published(tx: Tx, id: string, type: 'email_template' | 'sms_template' | 'push_template' | 'segment') {
   const [a] = await tx
@@ -1599,7 +1599,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         : def.template.startsWith('psh_')
           ? ('push' as const)
           : ('email' as const);
-      const d = await requestFor(def.template)(tx, ws, deps.kp, deps.events, {
+      const d = await requestFor(def.template)(tx, ws, deps.kp, {
         profileId: m.profileId,
         templateId: def.template,
         topic: def.topic,

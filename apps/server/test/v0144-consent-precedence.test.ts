@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { consentHook } from '@agentic-marketing/audience';
+import { consentHook, dispatchOutboxOnce } from '@agentic-marketing/audience';
 import type { BusEvent } from '@agentic-marketing/events';
 import { recomputeConsentState } from '@agentic-marketing/profiles';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -264,8 +264,6 @@ describe('an async consent write carries the action time (#928)', () => {
   beforeAll(async () => {
     hook = consentHook({
       db: t.srv.db,
-      kp: t.srv.keyProvider,
-      events: t.srv.events,
       links: t.srv.email.links,
       linksUrl: t.srv.linksUrl,
     });
@@ -423,7 +421,18 @@ describe('an async consent write carries the action time (#928)', () => {
           [ws, key],
         )
       ).rows[0]!.n;
-    expect(await count()).toBe(1);
+    const intents = async () =>
+      (
+        await t.srv.db.admin.query<{ n: number }>(
+          `SELECT count(*)::int AS n FROM outbox WHERE workspace_id = $1 AND kind = 'doi_send' AND operation_key = $2`,
+          [ws, key],
+        )
+      ).rows[0]!.n;
+    // The consent transaction writes one durable intent; the dispatcher (or the test server's
+    // scheduler) then creates the confirmation message (#978 part 2).
+    expect(await intents()).toBe(1);
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    await eventually(count, (n) => n === 1);
 
     // A later hook in the same batch failed before the event was acknowledged; the person is merged
     // and the redelivery now resolves to the survivor. The request itself did not change.
@@ -434,7 +443,16 @@ describe('an async consent write carries the action time (#928)', () => {
     await t.srv.db.admin.query('UPDATE profiles SET merged_into = $3 WHERE workspace_id = $1 AND id = $2', [ws, a, b]);
     await t.srv.db.admin.query('DELETE FROM consent_state WHERE workspace_id = $1 AND profile_id = $2', [ws, a]);
     await handle(b, submitted);
-    expect(await count()).toBe(1);
+    // The redelivered submission adds no second intent, and re-running the delivered one replays the
+    // message instead of sending again (the dispatcher died after the send but before its ack).
+    expect(await intents()).toBe(1);
+    await t.srv.db.admin.query(
+      `UPDATE outbox SET state = 'pending', lease_until = NULL, delivered_at = NULL
+       WHERE workspace_id = $1 AND kind = 'doi_send' AND operation_key = $2`,
+      [ws, key],
+    );
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    await eventually(count, (n) => n === 1);
   });
 
   it('a provider unsubscribe callback records the provider event time, not the webhook time', async () => {
@@ -521,8 +539,6 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
   beforeAll(() => {
     hook = consentHook({
       db: t.srv.db,
-      kp: t.srv.keyProvider,
-      events: t.srv.events,
       links: t.srv.email.links,
       linksUrl: t.srv.linksUrl,
     });

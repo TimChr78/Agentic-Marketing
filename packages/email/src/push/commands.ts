@@ -48,7 +48,7 @@ export const sendPush = defineCommand({
   // sends in the metric layer (#265).
   ledgerImpact: directSendLedger,
   handler: async (input, ctx) =>
-    requestPush(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
+    requestPush(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
       requestHash: sendRequestHash(

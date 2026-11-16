@@ -12,5 +12,6 @@ import { importProfiles } from './import';
 
 export const audienceCommands = [importProfiles, ...broadcastCommands, ...hostedPageCommands, ...archiveCommands] as const;
 export * from './messageEvents';
+export * from './outboxDispatcher';
 export * from './retention';
 export * from './undo';

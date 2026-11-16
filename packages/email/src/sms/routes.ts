@@ -1,7 +1,6 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore } from '@agentic-marketing/events';
 import { bodyLimit } from '@agentic-marketing/ingest';
 import { personCrypto, recordConsentEvidence } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -10,6 +9,7 @@ import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { applyDeliveryEvents, logSuppressionEscalation } from '../deliveryEvents';
 import type { EmailServices } from '../gateway';
+import { enqueueMessageEvents } from '../outbox';
 import { isMarketing } from '../policy';
 import { classifySmsReply } from './keywords';
 import { billingOf, smsTransportFor } from './providers';
@@ -28,7 +28,6 @@ const SMS_INBOUND_MAX_BODY = 64 * 1024;
 interface Deps {
   db: Db;
   kp: KeyProvider;
-  events: EventStore;
   email: EmailServices;
 }
 
@@ -81,6 +80,7 @@ export function smsRoutes(deps: Deps) {
 
         if (kind === 'status') {
           const applied = await applyDeliveryEvents(tx, transport.parseStatus(req), provider.adapter, deps.kp);
+          await enqueueMessageEvents(tx, target.ws, applied.events);
           return { status: 200 as const, events: applied.events, escalations: applied.escalations };
         }
 
@@ -137,7 +137,6 @@ export function smsRoutes(deps: Deps) {
       if ('events' in result) {
         // After the transaction committed: a rolled-back escalation leaves no log behind.
         for (const escalation of result.escalations ?? []) logSuppressionEscalation(escalation);
-        await deps.events.insertMessageEvents(result.events ?? []);
         return c.json({ ok: true });
       }
       return c.body(result.reply!.body, 200, { 'content-type': result.reply!.contentType });

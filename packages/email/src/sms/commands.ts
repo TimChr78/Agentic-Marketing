@@ -41,7 +41,7 @@ export const sendSms = defineCommand({
   // sends in the metric layer (#265).
   ledgerImpact: directSendLedger,
   handler: async (input, ctx) =>
-    requestSms(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
+    requestSms(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
       requestHash: sendRequestHash(

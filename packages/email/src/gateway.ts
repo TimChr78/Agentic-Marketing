@@ -27,7 +27,7 @@ import {
   type UnsubscribeLink,
   type WebLink,
 } from './links';
-import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from './outbox';
+import { decisionEvent, defer, enqueueMessageEvents, MAX_ATTEMPTS, retryDelaySeconds } from './outbox';
 import { checkPolicy } from './policy';
 import { transportFor } from './providers';
 import { deliverPush } from './push/gateway';
@@ -237,7 +237,7 @@ export async function checkRecipient(
  * Records a send request and decides it. Returns the earlier decision for a repeated
  * idempotency key. Queued messages are sent by the delivery worker.
  */
-export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider, events: EventStore, req: EmailRequest): Promise<Decision> {
+export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider, req: EmailRequest): Promise<Decision> {
   const key = req.idempotencyKey ?? newUuid();
   if (req.idempotencyKey) await lockSendKey(tx, workspaceId, key);
   const [existing] = await tx.select().from(schema.messages).where(eq(schema.messages.idempotencyKey, key));
@@ -285,7 +285,7 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
       data: req.subject ? { ...(req.data ?? {}), __subject: req.subject } : (req.data ?? {}),
     })
     .returning();
-  await events.insertMessageEvents([decisionEvent(m, status, reason ?? '')]);
+  await enqueueMessageEvents(tx, workspaceId, [decisionEvent(m, status, reason ?? '')]);
   return { messageId: m.id, status, reason, duplicate: false };
 }
 

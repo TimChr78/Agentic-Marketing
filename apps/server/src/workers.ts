@@ -2,7 +2,7 @@ import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
 import { runActiveMandateRepair } from '@agentic-marketing/artifacts';
-import { consentHook, runBroadcasts, runRetention } from '@agentic-marketing/audience';
+import { consentHook, runBroadcasts, runOutboxDispatcher, runRetention } from '@agentic-marketing/audience';
 import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
 import { type Db, runSentAtBackfill } from '@agentic-marketing/db';
@@ -85,7 +85,7 @@ export function startScheduler(
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices',
+    'scheduler role: segment recomputation, broadcasts, the transactional outbox, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices',
   );
   return [
     // One pass at start: an abandoned consent choice is short-lived, and nothing in the request
@@ -115,6 +115,9 @@ export function startScheduler(
       signal,
     ),
     runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs),
+    // Post-commit work enqueued by tenant transactions (#978 part 2): message events and DOI
+    // confirmation sends. It runs across tenants, as the owner, and claims with SKIP LOCKED.
+    runOutboxDispatcher({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal),
     runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention, erasureGraceHours: srv.erasureGraceHours }, signal),
     runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
     runAudienceSyncs({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
@@ -230,8 +233,6 @@ export function startWorkers(
           // Consent first: segments and journeys that react to a signup need it recorded.
           consentHook({
             db: srv.db,
-            kp: srv.keyProvider,
-            events: srv.events,
             links: srv.email.links,
             linksUrl: srv.linksUrl,
             linksUrlFor: (workspaceId) => srv.domains.linksUrlFor(workspaceId),

@@ -125,8 +125,10 @@ describe('an idempotency key is bound to its principal (A1)', () => {
       output: z.object({ value: z.string() }),
       async handler(input) {
         runs++;
-        // Stands in for a segment refresh publishing membership events, or a ClickHouse message
-        // event written by requestEmail: outside the transaction, a rollback cannot undo it.
+        // Stands in for a segment refresh publishing membership events, or a webhook handed to
+        // another system: outside the transaction, a rollback cannot undo it. (Message decision
+        // events are no longer an example: since #978 part 2 they are outbox rows in the
+        // transaction itself.)
         externalEffects.push(`${input.value}:${runs}`);
         await new Promise((resolve) => setTimeout(resolve, 250));
         return { value: input.value };
@@ -211,9 +213,9 @@ describe('an input-level idempotency key is bound to its caller and request (#92
         data: null,
       });
       const req = { profileId, templateId: c.template(), idempotencyKey: key, requestHash };
-      if (c.channel === 'email') return requestEmail(tx, ws, t.srv.keyProvider, t.srv.events, req);
-      if (c.channel === 'sms') return requestSms(tx, ws, t.srv.keyProvider, t.srv.events, req);
-      return requestPush(tx, ws, t.srv.keyProvider, t.srv.events, req);
+      if (c.channel === 'email') return requestEmail(tx, ws, t.srv.keyProvider, req);
+      if (c.channel === 'sms') return requestSms(tx, ws, t.srv.keyProvider, req);
+      return requestPush(tx, ws, t.srv.keyProvider, req);
     });
 
   const messageCount = async (key: string) =>
@@ -480,7 +482,7 @@ describe('an input-level idempotency key is bound to its caller and request (#92
     });
     const journeySend = (profileId: string, data: Record<string, unknown>) =>
       t.srv.db.withWorkspace(ws, (tx) =>
-        requestEmail(tx, ws, t.srv.keyProvider, t.srv.events, {
+        requestEmail(tx, ws, t.srv.keyProvider, {
           profileId,
           templateId: emailTemplate,
           idempotencyKey: journeyKey,
@@ -505,7 +507,7 @@ describe('an input-level idempotency key is bound to its caller and request (#92
     });
     const broadcastSend = (profileId: string, variant: string, data: Record<string, unknown>) =>
       t.srv.db.withWorkspace(ws, (tx) =>
-        requestEmail(tx, ws, t.srv.keyProvider, t.srv.events, {
+        requestEmail(tx, ws, t.srv.keyProvider, {
           profileId,
           templateId: emailTemplate,
           idempotencyKey: broadcastKey,
