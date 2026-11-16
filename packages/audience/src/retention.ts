@@ -2,14 +2,14 @@ import type { Db } from '@agentic-marketing/db';
 import type { EventStore, StoredEvent } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { PLATFORM_EVENT, PLATFORM_EVENTS } from '@agentic-marketing/ingest';
-import { removeProfiles } from '@agentic-marketing/profiles';
 import { logger } from '@agentic-marketing/telemetry';
-import { sql } from 'drizzle-orm';
 
 // Retention (scheduler role): data is kept only as long as it has a purpose.
 // - Signups that were never confirmed: people known only through a form submission, with no
-//   consent recorded and no activity of their own, are removed after `unconfirmedDays`. Without
-//   suppression, so they can sign up again later.
+//   consent recorded and no activity of their own, were removed after `unconfirmedDays`. The
+//   destructive pruning is paused (#978 part 2): the scan and its report continue, but nothing is
+//   deleted until a durable activity check replaces the event-store read. Without suppression,
+//   they can sign up again later.
 // - Operational logs: finished webhook and action deliveries and AI calls after `logDays`.
 // - Finished hosted-agent runs after `hostedAgentRunDays` (default 90): the run history and failure
 //   queue are recent-window reads, so old rows are not kept (#488).
@@ -167,60 +167,16 @@ async function historyOf(deps: RetentionDeps, candidates: Candidate[]) {
 }
 
 /**
- * Deletes only while the profile is still the one that was selected. `FOR UPDATE` on the profile
- * row serialises with consent and identifier writes: the app's consent writer inserts the ledger
- * row and then `consent_state`, whose foreign key takes a key-share lock on this profile. If that
- * writer commits first, the lock waits and the re-check sees the consent; if the delete wins, the
- * writer's transaction rolls back instead of recording consent on a deleted person. A committed
- * consent row or a new identifier always keeps the profile.
+ * One retention round. It still scans for unconfirmed signups and reports how many it found, but
+ * destructive pruning is paused (#978 part 2): the event-store read cannot be made atomic with a
+ * delete, so a late signup or page view could be lost. The removal returns with a durable activity
+ * check; until then `unconfirmedSignups` counts what would have been removed and `profiles` is 0.
  */
-async function removeUnconfirmedSignup(deps: RetentionDeps, candidate: Candidate): Promise<boolean> {
-  let removed = false;
-  await deps.db.withWorkspace(candidate.workspace_id, async (tx) => {
-    const locked = await tx.execute<{ id: string }>(sql`
-      SELECT id FROM profiles
-      WHERE workspace_id = ${candidate.workspace_id} AND id = ${candidate.id} AND merged_into IS NULL
-      FOR UPDATE`);
-    if (!locked.rows.length) return;
-    const anon = candidate.anonymous_ids[0] ?? '';
-    const recheck = await tx.execute<{ blocked: boolean }>(sql`
-      SELECT (
-        EXISTS (SELECT 1 FROM consent_records c
-                WHERE c.workspace_id = ${candidate.workspace_id} AND c.profile_id = ${candidate.id})
-        OR NOT EXISTS (SELECT 1 FROM identifiers e
-                       WHERE e.workspace_id = ${candidate.workspace_id} AND e.profile_id = ${candidate.id} AND e.type = 'email')
-        OR EXISTS (SELECT 1 FROM identifiers u
-                   WHERE u.workspace_id = ${candidate.workspace_id} AND u.profile_id = ${candidate.id} AND u.type = 'user_id')
-        OR EXISTS (SELECT 1 FROM identifiers o
-                   WHERE o.workspace_id = ${candidate.workspace_id} AND o.profile_id = ${candidate.id}
-                     AND o.type NOT IN ('anonymous_id', 'email', 'phone'))
-        OR (SELECT count(*) FROM identifiers a
-            WHERE a.workspace_id = ${candidate.workspace_id} AND a.profile_id = ${candidate.id} AND a.type = 'anonymous_id') <> 1
-        OR NOT EXISTS (SELECT 1 FROM identifiers a
-                       WHERE a.workspace_id = ${candidate.workspace_id} AND a.profile_id = ${candidate.id}
-                         AND a.type = 'anonymous_id' AND a.value = ${anon})
-      ) AS blocked`);
-    if (recheck.rows[0]?.blocked) return;
-    // Re-read the event store under the lock (#766): the round's history was a snapshot taken
-    // before any deletion, so a page view, a second form submission or any other event that landed
-    // since then is invisible to it. Only a fresh read can prove the person is still inactive; an
-    // unreadable store proves nothing and keeps them, as the round's own read does.
-    let fresh: StoredEvent[];
-    try {
-      fresh = await deps.events.eventsOfAnonymousIds(candidate.workspace_id, [anon], EVENT_WINDOW);
-    } catch (err) {
-      logger.warn({ err, profile: candidate.id }, 'retention: event history not re-read; keeping candidate');
-      return;
-    }
-    if (!onlyFormActivity(fresh)) return;
-    await removeProfiles(tx, candidate.workspace_id, [candidate.id], deps, { suppress: false });
-    removed = true;
-  });
-  return removed;
-}
-
 export async function runRetentionOnce(deps: RetentionDeps): Promise<{
+  /** Always 0 while destructive pruning is paused (#978 part 2); kept for callers of this shape. */
   profiles: number;
+  /** Unconfirmed signups the scan found and kept because the pruning is paused. */
+  unconfirmedSignups: number;
   deliveries: number;
   aiCalls: number;
   inputWarnings: number;
@@ -241,17 +197,14 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
     rows = await candidates(deps, null);
   }
   const history = await historyOf(deps, rows);
-  let profiles = 0;
+  let unconfirmedSignups = 0;
   for (const r of rows) {
     const events = history.get(`${r.workspace_id}:${r.anonymous_ids[0]}`) ?? [];
     // Positive evidence only. No form submission, a confirmation, other activity, an empty or an
     // unreadable history all mean the profile stays.
     if (!onlyFormActivity(events)) continue;
-    try {
-      if (await removeUnconfirmedSignup(deps, r)) profiles++;
-    } catch (err) {
-      logger.warn({ err, profile: r.id }, 'retention: unconfirmed signup not removed');
-    }
+    // Found and kept, not deleted: retention pruning is paused (#978 part 2).
+    unconfirmedSignups++;
   }
   const last = rows.at(-1);
   if (rows.length === CANDIDATE_BATCH && last)
@@ -292,8 +245,9 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
   const hostedAgentRuns = await deps.db.admin.query(`DELETE FROM hosted_agent_runs WHERE started_at < now() - make_interval(days => $1)`, [
     deps.hostedAgentRunDays ?? 90,
   ]);
+  if (unconfirmedSignups)
+    logger.info({ unconfirmedSignups, profiles: 0 }, 'retention kept unconfirmed signups; destructive pruning is paused (#978 part 2)');
   if (
-    profiles ||
     deliveries.rowCount ||
     aiCalls.rowCount ||
     profileScores.rowCount ||
@@ -303,7 +257,6 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
   )
     logger.info(
       {
-        profiles,
         deliveries: deliveries.rowCount,
         aiCalls: aiCalls.rowCount,
         profileScores: profileScores.rowCount,
@@ -314,7 +267,8 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
       'retention removed old data',
     );
   return {
-    profiles,
+    profiles: 0,
+    unconfirmedSignups,
     deliveries: deliveries.rowCount ?? 0,
     aiCalls: aiCalls.rowCount ?? 0,
     profileScores: profileScores.rowCount ?? 0,
