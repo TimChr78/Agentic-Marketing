@@ -17,10 +17,10 @@
 //
 // Entries are normalised the way the CSRF check always normalised them: an exact entry goes through
 // `URL` (lower-case host, default port dropped, no trailing slash), and a wildcard entry has its
-// scheme and host lower-cased and a trailing slash dropped. Better Auth compares a pattern verbatim,
-// so it would refuse `https://Example.COM/` that this accepts — the same entry a wildcard-free
-// configuration accepted before #902, and only the spelling of the entry, never a host the operator
-// did not name.
+// scheme and host lower-cased, its default port dropped and a trailing slash removed. Better Auth
+// compares a pattern verbatim, so it would refuse `https://Example.COM/` that this accepts — the
+// same entry a wildcard-free configuration accepted before #902, and only the spelling of the entry,
+// never a host the operator did not name.
 //
 // Matching is bounded: an Origin header over `MAX_ORIGIN_LENGTH` is refused without looking at it, an
 // entry over `MAX_PATTERN_LENGTH` or with more than `MAX_PATTERN_WILDCARDS` wildcards is refused by
@@ -136,8 +136,11 @@ function normalizeExact(entry: string): string {
 }
 
 /**
- * A wildcard entry with the scheme and host lower-cased and a trailing slash dropped. Only the
- * spelling of the entry changes, never the set of hosts it covers.
+ * A wildcard entry with the scheme and host lower-cased, its default port dropped and a trailing
+ * slash removed. Only the spelling of the entry changes, never the set of hosts it covers: a browser
+ * never writes `:443` for an `https` origin (or `:80` for an `http` one), so an entry that spells it
+ * out names the same origins as one that does not — which is what an exact entry has always done
+ * (#943). Any other port, and the wildcard port `:*`, stay.
  */
 function normalizeWildcard(entry: string): string {
   const trimmed = trimTrailingSlashes(entry.trim());
@@ -146,8 +149,25 @@ function normalizeWildcard(entry: string): string {
   const scheme = trimmed.slice(0, schemeEnd).toLowerCase();
   const rest = trimmed.slice(schemeEnd + 3);
   const authorityEnd = rest.search(/[/?#]/);
-  const authority = (authorityEnd === -1 ? rest : rest.slice(0, authorityEnd)).toLowerCase();
+  const rawAuthority = (authorityEnd === -1 ? rest : rest.slice(0, authorityEnd)).toLowerCase();
+  const authority = trimDefaultPort(rawAuthority, scheme);
   return `${scheme}://${authority}${authorityEnd === -1 ? '' : rest.slice(authorityEnd)}`;
+}
+
+/** The port a scheme serializes away, or null when it keeps every port. */
+function defaultPortOf(scheme: string): string | null {
+  if (scheme === 'https') return '443';
+  if (scheme === 'http') return '80';
+  return null;
+}
+
+/** Drops a wildcard entry's default port, so it matches the serialized origin a browser sends (#943). */
+function trimDefaultPort(authority: string, scheme: string): string {
+  const colon = authority.lastIndexOf(':');
+  if (colon === -1) return authority;
+  const defaultPort = defaultPortOf(scheme);
+  // A last colon that does not separate the default port (an IPv6 address, `:*`, `:8443`) stays.
+  return defaultPort !== null && authority.slice(colon + 1) === defaultPort ? authority.slice(0, colon) : authority;
 }
 
 /**

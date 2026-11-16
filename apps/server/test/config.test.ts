@@ -68,6 +68,9 @@ describe('configuration', () => {
     expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*.example.com,http://localhost:5173' })).not.toThrow();
     // A trailing comma or a blank element is ignored, as it always was.
     expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*.example.com, ,' })).not.toThrow();
+    // #943: a default port in a wildcard entry is a spelling, not a wildcard, so it is accepted.
+    expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*.example.com:443' })).not.toThrow();
+    expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://192.168.*.*:*' })).not.toThrow();
   });
 
   it('accepts a percent-encoded password in DATABASE_URL (#647)', () => {
