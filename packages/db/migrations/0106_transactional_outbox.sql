@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS outbox (
   -- while it still matches, so a dispatcher whose lease expired cannot overwrite the new owner's
   -- result.
   claim_token text,
+  -- Why a row is dead-lettered: 'permanent' (a payload no version can deliver) or 'exhausted'
+  -- (transient failures used their attempt budget). Requeue skips permanent failures by default.
+  failure_kind text CHECK (failure_kind IN ('permanent', 'exhausted')),
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -54,3 +57,5 @@ COMMENT ON COLUMN outbox.operation_key IS
   'Stable id of the action this row delivers; unique per workspace so a redelivery enqueues nothing new.';
 COMMENT ON COLUMN outbox.claim_token IS
   'Token of the current claim; ack and fail only apply while it matches, fencing an expired claim.';
+COMMENT ON COLUMN outbox.failure_kind IS
+  'permanent (an undeliverable payload) or exhausted (transient retries used their budget); requeue skips permanent rows.';

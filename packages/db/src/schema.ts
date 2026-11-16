@@ -538,6 +538,7 @@ export const outbox = pgTable(
     nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),
     leaseUntil: ts('lease_until'),
     claimToken: text('claim_token'),
+    failureKind: text('failure_kind').$type<'permanent' | 'exhausted'>(),
     lastError: text('last_error'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),

@@ -38,6 +38,7 @@ const row = async (operationKey: string) => {
     operation_key: string;
     payload: Record<string, unknown>;
     claim_token: string | null;
+    failure_kind: string | null;
     last_error: string | null;
     next_attempt_at: Date;
     lease_until: Date | null;
@@ -143,22 +144,33 @@ describe.skipIf(!hasTestDatabase())('transactional outbox (#978 part 2)', () => 
     await expect(renewOutboxLease(d.db, { ...claims[0]!, claimToken: 'stale-token' })).resolves.toBe(false);
   });
 
-  it('requeues dead-lettered rows, all of them or one kind', async () => {
+  it('requeues exhausted failures but not permanent ones', async () => {
     await d.db.admin.query(
-      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts, last_error)
-       VALUES ($1, 'obx_rq_a', 'message_event', '{}', 'requeue-a', 'failed', 36, 'ClickHouse unavailable'),
-              ($1, 'obx_rq_b', 'doi_send', '{}', 'requeue-b', 'failed', 36, 'ClickHouse unavailable'),
-              ($1, 'obx_rq_c', 'doi_send', '{}', 'requeue-c', 'delivered', 1, NULL)`,
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts, failure_kind, last_error)
+       VALUES ($1, 'obx_rq_a', 'message_event', '{}', 'requeue-a', 'failed', 36, 'exhausted', 'ClickHouse unavailable'),
+              ($1, 'obx_rq_b', 'doi_send', '{}', 'requeue-b', 'failed', 1, 'permanent', 'doi_send payload is invalid: idempotencyKey'),
+              ($1, 'obx_rq_c', 'doi_send', '{}', 'requeue-c', 'delivered', 1, NULL, NULL)`,
       [d.workspace],
     );
-    await expect(requeueFailedOutbox(d.db, { kind: 'message_event' })).resolves.toBe(1);
+    await expect(requeueFailedOutbox(d.db, { kind: 'message_event' })).resolves.toEqual({ requeued: 1, skippedPermanent: 0 });
     const a = (await row('requeue-a'))!;
-    expect(a).toMatchObject({ state: 'pending', attempts: 0, last_error: null, claim_token: null });
+    expect(a).toMatchObject({ state: 'pending', attempts: 0, failure_kind: null, last_error: null, claim_token: null });
     expect((await row('requeue-b'))?.state).toBe('failed');
     expect((await row('requeue-c'))?.state).toBe('delivered');
 
-    await expect(requeueFailedOutbox(d.db)).resolves.toBe(1);
+    // A permanent failure is left alone by default: requeueing it would only fail it again.
+    await expect(requeueFailedOutbox(d.db)).resolves.toEqual({ requeued: 0, skippedPermanent: 1 });
+    expect((await row('requeue-b'))?.state).toBe('failed');
+    await expect(requeueFailedOutbox(d.db, { includePermanent: true })).resolves.toEqual({ requeued: 1, skippedPermanent: 0 });
     expect((await row('requeue-b'))?.state).toBe('pending');
+    expect((await row('requeue-b'))?.failure_kind).toBeNull();
+  });
+
+  it('records why a row was dead-lettered', async () => {
+    await enqueue('permanent-kind');
+    const [claim] = (await claimOutboxBatch(d.db, { limit: 50 })).filter((c) => c.operationKey === 'permanent-kind');
+    await expect(failOutbox(d.db, claim, new Error('bad payload'), { permanent: true })).resolves.toBe('failed');
+    expect((await row('permanent-kind'))?.failure_kind).toBe('permanent');
   });
 
   it('backs off after a failure and stops after the attempt bound', async () => {
@@ -184,6 +196,7 @@ describe.skipIf(!hasTestDatabase())('transactional outbox (#978 part 2)', () => 
     expect(last.attempts).toBe(3);
     await expect(failOutbox(d.db, last, new Error('still broken'), { maxAttempts: 3 })).resolves.toBe('failed');
     expect((await row('retry'))?.state).toBe('failed');
+    expect((await row('retry'))?.failure_kind).toBe('exhausted');
     expect((await claimOutboxBatch(d.db, { limit: 50 })).some((c) => c.operationKey === 'retry')).toBe(false);
   });
 

@@ -123,6 +123,7 @@ export async function claimOutboxBatch(db: Db, opts: { limit?: number; leaseMs?:
          lease_until = now() + make_interval(secs => $2),
          claim_token = gen_random_uuid()::text,
          last_error = NULL,
+         failure_kind = NULL,
          updated_at = now()
      FROM ready
      WHERE o.workspace_id = ready.workspace_id AND o.id = ready.id
@@ -173,28 +174,33 @@ export async function ackOutbox(db: Db, claim: Pick<OutboxClaim, 'workspaceId' |
 
 /**
  * Records a failed attempt: back off with the bounded schedule, or stop after `maxAttempts` so a
- * permanently broken payload cannot retry forever. The lease is released either way. A stale claim
- * returns `'stale'` and changes nothing; the current owner settles the row.
+ * transient failure cannot retry forever. `permanent` stops at once (an undeliverable payload) and
+ * persists that distinction so a requeue does not loop it. The lease is released either way. A
+ * stale claim returns `'stale'` and changes nothing; the current owner settles the row.
  */
 export async function failOutbox(
   db: Db,
   claim: Pick<OutboxClaim, 'workspaceId' | 'id' | 'attempts' | 'claimToken'>,
   err: unknown,
-  opts: { maxAttempts?: number } = {},
+  opts: { maxAttempts?: number; permanent?: boolean } = {},
 ): Promise<'pending' | 'failed' | 'stale'> {
   const maxAttempts = opts.maxAttempts ?? OUTBOX_MAX_ATTEMPTS;
+  const permanent = opts.permanent ?? false;
   const retrySeconds = outboxRetrySeconds(claim.attempts);
   const { rows } = await db.admin.query<{ state: 'pending' | 'failed' }>(
     `UPDATE outbox SET
-       state = CASE WHEN attempts >= $4 THEN 'failed' ELSE 'pending' END,
-       next_attempt_at = CASE WHEN attempts >= $4 THEN next_attempt_at ELSE now() + make_interval(secs => $5) END,
+       state = CASE WHEN $7::boolean OR attempts >= $4 THEN 'failed' ELSE 'pending' END,
+       next_attempt_at = CASE WHEN $7::boolean OR attempts >= $4 THEN next_attempt_at
+                              ELSE now() + make_interval(secs => $5) END,
+       failure_kind = CASE WHEN $7::boolean THEN 'permanent'
+                           WHEN attempts >= $4 THEN 'exhausted' ELSE NULL END,
        lease_until = NULL,
        claim_token = NULL,
        last_error = $6,
        updated_at = now()
      WHERE workspace_id = $1 AND id = $2 AND claim_token = $3 AND state = 'delivering'
      RETURNING state`,
-    [claim.workspaceId, claim.id, claim.claimToken, maxAttempts, retrySeconds, sanitiseOutboxError(err)],
+    [claim.workspaceId, claim.id, claim.claimToken, maxAttempts, retrySeconds, sanitiseOutboxError(err), permanent],
   );
   return rows[0]?.state ?? 'stale';
 }
@@ -211,15 +217,34 @@ export async function pruneOutbox(db: Db, retentionDays = OUTBOX_RETENTION_DAYS)
 /**
  * Puts dead-lettered rows back in the queue, resetting their attempt budget. Operators run this
  * after an outage (`am outbox [--kind KIND]`); without it a long ClickHouse outage would leave
- * valid events `failed` forever. Returns how many rows were requeued.
+ * valid events `failed` forever. A permanent failure (an undeliverable payload) is skipped unless
+ * `includePermanent` is set: requeueing it would only fail it again. Returns what was requeued and
+ * how many permanent failures were left alone.
  */
-export async function requeueFailedOutbox(db: Db, opts: { kind?: string } = {}): Promise<number> {
-  const { rowCount } = await db.admin.query(
-    `UPDATE outbox
-     SET state = 'pending', attempts = 0, next_attempt_at = now(), lease_until = NULL,
-         claim_token = NULL, last_error = NULL, updated_at = now()
-     WHERE state = 'failed' AND ($1::text IS NULL OR kind = $1)`,
-    [opts.kind ?? null],
+export async function requeueFailedOutbox(
+  db: Db,
+  opts: { kind?: string; includePermanent?: boolean } = {},
+): Promise<{ requeued: number; skippedPermanent: number }> {
+  const includePermanent = opts.includePermanent ?? false;
+  const { rows } = await db.admin.query<{ requeued: number; permanent: number }>(
+    `WITH candidates AS (
+       SELECT workspace_id, id, failure_kind = 'permanent' AS is_permanent
+       FROM outbox
+       WHERE state = 'failed' AND ($1::text IS NULL OR kind = $1)
+     ), requeued AS (
+       UPDATE outbox o
+       SET state = 'pending', attempts = 0, next_attempt_at = now(), lease_until = NULL,
+           claim_token = NULL, failure_kind = NULL, last_error = NULL, updated_at = now()
+       FROM candidates c
+       WHERE o.workspace_id = c.workspace_id AND o.id = c.id
+         AND ($2::boolean OR NOT c.is_permanent)
+       RETURNING 1
+     )
+     SELECT (SELECT count(*) FROM requeued)::int AS requeued,
+            (SELECT count(*) FROM candidates WHERE is_permanent)::int AS permanent`,
+    [opts.kind ?? null, includePermanent],
   );
-  return rowCount ?? 0;
+  const requeued = rows[0]?.requeued ?? 0;
+  const permanent = rows[0]?.permanent ?? 0;
+  return { requeued, skippedPermanent: includePermanent ? 0 : permanent };
 }
