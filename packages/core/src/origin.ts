@@ -172,8 +172,12 @@ function normalizePort(authority: string, scheme: string): string {
   // A port is a number, and `URL` writes it without leading zeros (`:0443` is `:443`, `:08443` is
   // `:8443`), so the spelling has to agree with the candidate. `:*` is not a number and stays, and a
   // last colon that does not separate a port (an IPv6 address such as `[::1]`) is left alone.
-  if (!/^\d{1,5}$/.test(port)) return authority;
-  const numeric = String(Number(port));
+  // Any number of leading zeros is accepted (the pattern-length bound limits the digits); a value
+  // above 65535 is no port at all and is left for start-up validation to refuse.
+  if (!/^\d+$/.test(port)) return authority;
+  const value = Number(port);
+  if (value > 65535) return authority;
+  const numeric = String(value);
   const defaultPort = defaultPortOf(scheme);
   return defaultPort !== null && numeric === defaultPort ? authority.slice(0, colon) : `${authority.slice(0, colon)}:${numeric}`;
 }

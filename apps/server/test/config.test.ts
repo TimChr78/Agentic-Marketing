@@ -90,6 +90,12 @@ describe('configuration', () => {
     expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: '' })).not.toThrow();
   });
 
+  // #947 review round 2: Better Auth adds the base URL's origin to its own list, outside the resolver.
+  it('refuses a PUBLIC_URL whose origin carries a wildcard (#947)', () => {
+    expect(() => loadConfig({ ...base, PUBLIC_URL: 'https://%2a.%2a.%2a:8443' })).toThrow(/PUBLIC_URL .*wildcard/);
+    expect(() => loadConfig({ ...base, PUBLIC_URL: 'https://app.example.com/%2a' })).not.toThrow();
+  });
+
   it('accepts a percent-encoded password in DATABASE_URL (#647)', () => {
     const c = loadConfig({ ...base, DATABASE_URL: 'postgres://am:abc%2Fdef@postgres:5432/am' });
     // The app role replaces the owner credentials, and the URL setter encodes them.

@@ -136,6 +136,8 @@ describe('a wildcard entry normalises its default port (#943)', () => {
     expect(matches('https://a.example.com:443', 'https://*.example.com:0443')).toBe(true);
     expect(matches('https://a.example.com:8443', 'https://*.example.com:08443')).toBe(true);
     expect(matches('https://a.example.com', 'https://*.example.com:08443')).toBe(false);
+    expect(matches('https://a.example.com', 'https://*.example.com:000443')).toBe(true);
+    expect(matches('https://a.example.com:8443', 'https://*.example.com:0008443')).toBe(true);
     expect(matches('http://a.example.com', 'http://*.example.com:080')).toBe(true);
     expect(matches('http://a.example.com:8080', 'http://*.example.com:08080')).toBe(true);
     expect(matches('https://192.168.1.5', 'https://192.168.*.*:0443')).toBe(true);

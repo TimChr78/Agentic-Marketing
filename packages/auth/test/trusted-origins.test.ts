@@ -153,6 +153,15 @@ describe('the callback origins handed to Better Auth (#947)', () => {
     expect(await req.text()).toBe(body);
   });
 
+  // #947 review round 2: Better Auth keeps the last value of a repeated field, so the resolver must too.
+  it('reads the last value of a repeated callback field, as Better Auth does', async () => {
+    const resolve = betterAuthTrustedOrigins(['https://*.example.com']);
+    const body = 'callbackURL=%2F&callbackURL=https%3A%2F%2Fadmin.example.com%2Fafter';
+    expect(await resolve(request({ 'content-type': 'application/x-www-form-urlencoded' }, body))).toEqual(['https://admin.example.com']);
+    const query = 'https://marketing.example.com/api/auth/sign-in/social?callbackURL=%2F&callbackURL=https%3A%2F%2Fadmin.example.com%2Fafter';
+    expect(await resolve(new Request(query))).toEqual(['https://admin.example.com']);
+  });
+
   it('adds nothing for a callback origin no entry covers, over the cap, or carrying a wildcard', async () => {
     const resolve = betterAuthTrustedOrigins(['https://*.example.com']);
     expect(await resolve(json({}, { callbackURL: 'https://evil.example.net/after' }))).toEqual([]);

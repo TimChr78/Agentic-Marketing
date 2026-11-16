@@ -55,7 +55,7 @@ async function callbackOrigins(request: Request): Promise<string[]> {
   const values: unknown[] = [];
   try {
     const url = new URL(request.url);
-    for (const field of CALLBACK_FIELDS) values.push(url.searchParams.get(field));
+    for (const field of CALLBACK_FIELDS) values.push(url.searchParams.getAll(field).at(-1));
   } catch {
     // A request URL the platform cannot parse has no query to read.
   }
@@ -69,7 +69,8 @@ async function callbackOrigins(request: Request): Promise<string[]> {
           for (const field of CALLBACK_FIELDS) values.push(body?.[field]);
         } else {
           const form = new URLSearchParams(text);
-          for (const field of CALLBACK_FIELDS) values.push(form.get(field));
+          // Better Auth's form parser keeps the last value of a repeated field, so read that one.
+          for (const field of CALLBACK_FIELDS) values.push(form.getAll(field).at(-1));
         }
       } catch {
         // A body Better Auth cannot parse either: it names no callback origin.
