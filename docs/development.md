@@ -357,6 +357,8 @@ pnpm audit --prod --audit-level=moderate   # accepted advisories are listed in S
 
 Biome checks every directory unless `biome.json` excludes it; add generated output to its `files.includes` exclusions rather than leaving a new directory unchecked.
 
+`pnpm typecheck` runs `tsc --noEmit` per package and app. Each one writes an incremental build info file under its own `node_modules/.cache/tsbuildinfo/`, so a second run only rechecks what changed: about 2m10s cold and 48s warm on the reference machine. The cache lives in the checkout's `node_modules`, so worktrees and delegates never share one, and it is never committed.
+
 ### Testing only what changed
 
 The full local suite takes about 44 minutes on the shared test stack. While iterating on a change,

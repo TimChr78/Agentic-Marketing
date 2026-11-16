@@ -12,7 +12,9 @@
     "isolatedModules": true,
     "resolveJsonModule": true,
     "types": ["vite/client", "node"],
-    "noEmit": true
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "./node_modules/.cache/tsbuildinfo/web.tsbuildinfo"
   },
   "include": ["src", "test"]
 }
