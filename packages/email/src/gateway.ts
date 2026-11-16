@@ -113,9 +113,8 @@ export function sendRequestHash(channel: SendChannel, parts: Record<string, unkn
  * Order: the executor's command-level idempotency lock is taken before BEGIN; this is the first
  * lock inside a send handler and precedes every message write. The delivery worker's
  * `message-cap` lock is taken only for an existing message and never calls the request gateways,
- * so the two cannot form a cycle. A broadcast run takes its run row, then the workspace identity
- * lock (`lockIdentity` in `@agentic-marketing/profiles`), and only then this lock per member; a
- * merge takes the identity lock and never this one, so the two orders cannot cross (#944).
+ * so the two cannot form a cycle. A broadcast run takes its run row and then this lock per member;
+ * it does not take the identity lock, so nothing takes these two in a fixed order across paths.
  */
 export async function lockSendKey(tx: Tx, workspaceId: string, key: string) {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`send-idempotency:${workspaceId}:${key}`}, 0))`);

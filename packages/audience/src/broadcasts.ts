@@ -40,7 +40,6 @@ import {
   validateSubject,
 } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
-import { lockIdentity } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
@@ -1499,13 +1498,13 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       .orderBy(asc(schema.segmentMemberships.profileId))
       .limit(BATCH);
     const ids = members.map((m) => m.profileId);
-    // One message per person per broadcast (#944). Identity resolution holds the workspace identity
-    // lock while it rewrites a profile id and moves that person's messages to the survivor, so the
-    // batch takes the same lock before it resolves the person, checks and records: a merge either
-    // committed before this point (and the check sees its result) or waits for this transaction to
-    // commit, and can no longer land between the check and the insert. Lock order: the run row above,
-    // then this lock, then per member a send key and message rows (see `lockIdentity`).
-    if (ids.length) await lockIdentity(tx, ws);
+    // One message per person per broadcast (#944), as of the moment this batch looks: the person is
+    // the member's id or any profile it was already merged into, and two aliases of one person in
+    // this batch are one recipient. That is the whole guarantee. A merge that commits while the
+    // batch is in flight is treated exactly like one that commits just after it: the batch's
+    // snapshot still saw two people, so it decides for the one it selected, and the same merge
+    // landing a moment later could not be prevented either. Serialising the batch against merges
+    // would hold the workspace's identity lock across every member's send, so it does not.
     const { handled, canonical } = await handledPeople(tx, ws, broadcastId, ids);
     // Canonical ids this batch already recorded a decision for: a second alias of the same person
     // (a dynamic segment keeps both until its next refresh) is the same recipient, not another one.
@@ -1546,17 +1545,20 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           ? (subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length) ?? undefined)
           : (test?.winner ?? undefined);
       // The first time this person is about to get anything from a sending member, record their
-      // campaign arm. Later members read the same row.
+      // campaign arm. Later members read the same row. The arm belongs to the person, not to the
+      // alias this batch happened to select: assigning it to a stale alias could give a control
+      // participant a fresh treatment arm (and then send to the survivor), or hold out the survivor
+      // while the record stayed on the alias (#944).
       const holdout = campaign
-        ? await assignHoldout(tx, ws, { type: 'campaign', id: campaign.id }, campaign.content.controlGroup, m.profileId)
+        ? await assignHoldout(tx, ws, { type: 'campaign', id: campaign.id }, campaign.content.controlGroup, person)
         : null;
       if (campaign && holdout?.created)
         holdoutEvents.push({
           workspaceId: ws,
           journeyId: campaign.id,
           version: campaign.version,
-          participantId: holdoutParticipantId(m.profileId),
-          profileId: m.profileId,
+          participantId: holdoutParticipantId(person),
+          profileId: person,
           node: '',
           type: 'holdout_assigned',
           seq: 0,

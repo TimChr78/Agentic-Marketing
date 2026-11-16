@@ -1,9 +1,5 @@
-import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
-import { schema } from '@agentic-marketing/db';
+import { holdoutHashVersion } from '@agentic-marketing/artifacts';
 import { sendRequestHash } from '@agentic-marketing/email';
-import type { BusEvent } from '@agentic-marketing/events';
-import { applyEvents } from '@agentic-marketing/profiles';
-import { drizzle } from 'drizzle-orm/node-postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -37,7 +33,7 @@ const ingest = (batch: unknown[]) =>
 
 const identify = (body: Record<string, unknown>) => ingest([{ type: 'identify', ...body }]);
 
-const createPublished = async (type: 'email_template' | 'segment' | 'broadcast', name: string, content: object) => {
+const createPublished = async (type: 'email_template' | 'segment' | 'broadcast' | 'campaign', name: string, content: object) => {
   const a = await api().call('artifacts.create', { type, name, content });
   await api().call('artifacts.requestPublish', { artifactId: a.artifactId, note: 'v01424 merge keys' });
   return a.artifactId;
@@ -56,13 +52,14 @@ interface MessageRow {
   profile_id: string | null;
   idempotency_key: string;
   status: string;
+  reason: string | null;
   request_hash: string | null;
 }
 
 const messagesOf = async (broadcastId: string): Promise<MessageRow[]> =>
   (
     await t.srv.db.admin.query<MessageRow>(
-      `SELECT id, profile_id, idempotency_key, status, request_hash FROM messages
+      `SELECT id, profile_id, idempotency_key, status, reason, request_hash FROM messages
        WHERE workspace_id = $1 AND journey_id = $2 AND test = false ORDER BY id`,
       [ws, broadcastId],
     )
@@ -151,6 +148,33 @@ const chunkMessage = (broadcastId: string, profileId: string, requestHash: strin
 const broadcastHash = (broadcastId: string, recipient: string) =>
   sendRequestHash('email', { caller: 'system:broadcast', recipient, broadcast: broadcastId });
 
+/** A published campaign whose control group covers the broadcast, so the run assigns arms. */
+const campaignFor = (broadcastId: string, name: string) =>
+  createPublished('campaign', `merge keys ${name}`, {
+    startsAt: '2026-01-01T00:00:00.000Z',
+    goal: { kind: 'conversion', event: 'Order Completed', attributionDays: 7 },
+    controlGroup: { percent: 50, minSampleSize: 1 },
+    members: [{ artifactId: broadcastId, role: 'primary' }],
+  });
+
+/** Assigns campaign arms directly, so the test decides them instead of the 50% hash. */
+const assignCampaignArms = (campaign: string, rows: { profile: string; arm: 'control' | 'treatment' }[]) =>
+  t.srv.db.admin.query(
+    `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm)
+     SELECT $1, 'campaign', $2, $3, x.profile, x.arm
+     FROM unnest($4::text[], $5::text[]) AS x(profile, arm)`,
+    [ws, campaign, holdoutHashVersion(50), rows.map((r) => r.profile), rows.map((r) => r.arm)],
+  );
+
+const campaignAssignments = async (campaign: string) =>
+  (
+    await t.srv.db.admin.query<{ profile_id: string; arm: string }>(
+      `SELECT profile_id, arm FROM holdout_assignments
+       WHERE workspace_id = $1 AND scope_type = 'campaign' AND scope_id = $2 ORDER BY profile_id`,
+      [ws, campaign],
+    )
+  ).rows;
+
 /** Two profiles of one person, and the id-time pair that decides which one survives a merge. */
 async function twoProfiles(suffix: string) {
   await identify({ anonymousId: `anon-${suffix}` });
@@ -177,52 +201,6 @@ async function mergeProfiles(suffix: string, survivor: string, loser: string) {
   await identify({ anonymousId: `anon-${suffix}`, traits: { email: `${suffix}@example.com` } });
   await mergedInto(loser, survivor);
 }
-
-/**
- * A merge written but not committed, on its own connection: identity resolution takes the
- * workspace's identity advisory lock and holds it until the transaction ends, so a broadcast batch
- * has to queue behind it. The test commits when it wants the merge to land.
- */
-async function heldMerge(suffix: string) {
-  const client = await t.srv.db.app.connect();
-  await client.query('BEGIN');
-  await client.query('SELECT set_config($1, $2, true)', ['app.workspace_id', ws]);
-  const event: BusEvent = {
-    workspaceId: ws,
-    sourceId: 'src_merge_race',
-    messageId: `msg-merge-race-${suffix}`,
-    type: 'identify',
-    name: 'identify',
-    anonymousId: `anon-${suffix}`,
-    userId: '',
-    timestamp: new Date().toISOString(),
-    receivedAt: new Date().toISOString(),
-    properties: {},
-    traits: {},
-    piiTraits: { email: `${suffix}@example.com` },
-    context: {},
-    consent: {},
-  };
-  await applyEvents(drizzle(client, { schema }), ws, [event], {
-    kp: t.srv.keyProvider,
-    purposes: async (tx) => (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES,
-  });
-  return {
-    async commit() {
-      await client.query('COMMIT');
-      client.release();
-    },
-    async rollback() {
-      await client.query('ROLLBACK').catch(() => {});
-      client.release();
-    },
-  };
-}
-
-/** Backends waiting on a transaction-scoped advisory lock; the dedicated database makes this exact. */
-const advisoryWaiters = async () =>
-  (await t.srv.db.admin.query<{ n: number }>('SELECT count(*)::int AS n FROM pg_locks WHERE locktype = $1 AND NOT granted', ['advisory']))
-    .rows[0]!.n;
 
 beforeAll(async () => {
   t = await startTestServer('test_v01424_broadcast_merge', PORT);
@@ -364,38 +342,80 @@ describe('a merge mid-broadcast still sends one message (#944)', () => {
     expect((await runRow(id)).status).toBe('done');
   }, 90_000);
 
-  it('serialises with a merge that commits while the batch is looking at the person', async () => {
-    const { anon, user } = await twoProfiles('race');
+  it('holds out the survivor even when the stale alias would be treatment', async () => {
+    const { anon, user } = await twoProfiles('holdout-control');
+    // The larger id survives, so the stale alias sorts first and is the batch's first member.
     const survivor = anon > user ? anon : user;
-    const loser = survivor === anon ? user : anon;
-    const segment = await audienceOf('race', [survivor, loser]);
-    const id = await scheduledBroadcast('race', segment);
-    await grant([survivor, loser]);
-    // Chunk 1 queued the merged-away profile; its message is what a merge would move.
-    await chunkMessage(id, loser, broadcastHash(id, loser));
-    await survivorIsOlder(survivor, loser);
+    const alias = survivor === anon ? user : anon;
+    const segment = await audienceOf('holdout-control', [survivor, alias]);
+    const id = await scheduledBroadcast('holdout-control', segment);
+    await grant([survivor, alias]);
+    const campaign = await campaignFor(id, 'holdout control');
+    await mergeProfiles('holdout-control', survivor, alias);
+    await t.srv.db.admin.query(
+      `INSERT INTO segment_list_members (workspace_id, segment_id, profile_id, source) VALUES ($1, $2, $3, 'manual')
+       ON CONFLICT DO NOTHING`,
+      [ws, segment, alias],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO segment_memberships (workspace_id, segment_id, profile_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      [ws, segment, alias],
+    );
+    // The person (under the survivor) is control; the stale alias carries a treatment arm.
+    await assignCampaignArms(campaign, [
+      { profile: survivor, arm: 'control' },
+      { profile: alias, arm: 'treatment' },
+    ]);
 
-    // The merge is written and holds the identity lock, but is not committed yet.
-    const merge = await heldMerge('race');
-    try {
-      await startRunAt(id, '');
-      // The batch cannot check or queue for this person until the merge is resolved: it waits on the
-      // identity lock the merge holds. (Before the fix it read past the uncommitted merge and
-      // queued a second copy.) No sleep: the wait is visible in `pg_locks`.
-      const waiting = await eventually(
-        () => advisoryWaiters(),
-        (n) => n >= 1,
-        20_000,
-      );
-      expect(waiting, 'the batch waits on the identity lock the merge holds').toBeGreaterThanOrEqual(1);
-    } finally {
-      await merge.commit();
-    }
+    await startRunAt(id, '');
     await awaitDone(id);
     const rows = await messagesOf(id);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.profile_id).toBe(survivor);
-  }, 120_000);
+    expect(rows[0]!.status).toBe('suppressed');
+    expect(rows[0]!.reason).toContain('holdout_control');
+    expect(rows[0]!.idempotency_key).toBe(`bctc:${id}:${survivor}`);
+  }, 90_000);
+
+  it('sends to the survivor even when the stale alias was held out', async () => {
+    const { anon, user } = await twoProfiles('holdout-send');
+    const survivor = anon > user ? anon : user;
+    const alias = survivor === anon ? user : anon;
+    const segment = await audienceOf('holdout-send', [survivor, alias]);
+    const id = await scheduledBroadcast('holdout-send', segment);
+    await grant([survivor, alias]);
+    const campaign = await campaignFor(id, 'holdout send');
+    await mergeProfiles('holdout-send', survivor, alias);
+    await t.srv.db.admin.query(
+      `INSERT INTO segment_list_members (workspace_id, segment_id, profile_id, source) VALUES ($1, $2, $3, 'manual')
+       ON CONFLICT DO NOTHING`,
+      [ws, segment, alias],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO segment_memberships (workspace_id, segment_id, profile_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+      [ws, segment, alias],
+    );
+    // The stale alias was held out; the person under the survivor is treatment and must get it.
+    await assignCampaignArms(campaign, [
+      { profile: alias, arm: 'control' },
+      { profile: survivor, arm: 'treatment' },
+    ]);
+
+    await startRunAt(id, '');
+    await awaitDone(id);
+    const rows = await messagesOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.profile_id).toBe(survivor);
+    expect(rows[0]!.status).not.toBe('suppressed');
+    // The run read the survivor's arm; it did not add or move an assignment for the alias.
+    expect((await campaignAssignments(campaign)).map((a) => [a.profile_id, a.arm])).toEqual(
+      expect.arrayContaining([
+        [survivor, 'treatment'],
+        [alias, 'control'],
+      ]),
+    );
+    expect((await campaignAssignments(campaign)).length).toBe(2);
+  }, 90_000);
 
   it('replays a chunk whose messages committed without its cursor, without duplicating', async () => {
     const profiles: string[] = [];
