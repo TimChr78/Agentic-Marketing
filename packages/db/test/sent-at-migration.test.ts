@@ -150,8 +150,9 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       await d.db.admin.query(`CREATE ROLE ${role} LOGIN CREATEROLE PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
       await d.db.admin.query(`GRANT CREATE ON SCHEMA public TO ${role}`);
       // The migration role owns the tables the migration files alter or index (profiles for 0099's
-      // merged-into index). It is deliberately not a superuser and has no BYPASSRLS, so FORCE RLS
-      // applies to it.
+      // merged-into index, idempotency_keys for 0103's reversal columns and 0104's retention index,
+      // agent_actions for 0103's foreign key). It is deliberately not a superuser and has no
+      // BYPASSRLS, so FORCE RLS applies to it.
       for (const table of [
         'artifacts',
         'artifact_versions',

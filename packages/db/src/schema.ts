@@ -304,7 +304,12 @@ export const idempotencyKeys = pgTable(
     reversedAt: ts('reversed_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.key] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.key] }),
+    // The retention cleanup's `created_at < cutoff ORDER BY created_at` batches (#976); the
+    // primary key still answers the per-key replay lookup.
+    index('idempotency_keys_created_at').on(t.createdAt, t.workspaceId, t.key),
+  ],
 );
 
 /**

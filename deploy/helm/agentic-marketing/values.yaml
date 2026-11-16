@@ -64,6 +64,7 @@ config:
   RETENTION_UNCONFIRMED_DAYS: "30"
   RETENTION_LOG_DAYS: "180"
   RETENTION_HOSTED_AGENT_RUN_DAYS: "90"
+  RETENTION_IDEMPOTENCY_DAYS: "30"
   WORKSPACE_QUOTA: "10"
   EGRESS_ALLOWED_HOSTS: ""
   # Backups (`am backup`, and the image's pre-upgrade dump): the chart runs no backup job, but these

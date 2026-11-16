@@ -26,6 +26,19 @@ describe('configuration', () => {
     expect(() => loadConfig({ ...base, PUBLIC_LINKS_URL: 'not a url' })).toThrow('PUBLIC_LINKS_URL');
   });
 
+  // #976: the retention feeds a day interval; a value that would overflow the date math (Invalid
+  // Date) is refused at start-up instead of silently changing the window.
+  it('bounds the idempotency retention to 1..3650 days', () => {
+    expect(loadConfig({ ...base, RETENTION_IDEMPOTENCY_DAYS: '1' }).idempotencyRetentionDays).toBe(1);
+    expect(loadConfig({ ...base, RETENTION_IDEMPOTENCY_DAYS: '3650' }).idempotencyRetentionDays).toBe(3650);
+    expect(loadConfig({ ...base }).idempotencyRetentionDays).toBe(30);
+    expect(() => loadConfig({ ...base, RETENTION_IDEMPOTENCY_DAYS: '3651' })).toThrow('RETENTION_IDEMPOTENCY_DAYS must be at most 3650');
+    expect(() => loadConfig({ ...base, RETENTION_IDEMPOTENCY_DAYS: '1000000000' })).toThrow(
+      'RETENTION_IDEMPOTENCY_DAYS must be at most 3650',
+    );
+    expect(() => loadConfig({ ...base, RETENTION_IDEMPOTENCY_DAYS: '0' })).toThrow('RETENTION_IDEMPOTENCY_DAYS must be at least 1');
+  });
+
   // AWS KMS signs with SigV4 and cannot use basic-auth userinfo; reject it by variable name
   // without echoing the credential (#931 review A4).
   it('rejects credentials in AWS_KMS_ENDPOINT without printing them', () => {
