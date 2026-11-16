@@ -137,6 +137,21 @@ describe('configured URL credentials stay out of errors, logs, spans and doctor 
   });
 });
 
+// #951: a redis-scheme URL has the WHATWG origin "null", but that is not an invalid URL. The doctor
+// check must name the host it could not reach, without the password, instead of telling an operator
+// that a valid VALKEY_URL is malformed. The client reports a refused connection as a failed PING
+// rather than a thrown error, so the endpoint is part of that message too.
+describe('the doctor Valkey check names a refused redis endpoint (#951)', () => {
+  it('reports scheme://host:port, never the password and never "(invalid URL)"', async () => {
+    const check = await checkValkey(config({ valkey: { url: 'redis://user:secret-9137@127.0.0.1:9', prefix: 'am' } }));
+    expect(check.status).toBe('fail');
+    expect(check.message).toContain('redis://127.0.0.1:9');
+    expect(check.message).not.toContain('invalid URL');
+    expect(check.message).not.toContain('secret-9137');
+    expect(check.message).not.toContain('user');
+  });
+});
+
 // The failure-path tests above prove the text is clean. These capture servers prove the credential
 // still authenticates the outgoing request after it moved out of the URL (#931 round 3).
 
