@@ -2,7 +2,6 @@ import type { Purposes } from '@agentic-marketing/artifacts';
 import type { ConsentStatus } from '@agentic-marketing/db';
 import { describe, expect, it } from 'vitest';
 import {
-  CONSENT_REPEAT_WINDOW_MS,
   type ConsentInput,
   type ConsentRow,
   consentProofFor,
@@ -131,9 +130,10 @@ describe('refusedPurposes (journeys exit on these, #108)', () => {
   });
 });
 
-// #936: a signup that leaves the status unchanged is still evidence when its action is newer
-// than the newest ledger row. Deduplicating by status silently dropped it, so a delayed
-// withdrawal that arrived later won although the person's latest action was the signup.
+// #936: every distinct action is evidence, deduplicated only by event identity (the ledger's
+// message-id index) or an exact duplicate (same scope, status, source and action time). A
+// same-status signup is never folded against an older row: a decisive action can be processed
+// after the action it must outrank, so no time window is safe.
 describe('newConsentEvidence (#936)', () => {
   const at = (minute: number) => new Date(Date.UTC(2026, 9, 24, 12, minute));
   const consent = (minute: number, status: ConsentStatus = 'granted', extra: Partial<ConsentInput> = {}): ConsentInput => ({
@@ -150,55 +150,30 @@ describe('newConsentEvidence (#936)', () => {
     source,
     recordedAt: at(minute),
   });
-  const state = (minute: number, status: ConsentStatus = 'granted', channel = '') => [row(channel, status, minute)];
 
   it('keeps a newer same-status signup as evidence (the out-of-order case)', () => {
-    const kept = newConsentEvidence([consent(120)], [stored(0)], state(0));
-    expect(kept.map((r) => r.recordedAt)).toEqual([at(120)]);
+    expect(newConsentEvidence([consent(120)], [stored(0)]).map((r) => r.recordedAt)).toEqual([at(120)]);
   });
 
-  it('does not add an identical repeat inside the window', () => {
-    const inside = new Date(at(20).getTime() + CONSENT_REPEAT_WINDOW_MS / 2);
-    const kept = newConsentEvidence([{ ...consent(20), recordedAt: inside }], [stored(20)], state(20));
-    expect(kept).toEqual([]);
+  it('keeps an older distinct signup too: an action is not folded by time', () => {
+    expect(newConsentEvidence([consent(10)], [stored(20)])).toHaveLength(1);
   });
 
-  it('adds the same action again once the window has passed', () => {
-    const outside = new Date(at(20).getTime() + CONSENT_REPEAT_WINDOW_MS + 1);
-    const kept = newConsentEvidence([{ ...consent(20), recordedAt: outside }], [stored(20)], state(20));
-    expect(kept).toHaveLength(1);
+  it('folds an exact duplicate: same scope, status, source and action time', () => {
+    expect(newConsentEvidence([consent(20)], [stored(20)])).toEqual([]);
   });
 
-  it('drops a repeat of the same event (the same action time) even after the window', () => {
-    const kept = newConsentEvidence([consent(20)], [stored(20)], state(20));
-    expect(kept).toEqual([]);
+  it('keeps a second signup minutes later as a distinct action', () => {
+    expect(newConsentEvidence([consent(30)], [stored(20)])).toHaveLength(1);
   });
 
-  it('drops a re-signup older than the newest row when the status is unchanged', () => {
-    const kept = newConsentEvidence([consent(10)], [stored(20)], state(20));
-    expect(kept).toEqual([]);
+  it('does not fold a different source or channel at the same action time', () => {
+    expect(newConsentEvidence([consent(20, 'granted', { source: 'import' })], [stored(20)])).toHaveLength(1);
+    expect(newConsentEvidence([consent(20, 'granted', { channel: 'email' })], [stored(20)])).toHaveLength(1);
   });
 
-  it('still keeps an older row that records a different action, e.g. a delayed withdrawal', () => {
-    const kept = newConsentEvidence([consent(10, 'withdrawn')], [stored(20)], state(20));
-    expect(kept).toHaveLength(1);
-  });
-
-  it('counts evidence per scope and source, not across them', () => {
-    // A newer import grant is evidence even when the newest form grant is identical in status.
-    expect(newConsentEvidence([consent(30, 'granted', { source: 'import' })], [stored(20)], state(20))).toHaveLength(1);
-    // The channel scope is independent: an all-channels grant does not dedupe an e-mail row.
-    expect(newConsentEvidence([consent(30, 'granted', { channel: 'email' })], [stored(20)], state(20))).toHaveLength(1);
-  });
-
-  it('measures the repeat window from the newest identical row, not from another source', () => {
-    // The import at minute 10 does not make the form signup at minute 20 a new form action.
-    const rows = [stored(0), stored(10, 'granted', 'import')];
-    expect(newConsentEvidence([consent(20)], rows, state(10))).toEqual([]);
-  });
-
-  it('keeps the newest of several actions in one batch and drops its repeat', () => {
-    const kept = newConsentEvidence([consent(120), consent(120)], [stored(0)], state(0));
-    expect(kept.map((r) => r.recordedAt)).toEqual([at(120)]);
+  it('keeps every distinct action in one batch and folds its exact repeat', () => {
+    const kept = newConsentEvidence([consent(120), consent(120), consent(130)], [stored(0)]);
+    expect(kept.map((r) => r.recordedAt)).toEqual([at(120), at(130)]);
   });
 });

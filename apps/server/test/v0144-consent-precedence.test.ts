@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
+import type { Purposes } from '@agentic-marketing/artifacts';
 import { consentHook } from '@agentic-marketing/audience';
 import type { BusEvent } from '@agentic-marketing/events';
-import { recomputeConsentState } from '@agentic-marketing/profiles';
+import { lockConsent, recomputeConsentState, recordConsentEvidence } from '@agentic-marketing/profiles';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { applyDeliveryEvents } from '../../../packages/email/src/deliveryEvents';
 import { eventually, startTestServer, testPort, type User } from './harness';
@@ -530,9 +531,11 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
 
   it('keeps the signup at T2 and resolves to granted when the withdrawal at T1 arrives late', async () => {
     const profileId = await newProfile();
-    const t0 = new Date(Date.now() - 3 * 3_600_000);
-    const t1 = new Date(Date.now() - 2 * 3_600_000);
-    const t2 = new Date(Date.now() - 60_000);
+    // All three actions are minutes apart and the decisive one is processed last: no time window
+    // can be allowed to fold the signup against the older grant.
+    const t0 = new Date(Date.now() - 30 * 60_000);
+    const t1 = new Date(Date.now() - 20 * 60_000);
+    const t2 = new Date(Date.now() - 10 * 60_000);
 
     await handle(profileId, formEvent(profileId, t0));
     // The person signs up again while the ledger still says granted: the provider's withdrawal
@@ -549,14 +552,33 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
     expect(records.filter((r) => r.status === 'granted')).toHaveLength(2);
   });
 
-  it('does not add a row for an identical repeat inside the window', async () => {
+  it('keeps the newer withdrawal when a delayed grant is processed last (the mirror ordering)', async () => {
+    const profileId = await newProfile();
+    const t0 = new Date(Date.now() - 30 * 60_000);
+    const t10 = new Date(Date.now() - 20 * 60_000);
+    const t20 = new Date(Date.now() - 10 * 60_000);
+
+    await providerUnsubscribe(profileId, t0);
+    // A second withdrawal while the status is already withdrawn is a distinct action: folding it
+    // would let the delayed grant at T10 look like the newest action.
+    await providerUnsubscribe(profileId, t20);
+    await handle(profileId, formEvent(profileId, t10));
+
+    expect(await effective(profileId)).toMatchObject({ status: 'withdrawn', allowed: false });
+    const records = await history(profileId);
+    expect(records.filter((r) => r.status === 'withdrawn')).toHaveLength(2);
+    expect(records.find((r) => r.status === 'withdrawn' && r.recordedAt === t20.toISOString())).toBeDefined();
+    // The delayed grant is kept as evidence but is older than the T20 withdrawal.
+    expect(records.filter((r) => r.status === 'granted')).toHaveLength(1);
+  });
+
+  it('keeps a second signup minutes later as a distinct action', async () => {
     const profileId = await newProfile();
     const first = new Date(Date.now() - 30 * 60_000);
     const repeat = new Date(Date.now() - 20 * 60_000);
     await handle(profileId, formEvent(profileId, first));
-    const before = (await history(profileId)).length;
     await handle(profileId, formEvent(profileId, repeat));
-    expect((await history(profileId)).length).toBe(before);
+    expect((await history(profileId)).filter((r) => r.status === 'granted')).toHaveLength(2);
     expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
   });
 
@@ -589,13 +611,13 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
     expect((await history(profileId)).filter((r) => r.status === 'withdrawn')).toHaveLength(1);
   });
 
-  it('an older re-signup adds nothing and leaves the outcome unchanged', async () => {
+  it('keeps an older re-signup as evidence without changing the newer outcome', async () => {
     const profileId = await newProfile();
     const newest = new Date(Date.now() - 10 * 60_000);
     const older = new Date(Date.now() - 20 * 60_000);
     await handle(profileId, formEvent(profileId, newest));
     await handle(profileId, formEvent(profileId, older));
-    expect(await history(profileId)).toHaveLength(1);
+    expect(await history(profileId)).toHaveLength(2);
     expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
   });
 
@@ -627,6 +649,108 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
       (r) => r.records.filter((x) => x.status === 'granted').length === 2,
     );
     await providerUnsubscribe(profileId, t1);
+    expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
+  });
+
+  it('keeps a newer SDK refusal when a delayed SDK grant is processed last', async () => {
+    // The SDK labels a negative action "withdrawn" when the ledger currently says granted and
+    // "denied" when it already says withdrawn. Both are refusals (ADR-0014); neither may be
+    // dropped because of the label, or a delayed grant outranks the later refusal.
+    const anonymousId = `dev-936-refusal-${randomBytes(5).toString('hex')}`;
+    const change = (at: Date, allowed: boolean) => ({
+      type: 'track',
+      event: 'Segment Consent Preference Updated',
+      anonymousId,
+      timestamp: at.toISOString(),
+      context: { consent: { categoryPreferences: { marketing: allowed } } },
+    });
+    const initial = new Date(Date.now() - 4 * 3_600_000);
+    const t0 = new Date(Date.now() - 2 * 3_600_000);
+    const t1 = new Date(Date.now() - 3_600_000);
+    const t2 = new Date(Date.now() - 10 * 60_000);
+    await send([change(initial, true)]);
+    const found = await eventually(
+      () => api().call('profiles.find', { type: 'anonymous_id', value: anonymousId }),
+      (r) => !!r.profileId,
+    );
+    const profileId = found.profileId!;
+    await eventually(
+      () => api().call('consent.history', { profileId }),
+      (r) => r.records.length === 1,
+    );
+    // The withdrawal at T0 becomes "withdrawn"; the later refusal at T2 (more than an hour after
+    // T0) becomes "denied" because the ledger already says withdrawn.
+    await send([change(t0, false)]);
+    await eventually(
+      () => api().call('consent.history', { profileId }),
+      (r) => r.records.length === 2,
+    );
+    await send([change(t2, false)]);
+    await eventually(
+      () => api().call('consent.history', { profileId }),
+      (r) => r.records.length === 3,
+    );
+    // The delayed grant is processed last.
+    await send([change(t1, true)]);
+    await eventually(
+      () => api().call('consent.history', { profileId }),
+      (r) => r.records.some((rec) => rec.recordedAt === t1.toISOString()),
+    );
+
+    expect(await effective(profileId)).toMatchObject({ status: 'denied', allowed: false });
+    const records = await history(profileId);
+    expect(records.find((r) => r.recordedAt === t2.toISOString())).toMatchObject({ status: 'denied', source: 'sdk' });
+    expect(records.find((r) => r.recordedAt === t1.toISOString())).toMatchObject({ status: 'granted', source: 'sdk' });
+  });
+
+  it('serialises two consent writers for one profile on the consent lock', async () => {
+    const profileId = await newProfile();
+    const newer = new Date(Date.now() - 60_000);
+    const older = new Date(Date.now() - 120_000);
+    const purposes = PURPOSES.purposes as Purposes;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+
+    // The first transaction takes the lock, then pauses before reading evidence and writing.
+    const first = t.srv.db.withWorkspace(ws, async (tx) => {
+      await lockConsent(tx, ws, profileId);
+      locked();
+      await held;
+      await recordConsentEvidence(tx, ws, profileId, purposes, [
+        { purpose: 'marketing', status: 'granted', source: 'form', recordedAt: newer },
+      ]);
+    });
+    await isLocked;
+
+    // A second writer for the same profile must wait for the first to commit.
+    let secondStarted!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      secondStarted = resolve;
+    });
+    const second = t.srv.db.withWorkspace(ws, async (tx) => {
+      secondStarted();
+      await recordConsentEvidence(tx, ws, profileId, purposes, [
+        { purpose: 'marketing', status: 'withdrawn', source: 'form', recordedAt: older },
+      ]);
+    });
+    await inFlight;
+    const outcome = await Promise.race([
+      second.then(() => 'finished' as const),
+      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 1_000)),
+    ]);
+    expect(outcome).toBe('blocked');
+
+    release();
+    await Promise.all([first, second]);
+
+    // Both actions are kept and the state is rebuilt from both: the newer grant wins.
+    expect(await history(profileId)).toHaveLength(2);
     expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
   });
 

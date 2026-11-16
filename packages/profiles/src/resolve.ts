@@ -5,7 +5,7 @@ import { type BusEvent, CONSENT_EVENT } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { consentStateOf, currentConsent, recomputeConsentState, recordConsentEvidence } from './consent';
+import { consentStateOf, currentConsent, lockIdentity, recomputeConsentState, recordConsentEvidence } from './consent';
 import { type PersonCrypto, personCrypto } from './crypto';
 
 // Deterministic identity resolution (data-platform.md §3). Each event's identifiers are looked up;
@@ -95,8 +95,9 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
     }
 
     // Anything that creates, attaches or merges is serialised per workspace, so concurrent shard
-    // consumers cannot interleave on the same people.
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
+    // consumers cannot interleave on the same people. Identity first; the SDK consent write below
+    // takes the per-person consent lock second, never the other way round (#936).
+    await lockIdentity(tx, workspaceId);
     const profileId = await resolve(tx, workspaceId, ids, crypto, e);
     await updateProfile(tx, workspaceId, profileId, e, crypto);
     if (e.name === CONSENT_EVENT && Object.keys(e.consent).length) {
@@ -358,9 +359,10 @@ async function recordSdkConsent(tx: Tx, workspaceId: string, profileId: string, 
       page: (e.context.page as { url?: string } | undefined)?.url,
     },
   }));
-  // Regular page loads send no consent event (the SDK enqueues one only when the choice changes),
-  // so the evidence rule (#936) applies here as everywhere the action time is known: a newer
-  // repeat of the same choice is real evidence, an identical repeat inside the window is not.
-  const meaningful = records.filter((r) => !(r.status === 'denied' && current.get(r.purpose) === 'withdrawn'));
-  await recordConsentEvidence(tx, workspaceId, profileId, purposes, meaningful);
+  // Every action is passed to the evidence helper (#936). The SDK labels a negative action
+  // "withdrawn" when the ledger currently says granted and "denied" when it already says
+  // withdrawn; ADR-0014 treats both as refusals, so neither may be filtered on the status that
+  // happened to be current when the event arrived. A delayed grant must not outrank a later
+  // refusal.
+  await recordConsentEvidence(tx, workspaceId, profileId, purposes, records);
 }

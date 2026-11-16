@@ -124,11 +124,27 @@ export function consentProofFor(
 }
 
 /**
- * How long an identical action counts as the same evidence (#936). One hour absorbs a double
- * submission, a retried hook or a reopened confirmation without swallowing a genuine later
- * signup: an action beyond the window is evidence that must beat a delayed withdrawal.
+ * The workspace identity lock: taken before a merge, an identifier attach or a topic preference
+ * write. Lock order is always this lock first, then `lockConsent` for one person (#936). Never
+ * take the per-person lock and then this one: `resolve.ts` holds the identity lock while it calls
+ * `recordSdkConsent`, which takes the consent lock.
  */
-export const CONSENT_REPEAT_WINDOW_MS = 3_600_000;
+export async function lockIdentity(tx: Tx, workspaceId: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
+}
+
+/**
+ * Serialises consent evidence writes for one canonical profile (#936): the evidence read, the
+ * insert and the `consent_state` rebuild must not interleave, or two writers can each miss the
+ * other's row and one rebuild can drop the newer state. `profileId` must already be the survivor
+ * of any merge (identity resolution, or `profileForMessage` for a message).
+ *
+ * Lock order: `lockIdentity` first when the caller needs it (as `resolve.ts` does), then this
+ * lock. Never the other way round. The transaction-scoped lock is released on commit/rollback.
+ */
+export async function lockConsent(tx: Tx, workspaceId: string, profileId: string) {
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`consent:${workspaceId}:${profileId}`}, 0))`);
+}
 
 /** The part of an existing ledger row that deduplication needs. */
 export interface ConsentEvidenceRow {
@@ -139,75 +155,43 @@ export interface ConsentEvidenceRow {
   recordedAt: Date;
 }
 
-const evidenceScope = (purpose: string, channel: string) => `${purpose}\u0000${channel}`;
-const evidenceIdentity = (scope: string, status: ConsentStatus, source: ConsentSource) => `${scope}\u0000${status}\u0000${source}`;
+const evidenceIdentity = (row: { purpose: string; channel: string; status: ConsentStatus; source: ConsentSource; recordedAt: Date }) =>
+  `${row.purpose}\u0000${row.channel}\u0000${row.status}\u0000${row.source}\u0000${row.recordedAt.getTime()}`;
 
 /**
  * Keeps the records that add evidence to the ledger (#936). Deduplicating by current status alone
  * dropped a signup that arrived while the person was already granted, so a delayed withdrawal
  * with an older action time could win although the person's latest action was the signup.
  *
- * A record is kept when it changes the current status (as before), or when its action time is
- * newer than the newest row for the same person, purpose and channel scope. Older records that
- * change the status are still kept: that is how a delayed withdrawal leaves its proof.
- *
- * Ledger growth is bounded: an identical action (same status, source and scope) within
- * `windowMs` of the newest identical row is the same standing choice and adds no row. A redelivery
- * of the same event is additionally deduplicated by the ledger's (message_id, purpose, channel)
- * index in `recordConsent`.
+ * Every distinct action is kept, whatever its status, source, age or relation to the newest row:
+ * the decisive action can be processed after the action it must outrank, so folding by time is
+ * never safe. Only an exact duplicate (same purpose, channel, status, source and action time) is
+ * the same action. A redelivery of the same event is additionally deduplicated by the ledger's
+ * `(message_id, purpose, channel)` index in `recordConsent`. Genuinely repeated signups therefore
+ * grow the ledger by one row each; that is accepted in exchange for not losing the later action.
  */
-export function newConsentEvidence<T extends ConsentInput>(
-  records: T[],
-  existing: ConsentEvidenceRow[],
-  current: ConsentRow[],
-  windowMs = CONSENT_REPEAT_WINDOW_MS,
-): T[] {
-  const newest = new Map<string, number>();
-  const newestIdentical = new Map<string, number>();
-  for (const row of existing) {
-    const scope = evidenceScope(row.purpose, row.channel);
-    const at = row.recordedAt.getTime();
-    newest.set(scope, Math.max(at, newest.get(scope) ?? Number.NEGATIVE_INFINITY));
-    const identity = evidenceIdentity(scope, row.status, row.source);
-    newestIdentical.set(identity, Math.max(at, newestIdentical.get(identity) ?? Number.NEGATIVE_INFINITY));
-  }
-
+export function newConsentEvidence<T extends ConsentInput>(records: T[], existing: ConsentEvidenceRow[]): T[] {
+  const seen = new Set(existing.map((row) => evidenceIdentity(row)));
   const kept: T[] = [];
   for (const record of records) {
-    const scope = evidenceScope(record.purpose, record.channel ?? '');
-    const at = record.recordedAt.getTime();
-    const newestRow = newest.get(scope);
-    let keep: boolean;
-    if (currentConsent(current, record.purpose)?.status !== record.status) {
-      // A different choice is evidence even when it happened before the newest row (a delayed
-      // withdrawal must stay in the ledger), so it is kept as before.
-      keep = true;
-    } else if (newestRow === undefined || at > newestRow) {
-      const identity = evidenceIdentity(scope, record.status, record.source);
-      const last = newestIdentical.get(identity);
-      keep = last === undefined || at - last >= windowMs;
-    } else {
-      // Same standing choice, older than the newest row: nothing changes and nothing is added.
-      keep = false;
-    }
-    if (!keep) continue;
+    const row = { ...record, channel: record.channel ?? '' };
+    const identity = evidenceIdentity(row);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
     kept.push(record);
-    newest.set(scope, Math.max(at, newest.get(scope) ?? Number.NEGATIVE_INFINITY));
-    const identity = evidenceIdentity(scope, record.status, record.source);
-    newestIdentical.set(identity, Math.max(at, newestIdentical.get(identity) ?? Number.NEGATIVE_INFINITY));
   }
   return kept;
 }
 
 /**
- * Records only the evidence a write adds (#936): the current-status change, or a newer action even
- * when the status is unchanged, with identical repeats inside the window deduplicated. Use this in
- * every writer that knows the person's action time; `recordConsent` remains the raw append.
+ * Records the evidence a write adds (#936): every distinct action, with exact duplicates and event
+ * redeliveries folded. Use this in every writer that knows the person's action time; `recordConsent`
+ * remains the raw append and takes the same per-person lock.
  */
 export async function recordConsentEvidence(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
   if (!records.length) return 0;
+  await lockConsent(tx, workspaceId, profileId);
   const family = await mergedFamily(tx, workspaceId, profileId);
-  const current = await consentStateOf(tx, workspaceId, profileId);
   const existing = await tx
     .select({
       purpose: schema.consentRecords.purpose,
@@ -224,11 +208,14 @@ export async function recordConsentEvidence(tx: Tx, workspaceId: string, profile
         inArray(schema.consentRecords.purpose, [...new Set(records.map((r) => r.purpose))]),
       ),
     );
-  return recordConsent(tx, workspaceId, profileId, purposes, newConsentEvidence(records, existing, current));
+  return recordConsent(tx, workspaceId, profileId, purposes, newConsentEvidence(records, existing));
 }
 
 export async function recordConsent(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
   if (!records.length) return 0;
+  // The raw append takes the same per-person lock as the evidence helper, so a command and an
+  // event hook cannot rebuild `consent_state` concurrently from different snapshots (#936).
+  await lockConsent(tx, workspaceId, profileId);
   const inserted = await tx
     .insert(schema.consentRecords)
     .values(
@@ -534,7 +521,8 @@ export async function recordTopicPreference(
 ) {
   // Serialize topic writes with identity merges, then resolve again in the write transaction.
   // Otherwise an old signed preference link can recreate a choice on a merged-away profile.
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
+  // Lock order: identity first, then (if a caller goes on to write consent) the per-person lock.
+  await lockIdentity(tx, workspaceId);
   let canonicalId = profileId;
   for (let i = 0; i < 20; i++) {
     const [profile] = await tx

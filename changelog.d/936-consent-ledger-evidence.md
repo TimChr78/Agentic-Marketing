@@ -2,4 +2,4 @@
 section: Fixed
 issues: [936]
 ---
-- A signup that leaves the consent status unchanged is kept in the ledger when its action time is newer than the person's newest row, so a delayed unsubscribe callback with an older action time no longer overrides the later signup. Identical repeats within an hour add no row, and a redelivered event is recorded once; the SDK, unsubscribe and SMS STOP writers follow the same rule.
+- A signup that leaves the consent status unchanged is kept in the ledger as a distinct action, so a delayed unsubscribe callback with an older action time no longer overrides the later signup; the same applies to imports, SDK consent events, unsubscribe callbacks and SMS STOP. Only an exact duplicate action or a redelivered event is folded, never a later action folded against an older row. Genuinely repeated signups therefore add a ledger row each; that growth is accepted so the decisive action is never lost, and consent writes for one person are serialised.
