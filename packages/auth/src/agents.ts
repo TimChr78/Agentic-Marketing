@@ -743,28 +743,17 @@ export async function undoAgentAction(tx: Tx, ctx: CommandContext, actionId: num
   // have stored several ledger rows under one key (config.import publishes each artifact), so any
   // one of those rows being undone reverses the key. Only an agent write has ledger rows, so a
   // person's key can never be reversed.
-  const linked = await tx
-    .select({ key: schema.idempotencyKeyActions.key })
-    .from(schema.idempotencyKeyActions)
-    .where(
-      and(
-        eq(schema.idempotencyKeyActions.workspaceId, ctx.principal.workspaceId),
-        eq(schema.idempotencyKeyActions.agentActionId, actionId),
-      ),
-    );
-  if (linked.length)
-    await tx
-      .update(schema.idempotencyKeys)
-      .set({ reversedAt: undoneAt })
-      .where(
-        and(
-          eq(schema.idempotencyKeys.workspaceId, ctx.principal.workspaceId),
-          inArray(
-            schema.idempotencyKeys.key,
-            linked.map((r) => r.key),
-          ),
-        ),
-      );
+  // One statement joined to the link rows, not "read the keys, then update by name": an expired key
+  // reused in between is deleted and inserted fresh (its links cascade away), so updating by the key
+  // name alone would mark the new, unrelated request reversed (#982 review).
+  await tx.execute(sql`
+    UPDATE idempotency_keys k
+    SET reversed_at = ${undoneAt}
+    FROM idempotency_key_actions a
+    WHERE a.workspace_id = ${ctx.principal.workspaceId}
+      AND a.agent_action_id = ${actionId}
+      AND k.workspace_id = a.workspace_id
+      AND k.key = a.key`);
   return { actionId, undoneAt: undoneAt.toISOString(), result, steps };
 }
 
