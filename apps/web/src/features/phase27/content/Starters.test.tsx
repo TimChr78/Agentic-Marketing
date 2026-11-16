@@ -520,6 +520,71 @@ describe('Starters gallery (#526)', () => {
     expect(screen.getByText('Everything is in place.')).toBeTruthy();
   });
 
+  // #961 review A: A -> B -> A. The install was started for A's *edited* parameters, and leaving A
+  // and coming back reloads A's defaults, so the old response must not be reported as this
+  // starter's install — it belongs to values that are no longer on screen.
+  it('drops an install started before a starter switch, even when the person returns to it (#961 review)', async () => {
+    h.two = true;
+    h.fastGet = true;
+    renderPage();
+    await screen.findByRole('button', { name: /Starter A/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    // Edit A's parameter and check it, so the install is enabled again for the edited value.
+    const field = screen.getByLabelText(/^A parameter/);
+    await userEvent.clear(field);
+    await userEvent.type(field, 'Edited A value');
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(screen.getByText('Everything is in place.')).toBeTruthy());
+
+    h.holdInstall = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+
+    await userEvent.click(screen.getByRole('button', { name: /Starter B/ }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Starter B' })).toBeTruthy());
+    await userEvent.click(screen.getByRole('button', { name: /Starter A/ }));
+    await waitFor(() => expect(screen.getByLabelText(/^A parameter/)).toHaveProperty('value', 'A value'));
+
+    await act(async () => {
+      h.installHeld[0].resolve({ artifacts: [{ artifactId: `eml_${'d'.repeat(32)}`, name: 'Stale A draft' }] });
+    });
+    await act(async () => {});
+
+    // Not this starter's install: no success alert, no link, and no earlier-parameters notice for
+    // a starter the person left in between.
+    expect(screen.queryByText(/Created 1 drafts/)).toBeNull();
+    expect(screen.queryByText('Stale A draft')).toBeNull();
+    expect(screen.queryByText(/Your earlier install/)).toBeNull();
+    expect(screen.getByLabelText(/^A parameter/)).toHaveProperty('value', 'A value');
+  });
+
+  it('drops a failed install started before a starter switch, even after returning (#961 review)', async () => {
+    h.two = true;
+    h.fastGet = true;
+    renderPage();
+    await screen.findByRole('button', { name: /Starter A/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    h.holdInstall = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+
+    await userEvent.click(screen.getByRole('button', { name: /Starter B/ }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Starter B' })).toBeTruthy());
+    await userEvent.click(screen.getByRole('button', { name: /Starter A/ }));
+    await waitFor(() => expect(screen.getByLabelText(/^A parameter/)).toHaveProperty('value', 'A value'));
+
+    await act(async () => {
+      h.installHeld[0].reject(new Error('The drafts could not be created'));
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText('That did not work')).toBeNull();
+    expect(screen.queryByText(/The drafts could not be created/)).toBeNull();
+    expect(screen.queryByText(/Your earlier install/)).toBeNull();
+  });
+
   it('shows an install error for the earlier parameters, labelled as theirs (#961)', async () => {
     renderPage();
     await screen.findByRole('button', { name: /Weekly newsletter/ });

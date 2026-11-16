@@ -98,6 +98,13 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     // Only the latest selection may commit state (#616): a slower earlier read must not overwrite
     // the starter the person is now looking at.
     const seq = ++loadSeq.current;
+    // Selecting a starter is a new parameter generation, and it supersedes any install still in
+    // flight (#961 review): leaving A and coming back reloads A's defaults, so an install started
+    // for A's earlier values must not be reported as this starter's install. Clearing the
+    // installing state keeps the button honest for the starter now on screen.
+    paramsGeneration.current += 1;
+    installSeq.current += 1;
+    setInstalling(false);
     setError(null);
     setFailedRead(null);
     setCheckError(null);
