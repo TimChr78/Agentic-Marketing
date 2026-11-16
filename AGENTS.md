@@ -13,6 +13,8 @@ read it before your first change. This page lists only the rules that are easy t
 - The services come from the shared test stack: `eval "$(scripts/test-services.sh env)"`. Never run
   `scripts/test-services.sh up` (another agent owns the stack). Give your run its own
   `TEST_PORT_OFFSET`, and set `TEST_WORKERS=1` while other agents are running.
+- The migrated template databases are kept on purpose (setup never prunes them). Drop the old ones
+  with `pnpm test:clean -- --templates` when no test run is active.
 - Never `git stash`.
 
 ## Before pushing
@@ -20,7 +22,7 @@ read it before your first change. This page lists only the rules that are easy t
 Lint, typecheck and the docs project, in one command:
 
 ```bash
-npx biome check --diagnostic-level=error . && pnpm typecheck && npx vitest run --project docs
+pnpm lint && pnpm typecheck && npx vitest run --project docs
 ```
 
 ## Changes
