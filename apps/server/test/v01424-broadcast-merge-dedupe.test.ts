@@ -1,4 +1,4 @@
-import { holdoutHashVersion } from '@agentic-marketing/artifacts';
+import { armFor, holdoutHashVersion } from '@agentic-marketing/artifacts';
 import { sendRequestHash } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
@@ -148,32 +148,70 @@ const chunkMessage = (broadcastId: string, profileId: string, requestHash: strin
 const broadcastHash = (broadcastId: string, recipient: string) =>
   sendRequestHash('email', { caller: 'system:broadcast', recipient, broadcast: broadcastId });
 
+const campaignContent = (percent: number, broadcastId?: string) => ({
+  startsAt: '2026-01-01T00:00:00.000Z',
+  goal: { kind: 'conversion' as const, event: 'Order Completed', attributionDays: 7 },
+  controlGroup: { percent, minSampleSize: 1 },
+  members: broadcastId ? [{ artifactId: broadcastId, role: 'primary' as const }] : [],
+});
+
 /** A published campaign whose control group covers the broadcast, so the run assigns arms. */
 const campaignFor = (broadcastId: string, name: string) =>
-  createPublished('campaign', `merge keys ${name}`, {
-    startsAt: '2026-01-01T00:00:00.000Z',
-    goal: { kind: 'conversion', event: 'Order Completed', attributionDays: 7 },
-    controlGroup: { percent: 50, minSampleSize: 1 },
-    members: [{ artifactId: broadcastId, role: 'primary' }],
-  });
+  createPublished('campaign', `merge keys ${name}`, campaignContent(50, broadcastId));
 
-/** Assigns campaign arms directly, so the test decides them instead of the 50% hash. */
-const assignCampaignArms = (campaign: string, rows: { profile: string; arm: 'control' | 'treatment' }[]) =>
+/**
+ * A published campaign whose percentage hashes `profileId` to `arm`: picked from the campaign's own
+ * id before publishing, so a stale-arm test does not depend on the 50% bucket. With 50 possible
+ * percentages the loop effectively always finds one.
+ */
+async function campaignHashingTo(name: string, profileId: string, arm: 'control' | 'treatment', broadcastId?: string) {
+  const draft = await api().call('artifacts.create', {
+    type: 'campaign',
+    name: `merge keys ${name}`,
+    content: campaignContent(1, broadcastId),
+  });
+  let percent = 0;
+  for (let p = 1; p <= 50; p++)
+    if (armFor(p, ws, draft.artifactId, holdoutHashVersion(p), profileId) === arm) {
+      percent = p;
+      break;
+    }
+  expect(percent, `a control percentage that hashes ${profileId} to ${arm}`).toBeGreaterThan(0);
+  await api().call('artifacts.updateDraft', { artifactId: draft.artifactId, content: campaignContent(percent, broadcastId) });
+  await api().call('artifacts.requestPublish', { artifactId: draft.artifactId, note: 'merge keys holdout arm' });
+  return { campaign: draft.artifactId, hashVersion: holdoutHashVersion(percent), percent };
+}
+
+/** Assigns campaign arms directly, so the test decides them (and their times) instead of the hash. */
+const assignCampaignArms = (campaign: string, hashVersion: string, rows: { profile: string; arm: 'control' | 'treatment'; at?: Date }[]) =>
   t.srv.db.admin.query(
-    `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm)
-     SELECT $1, 'campaign', $2, $3, x.profile, x.arm
-     FROM unnest($4::text[], $5::text[]) AS x(profile, arm)`,
-    [ws, campaign, holdoutHashVersion(50), rows.map((r) => r.profile), rows.map((r) => r.arm)],
+    `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm, assigned_at)
+     SELECT $1, 'campaign', $2, $3, x.profile, x.arm, COALESCE(x.at, now())
+     FROM unnest($4::text[], $5::text[], $6::timestamptz[]) AS x(profile, arm, at)`,
+    [ws, campaign, hashVersion, rows.map((r) => r.profile), rows.map((r) => r.arm), rows.map((r) => r.at ?? null)],
   );
 
 const campaignAssignments = async (campaign: string) =>
   (
-    await t.srv.db.admin.query<{ profile_id: string; arm: string }>(
-      `SELECT profile_id, arm FROM holdout_assignments
+    await t.srv.db.admin.query<{ profile_id: string; arm: string; assigned_at: Date }>(
+      `SELECT profile_id, arm, assigned_at FROM holdout_assignments
        WHERE workspace_id = $1 AND scope_type = 'campaign' AND scope_id = $2 ORDER BY profile_id`,
       [ws, campaign],
     )
   ).rows;
+
+/** A static list keeps a merged-away id after the merge, as an audience imported before it does. */
+const keepAliasInAudience = async (segment: string, alias: string) => {
+  await t.srv.db.admin.query(
+    `INSERT INTO segment_list_members (workspace_id, segment_id, profile_id, source) VALUES ($1, $2, $3, 'manual')
+     ON CONFLICT DO NOTHING`,
+    [ws, segment, alias],
+  );
+  await t.srv.db.admin.query(
+    `INSERT INTO segment_memberships (workspace_id, segment_id, profile_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [ws, segment, alias],
+  );
+};
 
 /** Two profiles of one person, and the id-time pair that decides which one survives a merge. */
 async function twoProfiles(suffix: string) {
@@ -352,19 +390,12 @@ describe('a merge mid-broadcast still sends one message (#944)', () => {
     await grant([survivor, alias]);
     const campaign = await campaignFor(id, 'holdout control');
     await mergeProfiles('holdout-control', survivor, alias);
-    await t.srv.db.admin.query(
-      `INSERT INTO segment_list_members (workspace_id, segment_id, profile_id, source) VALUES ($1, $2, $3, 'manual')
-       ON CONFLICT DO NOTHING`,
-      [ws, segment, alias],
-    );
-    await t.srv.db.admin.query(
-      `INSERT INTO segment_memberships (workspace_id, segment_id, profile_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-      [ws, segment, alias],
-    );
-    // The person (under the survivor) is control; the stale alias carries a treatment arm.
-    await assignCampaignArms(campaign, [
-      { profile: survivor, arm: 'control' },
-      { profile: alias, arm: 'treatment' },
+    await keepAliasInAudience(segment, alias);
+    // The person (under the survivor) is control, decided first; the stale alias's later treatment
+    // row is not a second decision for them.
+    await assignCampaignArms(campaign, holdoutHashVersion(50), [
+      { profile: survivor, arm: 'control', at: new Date(Date.now() - 7_200_000) },
+      { profile: alias, arm: 'treatment', at: new Date(Date.now() - 3_600_000) },
     ]);
 
     await startRunAt(id, '');
@@ -386,19 +417,12 @@ describe('a merge mid-broadcast still sends one message (#944)', () => {
     await grant([survivor, alias]);
     const campaign = await campaignFor(id, 'holdout send');
     await mergeProfiles('holdout-send', survivor, alias);
-    await t.srv.db.admin.query(
-      `INSERT INTO segment_list_members (workspace_id, segment_id, profile_id, source) VALUES ($1, $2, $3, 'manual')
-       ON CONFLICT DO NOTHING`,
-      [ws, segment, alias],
-    );
-    await t.srv.db.admin.query(
-      `INSERT INTO segment_memberships (workspace_id, segment_id, profile_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
-      [ws, segment, alias],
-    );
-    // The stale alias was held out; the person under the survivor is treatment and must get it.
-    await assignCampaignArms(campaign, [
-      { profile: alias, arm: 'control' },
-      { profile: survivor, arm: 'treatment' },
+    await keepAliasInAudience(segment, alias);
+    // The person's own (earlier) decision is treatment and must send; the stale alias's later
+    // control row does not move them into the holdout.
+    await assignCampaignArms(campaign, holdoutHashVersion(50), [
+      { profile: survivor, arm: 'treatment', at: new Date(Date.now() - 7_200_000) },
+      { profile: alias, arm: 'control', at: new Date(Date.now() - 3_600_000) },
     ]);
 
     await startRunAt(id, '');
@@ -415,6 +439,115 @@ describe('a merge mid-broadcast still sends one message (#944)', () => {
       ]),
     );
     expect((await campaignAssignments(campaign)).length).toBe(2);
+  }, 90_000);
+
+  it('inherits a control arm recorded on a merged-away alias', async () => {
+    const { anon, user } = await twoProfiles('alias-arm');
+    const survivor = anon > user ? anon : user;
+    const alias = survivor === anon ? user : anon;
+    const segment = await audienceOf('alias-arm', [survivor, alias]);
+    const id = await scheduledBroadcast('alias-arm', segment);
+    await grant([survivor, alias]);
+    await mergeProfiles('alias-arm', survivor, alias);
+    await keepAliasInAudience(segment, alias);
+    // The campaign hashes the survivor to treatment: only the arm a 0.14.23 run recorded on the
+    // stale alias (before the run used the canonical person) says this person is held out.
+    const { campaign, hashVersion } = await campaignHashingTo('alias arm', survivor, 'treatment', id);
+    await assignCampaignArms(campaign, hashVersion, [{ profile: alias, arm: 'control', at: new Date(Date.now() - 7_200_000) }]);
+
+    await startRunAt(id, '');
+    await awaitDone(id);
+    const rows = await messagesOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('suppressed');
+    expect(rows[0]!.reason).toContain('holdout_control');
+    expect(rows[0]!.idempotency_key).toBe(`bctc:${id}:${survivor}`);
+    // The inherited control arm is the person's arm: no freshly hashed treatment row, and it is
+    // recorded under the survivor as well so later reads need no alias.
+    const arms = await campaignAssignments(campaign);
+    expect(arms.filter((a) => a.arm === 'treatment')).toEqual([]);
+    expect(arms.map((a) => [a.profile_id, a.arm])).toEqual(
+      expect.arrayContaining([
+        [alias, 'control'],
+        [survivor, 'control'],
+      ]),
+    );
+    expect(arms).toHaveLength(2);
+  }, 90_000);
+
+  it('takes the earliest arm when a stale alias and the survivor disagree', async () => {
+    const { anon, user } = await twoProfiles('alias-early');
+    const survivor = anon > user ? anon : user;
+    const alias = survivor === anon ? user : anon;
+    const segment = await audienceOf('alias-early', [survivor, alias]);
+    const id = await scheduledBroadcast('alias-early', segment);
+    await grant([survivor, alias]);
+    const campaign = await campaignFor(id, 'alias early');
+    await mergeProfiles('alias-early', survivor, alias);
+    await keepAliasInAudience(segment, alias);
+    // Two rows that disagree: the alias was held out first, the survivor's later row says treatment.
+    await assignCampaignArms(campaign, holdoutHashVersion(50), [
+      { profile: alias, arm: 'control', at: new Date(Date.now() - 7_200_000) },
+      { profile: survivor, arm: 'treatment', at: new Date(Date.now() - 3_600_000) },
+    ]);
+
+    await startRunAt(id, '');
+    await awaitDone(id);
+    const rows = await messagesOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('suppressed');
+    expect(rows[0]!.reason).toContain('holdout_control');
+    expect(rows[0]!.idempotency_key).toBe(`bctc:${id}:${survivor}`);
+  }, 90_000);
+
+  it('counts a person once in the holdout result when an arm sits on a merged-away id', async () => {
+    const campaign = await createPublished('campaign', 'merge keys counted once', campaignContent(50));
+    const hashVersion = holdoutHashVersion(50);
+    // Six people held out, seven rows: one person's arm is also stored under a profile they were
+    // merged from. Five in treatment, so both arms clear k and the counts are visible.
+    const control: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      await identify({ userId: `counted-control-${i}`, traits: { email: `counted-control-${i}@example.com` } });
+      control.push(await profileOf({ type: 'user_id', value: `counted-control-${i}` }));
+    }
+    const { anon, user } = await twoProfiles('counted-dup');
+    const survivor = anon > user ? anon : user;
+    const alias = survivor === anon ? user : anon;
+    await mergeProfiles('counted-dup', survivor, alias);
+    control.push(survivor);
+    const treatment: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      await identify({ userId: `counted-treatment-${i}`, traits: { email: `counted-treatment-${i}@example.com` } });
+      treatment.push(await profileOf({ type: 'user_id', value: `counted-treatment-${i}` }));
+    }
+    await assignCampaignArms(campaign, hashVersion, [
+      ...control.map((profile) => ({ profile, arm: 'control' as const })),
+      { profile: alias, arm: 'control' as const },
+      ...treatment.map((profile) => ({ profile, arm: 'treatment' as const })),
+    ]);
+
+    const result = await api().call('campaigns.holdoutResult', { campaignId: campaign });
+    expect(result.control.entered).toBe(6);
+    expect(result.treatment.entered).toBe(5);
+    expect(result.suppressed).toBe(false);
+  }, 90_000);
+
+  it('moves a merged-away alias’s assignment to the survivor on merge', async () => {
+    const { anon, user } = await twoProfiles('merge-arm');
+    const survivor = anon > user ? anon : user;
+    const alias = survivor === anon ? user : anon;
+    const campaign = await createPublished('campaign', 'merge keys carry arm', campaignContent(50));
+    const at = new Date(Date.now() - 3_600_000);
+    await assignCampaignArms(campaign, holdoutHashVersion(50), [{ profile: alias, arm: 'control', at }]);
+    await mergeProfiles('merge-arm', survivor, alias);
+
+    // Profile merges already carry the arm to the survivor (migration 0041): one row, same arm, the
+    // original time, and nothing left on the merged-away id.
+    const arms = await campaignAssignments(campaign);
+    expect(arms).toHaveLength(1);
+    expect(arms[0]!.profile_id).toBe(survivor);
+    expect(arms[0]!.arm).toBe('control');
+    expect(new Date(arms[0]!.assigned_at).getTime()).toBe(at.getTime());
   }, 90_000);
 
   it('replays a chunk whose messages committed without its cursor, without duplicating', async () => {

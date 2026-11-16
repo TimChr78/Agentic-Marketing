@@ -2,6 +2,7 @@ import {
   analyseHoldout,
   artifactTypes,
   type CampaignDefinition,
+  canonicalPeople,
   holdoutBelowK,
   holdoutHashVersion,
   K,
@@ -471,11 +472,22 @@ export const campaignHoldoutResult = defineCommand({
     // revenue k floor on (k_revenue_group): a currency with fewer than k buyers has its amount
     // suppressed even when the arm itself clears k (#901).
     const converters: Record<'control' | 'treatment', Map<string, Set<string>>> = { control: new Map(), treatment: new Map() };
+    // One person, one arm (#944). An assignment can sit on a profile the person was merged from — a
+    // run that selected a stale alias wrote it there — so each row is resolved to the person and the
+    // earliest arm is theirs, exactly as `assignHoldout` reads it. A duplicate row must never put
+    // one person in both arms or count them twice.
+    const personOf = await canonicalPeople(
+      ctx.tx,
+      ws,
+      assignments.map((a) => a.profileId),
+    );
     const people = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date }>();
     for (const r of assignments) {
-      counts[r.arm].entered++;
-      people.set(r.profileId, { arm: r.arm, assignedAt: r.assignedAt });
+      const person = personOf.get(r.profileId) ?? r.profileId;
+      const current = people.get(person);
+      if (!current || r.assignedAt < current.assignedAt) people.set(person, { arm: r.arm, assignedAt: r.assignedAt });
     }
+    for (const person of people.values()) counts[person.arm].entered++;
 
     // Goal events and revenue, when there are people to measure. ClickHouse joins in code to the
     // Postgres assignments: a person counts once, and only events inside their own attribution
