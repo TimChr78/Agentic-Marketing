@@ -22,7 +22,6 @@ import {
 } from './consent';
 import { personCrypto } from './crypto';
 import { isProfileCursorTimestamp } from './cursor';
-import { lockIdentity } from './identity';
 
 // Profile, consent and data-subject-request commands. Personal data is decrypted only for
 // principals with profiles:pii; agents additionally see only traits the attribute schema marks
@@ -523,9 +522,6 @@ export const recordConsentCommand = defineCommand({
   handler: async (input, ctx) => {
     if (ctx.principal.type === 'agent' && input.status === 'granted')
       throw new AppError('forbidden', 'Agents cannot record a consent; only a person (or the person’s own action) can.');
-    // Identity lock first, before resolving the profile: a merge cannot move the person between
-    // this resolution and the ledger write (#936). `recordConsent` re-takes the same lock.
-    await lockIdentity(ctx.tx, ctx.principal.workspaceId);
     const p = await canonical(ctx, input.profileId);
     const purposes = await purposesOf(ctx);
     if (!purposes.some((x) => x.key === input.purpose))

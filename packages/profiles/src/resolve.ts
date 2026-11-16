@@ -97,8 +97,6 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
 
     // Anything that creates, attaches or merges is serialised per workspace, so concurrent shard
     // consumers cannot interleave on the same people (and a broadcast batch can order against it).
-    // Identity first; the SDK consent write below re-uses this workspace lock, so no second lock
-    // has to be ordered against it (#936).
     await lockIdentity(tx, workspaceId);
     const profileId = await resolve(tx, workspaceId, ids, crypto, e);
     await updateProfile(tx, workspaceId, profileId, e, crypto);
@@ -353,7 +351,6 @@ async function recordSdkConsent(tx: Tx, workspaceId: string, profileId: string, 
     source: 'sdk' as const,
     messageId: e.messageId,
     recordedAt: new Date(e.timestamp),
-    recordedAtExact: e.timestamp,
     proof: {
       messageId: e.messageId,
       sourceId: e.sourceId,

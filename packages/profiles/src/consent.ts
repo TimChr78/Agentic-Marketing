@@ -29,12 +29,6 @@ export interface ConsentInput {
    * the action's time; only a synchronous command handler may pass `new Date()`.
    */
   recordedAt: Date;
-  /**
-   * The action time as the source reported it, when it may carry more precision than a JS Date
-   * (PostgreSQL stores microseconds). Used for exact-duplicate folding and inserted as
-   * `recorded_at`, so two actions in the same millisecond stay distinct (#936).
-   */
-  recordedAtExact?: string;
 }
 
 /** The profile and every profile merged into it, directly or through earlier merges. */
@@ -130,27 +124,18 @@ export function consentProofFor(
   return { proof: visible, proofWithheld: withheld };
 }
 
-/**
- * Follows a merge chain to the surviving profile. The caller must hold `lockIdentity`: a merge
- * cannot change the chain while the returned id is written to.
- */
-export async function canonicalProfileId(tx: Tx, workspaceId: string, profileId: string): Promise<string> {
-  let canonicalId = profileId;
-  for (let i = 0; i < 20; i++) {
-    const [profile] = await tx
-      .select({ mergedInto: schema.profiles.mergedInto })
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, canonicalId)));
-    if (!profile?.mergedInto) return canonicalId;
-    canonicalId = profile.mergedInto;
-    if (i === 19) throw new Error('Profile merge chain exceeds the supported depth.');
-  }
-  return canonicalId;
-}
-
 const consentEventKey = (record: ConsentInput) => `${record.purpose}\u0000${record.channel ?? ''}\u0000${record.messageId}`;
-const consentActionKey = (record: ConsentInput) =>
-  `${record.purpose}\u0000${record.channel ?? ''}\u0000${record.status}\u0000${record.source}\u0000${record.recordedAtExact ?? record.recordedAt.toISOString()}`;
+const consentActionKey = (record: { purpose: string; channel: string; status: ConsentStatus; source: ConsentSource; recordedAt: Date }) =>
+  `${record.purpose}\u0000${record.channel}\u0000${record.status}\u0000${record.source}\u0000${record.recordedAt.getTime()}`;
+
+/** Existing ledger rows reduced to what the exact-duplicate fold needs. */
+export interface ConsentEvidenceRow {
+  purpose: string;
+  channel: string;
+  status: ConsentStatus;
+  source: ConsentSource;
+  recordedAt: Date;
+}
 
 /**
  * Keeps the records that add evidence to the ledger (#936). Deduplicating by current status alone
@@ -159,14 +144,14 @@ const consentActionKey = (record: ConsentInput) =>
  *
  * Every distinct action is kept, whatever its status, source, age or relation to the newest row:
  * the decisive action can be processed after the action it must outrank, so folding by time is
- * never safe. Within one batch, only the same event id or the same action (scope, status, source
- * and action time to the microsecond) is folded. Existing rows are checked in SQL by
- * `recordConsentEvidence`, because a JS Date would collapse distinct microseconds. Genuinely
+ * never safe. Only the same event id or an exact duplicate is folded. Millisecond precision is the
+ * system's precision end to end (events and `recorded_at` are both millisecond timestamps), so two
+ * actions in the same millisecond with the same scope, status and source count as one. Genuinely
  * repeated signups grow the ledger by one row each; that is accepted so no action is lost.
  */
-export function newConsentEvidence<T extends ConsentInput>(records: T[]): T[] {
+export function newConsentEvidence<T extends ConsentInput>(records: T[], existing: ConsentEvidenceRow[]): T[] {
   const seenEvents = new Set<string>();
-  const seenActions = new Set<string>();
+  const seenActions = new Set(existing.map((row) => consentActionKey(row)));
   const kept: T[] = [];
   for (const record of records) {
     if (record.messageId) {
@@ -174,7 +159,7 @@ export function newConsentEvidence<T extends ConsentInput>(records: T[]): T[] {
       if (seenEvents.has(event)) continue;
       seenEvents.add(event);
     }
-    const action = consentActionKey(record);
+    const action = consentActionKey({ ...record, channel: record.channel ?? '' });
     if (seenActions.has(action)) continue;
     seenActions.add(action);
     kept.push(record);
@@ -185,54 +170,39 @@ export function newConsentEvidence<T extends ConsentInput>(records: T[]): T[] {
 /**
  * Records the evidence a write adds (#936): every distinct action, with exact duplicates and event
  * redeliveries folded. Use this in every writer that knows the person's action time; `recordConsent`
- * remains the raw append.
- *
- * The workspace identity lock is taken before the canonical profile is resolved: merges take the
- * same lock, so a merge cannot move the person between resolution and the write, and the merge's
- * `consent_state` rebuild cannot run without this write. The lock is held through the ledger insert
- * and the recomputation; no network I/O happens under it.
+ * remains the raw append. This helper adds no lock of its own: it keeps the same concurrency
+ * behaviour as `recordConsent` on main.
  */
 export async function recordConsentEvidence(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
   if (!records.length) return 0;
-  await lockIdentity(tx, workspaceId);
-  const canonicalId = await canonicalProfileId(tx, workspaceId, profileId);
-  const family = await mergedFamily(tx, workspaceId, canonicalId);
-  const kept: ConsentInput[] = [];
-  for (const record of newConsentEvidence(records)) {
-    // Compare the action time in SQL: `recorded_at` is a timestamptz with microsecond precision,
-    // while a JS Date only has milliseconds. A different microsecond is a different action.
-    const [duplicate] = await tx
-      .select({ id: schema.consentRecords.id })
-      .from(schema.consentRecords)
-      .where(
-        and(
-          eq(schema.consentRecords.workspaceId, workspaceId),
-          inArray(schema.consentRecords.profileId, family),
-          eq(schema.consentRecords.purpose, record.purpose),
-          eq(schema.consentRecords.channel, record.channel ?? ''),
-          eq(schema.consentRecords.status, record.status),
-          eq(schema.consentRecords.source, record.source),
-          sql`${schema.consentRecords.recordedAt} = ${record.recordedAtExact ?? record.recordedAt}::timestamptz`,
-        ),
-      )
-      .limit(1);
-    if (!duplicate) kept.push(record);
-  }
-  return recordConsent(tx, workspaceId, canonicalId, purposes, kept);
+  const family = await mergedFamily(tx, workspaceId, profileId);
+  const existing = await tx
+    .select({
+      purpose: schema.consentRecords.purpose,
+      channel: schema.consentRecords.channel,
+      status: schema.consentRecords.status,
+      source: schema.consentRecords.source,
+      recordedAt: schema.consentRecords.recordedAt,
+    })
+    .from(schema.consentRecords)
+    .where(
+      and(
+        eq(schema.consentRecords.workspaceId, workspaceId),
+        inArray(schema.consentRecords.profileId, family),
+        inArray(schema.consentRecords.purpose, [...new Set(records.map((r) => r.purpose))]),
+      ),
+    );
+  return recordConsent(tx, workspaceId, profileId, purposes, newConsentEvidence(records, existing));
 }
 
 export async function recordConsent(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
   if (!records.length) return 0;
-  // The raw append takes the same workspace identity lock as the evidence helper, so a command and
-  // an event hook cannot rebuild `consent_state` concurrently from different snapshots (#936).
-  await lockIdentity(tx, workspaceId);
-  const canonicalId = await canonicalProfileId(tx, workspaceId, profileId);
   const inserted = await tx
     .insert(schema.consentRecords)
     .values(
       records.map((r) => ({
         workspaceId,
-        profileId: canonicalId,
+        profileId,
         purpose: r.purpose,
         channel: r.channel ?? '',
         status: r.status,
@@ -241,12 +211,12 @@ export async function recordConsent(tx: Tx, workspaceId: string, profileId: stri
         proof: r.proof ?? {},
         messageId: r.messageId ?? null,
         recordedBy: r.recordedBy ?? null,
-        recordedAt: r.recordedAtExact ? sql`${r.recordedAtExact}::timestamptz` : r.recordedAt,
+        recordedAt: r.recordedAt,
       })),
     )
     .onConflictDoNothing()
     .returning({ id: schema.consentRecords.id });
-  if (inserted.length) await recomputeConsentState(tx, workspaceId, canonicalId, purposes);
+  if (inserted.length) await recomputeConsentState(tx, workspaceId, profileId, purposes);
   return inserted.length;
 }
 
@@ -532,9 +502,17 @@ export async function recordTopicPreference(
 ) {
   // Serialize topic writes with identity merges, then resolve again in the write transaction.
   // Otherwise an old signed preference link can recreate a choice on a merged-away profile.
-  // Same lock order as every consent writer: identity first, then the row writes.
   await lockIdentity(tx, workspaceId);
-  const canonicalId = await canonicalProfileId(tx, workspaceId, profileId);
+  let canonicalId = profileId;
+  for (let i = 0; i < 20; i++) {
+    const [profile] = await tx
+      .select({ mergedInto: schema.profiles.mergedInto })
+      .from(schema.profiles)
+      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, canonicalId)));
+    if (!profile?.mergedInto) break;
+    canonicalId = profile.mergedInto;
+    if (i === 19) throw new Error('Profile merge chain exceeds the supported depth.');
+  }
   const [current] = await tx
     .select({ status: schema.topicPreferences.status })
     .from(schema.topicPreferences)

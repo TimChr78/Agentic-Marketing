@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { MessageEvent } from '@agentic-marketing/events';
-import { lockIdentity, profileForMessage, recordConsentEvidence } from '@agentic-marketing/profiles';
+import { profileForMessage, recordConsentEvidence } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq, sql } from 'drizzle-orm';
@@ -44,13 +44,8 @@ export async function withdraw(
   recordedAt: Date,
   /** The provider event's id, when there is one, so a redelivery adds no evidence row (#936). */
   eventId?: string,
-  /** The provider's action time as reported, preserving microseconds for exact folding. */
-  recordedAtExact?: string,
 ) {
   if (!m.profileId) return;
-  // Identity lock first, before the profile is resolved (a merge must not move the person between
-  // the resolution and the ledger write). A delivery batch already holds it, so this is reentrant.
-  await lockIdentity(tx, m.workspaceId);
   const person = await profileForMessage(tx, m.workspaceId, m.profileId, kp);
   if (!person) return;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
@@ -67,7 +62,6 @@ export async function withdraw(
       proof,
       messageId: eventId,
       recordedAt,
-      recordedAtExact,
     },
   ]);
 }
@@ -105,16 +99,10 @@ export function logSuppressionEscalation(escalation: SuppressionEscalation): voi
 /** Applies a provider's delivery events to the message log, suppressions and consent. */
 export async function applyDeliveryEvents(
   tx: Tx,
-  workspaceId: string,
   events: DeliveryEvent[],
   provider: string,
   kp: KeyProvider,
 ): Promise<DeliveryEventsResult> {
-  // Identity lock first, before any message or suppression row (and before a withdrawal resolves
-  // its profile). Two batches in opposite orders cannot form a message-row/consent-lock cycle,
-  // and a merge cannot move a person mid-batch. No network I/O happens under it: the caller
-  // publishes the resulting message events after the transaction commits.
-  await lockIdentity(tx, workspaceId);
   const out: MessageEvent[] = [];
   const escalations: SuppressionEscalation[] = [];
   for (const e of events) {
@@ -188,12 +176,9 @@ export async function applyDeliveryEvents(
         .returning({ reason: schema.suppressions.reason, updated: sql<boolean>`(xmax <> 0)` });
       if (changed?.updated && changed.reason === reason) escalations.push({ workspaceId: m.workspaceId, channel: m.channel, reason });
     }
-    if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed')) {
-      // The provider's own time when it is in the past (microseconds preserved for exact folding);
-      // the clamped instant when it was in the future, so the consent record cannot post-date it.
-      const exact = e.at && !Number.isNaN(Date.parse(e.at)) && reported.getTime() <= now ? e.at : at;
-      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp, atDate, `evt:${e.eventId}`, exact);
-    }
+    if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
+      // The same clamped instant, so the consent record cannot post-date the event either.
+      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp, atDate, `evt:${e.eventId}`);
   }
   return { events: out, escalations };
 }

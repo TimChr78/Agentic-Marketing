@@ -105,7 +105,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
         } catch {
           return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
         }
-        const applied = await applyDeliveryEvents(tx, ws, parsed, provider.adapter, deps.kp);
+        const applied = await applyDeliveryEvents(tx, parsed, provider.adapter, deps.kp);
         return {
           status: 200 as const,
           events: applied.events,
