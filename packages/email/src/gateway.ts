@@ -124,7 +124,16 @@ export async function lockSendKey(tx: Tx, workspaceId: string, key: string) {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`send-idempotency:${workspaceId}:${key}`}, 0))`);
 }
 
-/** A pre-release row's fallback: compare the columns that were stored then, as documented (#926). */
+/**
+ * A pre-release row's fallback: compare the columns that were stored then, as documented (#926).
+ *
+ * Rows with `request_hash IS NULL` were written before the request fingerprint existed. They are
+ * compared on the recipient, template, journey and variant only — never the caller, the variables
+ * or the rendered payload. So an old key reused by a different caller, or with different data,
+ * replays the row's stored decision instead of answering `409 idempotency_key_reused`; that is a
+ * known, bounded gap (same workspace, exact key string) and is not repaired retroactively. Every
+ * row written since carries the fingerprint and gets the strict comparison. See docs/integrations.md.
+ */
 export function legacySameSend(
   existing: typeof schema.messages.$inferSelect,
   req: { profileId: string; templateId: string; journeyId?: string; variant?: string },
