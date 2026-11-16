@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { migrate } from '../src/migrate';
 import { createDb } from '../src/pool';
-import { runScoped } from './run';
+import { runDatabaseMarker, runScoped } from './run';
 
 // A throwaway database for package-level SQL tests. It is never the shared test template: each
 // caller gets its own freshly migrated database and drops it afterwards, so package tests can run
@@ -40,6 +40,9 @@ export async function createDisposableDb(prefix: string, opts: DisposableDbOptio
   try {
     await maint.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
     await maint.query(`CREATE DATABASE ${name}`);
+    // Ownership metadata for the shared-stack sweeper: a name alone is never enough.
+    const marker = runDatabaseMarker().replaceAll("'", "''");
+    await maint.query(`COMMENT ON DATABASE "${name}" IS '${marker}'`);
   } finally {
     await maint.end();
   }

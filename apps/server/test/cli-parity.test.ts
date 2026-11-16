@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildTestCli } from '../../../test-support/cli';
-import { TEMPLATE_DB, testDatabaseUrl } from './harness';
+import { templateDbName, testDatabaseUrl } from './harness';
 
 // #518 review: the bundled CLI is used by other tests as if it were the real one. A bundle is not
 // the same program when `import.meta.url` points into the temp directory: migration files, the
@@ -41,7 +41,7 @@ const baseEnv = (): NodeJS.ProcessEnv => ({ PATH: process.env.PATH, HOME: proces
 function configEnv(): NodeJS.ProcessEnv {
   return {
     ...baseEnv(),
-    DATABASE_URL: testDatabaseUrl(TEMPLATE_DB).toString(),
+    DATABASE_URL: testDatabaseUrl(templateDbName()).toString(),
     APP_DB_ROLE: 'am_app_test',
     APP_DB_PASSWORD: 'am_app_test_password',
     AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
