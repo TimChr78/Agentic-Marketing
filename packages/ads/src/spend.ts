@@ -75,6 +75,16 @@ const day = (d: Date) => d.toISOString().slice(0, 10);
  */
 export const SPEND_LIMITS = { metaPages: 200, googlePages: 50 };
 
+/**
+ * Rows per ClickHouse insert (#962). A page is already bounded by the provider, but a chunk cap
+ * keeps a single serialised insert small even if a platform ever answers a huge page, and lets the
+ * import start writing before the last page has arrived.
+ */
+export const SPEND_INSERT_CHUNK_ROWS = 5_000;
+
+/** Receives one provider page with the account its rows carry; the import stores each page at once. */
+export type SpendPageSink = (rows: readonly SpendRow[], account: string) => void | Promise<void>;
+
 /** Spend rows, the ad account they belong to, and whether the provider had more pages. */
 export interface SpendRead {
   rows: SpendRow[];
@@ -100,6 +110,7 @@ export async function metaSpend(
   since: string,
   until: string,
   egress: EgressPolicy,
+  onPage?: SpendPageSink,
 ): Promise<SpendRead> {
   const s = metaAdsConnector.settings.parse(conn.settings);
   if (!s.adAccountId) throw new AppError('invalid_input', 'Set adAccountId on the Meta connection to import spend.');
@@ -115,6 +126,11 @@ export async function metaSpend(
   });
   let url: string | undefined = `${s.apiBase.replace(/\/$/, '')}/${s.apiVersion}/${account}/insights?${q}`;
   const rows: SpendRow[] = [];
+  // With a sink, one page is stored before the next is read: the import never holds the whole read.
+  const emit = async (page: SpendRow[]) => {
+    if (onPage) await onPage(page, account);
+    else rows.push(...page);
+  };
   let truncated = false;
   for (let page = 0; url; page++) {
     if (page >= SPEND_LIMITS.metaPages) {
@@ -138,8 +154,9 @@ export async function metaSpend(
       }[];
       paging?: { next?: string };
     };
+    const pageRows: SpendRow[] = [];
     for (const r of body.data)
-      rows.push({
+      pageRows.push({
         platform: 'meta',
         account,
         campaignId: r.campaign_id,
@@ -153,6 +170,7 @@ export async function metaSpend(
           .filter((a) => ['lead', 'purchase', 'offsite_conversion'].some((t) => a.action_type.includes(t)))
           .reduce((n, a) => n + Number(a.value), 0),
       });
+    await emit(pageRows);
     url = body.paging?.next;
   }
   return { rows, account, truncated };
@@ -165,6 +183,7 @@ export async function googleSpend(
   since: string,
   until: string,
   egress: EgressPolicy,
+  onPage?: SpendPageSink,
 ): Promise<SpendRead> {
   const s = googleAdsConnector.settings.parse(conn.settings);
   const k = googleAdsConnector.secrets.parse(secrets);
@@ -173,6 +192,11 @@ export async function googleSpend(
   if (!k.developerToken) throw new AppError('invalid_input', 'Add the developerToken secret to the Google Ads connection to import spend.');
   const query = `SELECT campaign.id, campaign.name, segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions, customer.currency_code FROM campaign WHERE segments.date BETWEEN '${since}' AND '${until}'`;
   const rows: SpendRow[] = [];
+  // With a sink, one page is stored before the next is read: the import never holds the whole read.
+  const emit = async (page: SpendRow[]) => {
+    if (onPage) await onPage(page, s.customerId);
+    else rows.push(...page);
+  };
   let pageToken: string | undefined;
   let truncated = false;
   for (let page = 0; ; page++) {
@@ -204,8 +228,9 @@ export async function googleSpend(
       }[];
       nextPageToken?: string;
     };
+    const pageRows: SpendRow[] = [];
     for (const r of body.results ?? [])
-      rows.push({
+      pageRows.push({
         platform: 'google',
         account: s.customerId,
         campaignId: String(r.campaign.id),
@@ -217,10 +242,72 @@ export async function googleSpend(
         clicks: Number(r.metrics.clicks ?? 0),
         platformConversions: Number(r.metrics.conversions ?? 0),
       });
+    await emit(pageRows);
     pageToken = body.nextPageToken;
     if (!pageToken) break;
   }
   return { rows, account: s.customerId, truncated };
+}
+
+/**
+ * Stores one spend read page by page, chunk by chunk (#962). The page ceiling is a throughput cap,
+ * not a memory cap: each page is inserted as it arrives, so a many-page Google read never has to fit
+ * in Node's heap. The incomplete window is recorded before the first insert, so an OOM or a crash
+ * mid-import leaves the warning behind rather than losing it with the insert; a complete read
+ * removes the window at the end. Chunks share one `updated_at`, so the table's ReplacingMergeTree
+ * collapses duplicate rows and a re-import replaces the previous values (#917).
+ */
+export async function storeSpendPages(
+  deps: { db: Db; events: EventStore; ws: string; platform: 'meta' | 'google'; since: string; until: string },
+  read: (sink: SpendPageSink) => Promise<SpendRead>,
+  chunkRows = SPEND_INSERT_CHUNK_ROWS,
+): Promise<{ rows: number; truncated: boolean }> {
+  const { db, events, ws, platform, since, until } = deps;
+  const updatedAt = new Date().toISOString().replace('Z', '');
+  let inserted = 0;
+  let gapRecorded = false;
+  const sink: SpendPageSink = async (page, account) => {
+    if (!page.length) return;
+    if (!gapRecorded) {
+      await recordSpendGaps(db, ws, { platform, account }, { incomplete: { from: since, to: until } });
+      gapRecorded = true;
+    }
+    for (let at = 0; at < page.length; at += chunkRows) {
+      const chunk = page.slice(at, at + chunkRows);
+      await events.client.insert({
+        table: 'ad_spend',
+        format: 'JSONEachRow',
+        values: chunk.map((r) => ({
+          workspace_id: ws,
+          platform: r.platform,
+          account: r.account,
+          campaign_id: r.campaignId,
+          campaign_name: r.campaignName,
+          date: r.date,
+          cost: r.cost,
+          currency: r.currency,
+          impressions: r.impressions,
+          clicks: r.clicks,
+          platform_conversions: r.platformConversions,
+          updated_at: updatedAt,
+        })),
+      });
+      inserted += chunk.length;
+    }
+  };
+  const result = await read(sink);
+  // Persist the completeness of this read for `ads.performance`, keyed by the account the spend rows
+  // carry (#917 review rounds 2-3): the state follows the stored spend, so renaming the connection,
+  // pointing it at another account or deleting it can never clear an older gap, and concurrent
+  // imports serialise on that key. The provider does not promise page order, so a truncated read
+  // marks the whole requested window as incomplete; a complete read removes exactly the days it
+  // covered, for this account only.
+  if (result.truncated) {
+    if (!gapRecorded) await recordSpendGaps(db, ws, { platform, account: result.account }, { incomplete: { from: since, to: until } });
+  } else {
+    await recordSpendGaps(db, ws, { platform, account: result.account }, { complete: { from: since, to: until } });
+  }
+  return { rows: inserted, truncated: result.truncated };
 }
 
 /** Imports the last `days` days of spend for one connection into ClickHouse. */
@@ -237,51 +324,16 @@ export async function importSpend(
     return { conn: c, secrets: c ? await connectionSecrets(tx, c, deps.kp) : {} };
   });
   if (!conn) throw new AppError('not_found', `No connection ${connectionId}.`);
+  const platform = conn.connector === metaAdsConnector.id ? 'meta' : conn.connector === googleAdsConnector.id ? 'google' : null;
+  if (!platform) throw new AppError('invalid_input', `${conn.connector} has no spend reports.`);
   const until = day(new Date());
   const since = day(new Date(Date.now() - (days - 1) * 86_400_000));
-  const read: SpendRead =
-    conn.connector === metaAdsConnector.id
-      ? await metaSpend(conn, secrets, since, until, deps.egress)
-      : conn.connector === googleAdsConnector.id
-        ? await googleSpend(conn, secrets, since, until, deps.egress)
-        : (() => {
-            throw new AppError('invalid_input', `${conn.connector} has no spend reports.`);
-          })();
-  const { rows, truncated } = read;
-  if (rows.length) {
-    const updatedAt = new Date().toISOString().replace('Z', '');
-    await events.client.insert({
-      table: 'ad_spend',
-      format: 'JSONEachRow',
-      values: rows.map((r) => ({
-        workspace_id: ws,
-        platform: r.platform,
-        account: r.account,
-        campaign_id: r.campaignId,
-        campaign_name: r.campaignName,
-        date: r.date,
-        cost: r.cost,
-        currency: r.currency,
-        impressions: r.impressions,
-        clicks: r.clicks,
-        platform_conversions: r.platformConversions,
-        updated_at: updatedAt,
-      })),
-    });
-  }
-  // Persist the completeness of this read for `ads.performance`, keyed by the account the spend rows
-  // carry (#917 review rounds 2-3): the state follows the stored spend, so renaming the connection,
-  // pointing it at another account or deleting it can never clear an older gap, and concurrent
-  // imports serialise on that key. The provider does not promise page order, so a truncated read
-  // marks the whole requested window as incomplete; a complete read removes exactly the days it
-  // covered, for this account only.
-  await recordSpendGaps(
-    db,
-    ws,
-    { platform: conn.connector === metaAdsConnector.id ? 'meta' : 'google', account: read.account },
-    truncated ? { incomplete: { from: since, to: until } } : { complete: { from: since, to: until } },
+  const { rows, truncated } = await storeSpendPages({ db, events, ws, platform, since, until }, (sink) =>
+    platform === 'meta'
+      ? metaSpend(conn, secrets, since, until, deps.egress, sink)
+      : googleSpend(conn, secrets, since, until, deps.egress, sink),
   );
-  return { rows: rows.length, since, until, truncated };
+  return { rows, since, until, truncated };
 }
 
 /** Scheduler role: re-imports the last 3 days (late-arriving cost) of every ad account, every 6 hours. */

@@ -1,7 +1,8 @@
 import type { CommandContext } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
+import { schema } from '@agentic-marketing/db';
 import { describe, expect, it } from 'vitest';
-import { adPerformance, googleSpend, metaSpend } from '../src/spend';
+import { adPerformance, googleSpend, metaSpend, SPEND_INSERT_CHUNK_ROWS, SPEND_LIMITS, storeSpendPages } from '../src/spend';
 
 // #786: ads.performance used to read conversion events with a raw `LIMIT 100000` and no order,
 // paging or truncation signal, so a busy window silently lost conversions, revenue, CPA and ROAS.
@@ -11,12 +12,15 @@ import { adPerformance, googleSpend, metaSpend } from '../src/spend';
 const OLD_CAP = 100_000;
 const CONVERSION_COUNT = OLD_CAP + 1;
 
-/** The smallest tx shape publishedSingleton's conversion-map lookup and the spend gaps read use. */
-const commandTx = (rules: { event: string; value?: string }[], gaps: { platform: string; fromDate: string; toDate: string }[] = []) =>
+type GapRow = { platform: string; account: string; fromDate: string; toDate: string };
+type ConnectionRow = { connector: string; settings: Record<string, unknown> };
+
+/** The smallest tx shape publishedSingleton's conversion-map lookup, accounts and spend gaps read use. */
+const commandTx = (rules: { event: string; value?: string }[], gaps: GapRow[] = [], accounts: ConnectionRow[] = [META_CONNECTION]) =>
   ({
     select: () => ({
-      from: () => ({
-        where: async () => gaps,
+      from: (table: unknown) => ({
+        where: async () => (table === schema.connections ? accounts : gaps),
         innerJoin: () => ({
           where: async () => [{ content: { rules } }],
         }),
@@ -24,7 +28,9 @@ const commandTx = (rules: { event: string; value?: string }[], gaps: { platform:
     }),
   }) as never;
 
-const context = (gaps: { platform: string; fromDate: string; toDate: string }[] = []): CommandContext => {
+const META_CONNECTION: ConnectionRow = { connector: 'meta_ads', settings: { pixelId: '123456789', adAccountId: 'act_10001' } };
+
+const context = (gaps: GapRow[] = []): CommandContext => {
   const paged = Array.from({ length: CONVERSION_COUNT }, (_, i) => ({
     profileId: '',
     anonymousId: '',
@@ -340,26 +346,36 @@ describe('spend read truncation (#917)', () => {
 
   it('only reports truncation for a stored range that overlaps the report', async () => {
     const { incompleteSpendFor } = await import('../src/spendState');
-    const gap = (platform: 'meta' | 'google', from: string, to: string) => ({ platform, from, to });
-    expect(incompleteSpendFor([gap('meta', '2025-12-01', '2026-01-31')], { since: '2026-01-01', until: '2026-01-10' })).toHaveLength(1);
-    expect(incompleteSpendFor([gap('meta', '2025-10-01', '2025-10-31')], { since: '2026-01-01', until: '2026-01-10' })).toEqual([]);
-    expect(incompleteSpendFor([gap('meta', '2025-12-01', '2026-01-31')], { since: '2026-02-01', until: '2026-02-10' })).toEqual([]);
+    const gap = (platform: 'meta' | 'google', account: string, from: string, to: string) => ({ platform, account, from, to });
+    expect(
+      incompleteSpendFor([gap('meta', 'act_1', '2025-12-01', '2026-01-31')], { since: '2026-01-01', until: '2026-01-10' }),
+    ).toHaveLength(1);
+    expect(incompleteSpendFor([gap('meta', 'act_1', '2025-10-01', '2025-10-31')], { since: '2026-01-01', until: '2026-01-10' })).toEqual(
+      [],
+    );
+    expect(incompleteSpendFor([gap('meta', 'act_1', '2025-12-01', '2026-01-31')], { since: '2026-02-01', until: '2026-02-10' })).toEqual(
+      [],
+    );
     // A Meta-only report ignores a truncated Google import, and vice versa.
     expect(
-      incompleteSpendFor([gap('google', '2026-01-01', '2026-01-10')], { since: '2026-01-01', until: '2026-01-10', platform: 'meta' }),
+      incompleteSpendFor([gap('google', '1234567890', '2026-01-01', '2026-01-10')], {
+        since: '2026-01-01',
+        until: '2026-01-10',
+        platform: 'meta',
+      }),
     ).toEqual([]);
     expect(
-      incompleteSpendFor([gap('google', '2026-01-01', '2026-01-10')], { since: '2026-01-01', until: '2026-01-10', platform: 'google' }),
+      incompleteSpendFor([gap('google', '1234567890', '2026-01-01', '2026-01-10')], {
+        since: '2026-01-01',
+        until: '2026-01-10',
+        platform: 'google',
+      }),
     ).toHaveLength(1);
   });
 });
 
 describe('ads.performance unattributed and unmatched (#917)', () => {
-  const attributionContext = (opts: {
-    spend: Record<string, unknown>[];
-    touch: string | null;
-    gaps?: { platform: string; fromDate: string; toDate: string }[];
-  }) => {
+  const attributionContext = (opts: { spend: Record<string, unknown>[]; touch: string | null; gaps?: GapRow[] }) => {
     const conversions = [
       {
         profileId: '',
@@ -439,7 +455,7 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
     const ctx = attributionContext({
       spend,
       touch: 'Spring',
-      gaps: [{ platform: 'meta', fromDate: '2026-01-01', toDate: '2026-01-31' }],
+      gaps: [{ platform: 'meta', account: 'act_10001', fromDate: '2026-01-01', toDate: '2026-01-31' }],
     });
     const result = await adPerformance.handler({ since: '2026-01-01', until: '2026-01-10', windowDays: 30 }, ctx);
     expect(result.spendTruncated).toBe(true);
@@ -451,10 +467,163 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
     const ctx = attributionContext({
       spend,
       touch: 'Spring',
-      gaps: [{ platform: 'meta', fromDate: '2026-01-05', toDate: '2026-01-09' }],
+      gaps: [{ platform: 'meta', account: 'act_10001', fromDate: '2026-01-05', toDate: '2026-01-09' }],
     });
     const result = await adPerformance.handler({ since: '2026-02-01', until: '2026-02-10', windowDays: 30 }, ctx);
     expect(result.spendTruncated).toBe(false);
     expect(result.notes.join(' ')).not.toContain('incomplete');
   });
 });
+
+// #962: the raised Google Ads ceiling (50 pages × 10,000 rows) was read into one array, mapped into
+// a second and inserted in a single ClickHouse call. The import now streams page by page into
+// bounded chunks, and records the incomplete window before the first insert, so an OOM or crash
+// later leaves the truncation warning instead of losing it with the insert.
+describe('chunked spend import (#962)', () => {
+  const startProvider = async (pages: number, rowsPerPage = 7) => {
+    const { createServer } = await import('node:http');
+    let hits = 0;
+    const server = createServer(async (req, res) => {
+      for await (const _chunk of req) {
+        // Drain the request body; the query itself does not matter to the fake provider.
+      }
+      hits += 1;
+      const results = Array.from({ length: rowsPerPage }, (_, i) => ({
+        campaign: { id: String(hits * 100 + i), name: `Campaign ${hits}-${i}` },
+        segments: { date: '2026-01-02' },
+        metrics: { costMicros: '1000000', impressions: '5', clicks: '2', conversions: 1 },
+        customer: { currencyCode: 'DKK' },
+      }));
+      res.statusCode = 200;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ results, ...(hits < pages ? { nextPageToken: `page-${hits + 1}` } : {}) }));
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    return {
+      base: `http://127.0.0.1:${port}`,
+      hits: () => hits,
+      close: () => new Promise<void>((r) => server.close(() => r())),
+    };
+  };
+  const egress = { allowedHosts: ['127.0.0.1'] };
+  const conn = (base: string) =>
+    ({
+      connector: 'google_ads',
+      oauthStatus: 'connected',
+      workspaceId: 'ws',
+      settings: { customerId: '1234567890', reportingBase: base },
+    }) as never;
+  const secrets = { clientId: 'c', clientSecret: 's', developerToken: 'd'.repeat(20), __oauth: { accessToken: 't'.repeat(30) } };
+
+  /** The smallest Db/Tx shape recordSpendGaps and its read-modify-write need. */
+  const gapStore = () => {
+    const gaps: { platform: string; account: string; fromDate: string; toDate: string }[] = [];
+    const tx = {
+      execute: async () => ({}),
+      select: () => ({
+        from: (table: unknown) => ({
+          where: async () => (table === schema.adSpendGaps ? gaps.slice() : []),
+        }),
+      }),
+      delete: (table: unknown) => ({
+        where: async () => {
+          if (table === schema.adSpendGaps) gaps.length = 0;
+        },
+      }),
+      insert: (table: unknown) => ({
+        values: async (values: typeof gaps) => {
+          if (table === schema.adSpendGaps) gaps.push(...values);
+        },
+      }),
+    };
+    const db = { withWorkspace: async (_ws: string, fn: (t: unknown) => Promise<unknown>) => fn(tx) } as never;
+    return { db, gaps };
+  };
+
+  it('inserts a many-page Google read in bounded chunks, with totals unchanged', async () => {
+    const provider = await startProvider(3);
+    const saved = { ...SPEND_LIMITS };
+    try {
+      SPEND_LIMITS.googlePages = 10;
+      const { db, gaps } = gapStore();
+      const inserts: number[] = [];
+      const events = {
+        client: {
+          insert: async (payload: { values: unknown[] }) => {
+            inserts.push(payload.values.length);
+          },
+        },
+      } as never;
+      const since = '2026-01-01';
+      const until = '2026-01-31';
+      const result = await storeSpendPages(
+        { db, events, ws: 'ws', platform: 'google', since, until },
+        (sink) => googleSpend(conn(provider.base), secrets, since, until, egress, sink),
+        3,
+      );
+      expect(result).toMatchObject({ rows: 21, truncated: false });
+      expect(provider.hits()).toBe(3);
+      // No insert carries more than a bounded chunk (a page is split too), and every row arrived once.
+      expect(inserts).toEqual([3, 3, 1, 3, 3, 1, 3, 3, 1]);
+      expect(Math.max(...inserts)).toBeLessThanOrEqual(SPEND_INSERT_CHUNK_ROWS);
+      expect(inserts.reduce((n, size) => n + size, 0)).toBe(21);
+      // A complete read leaves no gap behind (the pre-insert warning is removed at the end).
+      expect(gaps).toEqual([]);
+    } finally {
+      Object.assign(SPEND_LIMITS, saved);
+      await provider.close();
+    }
+  });
+
+  it('keeps the gap record when the read is truncated at the page ceiling', async () => {
+    // Always another page: the import stops at its two-page ceiling with a truncated read.
+    const provider = await startProvider(Number.POSITIVE_INFINITY);
+    const saved = { ...SPEND_LIMITS };
+    try {
+      SPEND_LIMITS.googlePages = 2;
+      const { db, gaps } = gapStore();
+      const events = { client: { insert: async () => {} } } as never;
+      const since = '2026-01-01';
+      const until = '2026-01-31';
+      const result = await storeSpendPages({ db, events, ws: 'ws', platform: 'google', since, until }, (sink) =>
+        googleSpend(conn(provider.base), secrets, since, until, egress, sink),
+      );
+      expect(result).toMatchObject({ rows: 14, truncated: true });
+      expect(gaps).toEqual([{ workspaceId: 'ws', platform: 'google', account: '1234567890', fromDate: since, toDate: until }]);
+    } finally {
+      Object.assign(SPEND_LIMITS, saved);
+      await provider.close();
+    }
+  });
+
+  it('records the gap before the first insert, so a crash mid-import cannot hide it', async () => {
+    const provider = await startProvider(2);
+    const saved = { ...SPEND_LIMITS };
+    try {
+      SPEND_LIMITS.googlePages = 10;
+      const { db, gaps } = gapStore();
+      let calls = 0;
+      const events = {
+        client: {
+          insert: async () => {
+            calls += 1;
+            if (calls === 2) throw new Error('the api pod was killed');
+          },
+        },
+      } as never;
+      const since = '2026-01-01';
+      const until = '2026-01-31';
+      const err = await storeSpendPages({ db, events, ws: 'ws', platform: 'google', since, until }, (sink) =>
+        googleSpend(conn(provider.base), secrets, since, until, egress, sink),
+      ).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toMatchObject({ platform: 'google', account: '1234567890', fromDate: since, toDate: until });
+    } finally {
+      Object.assign(SPEND_LIMITS, saved);
+      await provider.close();
+    }
+  });
+});
+
