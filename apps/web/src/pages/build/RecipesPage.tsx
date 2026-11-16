@@ -88,6 +88,8 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
   // A parameter edit moves this generation, so an install that resolves later can tell that it no
   // longer belongs to the values on screen (#961).
   const paramsGeneration = useRef(0);
+  // Installs are sequenced on their own, so a check that bumps `loadSeq` leaves them alone.
+  const installSeq = useRef(0);
   const selectedRef = useRef(selected);
   useEffect(() => {
     selectedRef.current = selected;
@@ -172,9 +174,10 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
 
   const install = async () => {
     if (!recipe) return;
-    // Same rule as `check`: an install result may land under another selection or other parameters.
-    const seq = ++loadSeq.current;
-    // What this install sends, and the parameter generation it belongs to (#961).
+    // An install has its own sequence: it belongs to the starter it was started for and the
+    // parameter generation it sends, so a prerequisite check (a read, not a new set of parameters)
+    // cannot displace its result (#965 review B).
+    const seq = ++installSeq.current;
     const recipeId = recipe.id;
     const params = values;
     const generation = paramsGeneration.current;
@@ -185,28 +188,28 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     setEarlierInstallError(null);
     try {
       const out = await api.call('recipes.install', { recipeId, params });
-      if (seq === loadSeq.current) {
+      if (seq !== installSeq.current) return; // a newer install replaced this one
+      if (recipeId !== selectedRef.current) return; // the person left this starter (#792)
+      if (generation === paramsGeneration.current) {
         setInstalled(out);
         return;
       }
-      // The result no longer belongs to the parameters on screen. The server did create the
-      // drafts, so dropping the response silently made people install a second full set (#961):
-      // report it, labelled as the earlier parameters', without marking these as installed. A
-      // result for a starter the person has left stays dropped — that panel is another starter's
-      // (#792) — and so does any other stale sequence (a check does not change the values).
-      if (recipeId === selectedRef.current && generation !== paramsGeneration.current)
-        setEarlierInstall({ artifacts: out.artifacts, summary });
+      // The values changed while this ran. The server did create the drafts, so dropping the
+      // response silently made people install a second full set (#961): report it, labelled as
+      // the earlier parameters', without marking these as installed.
+      setEarlierInstall({ artifacts: out.artifacts, summary });
     } catch (e) {
-      if (seq === loadSeq.current) {
+      if (seq !== installSeq.current) return;
+      if (recipeId !== selectedRef.current) return;
+      if (generation === paramsGeneration.current) {
         setError(errText(e));
         return;
       }
       // A failure creates nothing to lose track of, but the person did click: it is shown rather
       // than swallowed, labelled with the parameters it ran for (#961).
-      if (recipeId === selectedRef.current && generation !== paramsGeneration.current)
-        setEarlierInstallError({ message: errText(e), summary });
+      setEarlierInstallError({ message: errText(e), summary });
     } finally {
-      setInstalling(false);
+      if (seq === installSeq.current) setInstalling(false);
     }
   };
 

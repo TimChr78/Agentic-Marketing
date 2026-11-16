@@ -486,6 +486,40 @@ describe('Starters gallery (#526)', () => {
     expect(h.calls.filter((c) => c.name === 'recipes.install').at(-1)?.input.params).toMatchObject({ newsletterName: 'Fjeldvej' });
   });
 
+  // #965 review B: a prerequisite check is not an install. It bumped the shared read sequence, so
+  // an install still in flight when the person checked the prerequisites lost its result: the
+  // drafts and links disappeared and Create drafts looked available for a second set.
+  it('keeps an install result when a prerequisite check resolves while it is pending (#965 review)', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /Weekly newsletter/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    h.holdInstall = true;
+    h.holdPreview = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(h.previewHeld).toHaveLength(1));
+
+    // The check answers first, then the install for the same parameters finishes.
+    await act(async () => {
+      h.previewHeld[0].resolve({
+        ready: true,
+        prerequisites: [{ kind: 'purpose', description: 'A published marketing purpose', ok: true, message: '' }],
+        artifacts: [{ key: 'tpl_weekly', type: 'email_template', name: 'Weekly newsletter' }],
+      });
+    });
+    await act(async () => {
+      h.installHeld[0].resolve({ artifacts: [{ artifactId: `eml_${'b'.repeat(32)}`, name: 'Weekly newsletter' }] });
+    });
+
+    // Its drafts are reported as this install's result, not as an earlier parameters' notice.
+    expect(await screen.findByText('Created 1 drafts')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Weekly newsletter' }).getAttribute('href')).toBe(`/artifacts/eml_${'b'.repeat(32)}`);
+    expect(screen.queryByText(/Your earlier install/)).toBeNull();
+    expect(screen.getByText('Everything is in place.')).toBeTruthy();
+  });
+
   it('shows an install error for the earlier parameters, labelled as theirs (#961)', async () => {
     renderPage();
     await screen.findByRole('button', { name: /Weekly newsletter/ });
