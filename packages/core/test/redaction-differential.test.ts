@@ -463,6 +463,22 @@ describe('the new redactor never keeps what 0.14.23 removed (#946, #956)', () =>
   });
 });
 
+describe('the new redactor never keeps what 0.14.24 removed (#937)', () => {
+  it('removes every planted credential the 0.14.24 implementation removed', () => {
+    // 0.14.24 is the release this batch builds on; its provider qualifiers remove values 0.14.23
+    // leaves, and a shape pass must not hide one of those (the scheme pass once did).
+    const leaks: string[] = [];
+    for (const { input, name, secrets } of generated()) {
+      const before = redact01424(input);
+      const after = redactCredentials(input);
+      for (const secret of secrets)
+        if (input.includes(secret) && !before.includes(secret) && after.includes(secret)) leaks.push(`${secret} kept in ${name}`);
+    }
+    expect(leaks.slice(0, 10)).toEqual([]);
+    expect(leaks).toHaveLength(0);
+  });
+});
+
 // #937: the shapes this batch adds, compared against every release it builds on. A reference may
 // only remove part of a shape (0.14.20 turns `{"token":["x"]}` into `{"token":[redacted]"x"]}`); a
 // planted value it removed whole must be gone from the new output as well.
