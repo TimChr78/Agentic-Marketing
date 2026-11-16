@@ -28,6 +28,7 @@ import {
   type Decision,
   deliveryPolicy,
   type EmailRequest,
+  fingerprintParts,
   requestEmail,
   requestPush,
   requestSms,
@@ -278,6 +279,70 @@ async function publishedTemplateInfo(tx: Tx, templateId: string): Promise<{ vers
 }
 
 /**
+ * Who each of a batch's segment members is, and whether that person already has a message for this
+ * broadcast (#944).
+ *
+ * The dedupe key alone is not merge-safe: it embeds the profile id, and identity resolution
+ * rewrites that id on a merge (it also moves the person's messages to the survivor). So the run
+ * asks the question by person instead. One recursive walk from every member gives the person the
+ * row will belong to (the survivors it was merged into) and whether any id on that walk already has
+ * a row for this broadcast. That covers the survivor a batch has not visited yet, the merged-away
+ * id an audience still lists, and two aliases of one person in one batch — they share a canonical
+ * id, so the run records one decision for the person, never one per alias.
+ *
+ * Test sends are excluded: they are the sender's own copies, not this run's message to the person.
+ */
+async function handledPeople(
+  tx: Tx,
+  workspaceId: string,
+  broadcastId: string,
+  ids: string[],
+): Promise<{ handled: Set<string>; canonical: Map<string, string> }> {
+  const handled = new Set<string>();
+  const canonical = new Map<string, string>();
+  if (!ids.length) return { handled, canonical };
+  const chain = await tx.execute<{ member: string; link: string; next_id: string | null }>(sql`
+    WITH RECURSIVE chain(member, link, next_id) AS (
+      SELECT p.id, p.id, p.merged_into FROM profiles p
+      WHERE p.workspace_id = ${workspaceId} AND p.id IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      UNION
+      SELECT c.member, c.next_id, p.merged_into
+      FROM chain c
+      JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = c.next_id
+      WHERE c.next_id IS NOT NULL
+    )
+    SELECT member, link, next_id FROM chain`);
+  /** Every id a member's row for this broadcast can be stored under: the member and its survivors. */
+  const links = new Map<string, string[]>();
+  for (const row of chain.rows) {
+    links.set(row.member, [...(links.get(row.member) ?? []), row.link]);
+    // The walk ends at the profile with no survivor above it: the person this send reaches.
+    if (row.next_id === null) canonical.set(row.member, row.link);
+  }
+  const chainIds = [...new Set(chain.rows.map((row) => row.link))];
+  if (!chainIds.length) return { handled, canonical };
+  // One indexed lookup for the whole batch (`messages_journey_recipient`, migration 0099): the ids
+  // that already have this broadcast's message, independent of everything else the person received.
+  const seen = await tx
+    .selectDistinct({ profileId: schema.messages.profileId })
+    .from(schema.messages)
+    .where(
+      and(
+        eq(schema.messages.workspaceId, workspaceId),
+        eq(schema.messages.journeyId, broadcastId),
+        inArray(schema.messages.profileId, chainIds),
+        eq(schema.messages.test, false),
+      ),
+    );
+  const withMessage = new Set(seen.flatMap((row) => (row.profileId ? [row.profileId] : [])));
+  for (const [member, memberLinks] of links) if (memberLinks.some((link) => withMessage.has(link))) handled.add(member);
+  return { handled, canonical };
+}
+
+/**
  * Records a broadcast message that was not sent because the person is in the campaign's control
  * group. It is a suppression, like consent or a send window, not a failure: the message log and
  * ClickHouse keep it with the reason, and the run counts it as skipped.
@@ -301,7 +366,11 @@ async function suppressForControl(
     .values({
       workspaceId: ws,
       id: newId('msg'),
-      idempotencyKey: `bct:${broadcastId}:${profileId}`,
+      // Its own namespace: a control row and a real send are different requests for the same person
+      // and broadcast, so they must not share a key with different fingerprints (#945). A control
+      // row from before this namespace existed still counts as "this member was handled as
+      // control": the run recognises it by the person's message for the broadcast, not by the key.
+      idempotencyKey: `bctc:${broadcastId}:${profileId}`,
       channel,
       profileId,
       purpose: info.purpose,
@@ -312,12 +381,10 @@ async function suppressForControl(
       reason,
       variant: variant ?? null,
       agentId,
-      requestHash: sendRequestHash(channel, {
-        caller: 'system:broadcast_holdout',
-        recipient: profileId,
-        broadcast: broadcastId,
-        campaign: campaignId,
-      }),
+      requestHash: sendRequestHash(
+        channel,
+        fingerprintParts.broadcastControl({ recipient: profileId, broadcast: broadcastId, campaign: campaignId }),
+      ),
     })
     .onConflictDoNothing()
     .returning({ id: schema.messages.id });
@@ -329,6 +396,68 @@ async function suppressForControl(
       messageId: m.id,
       eventId: 'decision:suppressed:holdout',
       type: 'suppressed',
+      at: new Date().toISOString(),
+      profileId,
+      channel,
+      purpose: info.purpose,
+      provider: '',
+      templateId: def.template,
+      templateVersion: info.version,
+      journeyId: broadcastId,
+      variant: variant ?? '',
+      reason,
+      url: '',
+    },
+  ]);
+}
+
+/**
+ * Records one member's send as failed when the key it would use is bound to a different request
+ * (#945). One member never stops the run: the row is keyed apart from the conflicting one, carries
+ * the reason a person can act on, and is the person's message for this broadcast from then on, so a
+ * retry does not raise the conflict again.
+ */
+async function recordSendConflict(
+  tx: Tx,
+  deps: BroadcastDeps,
+  ws: string,
+  broadcastId: string,
+  def: BroadcastDefinition,
+  profileId: string,
+  variant: string | undefined,
+  agentId: string | null,
+): Promise<void> {
+  const channel = def.template.startsWith('sms_') ? 'sms' : def.template.startsWith('psh_') ? 'push' : 'email';
+  const info = await publishedTemplateInfo(tx, def.template);
+  const reason =
+    'idempotency_conflict: the key this send would use belongs to a different request; check that message before resending this person';
+  const [m] = await tx
+    .insert(schema.messages)
+    .values({
+      workspaceId: ws,
+      id: newId('msg'),
+      idempotencyKey: `bct:${broadcastId}:${profileId}:conflict`,
+      channel,
+      profileId,
+      purpose: info.purpose,
+      templateId: def.template,
+      templateVersion: info.version,
+      journeyId: broadcastId,
+      status: 'failed',
+      reason,
+      variant: variant ?? null,
+      agentId,
+      requestHash: sendRequestHash(channel, fingerprintParts.broadcast({ recipient: profileId, broadcast: broadcastId })),
+    })
+    .onConflictDoNothing()
+    .returning({ id: schema.messages.id });
+  if (!m) return;
+  await deps.events.insertMessageEvents([
+    {
+      workspaceId: ws,
+      messageId: m.id,
+      eventId: 'decision:failed:idempotency_conflict',
+      type: 'failed',
       at: new Date().toISOString(),
       profileId,
       channel,
@@ -1369,18 +1498,17 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       .orderBy(asc(schema.segmentMemberships.profileId))
       .limit(BATCH);
     const ids = members.map((m) => m.profileId);
-    // In the rest pass, everyone the sample already touched is left alone; the retry-safe
-    // idempotency key would prevent a second message, but skipping them keeps the counts honest.
-    const already = new Set(
-      (test?.state === 'winner_sent' || restPass) && ids.length
-        ? (
-            await tx
-              .select({ profileId: schema.messages.profileId })
-              .from(schema.messages)
-              .where(and(eq(schema.messages.journeyId, broadcastId), inArray(schema.messages.profileId, ids)))
-          ).flatMap((r) => (r.profileId ? [r.profileId] : []))
-        : [],
-    );
+    // One message per person per broadcast (#944), as of the moment this batch looks: the person is
+    // the member's id or any profile it was already merged into, and two aliases of one person in
+    // this batch are one recipient. That is the whole guarantee. A merge that commits while the
+    // batch is in flight is treated exactly like one that commits just after it: the batch's
+    // snapshot still saw two people, so it decides for the one it selected, and the same merge
+    // landing a moment later could not be prevented either. Serialising the batch against merges
+    // would hold the workspace's identity lock across every member's send, so it does not.
+    const { handled, canonical } = await handledPeople(tx, ws, broadcastId, ids);
+    // Canonical ids this batch already recorded a decision for: a second alias of the same person
+    // (a dynamic segment keeps both until its next refresh) is the same recipient, not another one.
+    const recorded = new Set<string>();
     const traits =
       def.sendWindow && ids.length
         ? new Map(
@@ -1404,24 +1532,33 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     for (const m of members) {
       if (canaryPass && stage && !canaryAssignment(m.profileId, broadcastId, stage.canaryPercent)) continue;
       if (test?.state === 'sampling' && !subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length)) continue;
-      if (test?.state === 'winner_sent' && already.has(m.profileId)) continue;
-      if (restPass && already.has(m.profileId)) continue;
+      const person = canonical.get(m.profileId) ?? m.profileId;
+      if (handled.has(m.profileId) || recorded.has(person)) {
+        // The person's message for this broadcast exists: a sample send, a rest pass, a replayed
+        // chunk, a control suppression, or a chunk that ran before a merge — or this batch just
+        // recorded one for another alias of the same person. Not a second send, and not counted
+        // again: the run counted this person when the row was written.
+        continue;
+      }
       const variant =
         test?.state === 'sampling'
           ? (subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length) ?? undefined)
           : (test?.winner ?? undefined);
       // The first time this person is about to get anything from a sending member, record their
-      // campaign arm. Later members read the same row.
+      // campaign arm. Later members read the same row. The arm belongs to the person, not to the
+      // alias this batch happened to select: assigning it to a stale alias could give a control
+      // participant a fresh treatment arm (and then send to the survivor), or hold out the survivor
+      // while the record stayed on the alias (#944).
       const holdout = campaign
-        ? await assignHoldout(tx, ws, { type: 'campaign', id: campaign.id }, campaign.content.controlGroup, m.profileId)
+        ? await assignHoldout(tx, ws, { type: 'campaign', id: campaign.id }, campaign.content.controlGroup, person)
         : null;
       if (campaign && holdout?.created)
         holdoutEvents.push({
           workspaceId: ws,
           journeyId: campaign.id,
           version: campaign.version,
-          participantId: holdoutParticipantId(m.profileId),
-          profileId: m.profileId,
+          participantId: holdoutParticipantId(person),
+          profileId: person,
           node: '',
           type: 'holdout_assigned',
           seq: 0,
@@ -1432,7 +1569,10 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       // Control gets no message from any of the campaign's sending members. A suppression with
       // its own reason keeps the decision visible without counting it as a failed send.
       if (campaign && controlTemplate && holdout?.assignment.arm === 'control') {
-        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, m.profileId, variant, campaign.id, artifact.ownerAgentId);
+        // Under the canonical id, so a later batch that reaches the person by another alias finds
+        // this decision through their own id as well as through the merge chain.
+        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, person, variant, campaign.id, artifact.ownerAgentId);
+        recorded.add(person);
         skipped++;
         continue;
       }
@@ -1470,12 +1610,31 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         subject,
         notBefore,
         agentId: artifact.ownerAgentId,
-        requestHash: sendRequestHash(channel, {
-          caller: 'system:broadcast',
-          recipient: m.profileId,
-          broadcast: broadcastId,
-        }),
+        requestHash: sendRequestHash(channel, fingerprintParts.broadcast({ recipient: m.profileId, broadcast: broadcastId })),
+      }).catch(async (err: unknown) => {
+        // The key is bound to a different request: a caller who pre-claimed it before the system
+        // prefixes were reserved, or a control row and a send that disagree (#945). Throwing would
+        // roll back the batch and leave every later tick failing on the same member, so this member
+        // is recorded as failed and the run continues.
+        if (
+          !(err instanceof AppError) ||
+          err.code !== 'conflict' ||
+          (err.details as { reason?: string } | undefined)?.reason !== 'idempotency_key_reused'
+        )
+          throw err;
+        logger.error(
+          { err, broadcast: broadcastId, profile: m.profileId },
+          'broadcast member blocked by an idempotency key conflict; recorded as failed and the run continues',
+        );
+        await recordSendConflict(tx, deps, ws, broadcastId, def, person, variant, artifact.ownerAgentId);
+        return null;
       });
+      // One decision per person: every path below wrote (or found) that person's row for this run.
+      recorded.add(person);
+      if (!d) {
+        skipped++;
+        continue;
+      }
       if (test?.state === 'sampling' && d.status === 'queued' && !windowSkip) {
         const at = notBefore ?? now;
         if (!sampleStartsAt || at < sampleStartsAt) sampleStartsAt = at;

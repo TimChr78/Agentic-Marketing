@@ -89,19 +89,14 @@ export type SendChannel = 'email' | 'sms' | 'push';
 
 /**
  * The request fingerprint behind an input-level send key (#926). It is computed once from the
- * ORIGINAL request, before any resolution, and stored on the message:
+ * ORIGINAL request, before any resolution, and stored on the message.
  *
- * | source | fields |
- * |---|---|
- * | direct send | `caller` (principal hash), `recipient` (the profile id as supplied), `template`
- * |             | (the template id as supplied), `data` (the variables as supplied) |
- * | DOI | `caller: 'system:doi'`, `recipient`, `template`, `submission` (the event id) |
- * | journey | `caller: 'system:journey'`, `recipient`, `template`, `journey`, `enrollment`,
- * |         | `step`, `sequence` (never the rendered context) |
- * | broadcast | `caller: 'system:broadcast'`, `recipient`, `template`, `broadcast`, `variant` |
- * | holdout | `caller: 'system:broadcast_holdout'`, `recipient`, `template`, `broadcast`,
- * |         | `campaign`, `variant` |
- * | test send | `caller: 'system:test'`, `recipient` (address hash), `template` |
+ * The fields of every source are `fingerprintParts` in `./fingerprint.ts`, one builder per source,
+ * and its published list `fingerprintFields` is kept equal to the builders' output by a test
+ * (#948): a direct send binds the caller, the recipient and template as supplied and the variables;
+ * DOI the submission and form version; a journey the enrollment, step and sequence (never the
+ * profile); a broadcast the recipient and broadcast; a holdout-control row those plus the campaign;
+ * a test send the address hash; an alert the member's user id and the notification's key.
  *
  * Resolution (a merged profile id, the template's current purpose, a computed subject or send
  * window) is deliberately absent: none of it changes what the caller asked for.
@@ -118,13 +113,23 @@ export function sendRequestHash(channel: SendChannel, parts: Record<string, unkn
  * Order: the executor's command-level idempotency lock is taken before BEGIN; this is the first
  * lock inside a send handler and precedes every message write. The delivery worker's
  * `message-cap` lock is taken only for an existing message and never calls the request gateways,
- * so the two cannot form a cycle.
+ * so the two cannot form a cycle. A broadcast run takes its run row and then this lock per member;
+ * it does not take the identity lock, so nothing takes these two in a fixed order across paths.
  */
 export async function lockSendKey(tx: Tx, workspaceId: string, key: string) {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`send-idempotency:${workspaceId}:${key}`}, 0))`);
 }
 
-/** A pre-release row's fallback: compare the columns that were stored then, as documented (#926). */
+/**
+ * A pre-release row's fallback: compare the columns that were stored then, as documented (#926).
+ *
+ * Rows with `request_hash IS NULL` were written before the request fingerprint existed. They are
+ * compared on the recipient, template, journey and variant only — never the caller, the variables
+ * or the rendered payload. So an old key reused by a different caller, or with different data,
+ * replays the row's stored decision instead of answering `409 idempotency_key_reused`; that is a
+ * known, bounded gap (same workspace, exact key string) and is not repaired retroactively. Every
+ * row written since carries the fingerprint and gets the strict comparison. See docs/integrations.md.
+ */
 export function legacySameSend(
   existing: typeof schema.messages.$inferSelect,
   req: { profileId: string; templateId: string; journeyId?: string; variant?: string },

@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import type { Db, Tx } from '@agentic-marketing/db';
-import { type LinkSigner, requestEmail, sendRequestHash } from '@agentic-marketing/email';
+import { fingerprintParts, type LinkSigner, requestEmail, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
 import { type ConsentInput, consentStateOf, currentConsent, type ResolvedEvent, recordConsent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -81,13 +81,16 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
       idempotencyKey: `doi:${e.messageId}`,
       // Stable identifiers only: a redelivery of the same submission replays the confirmation,
       // including after a profile merge (the resolved profile id is deliberately absent).
-      requestHash: sendRequestHash('email', {
-        caller: 'system:doi',
-        submission: e.messageId,
-        form: p.form_id,
-        formVersion: p.form_version,
-        template: form.def.confirmationTemplate,
-      }),
+      requestHash: sendRequestHash(
+        'email',
+        fingerprintParts.doi({
+          submission: e.messageId,
+          // The values the form wrote into the event, unchanged: only the hash's field names moved.
+          form: p.form_id as string,
+          formVersion: p.form_version as number,
+          template: form.def.confirmationTemplate,
+        }),
+      ),
       data: { confirm_url: `${linksUrl}/f/confirm/${deps.links.sign(token)}` },
     });
     if (d.status !== 'queued') logger.warn({ form: p.form_id, status: d.status, reason: d.reason }, 'confirmation e-mail not queued');

@@ -8,6 +8,7 @@ import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { MESSAGE_ID_HEADER, ProviderSendError } from './adapters';
 import { blockResolver } from './blocks';
+import { fingerprintParts } from './fingerprint';
 import { sendRequestHash } from './gateway';
 import { tagLinks, tagTextLinks } from './links';
 import { transportFor } from './providers';
@@ -141,7 +142,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
             test: true,
             // The address hash and template id are as supplied; the test-send key is unique per attempt.
             // As above: the supplied address hash and template id, never a resolved profile.
-            requestHash: sendRequestHash('email', { caller: 'system:test', recipient: recipientHash, template: opts.templateId }),
+            requestHash: sendRequestHash('email', fingerprintParts.test({ recipient: recipientHash, template: opts.templateId })),
           })
           .returning();
         skipped.push({ email, reason });
@@ -172,7 +173,7 @@ export async function sendTestMessages(ctx: CommandContext, opts: TestSendOption
           status: 'sending',
           recipientHash,
           test: true,
-          requestHash: sendRequestHash('email', { caller: 'system:test', recipient: recipientHash, template: opts.templateId }),
+          requestHash: sendRequestHash('email', fingerprintParts.test({ recipient: recipientHash, template: opts.templateId })),
         })
         .returning();
 

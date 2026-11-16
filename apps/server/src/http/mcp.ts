@@ -178,7 +178,8 @@ export function mcpServerFor(
     // A write takes the retry key as its own argument unless the command already has one for its
     // handler (a send's `idempotencyKey`, a bulk enrollment's): that field keeps its meaning and
     // is not stripped or turned into the executor key (#906).
-    const writeKey = cmd.effect !== 'read' && !declaresIdempotencyKey(cmd.input);
+    const declaredKey = cmd.effect !== 'read' && declaresIdempotencyKey(cmd.input);
+    const writeKey = cmd.effect !== 'read' && !declaredKey;
     server.registerTool(
       toolName,
       {
@@ -199,8 +200,13 @@ export function mcpServerFor(
         try {
           let commandInput = input;
           let idempotencyKey: string | undefined;
-          if (writeKey && input && typeof input === 'object' && !Array.isArray(input)) {
-            const { idempotencyKey: raw, ...rest } = input as Record<string, unknown>;
+          // One key grammar per MCP surface (#949): the argument this tool adds *and* the four
+          // commands whose input declares `idempotencyKey` itself (the sends, a bulk enrollment) are
+          // validated here with the strict rule, whichever one the value arrived in. REST keeps its
+          // input-level keys at 1–200 characters for compatibility.
+          if ((writeKey || declaredKey) && input && typeof input === 'object' && !Array.isArray(input)) {
+            const record = input as Record<string, unknown>;
+            const raw = record.idempotencyKey;
             if (raw !== undefined) {
               if (!isValidIdempotencyKey(raw))
                 return {
@@ -215,10 +221,13 @@ export function mcpServerFor(
                     },
                   ],
                 };
-              idempotencyKey = raw;
-            }
-            // The key is not part of the command's input: the executor hashes and validates the rest.
-            commandInput = rest;
+              if (writeKey) {
+                // The key is not part of the command's input: the executor hashes and validates the rest.
+                const { idempotencyKey: _stripped, ...rest } = record;
+                commandInput = rest;
+                idempotencyKey = raw;
+              }
+            } else if (writeKey) commandInput = record;
           }
           const out = await executor.execute(cmd, commandInput, principal, {
             surface: 'mcp',

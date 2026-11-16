@@ -11,7 +11,9 @@ import { schema } from '@agentic-marketing/db';
 import { profileForMessage } from '@agentic-marketing/profiles';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { fingerprintParts } from '../fingerprint';
 import { sendRequestHash } from '../gateway';
+import { sendIdempotencyKey } from '../idempotency';
 import { templateRenderError } from '../render';
 import { directSendImpact, directSendLedger } from '../sendTouches';
 import { topicProblems } from '../topicValidation';
@@ -33,7 +35,7 @@ export const sendPush = defineCommand({
   input: z.object({
     profileId: ProfileId,
     templateId: z.string().regex(/^psh_[0-9a-f]{32}$/),
-    idempotencyKey: z.string().min(1).max(200).optional(),
+    idempotencyKey: sendIdempotencyKey.describe('Same key, same message: a retry never sends twice'),
     data: z.record(z.string(), z.unknown()).optional().describe('Extra template variables'),
   }),
   output: z.object({ messageId: z.string(), status: Status, reason: z.string().nullable(), duplicate: z.boolean() }),
@@ -49,12 +51,15 @@ export const sendPush = defineCommand({
     requestPush(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
-      requestHash: sendRequestHash('push', {
-        caller: callerHash(ctx.principal),
-        recipient: input.profileId,
-        template: input.templateId,
-        data: input.data ?? null,
-      }),
+      requestHash: sendRequestHash(
+        'push',
+        fingerprintParts.direct({
+          caller: callerHash(ctx.principal),
+          recipient: input.profileId,
+          template: input.templateId,
+          data: input.data ?? null,
+        }),
+      ),
     }),
 });
 

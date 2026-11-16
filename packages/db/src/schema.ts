@@ -597,6 +597,9 @@ export const messages = pgTable(
     // Counts one agent's contact-pressure skips in a period without scanning the workspace (#488).
     index('messages_agent_contact_count').on(t.workspaceId, t.agentId, t.createdAt).where(sql`agent_id IS NOT NULL`),
     index('messages_journey_status').on(t.workspaceId, t.journeyId, t.status).where(sql`journey_id IS NOT NULL`),
+    // The broadcast run's per-batch "does this person already have this broadcast's message"
+    // lookup (#944, migration 0099).
+    index('messages_journey_recipient').on(t.workspaceId, t.journeyId, t.profileId).where(sql`journey_id IS NOT NULL AND test = false`),
   ],
 );
 

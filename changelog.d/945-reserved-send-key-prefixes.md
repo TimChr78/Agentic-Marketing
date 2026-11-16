@@ -1,0 +1,6 @@
+---
+section: Security
+issues: [945]
+---
+- **Breaking:** a caller-supplied `idempotencyKey` on `messages.sendEmail`, `messages.sendSms`, `messages.sendPush` or `journeys.enrollSegment` may no longer start with one of the platform's own key prefixes (`adc:`, `agent-digest:`, `agent-event:`, `agent-expiry:`, `alert:`, `bct:`, `bctc:`, `doi:`, `experience-rollout:`, `guardian:`, `hosted-run:`, `jrn:`, `password-reset:`, `test:`, `wh:`). Such a key is refused with `400 invalid_input` naming them, on REST and MCP: those keys belong to the platform's own sends and deliveries, and pre-claiming one could block that send with a fingerprint conflict. Use a key of your own, for example one per order or job.
+- A broadcast's holdout-control row now has its own `bctc:` key, so a campaign control group that changes mid-run no longer makes the person's earlier row and the real send collide on one key with two fingerprints. If a member's key is still bound to a different request (a key claimed before the prefixes were reserved), that member is recorded as a failed send with `idempotency_conflict: …` and the run continues with the rest of the audience instead of failing every tick on the same member. A control row written under the old shared key still counts as that person handled: no second message and no conflict.

@@ -130,6 +130,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0096_message_request_identity.sql': '0.14.22',
   '0097_ai_billing_usage.sql': '0.14.24',
   '0098_ai_calls_provider_billed_index.sql': '0.14.24',
+  '0099_messages_journey_recipient.sql': '0.14.24',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

@@ -2,6 +2,8 @@ import {
   analyseHoldout,
   artifactTypes,
   type CampaignDefinition,
+  canonicalPeople,
+  earlierAssignment,
   holdoutBelowK,
   holdoutHashVersion,
   K,
@@ -14,7 +16,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/events';
-import { and, eq, gte, inArray, isNotNull, lte, max } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, max, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
 import { goalEventsFor } from './goal';
@@ -445,11 +447,16 @@ export const campaignHoldoutResult = defineCommand({
     const hashVersion = holdoutHashVersion(cg.percent);
     const from = input.from ? new Date(input.from) : undefined;
     const to = input.to ? new Date(input.to) : undefined;
+    // The whole scope version, not just the requested window: a person's arm is their earliest
+    // assignment, and applying the date range first would let a later row on another of their
+    // profiles decide the arm while the send used the earlier one (#944).
     const assignments = await ctx.tx
       .select({
         profileId: schema.holdoutAssignments.profileId,
         arm: schema.holdoutAssignments.arm,
         assignedAt: schema.holdoutAssignments.assignedAt,
+        // Full precision for the earliest-wins order (see HoldoutStamp.assignedMicros).
+        assignedMicros: sql<string>`(extract(epoch from ${schema.holdoutAssignments.assignedAt}) * 1000000)::bigint::text`,
       })
       .from(schema.holdoutAssignments)
       .where(
@@ -458,8 +465,6 @@ export const campaignHoldoutResult = defineCommand({
           eq(schema.holdoutAssignments.scopeType, 'campaign'),
           eq(schema.holdoutAssignments.scopeId, input.campaignId),
           eq(schema.holdoutAssignments.hashVersion, hashVersion),
-          from ? gte(schema.holdoutAssignments.assignedAt, from) : undefined,
-          to ? lte(schema.holdoutAssignments.assignedAt, to) : undefined,
         ),
       );
     const counts = {
@@ -471,11 +476,30 @@ export const campaignHoldoutResult = defineCommand({
     // revenue k floor on (k_revenue_group): a currency with fewer than k buyers has its amount
     // suppressed even when the arm itself clears k (#901).
     const converters: Record<'control' | 'treatment', Map<string, Set<string>>> = { control: new Map(), treatment: new Map() };
-    const people = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date }>();
+    // One person, one arm (#944). An assignment can sit on a profile the person was merged from — a
+    // run that selected a stale alias wrote it there — so each row is resolved to the person and the
+    // earliest arm is theirs (`earlierAssignment`, the same order `assignHoldout` reads), which also
+    // breaks a timestamp tie the same way, so the send and the report cannot disagree. The requested
+    // window then applies to that winning assignment, never to a row that did not decide the arm.
+    const personOf = await canonicalPeople(
+      ctx.tx,
+      ws,
+      assignments.map((a) => a.profileId),
+    );
+    const decided = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date; assignedMicros: bigint; profileId: string }>();
     for (const r of assignments) {
-      counts[r.arm].entered++;
-      people.set(r.profileId, { arm: r.arm, assignedAt: r.assignedAt });
+      const person = personOf.get(r.profileId) ?? r.profileId;
+      const current = decided.get(person);
+      const candidate = { arm: r.arm, assignedAt: r.assignedAt, assignedMicros: BigInt(r.assignedMicros), profileId: r.profileId };
+      if (!current || earlierAssignment(candidate, current)) decided.set(person, candidate);
     }
+    const people = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date }>();
+    for (const [person, win] of decided) {
+      if (from && win.assignedAt < from) continue;
+      if (to && win.assignedAt > to) continue;
+      people.set(person, { arm: win.arm, assignedAt: win.assignedAt });
+    }
+    for (const person of people.values()) counts[person.arm].entered++;
 
     // Goal events and revenue, when there are people to measure. ClickHouse joins in code to the
     // Postgres assignments: a person counts once, and only events inside their own attribution
@@ -501,9 +525,10 @@ export const campaignHoldoutResult = defineCommand({
     );
     let identityLimit: number | null = null;
     if (people.size && names.length) {
-      const assignedTimes = [...people.values()].map((p) => p.assignedAt.getTime());
-      const first = new Date(Math.min(...assignedTimes));
-      const last = new Date(Math.max(...assignedTimes) + c.goal.attributionDays * 86_400_000);
+      // A loop, not Math.min(...times): a spread of 100k+ arguments overflows the call stack.
+      const bounds = assignedTimeBounds(people.values());
+      const first = new Date(bounds.first);
+      const last = new Date(bounds.last + c.goal.attributionDays * 86_400_000);
       const windowTo = to && to < last ? to : last;
       // One identity map, shared with the campaign summary and the measure queries (#590): sent
       // recipients union this campaign's holdout assignments, both arms. The union is what keeps
@@ -736,3 +761,15 @@ export const campaignCommands = [
   planCampaign,
   campaignFromBrief,
 ] as const;
+
+/** The earliest and latest assignment time in milliseconds, in one pass over any number of people. */
+export function assignedTimeBounds(people: Iterable<{ assignedAt: Date }>): { first: number; last: number } {
+  let first = Number.POSITIVE_INFINITY;
+  let last = Number.NEGATIVE_INFINITY;
+  for (const person of people) {
+    const time = person.assignedAt.getTime();
+    if (time < first) first = time;
+    if (time > last) last = time;
+  }
+  return { first, last };
+}

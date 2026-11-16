@@ -9,6 +9,7 @@ import {
   type Tx,
 } from '@agentic-marketing/db';
 import { and, eq, inArray, type SQL, sql } from 'drizzle-orm';
+import { lockIdentity } from './identity';
 
 // The consent and objection ledger (security-and-privacy.md §2). Records are append-only;
 // consent_state is the latest record per purpose and channel, over a profile and every profile
@@ -430,7 +431,7 @@ export async function recordTopicPreference(
 ) {
   // Serialize topic writes with identity merges, then resolve again in the write transaction.
   // Otherwise an old signed preference link can recreate a choice on a merged-away profile.
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
+  await lockIdentity(tx, workspaceId);
   let canonicalId = profileId;
   for (let i = 0; i < 20; i++) {
     const [profile] = await tx
