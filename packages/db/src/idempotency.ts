@@ -16,9 +16,9 @@ import type pg from 'pg';
 // transaction is touching is left for a later pass rather than blocked on or removed underneath it.
 // Each batch is its own statement, so no long lock is held.
 //
-// Nothing references an idempotency row today. The 0.14.26 branch (#975) adds a link table with
-// ON DELETE CASCADE, so this plain DELETE then removes the links with its row; a future child
-// table without a cascade must be deleted first.
+// Nothing else requires an expired row to stay. `idempotency_key_actions` (#975) links agent
+// ledger rows to a stored response with ON DELETE CASCADE, so this plain DELETE removes the links
+// with their key; a future child table without a cascade must be deleted first.
 
 /** How long a key replays. The command layer and the cleanup read the same default. */
 export const IDEMPOTENCY_RETENTION_DAYS = 30;

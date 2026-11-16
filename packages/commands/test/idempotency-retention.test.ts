@@ -41,7 +41,11 @@ async function row(key: string) {
     response: { run: number };
     created_at: Date;
     input_hash: string;
-  }>('SELECT command, response, created_at, input_hash FROM idempotency_keys WHERE workspace_id = $1 AND key = $2', [d.workspace, key]);
+    reversed_at: Date | null;
+  }>('SELECT command, response, created_at, input_hash, reversed_at FROM idempotency_keys WHERE workspace_id = $1 AND key = $2', [
+    d.workspace,
+    key,
+  ]);
   return rows[0];
 }
 
@@ -118,14 +122,26 @@ describe.skipIf(!hasTestDatabase())('idempotency key retention (#976)', () => {
     expect(after?.response).toEqual({ run: 2, value: 'b' });
   });
 
-  // #975 (0.14.26) adds `reversed_at` and an `idempotency_key_actions` link table to this row.
-  // Replacing an expired key must therefore delete the old row, not update it in place, or the
-  // fresh result would inherit the old request's reversal and action links. The column stands in
-  // for that branch's state until it lands; keep delete-then-insert on the rebase.
-  it('deletes an expired row instead of carrying its other state into the fresh result', async () => {
-    await d.db.admin.query('ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS reversed_at timestamptz');
+  // #975 gives the row `reversed_at` and an `idempotency_key_actions` link table (links cascade
+  // with the key). Replacing an expired key must delete the old row rather than update it in
+  // place, or the fresh result would inherit the old request's reversal and action links.
+  it('deletes an expired row and its action links instead of carrying them into the fresh result', async () => {
     const key = 'retention-old-row-state';
     await executor.execute(command, { value: 'a' }, principal(), { surface: 'rest', idempotencyKey: key });
+
+    // An agent action the stored response describes, linked as the executor links a real one.
+    const { rows: actions } = await d.db.admin.query<{ id: number }>(
+      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface)
+       VALUES ($1, 'agt_test', 'artifacts.requestPublish', 'content.publish', 'allow', true, 'rest')
+       RETURNING id`,
+      [d.workspace],
+    );
+    await d.db.admin.query('INSERT INTO idempotency_key_actions (workspace_id, key, agent_action_id) VALUES ($1, $2, $3)', [
+      d.workspace,
+      key,
+      actions[0]!.id,
+    ]);
+    // Simulate agents.undo having run on the old row, and old stored state on the other columns.
     await d.db.admin.query(
       `UPDATE idempotency_keys
           SET command = 'test.aDifferentCommand', input_hash = 'hash-from-the-old-request',
@@ -134,6 +150,7 @@ describe.skipIf(!hasTestDatabase())('idempotency key retention (#976)', () => {
       [d.workspace, key],
     );
     await ageKey(key, 31);
+    expect((await row(key))?.reversed_at).not.toBeNull();
 
     await executor.execute(command, { value: 'b' }, principal(), { surface: 'rest', idempotencyKey: key });
 
@@ -153,6 +170,18 @@ describe.skipIf(!hasTestDatabase())('idempotency key retention (#976)', () => {
     expect(rows[0]?.response).toEqual({ run: 2, value: 'b' });
     expect(rows[0]?.reversed_at).toBeNull();
     expect(Date.now() - (rows[0]?.created_at.getTime() ?? 0)).toBeLessThan(60_000);
+
+    // The old key's links went with the deleted row (ON DELETE CASCADE), so an undo of the old
+    // action can no longer reach the fresh row, and the fresh key replays its own response.
+    const { rows: links } = await d.db.admin.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM idempotency_key_actions WHERE workspace_id = $1 AND key = $2',
+      [d.workspace, key],
+    );
+    expect(links[0]?.n).toBe(0);
+    await expect(executor.execute(command, { value: 'b' }, principal(), { surface: 'rest', idempotencyKey: key })).resolves.toEqual({
+      run: 2,
+      value: 'b',
+    });
   });
 
   // The replacement deletes as the app role under row-level security, so 0104 grants DELETE
