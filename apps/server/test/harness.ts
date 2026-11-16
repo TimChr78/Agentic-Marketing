@@ -14,6 +14,14 @@ import { prefixOf } from '../src/domains';
 import { publicOnly } from '../src/http/public-only';
 import type { Commands } from '../src/registry';
 import { startScheduler, startWorkers } from '../src/workers';
+import {
+  ensureTemplateDatabase,
+  migrationsFingerprint,
+  pruneTemplateDatabases,
+  templateDatabaseName,
+  templateMarker,
+  withTemplateLock,
+} from './template-db';
 
 // A complete server (Postgres, ClickHouse, NATS, api + ingest + worker roles) on fresh databases.
 
@@ -157,8 +165,11 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
  */
 export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 1000 + testPortOffset();
 
-/** The migrated database that test-setup.ts prepares once per run; run-scoped like every test database. */
-export const TEMPLATE_DB = scopedDbName('am_test_template');
+/**
+ * The migrated template database: named after the migration files, so an unchanged tree reuses it
+ * across runs and checkouts, and test-setup.ts shares the name through AM_TEST_TEMPLATE.
+ */
+export const templateDbName = () => process.env.AM_TEST_TEMPLATE ?? templateDatabaseName();
 
 // Hot state (rate-limit buckets, sessions, snapshots) is not dropped with the databases. A run-unique
 // prefix keeps one run's buckets out of the next one, which matters now that seeded fixtures reuse
@@ -174,25 +185,41 @@ export function testDatabaseUrl(dbName: string) {
 }
 
 /**
- * Builds the template: Postgres migrations, the app role and better-auth's tables, once per run
- * (test-setup.ts). Each file's database is then a copy, instead of running every migration again.
+ * Builds the template: Postgres migrations, the app role and better-auth's tables, under the shared
+ * maintenance advisory lock (test-setup.ts). The template is keyed on a hash of the migration files,
+ * so a run reuses a completed one when nothing changed instead of replaying every migration, and the
+ * lock keeps two concurrent runs from building or dropping it at once. Templates beyond the newest
+ * few are dropped in the same pass. Returns the name.
  */
-export async function prepareTemplateDatabase() {
+export async function prepareTemplateDatabase(): Promise<string> {
+  const fingerprint = migrationsFingerprint();
+  const template = templateDatabaseName(fingerprint);
+  const marker = templateMarker(fingerprint);
   const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
   await maint.connect();
   try {
-    await maint.query(`DROP DATABASE IF EXISTS ${TEMPLATE_DB} WITH (FORCE)`);
-    await maint.query(`CREATE DATABASE ${TEMPLATE_DB}`);
+    await withTemplateLock(maint, async () => {
+      const { built } = await ensureTemplateDatabase(maint, {
+        name: template,
+        marker,
+        build: async (name) => {
+          const db = createDb({ adminUrl: testDatabaseUrl(name).toString(), appUrl: testDatabaseUrl(name).toString() });
+          try {
+            await migrate(db.admin, APP_ROLE);
+            await migrateAuth({ baseUrl: 'http://localhost', secret: 'test-secret-test-secret-test-secret-123', db });
+          } finally {
+            await db.close();
+          }
+        },
+      });
+      console.log(`[test] ${built ? 'built' : 'reused'} template ${template}`);
+      const pruned = await pruneTemplateDatabases(maint);
+      if (pruned.dropped.length) console.log(`[test] dropped ${pruned.dropped.length} older template(s)`);
+    });
   } finally {
     await maint.end();
   }
-  const db = createDb({ adminUrl: testDatabaseUrl(TEMPLATE_DB).toString(), appUrl: testDatabaseUrl(TEMPLATE_DB).toString() });
-  try {
-    await migrate(db.admin, APP_ROLE);
-    await migrateAuth({ baseUrl: 'http://localhost', secret: 'test-secret-test-secret-test-secret-123', db });
-  } finally {
-    await db.close();
-  }
+  return template;
 }
 
 /**

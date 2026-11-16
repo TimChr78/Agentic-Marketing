@@ -442,7 +442,14 @@ install are left alone. It is a dry run until `--yes`.
 The `server` project runs its files in parallel, four at a time (`TEST_WORKERS` sets the worker
 count; 1 runs them one by one). Each file gets its own Postgres and ClickHouse database, NATS
 namespace and Valkey prefix, and `apps/server/test/setup.ts` migrates one template database first
-so every file starts from a copy of it. Ports come from `testPort()` in
+so every file starts from a copy of it. The template is named after a hash of the migration files
+(`am_tpl_<hash12>`, shared through `AM_TEST_TEMPLATE`) and marked complete with `COMMENT ON DATABASE`
+written last: an unchanged tree reuses the completed template instead of replaying every migration,
+only a migration edit builds a new one, and a build that crashed halfway is rebuilt. Builds and
+drops run under one Postgres advisory lock, so two runs (or two checkouts) on the shared stack never
+build or drop the same template at once; the newest three templates are kept so switching between
+branches does not migrate again, and a template that still has a connection is never dropped (another
+run may be cloning it). Ports come from `testPort()` in
 `apps/server/test/harness.ts`, which gives each worker its own block; `TEST_PORT_OFFSET` moves
 every block and the seeded e2e server's default port, so a second checkout can run at the same
 time even against another stack.
