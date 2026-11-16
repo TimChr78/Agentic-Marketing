@@ -1,5 +1,5 @@
 import { agentPolicy, autonomySettings, defineCommand, PolicyDeniedError, recordAgentAction } from '@agentic-marketing/commands';
-import { AppError, canonicalJson, hashValue } from '@agentic-marketing/core';
+import { AppError, canonicalJson, hashValue, safeErrorText } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
@@ -540,7 +540,9 @@ export const importConfig = defineCommand({
         } catch (err) {
           if (!(err instanceof AppError)) throw err;
           p.change.publish = 'failed';
-          p.change.problem = err.message;
+          // The message may quote the content it refused, so it is redacted and bounded like the
+          // agent ledger row beside it (#940). It reaches the caller and the idempotency row.
+          p.change.problem = safeErrorText(err.message, 1000);
           // A refusal by the agent policy is final; other failures may need another artifact first.
           if (!(err instanceof PolicyDeniedError)) failed.push(p);
         }
