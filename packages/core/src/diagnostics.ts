@@ -290,10 +290,63 @@ function classifyCompoundKey(full: string): boolean {
 
 /**
  * A name, with its `_`, `-` and `.` separators, that is directly followed by `:` or `=` (an
- * optional closing quote in between). It can only start where a name starts, so a long run is
- * read once.
+ * optional closing quote in between). A run of leading separators is not part of the name, so the
+ * candidate starts at the first letter after it: `_secretKey`, `__authToken` and `$$SIGNINGKEY`
+ * are the same names as their unprefixed forms (#946). `$` splits a run because it is not part of
+ * a name.
+ *
+ * The run is read by hand rather than by a back-tracking regex: `'_a_'.repeat(1 MiB)` has a
+ * candidate start every other character, and a regex would retry the whole suffix at each one
+ * (#946 review). Each maximal run is consumed once, and at most one candidate comes out of it
+ * (the match that starts earliest and ends at the run's `:`/`=`).
  */
-const COMPOUND_KEY = /(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
+const isNameChar = (char: string): boolean =>
+  (char >= 'a' && char <= 'z') ||
+  (char >= 'A' && char <= 'Z') ||
+  (char >= '0' && char <= '9') ||
+  char === '_' ||
+  char === '.' ||
+  char === '-' ||
+  char === '$';
+const isNameLetter = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
+const isAlnum = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9');
+
+/** The original lookahead: an optional quote, whitespace, then `:` or `=`. */
+function assignmentAfter(text: string, pos: number): boolean {
+  let index = pos;
+  const quote = text.charAt(index);
+  if (quote === '"' || quote === "'") index += 1;
+  while (isSpace(text.charAt(index))) index += 1;
+  const mark = text.charAt(index);
+  return mark === ':' || mark === '=';
+}
+
+/**
+ * Every candidate name as `[start, end)`, left to right. A maximal run of name characters is
+ * consumed once; within it, `$` splits segments (it is not a name character), and the candidate is
+ * the first letter whose predecessor is not alphanumeric. If the segment is followed by an
+ * assignment, that is the only match the old regex could make in it.
+ */
+function* compoundKeyCandidates(text: string): Generator<readonly [number, number]> {
+  let index = 0;
+  while (index < text.length) {
+    if (!isNameChar(text.charAt(index))) {
+      index += 1;
+      continue;
+    }
+    const runStart = index;
+    while (index < text.length && isNameChar(text.charAt(index))) index += 1;
+    const runEnd = index;
+    let segmentStart = runStart;
+    for (let pos = runStart; pos <= runEnd; pos += 1) {
+      if (pos !== runEnd && text.charAt(pos) !== '$') continue;
+      let start = segmentStart;
+      while (start < pos && !(isNameLetter(text.charAt(start)) && !isAlnum(text.charAt(start - 1)))) start += 1;
+      if (start < pos && assignmentAfter(text, pos)) yield [start, pos] as const;
+      segmentStart = pos + 1;
+    }
+  }
+}
 
 /** A name long enough for the bare-token rule to replace it before its value is looked at. */
 const TOKEN_SHAPED = /[A-Za-z0-9+/_-]{24,}/;
@@ -326,10 +379,10 @@ const SCHEME_WORD = /\b(?:bearer|basic)\b/i;
 function redactLongKeyValues(text: string): string {
   let out = '';
   let copied = 0;
-  COMPOUND_KEY.lastIndex = 0;
-  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
-    if (key[0].length < 24 || !TOKEN_SHAPED.test(key[0]) || !isCompoundCredentialKey(key[0])) continue;
-    const keyEnd = key.index + key[0].length;
+  for (const [keyStart, keyEnd] of compoundKeyCandidates(text)) {
+    if (keyStart < copied) continue;
+    const key = text.slice(keyStart, keyEnd);
+    if (key.length < 24 || !TOKEN_SHAPED.test(key) || !isCompoundCredentialKey(key)) continue;
     const start = separatorEnd(text, keyEnd, true);
     if (start < 0) continue;
     PLAIN_QUOTED.lastIndex = start;
@@ -344,7 +397,6 @@ function redactLongKeyValues(text: string): string {
     const inset = quoted ? 1 : 0;
     out += `${text.slice(copied, start + inset)}[redacted]`;
     copied = start + value.length - inset;
-    COMPOUND_KEY.lastIndex = copied;
   }
   return copied === 0 ? text : out + text.slice(copied);
 }
@@ -367,12 +419,14 @@ const SCHEME_START = /(?:bearer|basic)\s/iy;
  * through. Each character is read a bounded number of times.
  */
 function redactCompoundKeys(text: string): string {
-  let out = '';
-  let copied = 0;
-  COMPOUND_KEY.lastIndex = 0;
-  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
-    const keyEnd = key.index + key[0].length;
-    if (!isCompoundCredentialKey(key[0])) continue;
+  // Replace from the right/merge adjacent spans: redacting an outer key first would otherwise
+  // swallow an inner key (`secretKey=apiSecret="…"`) before its own value is found, and the inner
+  // value would survive (#946 review). Every credential pair the scan finds is redacted, and
+  // adjacent or overlapping spans become one marker, so this only ever replaces more.
+  const spans: [number, number][] = [];
+  for (const [keyStart, keyEnd] of compoundKeyCandidates(text)) {
+    const key = text.slice(keyStart, keyEnd);
+    if (!isCompoundCredentialKey(key)) continue;
     const start = separatorEnd(text, keyEnd, true);
     if (start < 0) continue;
     SCHEME_START.lastIndex = start;
@@ -380,12 +434,49 @@ function redactCompoundKeys(text: string): string {
     PAIR_VALUE.lastIndex = start;
     const value = PAIR_VALUE.exec(text);
     if (!value) continue;
-    COMPOUND_KEY.lastIndex = start + value[0].length;
-    if (value[0] === '[redacted]' || PLAIN_LITERAL.test(value[0])) continue;
-    out += `${text.slice(copied, start)}[redacted]`;
-    copied = start + value[0].length;
+    let replacement = value[0];
+    // A bare prefix that ends in `=` or `:` is the start of an inner pair
+    // (`secretKey=apiSecret: "…"`, `secretKey=apiSecret: value`). Replacing only the prefix would
+    // swallow the inner key and leave its value, so the inner pair is replaced too.
+    const lastChar = replacement.charAt(replacement.length - 1);
+    if (lastChar === '=' || lastChar === ':') {
+      let cursor = start + replacement.length;
+      while (isSpace(text.charAt(cursor))) cursor += 1;
+      const quote = text.charAt(cursor);
+      let end = cursor;
+      if (quote === '"' || quote === "'") {
+        end = cursor + 1;
+        while (end < text.length) {
+          const char = text.charAt(end);
+          if (char === '\\') end += 2;
+          else if (char === quote) {
+            end += 1;
+            break;
+          } else end += 1;
+        }
+      } else {
+        while (end < text.length && !isSpace(text.charAt(end)) && !',;&}])"\'['.includes(text.charAt(end))) end += 1;
+      }
+      if (end > start + replacement.length) replacement = text.slice(start, end);
+    }
+    if (replacement === '[redacted]' || PLAIN_LITERAL.test(replacement)) continue;
+    spans.push([start, start + replacement.length]);
   }
-  return copied === 0 ? text : out + text.slice(copied);
+  if (!spans.length) return text;
+  spans.sort((a, b) => a[0] - b[0]);
+  const merged: [number, number][] = [];
+  for (const span of spans) {
+    const last = merged[merged.length - 1];
+    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
+    else merged.push([span[0], span[1]]);
+  }
+  let out = '';
+  let copied = 0;
+  for (const [start, end] of merged) {
+    out += `${text.slice(copied, start)}[redacted]`;
+    copied = end;
+  }
+  return out + text.slice(copied);
 }
 
 /**

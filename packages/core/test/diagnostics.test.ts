@@ -236,6 +236,57 @@ describe('camelCase and PascalCase credential keys (#898)', () => {
   });
 });
 
+describe('a leading separator does not hide a camelCase credential key (#946)', () => {
+  const SHORT = 'abc1234567';
+
+  it('redacts a key after a run of leading separators', () => {
+    for (const prefix of ['_', '.', '-', '$', '__', '$$']) {
+      for (const key of ['secretKey', 'userPassword', 'authToken', 'oauthToken', 'sessionKey'])
+        expect(redactCredentials(`${prefix}${key}: ${SHORT}`), `${prefix}${key}`).toBe(`${prefix}${key}: [redacted]`);
+      expect(redactCredentials(`${prefix}SIGNINGKEY=${SHORT}`), `${prefix}SIGNINGKEY`).toBe(`${prefix}SIGNINGKEY=[redacted]`);
+    }
+  });
+
+  it('redacts the issue’s examples in every separator form', () => {
+    const examples: [string, string][] = [
+      ['_secretKey: "abc"', '_secretKey: [redacted]'],
+      ['_userPassword=hunter2', '_userPassword=[redacted]'],
+      ['_authToken=abc', '_authToken=[redacted]'],
+      ['_oauthToken=abc', '_oauthToken=[redacted]'],
+      ['_sessionKey=abc', '_sessionKey=[redacted]'],
+      ['_SIGNINGKEY=abc', '_SIGNINGKEY=[redacted]'],
+      ['_clientSecret=abc', '_clientSecret=[redacted]'],
+      ['__secretKey=abc', '__secretKey=[redacted]'],
+      ['$$authToken=abc', '$$authToken=[redacted]'],
+    ];
+    for (const [input, expected] of examples) expect(redactCredentials(input), input).toBe(expected);
+  });
+
+  it('treats a separator-prefixed name inside a longer name the same way', () => {
+    for (const name of ['a.b_secretKey', 'a.b-_secretKey', 'x._authToken', 'config.userPassword'])
+      expect(redactCredentials(`${name}=${SHORT}`), name).toBe(`${name}=[redacted]`);
+  });
+
+  it('does not over-redact ordinary words after a separator', () => {
+    for (const [input, expected] of [
+      ['_id=123', '_id=123'],
+      ['_type=user', '_type=user'],
+      ['__proto__=value', '__proto__=value'],
+      ['_keyboard=on', '_keyboard=on'],
+      ['_entryKey=ascending', '_entryKey=ascending'],
+      ['_idempotencyKey=abc123', '_idempotencyKey=abc123'],
+    ] as const)
+      expect(redactCredentials(input), input).toBe(expected);
+  });
+
+  it('is still idempotent on the new shapes', () => {
+    for (const input of ['_secretKey=abc1234567', '__authToken: "abc1234567"', '$$SIGNINGKEY=abc']) {
+      const once = redactCredentials(input);
+      expect(redactCredentials(once), input).toBe(once);
+    }
+  });
+});
+
 describe('URL userinfo credentials (#920)', () => {
   it('replaces the password of a connection string and keeps the rest of the URL', () => {
     expect(redactCredentials('postgres://am:shortpw@db:5432/am')).toBe('postgres://am:[redacted]@db:5432/am');
