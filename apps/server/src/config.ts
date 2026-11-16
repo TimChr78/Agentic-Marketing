@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { isIpOrCidr, originPatternHasWildcard, originPatternProblem } from '@agentic-marketing/core';
+import { IDEMPOTENCY_RETENTION_DAYS } from '@agentic-marketing/db';
 import { z } from 'zod';
 
 // The runtime roles a process can take. `ROLE` is a comma-separated list of these; any other value
@@ -211,6 +212,12 @@ const Env = z.object({
     .min(1)
     .default(90)
     .describe('Days finished hosted-agent runs are kept; the failure queue and run history read only this window'),
+  RETENTION_IDEMPOTENCY_DAYS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(IDEMPOTENCY_RETENTION_DAYS)
+    .describe('Days an idempotency key replays; older requests run again and the scheduler removes the expired rows'),
   ERASURE_GRACE_HOURS: z.coerce
     .number()
     .int()
@@ -435,6 +442,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       logDays: e.RETENTION_LOG_DAYS,
       hostedAgentRunDays: e.RETENTION_HOSTED_AGENT_RUN_DAYS,
     },
+    idempotencyRetentionDays: e.RETENTION_IDEMPOTENCY_DAYS,
     erasureGraceHours: e.ERASURE_GRACE_HOURS,
     stepUp: {
       maxFailures: e.STEP_UP_MAX_FAILURES,

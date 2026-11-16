@@ -1,7 +1,7 @@
 import { AppError, canonicalJson, hashValue, redactCredentials, redactedText, safeErrorText, sha256 } from '@agentic-marketing/core';
-import { type AgentUndo, type Db, schema, type Tx } from '@agentic-marketing/db';
+import { type AgentUndo, type Db, idempotencyCutoff, schema, type Tx } from '@agentic-marketing/db';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
-import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   type ActionClass,
@@ -250,6 +250,11 @@ export interface ExecuteOptions {
 export interface ExecutorOptions {
   /** Reject unknown input keys instead of ignoring them with a warning (STRICT_INPUTS). */
   strictInputs?: boolean;
+  /**
+   * How long an idempotency key replays (#976); defaults to IDEMPOTENCY_RETENTION_DAYS (30).
+   * The cleanup job deletes rows older than the same window.
+   */
+  idempotencyRetentionDays?: number;
   /** Called with the unknown keys a non-strict executor ignored, e.g. to log and persist them. */
   onUnknownKeys?: (command: string, unknown: UnknownInputKey[], principal: Principal) => void;
   /**
@@ -512,6 +517,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               // them: config.import records one undoable publish per artifact besides its own row,
               // and undoing any of them must reverse the stored response (#950 review).
               ledgerActionsByTx.set(tx, []);
+              // Retention (#976): a key older than the window no longer replays; its row is
+              // replaced by the fresh result below, so a late retry runs as a new request.
+              const idempotencyExpiry = opts.idempotencyKey ? idempotencyCutoff(options.idempotencyRetentionDays) : undefined;
               // The agent-policy lock comes first for every agent write (#922 A2): before a
               // command's `impact`, which may lock artifacts for the independent check. Taking it
               // later is what let a held run and a publish request deadlock on the same artifact.
@@ -538,14 +546,19 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               // independent check again. Authentication, permission, the missing-record guard,
               // input validation and this agent's status (under the lock above) still ran, so a
               // paused or revoked agent gets its usual refusal instead of a replay.
-              if (opts.idempotencyKey) {
+              if (opts.idempotencyKey && idempotencyExpiry) {
                 // The key was serialised before BEGIN, so any winner has committed and its row is
-                // visible even in this read's snapshot (#812).
+                // visible even in this read's snapshot (#812). Rows past the retention are ignored,
+                // so they do not replay and do not answer the reused conflict (#976).
                 const [hit] = await tx
                   .select()
                   .from(schema.idempotencyKeys)
                   .where(
-                    and(eq(schema.idempotencyKeys.workspaceId, principal.workspaceId), eq(schema.idempotencyKeys.key, opts.idempotencyKey)),
+                    and(
+                      eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
+                      eq(schema.idempotencyKeys.key, opts.idempotencyKey),
+                      gt(schema.idempotencyKeys.createdAt, idempotencyExpiry),
+                    ),
                   );
                 if (hit) {
                   // `inputHash` binds the caller too, so another principal presenting the key is a
@@ -608,26 +621,36 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                 const extra = cmd.ledgerImpact(out);
                 if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
               }
-              if (opts.idempotencyKey)
-                try {
-                  await tx.insert(schema.idempotencyKeys).values({
+              if (opts.idempotencyKey && idempotencyExpiry) {
+                // The row is written when the request commits, so an expired row is replaced by the
+                // fresh result. Only an expired row may be replaced: if a live row won despite the
+                // serialised key, it must answer the same clean conflict as a sequential reuse,
+                // never let this request overwrite it (#976).
+                const [stored] = await tx
+                  .insert(schema.idempotencyKeys)
+                  .values({
                     workspaceId: principal.workspaceId,
                     key: opts.idempotencyKey,
                     command: cmd.name,
                     inputHash: idempotencyHash,
                     response: redact(out, cmd.sensitiveOutput) as object,
+                  })
+                  .onConflictDoUpdate({
+                    target: [schema.idempotencyKeys.workspaceId, schema.idempotencyKeys.key],
+                    set: {
+                      command: cmd.name,
+                      inputHash: idempotencyHash,
+                      response: redact(out, cmd.sensitiveOutput) as object,
+                      createdAt: sql`now()`,
+                    },
+                    setWhere: lt(schema.idempotencyKeys.createdAt, idempotencyExpiry),
+                  })
+                  .returning({ key: schema.idempotencyKeys.key });
+                if (!stored)
+                  throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                    reason: 'idempotency_key_reused',
                   });
-                } catch (err) {
-                  // Two different principals can use one key without serialising against each
-                  // other (the lock names the principal). The unique (workspace, key) then decides:
-                  // the loser's whole transaction rolls back and answers the same clean conflict as
-                  // a sequential reuse, never a 500 or a silent second run.
-                  if (isIdempotencyKeyConflict(err))
-                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
-                      reason: 'idempotency_key_reused',
-                    });
-                  throw err;
-                }
+              }
               // A read's target can only come from its output too (#763): a lookup resolves the
               // person, a preview samples people, a list returns rows about people.
               target = cmd.auditTarget?.(out) ?? target;
@@ -1142,11 +1165,6 @@ function uniqueViolationOn(err: unknown, index: string): boolean {
   )
     if (e.code === '23505' && e.constraint === index) return true;
   return false;
-}
-
-/** Postgres 23505 on the idempotency primary key, directly or as the cause of a query error. */
-function isIdempotencyKeyConflict(err: unknown): boolean {
-  return uniqueViolationOn(err, 'idempotency_keys_pkey');
 }
 
 /** Postgres 23505 on the singleton partial unique index, directly or as the cause of a query error. */

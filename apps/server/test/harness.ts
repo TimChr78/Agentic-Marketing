@@ -368,6 +368,8 @@ export async function startTestServer(
       hostedAgentTickMs: 86_400_000,
       // Content source tests fetch on demand and drive the sweep with a fixed clock.
       contentTickMs: 86_400_000,
+      // Idempotency retention is driven by its own test; keep the periodic loop out of the way.
+      idempotencyCleanupTickMs: 86_400_000,
       // Bulk enrollment tests drive the job directly with runEnrollmentJobsOnce.
       enrollmentTickMs: 86_400_000,
       guardianTickMs: 86_400_000,

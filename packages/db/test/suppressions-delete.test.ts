@@ -93,7 +93,7 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
     // one-published-version index, workspaces for 0094's data_repairs and 0095's gap table foreign
     // keys, messages for 0096's request fingerprint and 0099's recipient index, ai_calls and
     // ai_token_reservations for 0097's billing columns and 0098's index, profiles for 0099's
-    // merged-into index, idempotency_keys for 0103's reversal columns); FORCE RLS applies to it as
+    // merged-into index, idempotency_keys for 0104's retention index); FORCE RLS applies to it as
     // well, which is the small-install path this guards.
     for (const table of [
       'artifacts',
