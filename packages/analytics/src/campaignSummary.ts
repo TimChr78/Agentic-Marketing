@@ -509,6 +509,17 @@ export function summaryRevenue(
 }
 
 /**
+ * The currency `meta.currency` may name (#958): exactly one revenue row, with a visible amount and
+ * not `UNKNOWN`. A suppressed amount is withheld, so publishing its currency would tell a client the
+ * campaign is measurable in it; the rule matches `analytics.query`'s `meta.currency`.
+ */
+export function summaryCurrency(revenue: readonly { currency: string; amount: number | null }[]): string | null {
+  if (revenue.length !== 1) return null;
+  const row = revenue[0]!;
+  return row.amount === null || row.currency === 'UNKNOWN' ? null : row.currency;
+}
+
+/**
  * Progress towards a goal's target (#909). A revenue goal needs exactly one currency in total and a
  * visible amount: with a suppressed second currency the amounts cannot be compared, so progress is
  * withheld instead of computed from the visible one alone.
@@ -532,7 +543,7 @@ export const analyticsCampaignSummary = defineCommand({
   name: 'analytics.campaignSummary',
   title: 'Campaign evaluation',
   description:
-    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed; a currency revenue row below k=5 converters keeps its row with a null amount, while the rest of the campaign headline stays, and a revenue goal’s target progress is withheld when more than one currency is in play. Each headline total beside the member rows is protected per total: when exactly one member is hidden, the smallest visible member with a value in that total is hidden too, and a total with no visible member to hide is withheld (null) and named in the notes. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
+    'One campaign’s goal and attribution: recipients reached on any channel, e-mail delivered, clickers, unsubscribers, complaint and unsubscribe rates, converters, conversion rate, revenue per currency and per recipient, progress towards the target when set, and the recipients → delivered → clicked → converted funnel. Includes a row per sending member (broadcast or journey) and the holdout result for journey members with a control group. Member rows below k=5 people reached are suppressed; a currency revenue row below k=5 converters keeps its row with a null amount, while the rest of the campaign headline stays, and a revenue goal’s target progress is withheld when more than one currency is in play, and meta.currency is null unless exactly one known currency has a visible amount. Each headline total beside the member rows is protected per total: when exactly one member is hidden, the smallest visible member with a value in that total is hidden too, and a total with no visible member to hide is withheld (null) and named in the notes. A campaign that has not sent yet returns state "not_started" with readiness instead of zeros.',
   input: z.object({
     campaignId: CampaignId,
     from: isoDateTime('from')
@@ -797,7 +808,7 @@ export const analyticsCampaignSummary = defineCommand({
       holdouts,
       meta: {
         timeZone,
-        currency: revenueRows.length === 1 ? revenueRows[0].currency : null,
+        currency: summaryCurrency(revenueRows),
         from,
         to,
         freshness: email.meta.freshness ?? totals.meta.freshness,
