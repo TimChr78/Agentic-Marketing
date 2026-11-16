@@ -3,6 +3,7 @@ import { seededRandom } from '../../../test-support/index';
 import { redactCredentials } from '../src/diagnostics';
 import { redactCredentials as redact01420 } from './redaction-01420-reference';
 import { redactCredentials as redact01423 } from './redaction-01423-reference';
+import { redactCredentials as redact01424 } from './redaction-01424-reference';
 
 // #902 round 5: a standing differential check against the vendored 0.14.20 redactor, not only a
 // fixed fixture. Its rule is mechanical: a maximal run of non-space characters that 0.14.20 removed
@@ -371,6 +372,28 @@ function* longKeys(): Generator<Generated> {
           }
 }
 
+/**
+ * The #937 value shapes, with a marker planted inside every value. They are kept out of
+ * `generated()` because 0.14.20 eats the `>` of `=>` as formatting, which the run-level comparison
+ * reads as a credential; the #937 check compares planted values one by one instead.
+ */
+const SHAPE_KEYS = ['token', 'secret', 'password', 'authToken', 'apiSecret', 'signingKey', 'userPwd'];
+const SHAPES: [string, (key: string, value: string) => string][] = [
+  ['array', (key, value) => `{"${key}":["${value}"]}`],
+  ['object', (key, value) => `{"${key}":{"v":"${value}"}}`],
+  ['bare array', (key, value) => `${key}=[${value}]`],
+  ['bare object', (key, value) => `${key}: {"v":"${value}"}`],
+];
+
+function* shapes(): Generator<Generated> {
+  for (const key of SHAPE_KEYS)
+    for (const [shape, build] of SHAPES) {
+      const token = marker();
+      const text = build(key, `S3cr3tV4l${token}`);
+      yield { input: `${text} ${sentinel()}`, name: `shape ${shape} ${key} ${JSON.stringify(text)}`, secrets: [token] };
+    }
+}
+
 function* generated(): Generator<Generated> {
   yield* structured();
   yield* nested();
@@ -401,6 +424,42 @@ describe('the new redactor never keeps what 0.14.23 removed (#946, #956)', () =>
   it('stays idempotent on every generated input', () => {
     const unstable: string[] = [];
     for (const { input, name } of generated()) {
+      const once = redactCredentials(input);
+      if (redactCredentials(once) !== once) unstable.push(name);
+    }
+    expect(unstable.slice(0, 10)).toEqual([]);
+    expect(unstable).toHaveLength(0);
+  });
+});
+
+// #937: the shapes this batch adds, compared against every release it builds on. A reference may
+// only remove part of a shape (0.14.20 turns `{"token":["x"]}` into `{"token":[redacted]"x"]}`); a
+// planted value it removed whole must be gone from the new output as well.
+describe('the new redactor never keeps what an earlier release removed (#937)', () => {
+  const references: [string, (text: string) => string][] = [
+    ['0.14.20', redact01420],
+    ['0.14.23', redact01423],
+    ['0.14.24', redact01424],
+  ];
+
+  it('removes every planted value a reference removed', () => {
+    const leaks: string[] = [];
+    for (const { input, name, secrets } of shapes()) {
+      const after = redactCredentials(input);
+      for (const [release, redact] of references) {
+        const before = redact(input);
+        for (const secret of secrets)
+          if (input.includes(secret) && !before.includes(secret) && after.includes(secret))
+            leaks.push(`${secret} kept from ${release} in ${name}`);
+      }
+    }
+    expect(leaks.slice(0, 10)).toEqual([]);
+    expect(leaks).toHaveLength(0);
+  });
+
+  it('stays idempotent on every generated shape', () => {
+    const unstable: string[] = [];
+    for (const { input, name } of shapes()) {
       const once = redactCredentials(input);
       if (redactCredentials(once) !== once) unstable.push(name);
     }

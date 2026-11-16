@@ -55,7 +55,9 @@ export function redactCredentials(text: string): string {
   // A long camelCase credential key is replaced as a token by the rules below, after which its
   // value can no longer be told from any other text. So the plain value of such a key is replaced
   // first (#898); see redactLongKeyValues for why that cannot change what the rules below remove.
-  let out = applyRules(redactLongKeyValues(text));
+  // The #937 value shapes have the same problem: a rule consumes the delimiter the shape needs
+  // (`[`, a Unicode opening quote, `>`, `-----BEGIN`), so those passes run first too.
+  let out = applyRules(redactLongKeyValues(redactValueShapes(text)));
   // Main's 0.14.23 passes converge first, on exactly the release's rules and qualifiers. Only then
   // do the #946/#956 additions run, so they can add redaction but can never consume a key main's
   // next round would have needed. If an addition exposes a new main match, main settles again.
@@ -79,9 +81,11 @@ export function redactCredentials(text: string): string {
   };
   out = settleMain(out);
   for (let round = 0; round < 16; round += 1) {
-    const added = settleAdded(out);
-    if (added === out) break;
-    out = settleMain(added);
+    // The #937 passes run on the output of everything above, then main settles again so an
+    // addition that exposes a main match is still handled.
+    const shaped = redactValueShapes(settleAdded(out));
+    if (shaped === out) break;
+    out = settleMain(shaped);
   }
   return out;
 }
@@ -608,6 +612,168 @@ function redactPrefixedCompoundKeys(text: string): string {
 function redactJoinedCompoundKeys(text: string): string {
   if (!/[A-Z]/.test(text)) return text;
   return redactCompoundRuns(text, joinedStart, isAddedProviderKey);
+}
+
+/**
+ * The value shapes #937 collects: a structured value under a credential key, a short Authorization
+ * value, a Unicode-quoted value, `=>` as the separator, a PEM block, escaped JSON, URL-encoded
+ * pairs, a `Pwd`/`Pass` name and a nested all-capitals pair.
+ *
+ * Every pass below reads the text once and replaces a value with the marker. They run before the
+ * rules as well as on their output, for the same reason `redactLongKeyValues` runs before them: the
+ * rules destroy the delimiters these shapes need (a Unicode quote's opening half, the `>` of `=>`,
+ * the `-----BEGIN` of a PEM header, the `[` of an array). A shape is therefore replaced while it is
+ * still intact; the second run is the additive pass over everything the rules produced, and only
+ * ever replaces more.
+ */
+const MAX_SHAPE_KEY_CHARS = 256;
+const MAX_SHAPE_DEPTH = 32;
+
+const isShapeNameChar = (char: string): boolean =>
+  (char >= 'a' && char <= 'z') ||
+  (char >= 'A' && char <= 'Z') ||
+  (char >= '0' && char <= '9') ||
+  char === '_' ||
+  char === '.' ||
+  char === '-';
+
+const isShapeNameStart = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
+
+/**
+ * A credential name as the rules and the compound classifier read it, plus this batch's own
+ * additions: a name that ENDS in a credential word (`token`, `api_key`, `X-Auth-Token`), a
+ * camelCase/PascalCase or all-capitals compound, a provider qualifier from #956, or a `Pwd`/`Pass`
+ * ending. Ending matters: `token_count` and `tokens_count` are ordinary counters.
+ */
+const PLAIN_CREDENTIAL_SUFFIX = new RegExp(`(?:${CREDENTIAL_KEY})$`, 'i');
+
+function isPwdPassKey(name: string): boolean {
+  const trimmed = withoutTrailingDigits(name);
+  if (trimmed.length > 4 && trimmed.endsWith('Pwd') && /[a-z0-9]/.test(trimmed.charAt(trimmed.length - 4))) return true;
+  if (trimmed.length > 5 && trimmed.endsWith('Pass') && /[a-z0-9]/.test(trimmed.charAt(trimmed.length - 5))) return true;
+  const parts = trimmed.split(/[_.-]+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  const last = parts[parts.length - 1]!.toLowerCase();
+  return last === 'pwd' || last === 'pass';
+}
+
+function isShapesCredentialKey(name: string): boolean {
+  return isCompoundCredentialKey(name) || isAddedProviderKey(name) || isPwdPassKey(name) || PLAIN_CREDENTIAL_SUFFIX.test(name);
+}
+
+interface ValueSpan {
+  start: number;
+  end: number;
+}
+
+/**
+ * Replaces the value of every credential pair a shape pass recognises. A candidate may start only
+ * where the previous one ended, so each suffix is read once, like a global regex's scan.
+ */
+function redactPairValues(
+  text: string,
+  separator: (text: string, nameEnd: number) => number,
+  valueSpan: (text: string, valueStart: number) => ValueSpan | null,
+): string {
+  let out = '';
+  let copied = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (!isShapeNameStart(text.charAt(index))) {
+      index += 1;
+      continue;
+    }
+    let nameEnd = index + 1;
+    while (nameEnd < text.length && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
+    // The separator is the cheap test and almost no word has one; classify only then, so a long
+    // text of ordinary words does not run the name classifier for each of them.
+    const valueStart = separator(text, nameEnd);
+    if (valueStart < 0) {
+      index = nameEnd;
+      continue;
+    }
+    const name = text.slice(index, nameEnd);
+    if (name.length > MAX_SHAPE_KEY_CHARS || !isShapesCredentialKey(name)) {
+      index = nameEnd;
+      continue;
+    }
+    const span = valueSpan(text, valueStart);
+    if (!span || span.end <= span.start) {
+      index = nameEnd;
+      continue;
+    }
+    const value = text.slice(span.start, span.end);
+    if (value === '[redacted]' || PLAIN_LITERAL.test(value)) {
+      index = nameEnd;
+      continue;
+    }
+    out += `${text.slice(copied, span.start)}[redacted]`;
+    copied = span.end;
+    index = Math.max(span.end, nameEnd);
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/** The end of the line a value started on, so an unbalanced shape never leaves the secret. */
+function lineEnd(text: string, start: number): number {
+  const newline = text.indexOf('\n', start);
+  return newline < 0 ? text.length : newline;
+}
+
+/**
+ * A JSON array or object value under a credential key: `{"token":["shortpw"]}`,
+ * `{"secret":{"v":"x"}}`. Brackets are scanned to a bounded depth and strings are skipped, so a
+ * bracket inside a quoted string does not close the value. An unbalanced value is replaced up to
+ * the end of its line (chosen over "the next `,`/`}` at depth 0" because a multi-line secret is
+ * the case that matters, and stopping at the line never leaves any of it).
+ */
+function structuredValueEnd(text: string, start: number): number {
+  const open = text.charAt(start);
+  if (open !== '[' && open !== '{') return -1;
+  let depth = 0;
+  let quote = '';
+  let index = start;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (quote !== '') {
+      if (char === '\\') {
+        index += 2;
+        continue;
+      }
+      if (char === quote) quote = '';
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      index += 1;
+      continue;
+    }
+    if (char === '[' || char === '{') {
+      depth += 1;
+      if (depth > MAX_SHAPE_DEPTH) return lineEnd(text, start);
+    } else if (char === ']' || char === '}') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+    index += 1;
+  }
+  return lineEnd(text, start);
+}
+
+function redactStructuredValues(text: string): string {
+  if (!/[[{]/.test(text)) return text;
+  const span = (value: string, start: number): ValueSpan | null => {
+    const end = structuredValueEnd(value, start);
+    return end < 0 ? null : { start, end };
+  };
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), span);
+}
+
+/** Every #937 shape pass, in the order it runs. Each one reads the text once. */
+function redactValueShapes(text: string): string {
+  const out = redactStructuredValues(text);
+  return out;
 }
 
 /**
