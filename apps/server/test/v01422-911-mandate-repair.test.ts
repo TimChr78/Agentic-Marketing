@@ -312,6 +312,13 @@ describe('the single-active-mandate repair keeps what the runtime uses (#911 A1)
       expect.objectContaining({ id: broken2, archived: false }),
     ]);
     expect(logs.join(' ')).toMatch(/none is usable/);
+
+    // Leave nothing for a later pass in this file: the workspace now stays unrecorded on purpose
+    // (#955), and the clock injection in the failure test counts groups across the whole pass.
+    await t.srv.db.admin.query('UPDATE artifacts SET archived = true WHERE workspace_id = $1 AND id = ANY($2::text[])', [
+      ws,
+      [broken1, broken2],
+    ]);
   });
 
   it('repairs the other groups when one fails, leaves the workspace unrecorded, and the next pass finishes it', async () => {

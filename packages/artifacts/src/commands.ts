@@ -532,6 +532,72 @@ export const setOwner = defineCommand({
   },
 });
 
+export const archiveArtifact = defineCommand({
+  name: 'artifacts.archive',
+  title: 'Archive an artifact',
+  description:
+    'Retires an artifact for good: nothing can be published on it again, the default artifacts.list hides it, and its pending approval requests are closed as rejected. Use it to retire one of two published mandates for the same agent (an agent can have only one active mandate). A workspace singleton (brand, business context, tracking plan, purposes, delivery policy, conversion map) cannot be archived because a workspace needs it; edit it instead. Archiving does not unpublish a live version or delete history, and there is no unarchive command: config.import can restore an archived singleton when the workspace has no active one. People only.',
+  input: z.object({
+    artifactId: ArtifactId,
+  }),
+  output: z.object({
+    artifactId: z.string(),
+    name: z.string().describe('The name after archiving; an archive marker is appended the first time'),
+    archived: z.literal(true),
+    closedApprovals: z.number().int().describe('Pending approval requests closed as rejected, because nothing can be published on it'),
+  }),
+  permission: 'artifacts:write',
+  effect: 'write',
+  actionClass: 'destructive',
+  humansOnly: true,
+  target: (i) => i.artifactId,
+  handler: async (input, ctx) => {
+    const ws = ctx.principal.workspaceId;
+    const current = await loadArtifact(ctx, input.artifactId);
+    if (isSingleton(current.type))
+      throw new AppError(
+        'conflict',
+        `A workspace needs its ${current.type}, so it cannot be archived. Edit the active one with artifacts.updateDraft instead.`,
+      );
+    if (current.archived)
+      return {
+        artifactId: current.id,
+        name: current.name,
+        archived: true as const,
+        closedApprovals: await closeArchivedRequestsIn(ctx.tx, ws),
+      };
+    // The request rows first, then the artifact row: the order every decider takes, so archiving
+    // cannot deadlock with a person's approval of one of these requests (#957).
+    const rows = await lockRequestsFor(ctx.tx, ws, [current.id]);
+    // Re-read under the lock: a concurrent archive or restore decides which branch applies.
+    const fresh = await loadArtifact(ctx, input.artifactId);
+    if (fresh.archived)
+      return {
+        artifactId: fresh.id,
+        name: fresh.name,
+        archived: true as const,
+        closedApprovals: await closeArchivedAmong(
+          ctx.tx,
+          ws,
+          rows,
+          new Set([fresh.id, ...rows.filter((x) => x.a.archived).map((x) => x.a.id)]),
+        ),
+      };
+    const name = `${fresh.name} (archived ${fresh.id})`;
+    await ctx.tx
+      .update(schema.artifacts)
+      .set({ archived: true, name, updatedAt: new Date() })
+      .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, fresh.id)));
+    const archivedIds = new Set([fresh.id, ...rows.filter((x) => x.a.archived).map((x) => x.a.id)]);
+    return {
+      artifactId: fresh.id,
+      name,
+      archived: true as const,
+      closedApprovals: await closeArchivedAmong(ctx.tx, ws, rows, archivedIds),
+    };
+  },
+});
+
 const LayoutSchema = z.object({
   positions: z.record(z.string(), z.object({ x: z.number(), y: z.number() })).describe('Canvas position per step id'),
   updatedAt: z.string(),
@@ -1728,6 +1794,79 @@ async function closeRejectedRows(tx: Tx, workspaceId: string, rows: { id: string
 }
 
 /**
+ * Locks, in the documented order, the pending approval requests a decision on these artifacts
+ * covers (their own, plus every request of their bundles), then those artifacts, and returns the
+ * requests as they are under the locks. Approval rows come before artifact rows, in id order, which
+ * is the order `approvals.approve`, the held runner and `artifacts.archive` all take.
+ */
+async function lockRequestsFor(tx: Tx, workspaceId: string, artifactIds: string[]): Promise<{ r: ApprovalRow; a: ArtifactRow }[]> {
+  const pending = and(eq(schema.approvalRequests.workspaceId, workspaceId), eq(schema.approvalRequests.status, 'pending'));
+  const candidates = await tx
+    .select({ id: schema.approvalRequests.id, bundleId: schema.approvalRequests.bundleId })
+    .from(schema.approvalRequests)
+    .where(and(pending, inArray(schema.approvalRequests.artifactId, artifactIds)));
+  const bundleIds = [...new Set(candidates.map((c) => c.bundleId).filter((id): id is string => !!id))];
+  const inBundles = bundleIds.length
+    ? await tx
+        .select({ id: schema.approvalRequests.id })
+        .from(schema.approvalRequests)
+        .where(and(pending, inArray(schema.approvalRequests.bundleId, bundleIds)))
+    : [];
+  const ids = [...new Set([...candidates.map((c) => c.id), ...inBundles.map((b) => b.id)])];
+  const lockedScope = and(pending, inArray(schema.approvalRequests.id, ids));
+  if (ids.length)
+    await tx
+      .select({ id: schema.approvalRequests.id })
+      .from(schema.approvalRequests)
+      .where(lockedScope)
+      .orderBy(asc(schema.approvalRequests.id))
+      .for('update');
+  // The artifact ids the locked requests name, plus the caller's own, locked in id order. The
+  // caller's targets are locked even when there is no request, so an archive or a publish cannot
+  // race this transaction.
+  const named = ids.length
+    ? await tx.select({ artifactId: schema.approvalRequests.artifactId }).from(schema.approvalRequests).where(lockedScope)
+    : [];
+  const allArtifacts = [...new Set([...artifactIds, ...named.map((n) => n.artifactId)])];
+  await tx
+    .select({ id: schema.artifacts.id })
+    .from(schema.artifacts)
+    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, allArtifacts)))
+    .orderBy(asc(schema.artifacts.id))
+    .for('update');
+  if (!ids.length) return [];
+  // Re-read after both locks: a decision or a restore that committed while this waited wins.
+  return tx
+    .select({ r: schema.approvalRequests, a: schema.artifacts })
+    .from(schema.approvalRequests)
+    .innerJoin(
+      schema.artifacts,
+      and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, schema.approvalRequests.artifactId)),
+    )
+    .where(lockedScope);
+}
+
+/**
+ * Closes the locked pending requests that can never publish (#957): their own artifact is in
+ * `archivedIds`, or they belong to a bundle with one. `archivedIds` is passed separately because a
+ * caller may have just archived its artifact after the rows were read.
+ */
+async function closeArchivedAmong(tx: Tx, workspaceId: string, rows: { r: ApprovalRow; a: ArtifactRow }[], archivedIds: Set<string>) {
+  if (!archivedIds.size || !rows.length) return 0;
+  const bundleReason = `${[...archivedIds].join(', ')} in the same review is archived, so nothing in this bundle can be published.`;
+  const toClose: { id: string; artifactId: string; version: number; reason: string }[] = [];
+  for (const { r, a } of rows)
+    toClose.push({
+      id: r.id,
+      artifactId: r.artifactId,
+      version: r.version,
+      reason: archivedIds.has(a.id) ? (await archiveProblem(tx, workspaceId, { ...a, archived: true }))! : bundleReason,
+    });
+  await closeRejectedRows(tx, workspaceId, toClose);
+  return toClose.length;
+}
+
+/**
  * The pending requests that can never publish because an artifact they name is archived, closed
  * inside one workspace transaction (#957). `approvals.approve` and the held runner already reject
  * such a request when a person decides or a veto window ends; this covers the ones nobody touched.
@@ -1738,75 +1877,22 @@ async function closeRejectedRows(tx: Tx, workspaceId: string, rows: { id: string
  * order the approve path takes, so the two cannot deadlock.
  */
 async function closeArchivedRequestsIn(tx: Tx, workspaceId: string): Promise<number> {
-  const archivedArtifact = and(
-    eq(schema.artifacts.workspaceId, workspaceId),
-    eq(schema.artifacts.id, schema.approvalRequests.artifactId),
-    eq(schema.artifacts.archived, true),
-  );
   const candidates = await tx
-    .select({ id: schema.approvalRequests.id, bundleId: schema.approvalRequests.bundleId })
+    .select({ id: schema.approvalRequests.artifactId })
     .from(schema.approvalRequests)
-    .innerJoin(schema.artifacts, archivedArtifact)
+    .innerJoin(
+      schema.artifacts,
+      and(
+        eq(schema.artifacts.workspaceId, workspaceId),
+        eq(schema.artifacts.id, schema.approvalRequests.artifactId),
+        eq(schema.artifacts.archived, true),
+      ),
+    )
     .where(and(eq(schema.approvalRequests.workspaceId, workspaceId), eq(schema.approvalRequests.status, 'pending')));
-  if (!candidates.length) return 0;
-  const bundleIds = [...new Set(candidates.map((c) => c.bundleId).filter((id): id is string => !!id))];
-  const expanded = bundleIds.length
-    ? await tx
-        .select({ id: schema.approvalRequests.id })
-        .from(schema.approvalRequests)
-        .where(
-          and(
-            eq(schema.approvalRequests.workspaceId, workspaceId),
-            eq(schema.approvalRequests.status, 'pending'),
-            inArray(schema.approvalRequests.bundleId, bundleIds),
-          ),
-        )
-    : [];
-  const ids = [...new Set([...candidates.map((c) => c.id), ...expanded.map((e) => e.id)])];
-
-  // Approval rows first, in id order, then the artifact rows: the order every decider follows.
-  await tx
-    .select({ id: schema.approvalRequests.id })
-    .from(schema.approvalRequests)
-    .where(and(eq(schema.approvalRequests.workspaceId, workspaceId), inArray(schema.approvalRequests.id, ids)))
-    .orderBy(asc(schema.approvalRequests.id))
-    .for('update');
-  const pendingIn = and(eq(schema.approvalRequests.workspaceId, workspaceId), inArray(schema.approvalRequests.id, ids));
-  const locked = await tx
-    .select({ r: schema.approvalRequests, a: schema.artifacts })
-    .from(schema.approvalRequests)
-    .innerJoin(
-      schema.artifacts,
-      and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, schema.approvalRequests.artifactId)),
-    )
-    .where(and(pendingIn, eq(schema.approvalRequests.status, 'pending')));
-  const artifactIds = [...new Set(locked.map((x) => x.a.id))];
-  if (!artifactIds.length) return 0;
-  await tx
-    .select({ id: schema.artifacts.id })
-    .from(schema.artifacts)
-    .where(and(eq(schema.artifacts.workspaceId, workspaceId), inArray(schema.artifacts.id, artifactIds)))
-    .orderBy(asc(schema.artifacts.id))
-    .for('update');
-  // Re-read after both locks: a decision or a restore that committed while this waited wins.
-  const rows = await tx
-    .select({ r: schema.approvalRequests, a: schema.artifacts })
-    .from(schema.approvalRequests)
-    .innerJoin(
-      schema.artifacts,
-      and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, schema.approvalRequests.artifactId)),
-    )
-    .where(and(pendingIn, eq(schema.approvalRequests.status, 'pending')));
-  const archivedIds = [...new Set(rows.filter((x) => x.a.archived).map((x) => x.a.id))];
-  if (!archivedIds.length) return 0;
-  const bundleReason = `${archivedIds.join(', ')} in the same review is archived, so nothing in this bundle can be published.`;
-  const toClose: { id: string; artifactId: string; version: number; reason: string }[] = [];
-  for (const { r, a } of rows) {
-    const own = a.archived ? await archiveProblem(tx, workspaceId, a) : null;
-    toClose.push({ id: r.id, artifactId: r.artifactId, version: r.version, reason: own ?? bundleReason });
-  }
-  await closeRejectedRows(tx, workspaceId, toClose);
-  return toClose.length;
+  const archivedArtifactIds = [...new Set(candidates.map((c) => c.id))];
+  if (!archivedArtifactIds.length) return 0;
+  const rows = await lockRequestsFor(tx, workspaceId, archivedArtifactIds);
+  return closeArchivedAmong(tx, workspaceId, rows, new Set(rows.filter((x) => x.a.archived).map((x) => x.a.id)));
 }
 
 /** How often the scheduler looks again for a request an artifact archived after start-up (#957). */
@@ -2198,6 +2284,7 @@ export const artifactCommands = [
   listTypes,
   createArtifact,
   setOwner,
+  archiveArtifact,
   updateDraft,
   getArtifact,
   listArtifacts,
