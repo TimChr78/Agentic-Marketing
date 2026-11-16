@@ -196,6 +196,17 @@ describe("journey funnel's subtree rule and headlines (#908 review round 5)", ()
     expect(reachedOf(result)).toEqual({ start: 100, a: 99, b: null });
   });
 
+  it('names a below-k self-loop step as its own hidden subtree (#959)', () => {
+    const result = plan({
+      totals: { entered: 100, goalReached: 0, completed: 100, exited: 0 },
+      steps: steps({ trigger: 100, end: 100, h: 3 }),
+      topology: [node('trigger', 'trigger', ['end']), node('end', 'exit'), node('h', 'wait', ['h'])],
+    });
+    expect(result.selfHidden).toEqual(['h']);
+    expect(result.hiddenParents).toEqual([]);
+    expect(result.allStepsHidden).toBe(false);
+  });
+
   it('hides a primary row whose only parent is itself (disconnected self-loop) (#917 review round 6)', () => {
     // trigger(100) -> end(100) plus a disconnected wait node h whose only parent is itself, h(3).
     // `journeys.migrate` can move participants to h; the row must not print its own count.
@@ -342,6 +353,23 @@ describe('journey funnel response is indistinguishable under one participant mov
       { version: 1, order: population.nodes.map((node) => node.id), linear: linearOf(population.nodes), edges: population.nodes },
     );
   };
+
+  it('emits a note naming a hidden self-loop step and k (#959)', () => {
+    // trigger(100) -> end(100) plus a disconnected self-loop h reached by 3 migrated people.
+    const nodes: GraphNode[] = [
+      { id: 'trigger', kind: 'trigger', children: ['end'] },
+      { id: 'end', kind: 'exit', children: [] },
+      { id: 'h', kind: 'wait', children: ['h'] },
+    ];
+    const walks: Walk[] = [
+      ...Array.from({ length: 100 }, () => ({ visited: ['trigger', 'end'], converted: false })),
+      ...Array.from({ length: 3 }, () => ({ visited: ['h'], converted: false })),
+    ];
+    const funnel = response({ nodes, walks });
+    expect(funnel.steps.find((step) => step.step === 'h')).toMatchObject({ reached: null, suppressed: true });
+    expect(funnel.meta.notes.join(' ')).toContain('Step h is its own hidden subtree');
+    expect(funnel.meta.notes.join(' ')).toContain('k=5');
+  });
 
   /** The path from `from` to `target` inside `allowed`, exclusive of `from`, inclusive of `target`. */
   const pathTo = (nodes: GraphNode[], from: string, target: string, allowed: Set<string>): string[] | null => {
