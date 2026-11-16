@@ -171,6 +171,22 @@ function trimDefaultPort(authority: string, scheme: string): string {
 }
 
 /**
+ * Whether a `TRUSTED_ORIGINS` entry has a wildcard (`*` or `?`), and so must be matched by the
+ * bounded matcher here rather than handed to a third-party matcher (#947).
+ */
+export function originPatternHasWildcard(entry: string): boolean {
+  return hasWildcard(entry.trim());
+}
+
+/**
+ * An exact `TRUSTED_ORIGINS` entry in the form a matcher compares verbatim: its serialized origin.
+ * A wildcard entry has no such form and is resolved per request instead (#947).
+ */
+export function serializeTrustedOrigin(entry: string): string {
+  return normalizeExact(entry);
+}
+
+/**
  * Whether a digit-dot wildcard admits this authority. A pattern host that is only digits, dots and
  * wildcards names an IPv4 range (`192.168.*.*`, `10.*`), so the host must be a literal IPv4
  * address. Every other pattern keeps the documented subdomain matching.

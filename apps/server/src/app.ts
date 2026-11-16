@@ -36,7 +36,7 @@ import { agentOutcomes, agentOutcomesMany } from './agents/report';
 import type { Config } from './config';
 import { createDomainService, type PublicRequest } from './domains';
 import { copilotApi } from './http/copilot';
-import { type BrowserRequestPolicy, browserBody, formCsrfRefusal } from './http/csrf';
+import { type BrowserRequestPolicy, browserBody, formCsrfRefusal, originLengthRefusal } from './http/csrf';
 import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
 import { consentPage, invitePage, loginPage, pageNonce, pagesCsp } from './http/pages';
@@ -405,6 +405,15 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   // Prometheus text exposition on the main listener only, and only once METRICS_TOKEN is set (#147).
   // The public-only listener never forwards it (see http/public-only.ts).
   app.get('/metrics', metricsHandler({ token: config.metricsToken, registry: metrics, db, events, hot, natsUrl: config.nats.url }));
+
+  // Better Auth's own origin check for `/api/auth/*` compiles each trusted entry into a RegExp and
+  // runs it against the Origin (or Referer) header, so bound that header before it gets there
+  // (#947). This runs for every auth route below, including the password-reset and SAML ones.
+  app.use('/api/auth/*', async (c, next) => {
+    const refusal = originLengthRefusal(c.req.raw);
+    if (refusal) return refusal;
+    await next();
+  });
 
   // Self-service password reset (#191): rate limited and audited before Better Auth sees it.
   passwordResetRoutes(app, {
