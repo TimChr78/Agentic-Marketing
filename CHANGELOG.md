@@ -2,6 +2,31 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.27] - 2026-11-16
+
+### Changed
+
+- **Breaking:** idempotency keys are kept for 30 days (`RETENTION_IDEMPOTENCY_DAYS`) instead of indefinitely. A key reused after that runs the operation again and stores a fresh row; the scheduler removes expired rows in small batches so `idempotency_keys` no longer grows without limit.
+
+### Fixed
+
+- `campaigns.holdoutResult` chooses each person's winning holdout assignment in PostgreSQL over `profiles.merged_into`, in the same microsecond-then-profile-id order the send path uses, and computes the entrant counts and time bounds in SQL. The conversion-event and unsubscribe reads now run one bounded page of people at a time, fold each event page as it arrives, and keep only per-currency buyer counts saturating at k, so a long-running campaign's report no longer holds its whole assignment history, every conversion or every unsubscriber in memory.
+
+### Security
+
+- Better Auth and every `@better-auth/*` plugin move to 1.7.23 in one step. Dependabot had split the core from its plugins into two pull requests (#980 and #981), and each branch mixed 1.7.22 with 1.7.23, so typecheck failed in `packages/auth`; the dependabot groups now keep the core, plugins and their pinned peers together instead of letting the minor-and-patch group take a plugin.
+- The AI SDK update (7.0.172, with `@ai-sdk/anthropic` 4.0.104 and `@ai-sdk/openai-compatible` 3.0.92) carries the fix that keeps Azure image and Vertex tool-result downloads from sending an Azure bearer token or a Vertex Express Mode API key to the file host. Its UI message streams now keep a failed tool call's error text by default; this repository has no `toUIMessageStream` call site, and the in-app copilot's own NDJSON stream keeps showing tool errors with credential-shaped values redacted (a regression test drives a failing tool whose argument contains `password=…`). `jose` 6.2.17, the OpenTelemetry SDK and OTLP exporter 0.301.2, `jsdom` 31.0.1 and `@testing-library/user-event` 14.6.10 are updated with it.
+
+### Upgrading from 0.14.26
+
+- **Migrations:** `packages/db/migrations/0104_idempotency_keys_created_at.sql`.
+- **Configuration:** `RETENTION_IDEMPOTENCY_DAYS`.
+- **Breaking changes:** an idempotency key is kept for 30 days (`RETENTION_IDEMPOTENCY_DAYS`, 1 to 3650) instead of indefinitely: a key reused after that runs the operation again instead of replaying the first response, and the scheduler deletes expired keys in bounded batches. Better Auth 1.7.23: MCP routes verify tokens in process instead of fetching the server's own `/jwks`, and an OAuth authorization code is no longer consumed by a failed PKCE or redirect check. `campaigns.holdoutResult` returns the same figures, now computed in SQL with bounded memory.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.27.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.27 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.27` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.27). Run `docker compose exec app am doctor`.
+
+<!-- issues: 972, 976, 980, 981 -->
+
 ## [0.14.26] - 2026-11-16
 
 ### Fixed
