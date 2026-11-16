@@ -722,12 +722,53 @@ function lineEnd(text: string, start: number): number {
   return newline < 0 ? text.length : newline;
 }
 
+const isWordChar = (char: string): boolean =>
+  (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char === '_';
+
+/**
+ * The first position in [from, to) a later pass needs as an anchor: a credential key followed by
+ * `:`/`=` or an Authorization scheme word. A pre-pass must not consume one, because the key's value
+ * (the next line's `=…`, or the `Bearer` rule's token) would then never be redacted. The search is
+ * bounded by the caller, so this stays linear.
+ */
+function shapeAnchor(text: string, from: number, to: number): number {
+  const limit = Math.min(text.length, to);
+  let index = from;
+  while (index < limit) {
+    const char = text.charAt(index);
+    if ((char === 'b' || char === 'B') && (index === 0 || !isWordChar(text.charAt(index - 1)))) {
+      const word = text.slice(index, Math.min(limit, index + 7)).toLowerCase();
+      if (word.startsWith('bearer') && isSpace(text.charAt(index + 6))) return index;
+      if (word.startsWith('basic') && isSpace(text.charAt(index + 5))) return index;
+    }
+    if (!isShapeNameStart(char)) {
+      index += 1;
+      continue;
+    }
+    let nameEnd = index + 1;
+    while (nameEnd < limit && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
+    if (separatorEnd(text, nameEnd, false) >= 0) {
+      const name = text.slice(index, nameEnd);
+      if (name.length <= MAX_SHAPE_KEY_CHARS && isShapesCredentialKey(name)) return index;
+    }
+    index = nameEnd;
+  }
+  return -1;
+}
+
+/** Where an unbalanced structured value stops: before a later pass's anchor, else at the line end. */
+function unbalancedValueEnd(text: string, start: number): number {
+  const end = lineEnd(text, start);
+  const anchor = shapeAnchor(text, start + 1, Math.min(end, start + 1 + MAX_SHAPE_KEY_CHARS));
+  return anchor >= 0 ? anchor : end;
+}
+
 /**
  * A JSON array or object value under a credential key: `{"token":["shortpw"]}`,
  * `{"secret":{"v":"x"}}`. Brackets are scanned to a bounded depth and strings are skipped, so a
  * bracket inside a quoted string does not close the value. An unbalanced value is replaced up to
- * the end of its line (chosen over "the next `,`/`}` at depth 0" because a multi-line secret is
- * the case that matters, and stopping at the line never leaves any of it).
+ * the end of its line, or up to a credential key or scheme word on that line: taking the key too
+ * would leave the value it anchors (`{x-api-key\n=x…`) for no later pass to find.
  */
 function structuredValueEnd(text: string, start: number): number {
   const open = text.charAt(start);
@@ -753,21 +794,30 @@ function structuredValueEnd(text: string, start: number): number {
     }
     if (char === '[' || char === '{') {
       depth += 1;
-      if (depth > MAX_SHAPE_DEPTH) return lineEnd(text, start);
+      if (depth > MAX_SHAPE_DEPTH) return unbalancedValueEnd(text, start);
     } else if (char === ']' || char === '}') {
       depth -= 1;
       if (depth === 0) return index + 1;
     }
     index += 1;
   }
-  return lineEnd(text, start);
+  return unbalancedValueEnd(text, start);
 }
+
+/** Characters that end a value cleanly: the rules' bare-value stops, and a closing paren. */
+const STRUCTURED_FOLLOW = new Set(['', ',', ';', '}', ']', '"', "'", ')']);
 
 function redactStructuredValues(text: string): string {
   if (!/[[{]/.test(text)) return text;
   const span = (value: string, start: number): ValueSpan | null => {
     const end = structuredValueEnd(value, start);
-    return end < 0 ? null : { start, end };
+    if (end < 0) return null;
+    // Only a value followed by a delimiter or whitespace is taken. `{}$$nextKey: …` is a
+    // concatenation, not a JSON value: replacing its `}` would let a rule's greedy bare value
+    // swallow the next key and leave that key's value behind.
+    const next = value.charAt(end);
+    if (next !== '' && !isSpace(next) && !STRUCTURED_FOLLOW.has(next)) return null;
+    return { start, end };
   };
   return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), span);
 }
@@ -865,6 +915,9 @@ function arrowValueSpan(text: string, valueStart: number): ValueSpan | null {
   index -= 1;
   if (text.charAt(index) !== '=') return null;
   const start = index;
+  // A scheme value (`=> Bearer abc`) goes with the arrow, token included.
+  const scheme = schemeValueSpan(text, valueStart);
+  if (scheme) return { start, end: scheme.end };
   const unicode = unicodeValueSpan(text, valueStart);
   if (unicode) return { start, end: unicode.end };
   let end = pairValueEnd(text, valueStart);
@@ -875,6 +928,9 @@ function arrowValueSpan(text: string, valueStart: number): ValueSpan | null {
     const inner = pairValueEnd(text, end);
     if (inner > end) end = inner;
   }
+  // A credential key or scheme word inside the value is another pass's anchor: leave the pair to
+  // the rules rather than consuming it here.
+  if (shapeAnchor(text, valueStart, end) >= 0) return null;
   return { start, end };
 }
 
@@ -945,42 +1001,6 @@ function redactPemBlocks(text: string): string {
 }
 
 /**
- * A credential pair whose value is itself a credential pair: `SIGNINGKEY=AZUREOPENAIKEY='x'`,
- * `AZUREOPENAIKEY=apiSecret='x'`. The rules replace the inner key as the outer value and leave the
- * inner value behind, so this replaces the whole nested pair while both are intact. It only acts
- * on a quoted inner value: a bare inner pair is consumed whole by the rules already, and an
- * `innerKey://scheme` value belongs to the scheme rule.
- */
-function nestedValueSpan(text: string, valueStart: number): ValueSpan | null {
-  if (!isShapeNameStart(text.charAt(valueStart))) return null;
-  let nameEnd = valueStart + 1;
-  while (nameEnd < text.length && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
-  const innerName = text.slice(valueStart, nameEnd);
-  if (innerName.length > MAX_SHAPE_KEY_CHARS || !isShapesCredentialKey(innerName)) return null;
-  const innerStart = separatorEnd(text, nameEnd, true);
-  if (innerStart < 0) return null;
-  const quote = text.charAt(innerStart);
-  if (quote !== '"' && quote !== "'") return null;
-  let innerEnd = pairValueEnd(text, innerStart);
-  if (innerEnd < 0) return null;
-  // A value glued after the inner quote (`oauthToken="x"tail`) goes with it: the rules replace a
-  // marker plus glued text as one value in a later round, and consuming the key here would take
-  // that anchor away.
-  const next = text.charAt(innerEnd);
-  if (next !== '' && !isSpace(next) && !BARE_VALUE_STOP.has(next)) {
-    const tail = pairValueEnd(text, innerEnd);
-    if (tail > innerEnd) innerEnd = tail;
-  }
-  return { start: valueStart, end: innerEnd };
-}
-
-function redactNestedPairs(text: string): string {
-  if (!text.includes('=') && !text.includes(':')) return text;
-  if (!text.includes('"') && !text.includes("'")) return text;
-  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), nestedValueSpan);
-}
-
-/**
  * The passes that must see a shape before the rules do, because they consume a delimiter the rules
  * would otherwise take (`[`, a Unicode opening quote, `>`, `-----BEGIN`, an inner `=`). Each one
  * replaces a whole delimited span, so it cannot leave a nested pair's value behind.
@@ -990,7 +1010,6 @@ function redactIntactValueShapes(text: string): string {
   out = redactUnicodeQuotedValues(out);
   out = redactArrowPairs(out);
   out = redactPemBlocks(out);
-  out = redactNestedPairs(out);
   return out;
 }
 
@@ -1192,14 +1211,20 @@ function redactPwdKeys(text: string): string {
 
 /**
  * A value the rules replaced only in part: the marker is followed by the rest of the value
- * (`token=[redacted]shortpw`). Only a marker glued to a word is taken; a space or a delimiter means
- * the value already ended there.
+ * (`token=[redacted]shortpw`), or by the quoted value of an inner pair whose key the outer pass
+ * took as its value (`SIGNINGKEY=AZUREOPENAIKEY='x'` becomes `SIGNINGKEY=[redacted]'x'`). Only a
+ * marker glued to a word or a quote is taken; a space or another delimiter means the value already
+ * ended there.
  */
 function gluedMarkerSpan(text: string, start: number): ValueSpan | null {
   const marker = '[redacted]';
   if (!text.startsWith(marker, start)) return null;
   const restStart = start + marker.length;
   const char = text.charAt(restStart);
+  if (char === '"' || char === "'") {
+    const quotedEnd = pairValueEnd(text, restStart);
+    return quotedEnd < 0 ? null : { start, end: quotedEnd };
+  }
   if (char === '' || isSpace(char) || BARE_VALUE_STOP.has(char)) return null;
   const end = pairValueEnd(text, restStart);
   return end < 0 ? null : { start, end };
