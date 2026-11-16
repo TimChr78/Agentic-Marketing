@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { DecisionQuestion } from '@agentic-marketing/artifacts';
 import { describe, expect, it } from 'vitest';
+import { expectLinear } from '../../../test-support/linear';
 import { personalDataIn } from '../src/context';
 import {
   assertStateAllowed,
@@ -305,13 +306,13 @@ describe('the personal-data guard', () => {
 });
 
 describe('systemOneUrl', () => {
-  it('appends /systemone once and trims any number of trailing slashes quickly', () => {
+  it('appends /systemone once and trims any number of trailing slashes in linear time', () => {
     expect(systemOneUrl('https://api.commandcode.ai/provider/v1')).toBe('https://api.commandcode.ai/provider/v1/systemone');
     expect(systemOneUrl('https://api.typesafe.ai/v1///')).toBe('https://api.typesafe.ai/v1/systemone');
     expect(systemOneUrl('https://api.typesafe.ai/v1/systemone/')).toBe('https://api.typesafe.ai/v1/systemone');
-    const started = Date.now();
-    systemOneUrl(`https://x${'/'.repeat(100_000)}a`);
-    expect(Date.now() - started).toBeLessThan(500);
+    // An anchored slash trim is quadratic on a long run; compare n with 4n rather than timing this
+    // runner (#990 timing sweep).
+    expectLinear((n) => `https://x${'/'.repeat(n)}a`, systemOneUrl);
   });
 });
 

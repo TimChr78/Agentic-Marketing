@@ -1,5 +1,6 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { expectLinear } from '../../../test-support/linear';
 import { compileMjml, renderTemplate, stripLiquidTags, validateTemplate } from '../src/render';
 
 const welcome = {
@@ -132,10 +133,10 @@ describe('stripLiquidTags', () => {
     expect(stripLiquidTags('<p>{% if a %}x{% endif %}</p>')).toBe('<p>x</p>');
     expect(stripLiquidTags('{% open without close')).toBe('{% open without close');
     expect(stripLiquidTags('a {{ b }} c')).toBe('a {{ b }} c');
-    // Many unclosed tags no longer take polynomial time.
+    // Many unclosed tags no longer take polynomial time: compare n with 4n, so the check measures
+    // growth rather than this runner's speed (#990 timing sweep).
     const hostile = '{{%'.repeat(50_000);
-    const started = Date.now();
     expect(stripLiquidTags(hostile)).toBe(hostile);
-    expect(Date.now() - started).toBeLessThan(500);
+    expectLinear((n) => '{{%'.repeat(n), stripLiquidTags, 12_500);
   });
 });

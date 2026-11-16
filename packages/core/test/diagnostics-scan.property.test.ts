@@ -239,8 +239,10 @@ describe('the scanner is linear for every special shape (#902 round 4)', () => {
             const large = unit.repeat(4_000);
             measure(large);
             const elapsed = measure(large);
-            // A linear scan of tens of kilobytes is milliseconds; a quadratic one is not.
-            if (elapsed > 500) slow.push(`${JSON.stringify(unit)} ${elapsed.toFixed(0)}ms`);
+            // A linear scan of tens of kilobytes is milliseconds; a quadratic one is not. The
+            // bound is generous on purpose: it separates "finished" from "still running", not
+            // this runner from a faster one.
+            if (elapsed > 2_000) slow.push(`${JSON.stringify(unit)} ${elapsed.toFixed(0)}ms`);
           }
         }
       }
@@ -250,10 +252,11 @@ describe('the scanner is linear for every special shape (#902 round 4)', () => {
   }, 300_000);
 
   it('does not rescan the text for an unclosed Unicode quote', () => {
-    const started = performance.now();
     const out = redactCredentials('token=\u201cabc\n'.repeat(5_900));
-    expect(performance.now() - started).toBeLessThan(500);
     expect(out.split('\n').every((line) => !line.includes('abc'))).toBe(true);
+    // Growth, not a wall-clock budget: rescanning the whole text per line is quadratic, so 4n is
+    // about sixteen times n; linear code stays near four (#990 timing sweep).
+    expectLinear((n) => 'token=\u201cabc\n'.repeat(n), redactCredentials, 1_500);
   }, 60_000);
 });
 
@@ -265,6 +268,8 @@ describe('the scanner stays linear on very large input (#902 round 5)', () => {
     const text = repeatTo('the gateway said the request failed and it was retried; ', 10 * MB);
     const started = performance.now();
     const out = redactCredentials(text);
+    // Generous on purpose: a linear 10 MB scan is about a second, so this only catches a
+    // super-linear path that never finishes, not a slower shared runner.
     expect(performance.now() - started).toBeLessThan(20_000);
     expect(out).toBe(text);
   }, 120_000);
@@ -290,6 +295,8 @@ describe('the scanner stays linear on very large input (#902 round 5)', () => {
     const out = redactCredentials(text);
     const elapsed = performance.now() - started;
     expect(out.length).toBeGreaterThan(0);
+    // Same rule as the 10 MB test: a bound that separates a finished super-linear scan from a hung
+    // one, wide enough for a loaded runner.
     expect(elapsed).toBeLessThan(45_000);
   }, 120_000);
 });

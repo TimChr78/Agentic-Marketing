@@ -240,7 +240,16 @@ export function describeSettleState(state) {
     pending.push(`${state.images.length} on-screen image(s) not complete: ${state.images.map((i) => i.src).join(', ')}`);
   if (state.fonts && state.fonts !== 'loaded') pending.push(`fonts are ${state.fonts}`);
   if (state.gjs?.length) pending.push(`${state.gjs.length} e-mail editor(s) not ready: ${state.gjs.join(', ')}`);
-  if (state.flows?.length) pending.push(`${state.flows.length} journey canvas(es) without a visible node: ${state.flows.join(', ')}`);
+  if (state.flows?.length)
+    pending.push(
+      `${state.flows.length} journey canvas(es) not ready: ${state.flows
+        .map((f) =>
+          f.ready
+            ? `${f.name} (ready, but no visible node among ${f.nodes})`
+            : `${f.name} (${f.nodes} node(s), ${f.unmeasured} not measured)`,
+        )
+        .join(', ')}`,
+    );
   return pending.length ? pending.join('; ') : 'nothing is pending';
 }
 
@@ -283,11 +292,22 @@ export function settleState() {
         const r = flow.getBoundingClientRect();
         return r.width > 0 && r.height > 0;
       })
-      .filter(
-        (flow) => !Array.from(flow.querySelectorAll('.react-flow__node')).some((node) => getComputedStyle(node).visibility !== 'hidden'),
-      )
+      .filter((flow) => {
+        const nodes = Array.from(flow.querySelectorAll('.react-flow__node'));
+        if (!nodes.length) return false;
+        if (flow.getAttribute('data-journey-ready') !== 'true') return true;
+        return !nodes.some((node) => getComputedStyle(node).visibility !== 'hidden');
+      })
       .slice(0, 20)
-      .map((flow) => flow.id || flow.className || 'canvas'),
+      .map((flow) => {
+        const nodes = Array.from(flow.querySelectorAll('.react-flow__node'));
+        return {
+          name: flow.id || flow.className || 'canvas',
+          ready: flow.getAttribute('data-journey-ready') === 'true',
+          nodes: nodes.length,
+          unmeasured: nodes.filter((node) => getComputedStyle(node).visibility === 'hidden').length,
+        };
+      }),
   };
 }
 
@@ -338,10 +358,25 @@ export async function settle(page, { timeout = 20_000 } = {}) {
     () => Array.from(document.querySelectorAll('.am-gjs-app')).every((el) => el.dataset.amGjsReady === 'true'),
     { timeout },
   );
-  // The journey canvas (React Flow) mounts its nodes hidden until it has measured them; capture once
-  // every visible canvas shows its nodes (CI once caught the builder with an empty canvas). Only
-  // canvases with a size count, and one shown node is enough: requiring every node could wait
-  // forever on one that is never measured.
+  // The journey canvas (React Flow) keeps its nodes hidden until it has measured them. Wait for the
+  // canvas's own readiness signal, set from React Flow's measurement, instead of polling the
+  // derived `visibility` style: a poll cannot tell "not measured yet" from "never measured", which
+  // is how a slow dark-theme run timed out with an empty canvas (#990).
+  await waitForSettle(
+    page,
+    'the journey canvas to report its nodes ready',
+    () =>
+      Array.from(document.querySelectorAll('.react-flow'))
+        .filter((flow) => {
+          const r = flow.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        })
+        .every((flow) => flow.getAttribute('data-journey-ready') === 'true'),
+    { timeout },
+  );
+  // Then confirm the promise the signal makes: a measured node is actually shown. Only canvases
+  // with a size count, and one shown node is enough: a node that is never rendered cannot hide the
+  // whole graph.
   await waitForSettle(
     page,
     'the journey canvas to draw a visible node',
@@ -351,9 +386,11 @@ export async function settle(page, { timeout = 20_000 } = {}) {
           const r = flow.getBoundingClientRect();
           return r.width > 0 && r.height > 0;
         })
-        .every((flow) =>
-          Array.from(flow.querySelectorAll('.react-flow__node')).some((node) => getComputedStyle(node).visibility !== 'hidden'),
-        ),
+        .every((flow) => {
+          const nodes = Array.from(flow.querySelectorAll('.react-flow__node'));
+          // An empty graph is a valid canvas: the readiness signal is the only fact to wait for.
+          return nodes.length === 0 || nodes.some((node) => getComputedStyle(node).visibility !== 'hidden');
+        }),
     { timeout },
   );
   // Two frames, so charts (ECharts SVG) and layout effects have painted.

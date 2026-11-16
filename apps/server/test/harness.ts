@@ -161,10 +161,16 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
 
 /**
  * A test file's port, moved into its worker's own block: test files run in parallel workers, and
- * the numbers in the files repeat. Worker n adds (n - 1) * 1000; the files use 2500–3499.
- * TEST_PORT_OFFSET moves every block, so two checkouts can run their suites at once.
+ * the numbers in the files repeat. Worker n adds (n - 1) * 5 000.
+ *
+ * The stride must be larger than the spread of the base numbers (currently 2 500–4 700). It used to
+ * be 1 000, so bases that differed by 1 000 landed on the same port in neighbouring workers:
+ * experience-rollout (3 600) and password-reset (2 600 + 1 000) both listened on 3 600 in CI, and
+ * one failed with EADDRINUSE inside its beforeAll hook (#990 follow-up). Files in one worker run
+ * one at a time, so a repeated base there is safe. TEST_PORT_OFFSET still moves every block, so two
+ * checkouts can run at once.
  */
-export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 1000 + testPortOffset();
+export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 5_000 + testPortOffset();
 
 /**
  * The migrated template database: named after a fingerprint of the whole build recipe, so an

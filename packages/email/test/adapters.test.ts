@@ -1,4 +1,5 @@
 import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
+import type { AddressInfo } from 'node:net';
 import { SMTPServer } from 'smtp-server';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
@@ -390,8 +391,15 @@ describe('SMTP', () => {
       cb(address.address.endsWith('@nowhere.invalid') ? new Error('550 no such user') : undefined);
     },
   });
-  const port = 2526;
-  const ready = new Promise<void>((r) => server.listen(port, '127.0.0.1', () => r()));
+  // Port 0: the OS assigns a free port, read back after listen, so this mock cannot collide with
+  // another test worker (a fixed port failed with EADDRINUSE in CI, #990 follow-up).
+  let port = 0;
+  const ready = new Promise<void>((r) =>
+    server.listen(0, '127.0.0.1', () => {
+      port = (server.server.address() as AddressInfo).port;
+      r();
+    }),
+  );
   afterAll(() => new Promise<void>((r) => server.close(() => r())));
 
   it('delivers through a relay with our headers, and surfaces rejections', async () => {
