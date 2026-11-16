@@ -19,7 +19,7 @@ const kp = {} as KeyProvider;
 const bounce = (at: string) =>
   [{ eventId: `${sid}:bounced`, type: 'bounced' as const, bounce: 'hard' as const, providerMessageId: sid, at }] as const;
 
-const apply = (at: string) => db.withWorkspace(d.workspace, (tx) => applyDeliveryEvents(tx, [...bounce(at)], 'test', kp));
+const apply = (at: string) => db.withWorkspace(d.workspace, (tx) => applyDeliveryEvents(tx, d.workspace, [...bounce(at)], 'test', kp));
 
 /** What every caller does: log the returned transitions only after `withWorkspace` committed. */
 async function applyAndLog(at: string) {
@@ -63,7 +63,7 @@ describe.skipIf(!hasTestDatabase())('STOP suppression escalation logging (A3)', 
     try {
       await expect(
         db.withWorkspace(d.workspace, async (tx) => {
-          const result = await applyDeliveryEvents(tx, [...bounce('2026-01-05T00:00:00Z')], 'test', kp);
+          const result = await applyDeliveryEvents(tx, d.workspace, [...bounce('2026-01-05T00:00:00Z')], 'test', kp);
           expect(result.escalations).toHaveLength(1);
           throw new Error('rolled back after the escalation');
         }),

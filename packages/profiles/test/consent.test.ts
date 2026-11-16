@@ -130,50 +130,57 @@ describe('refusedPurposes (journeys exit on these, #108)', () => {
   });
 });
 
-// #936: every distinct action is evidence, deduplicated only by event identity (the ledger's
-// message-id index) or an exact duplicate (same scope, status, source and action time). A
-// same-status signup is never folded against an older row: a decisive action can be processed
-// after the action it must outrank, so no time window is safe.
+// #936: every distinct action is evidence. An exact duplicate is folded only when it is the
+// same event (message id) or the same action to the microsecond; a JS Date comparison would fold
+// .123100Z and .123900Z even though they are distinct.
 describe('newConsentEvidence (#936)', () => {
   const at = (minute: number) => new Date(Date.UTC(2026, 9, 24, 12, minute));
-  const consent = (minute: number, status: ConsentStatus = 'granted', extra: Partial<ConsentInput> = {}): ConsentInput => ({
+  const exact = (minute: number, micro: string) =>
+    at(minute)
+      .toISOString()
+      .replace(/\.\d{3}Z$/, `.${micro}Z`);
+  const consent = (
+    minute: number,
+    status: ConsentStatus = 'granted',
+    extra: Partial<ConsentInput> = {},
+    micro = '000000',
+  ): ConsentInput => ({
     purpose: P,
     status,
     source: 'form',
     recordedAt: at(minute),
+    recordedAtExact: exact(minute, micro),
     ...extra,
-  });
-  const stored = (minute: number, status: ConsentStatus = 'granted', source: ConsentInput['source'] = 'form', channel = '') => ({
-    purpose: P,
-    channel,
-    status,
-    source,
-    recordedAt: at(minute),
   });
 
   it('keeps a newer same-status signup as evidence (the out-of-order case)', () => {
-    expect(newConsentEvidence([consent(120)], [stored(0)]).map((r) => r.recordedAt)).toEqual([at(120)]);
+    expect(newConsentEvidence([consent(20)])).toHaveLength(1);
   });
 
   it('keeps an older distinct signup too: an action is not folded by time', () => {
-    expect(newConsentEvidence([consent(10)], [stored(20)])).toHaveLength(1);
+    expect(newConsentEvidence([consent(10), consent(20)])).toHaveLength(2);
   });
 
-  it('folds an exact duplicate: same scope, status, source and action time', () => {
-    expect(newConsentEvidence([consent(20)], [stored(20)])).toEqual([]);
+  it('folds an exact duplicate: same scope, status, source and action time to the microsecond', () => {
+    expect(newConsentEvidence([consent(20), consent(20)])).toHaveLength(1);
   });
 
-  it('keeps a second signup minutes later as a distinct action', () => {
-    expect(newConsentEvidence([consent(30)], [stored(20)])).toHaveLength(1);
+  it('keeps actions at the same millisecond but different microseconds', () => {
+    expect(newConsentEvidence([consent(20, 'granted', {}, '123100'), consent(20, 'granted', {}, '123900')])).toHaveLength(2);
+  });
+
+  it('folds a redelivery of the same event id even when its time differs', () => {
+    expect(
+      newConsentEvidence([consent(20, 'granted', { messageId: 'msg_1' }), consent(30, 'granted', { messageId: 'msg_1' })]),
+    ).toHaveLength(1);
   });
 
   it('does not fold a different source or channel at the same action time', () => {
-    expect(newConsentEvidence([consent(20, 'granted', { source: 'import' })], [stored(20)])).toHaveLength(1);
-    expect(newConsentEvidence([consent(20, 'granted', { channel: 'email' })], [stored(20)])).toHaveLength(1);
+    expect(newConsentEvidence([consent(20), consent(20, 'granted', { source: 'import' })])).toHaveLength(2);
+    expect(newConsentEvidence([consent(20), consent(20, 'granted', { channel: 'email' })])).toHaveLength(2);
   });
 
   it('keeps every distinct action in one batch and folds its exact repeat', () => {
-    const kept = newConsentEvidence([consent(120), consent(120), consent(130)], [stored(0)]);
-    expect(kept.map((r) => r.recordedAt)).toEqual([at(120), at(130)]);
+    expect(newConsentEvidence([consent(120), consent(120), consent(130)])).toHaveLength(2);
   });
 });

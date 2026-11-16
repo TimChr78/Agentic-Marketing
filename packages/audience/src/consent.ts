@@ -63,6 +63,7 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
           proof,
           messageId: e.messageId,
           recordedAt,
+          recordedAtExact: e.timestamp,
         })),
       );
     const form = await publishedForm(tx, String(p.form_id), Number(p.form_version));
@@ -109,6 +110,7 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
         source: 'form' as const,
         messageId: e.messageId,
         recordedAt,
+        recordedAtExact: e.timestamp,
         proof: {
           form_id: p.form_id,
           form_version: p.form_version,
@@ -132,12 +134,15 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
       profileId,
       consent.map((c) => {
         const given = c.recordedAt ? new Date(c.recordedAt) : importedAt;
+        const clamped = given.getTime() > importedAt.getTime();
         return {
           purpose: c.purpose,
           status: c.status,
           source: 'import' as const,
           messageId: e.messageId,
-          recordedAt: given.getTime() > importedAt.getTime() ? importedAt : given,
+          recordedAt: clamped ? importedAt : given,
+          // Preserve a historical import's own precision unless the ceiling clamped it.
+          recordedAtExact: clamped || !c.recordedAt ? e.timestamp : c.recordedAt,
           recordedBy: typeof p.imported_by === 'string' ? p.imported_by : undefined,
           proof: { ...(c.proof ?? {}), import_batch: e.sourceId, import_label: p.label },
         };

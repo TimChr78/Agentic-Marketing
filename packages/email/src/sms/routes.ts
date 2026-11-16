@@ -3,7 +3,7 @@ import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { bodyLimit } from '@agentic-marketing/ingest';
-import { personCrypto, recordConsentEvidence } from '@agentic-marketing/profiles';
+import { lockIdentity, personCrypto, recordConsentEvidence } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
@@ -80,7 +80,7 @@ export function smsRoutes(deps: Deps) {
         if (!transport.verifyWebhook(req)) return { status: 401 as const };
 
         if (kind === 'status') {
-          const applied = await applyDeliveryEvents(tx, transport.parseStatus(req), provider.adapter, deps.kp);
+          const applied = await applyDeliveryEvents(tx, target.ws, transport.parseStatus(req), provider.adapter, deps.kp);
           return { status: 200 as const, events: applied.events, escalations: applied.escalations };
         }
 
@@ -92,6 +92,9 @@ export function smsRoutes(deps: Deps) {
         const receivedAt = new Date();
         let reply: string | null = null;
         if (match?.intent === 'stop') {
+          // Identity lock first, before resolving the profiles and writing consent/suppression rows.
+          // It serialises with merges and every other consent writer (#936).
+          await lockIdentity(tx, target.ws);
           const { hash, profileIds } = await profilesWithPhone(tx, target.ws, deps.kp, inbound.from);
           const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
           const smsMarketing = purposes.filter((p) => isMarketing(p.basis) && p.channels.includes('sms'));
@@ -107,6 +110,7 @@ export function smsRoutes(deps: Deps) {
                 status: p.basis === 'legitimate_interest' ? ('objected' as const) : ('withdrawn' as const),
                 source: 'unsubscribe' as const,
                 recordedAt: receivedAt,
+                recordedAtExact: receivedAt.toISOString(),
                 proof: { via: `SMS ${match.keyword}`, provider: provider.id },
               })),
             );

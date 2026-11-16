@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto';
 import type { Purposes } from '@agentic-marketing/artifacts';
 import { consentHook } from '@agentic-marketing/audience';
 import type { BusEvent } from '@agentic-marketing/events';
-import { lockConsent, recomputeConsentState, recordConsentEvidence } from '@agentic-marketing/profiles';
+import { lockIdentity, recomputeConsentState, recordConsentEvidence } from '@agentic-marketing/profiles';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { applyDeliveryEvents } from '../../../packages/email/src/deliveryEvents';
 import { eventually, startTestServer, testPort, type User } from './harness';
@@ -449,7 +450,7 @@ describe('an async consent write carries the action time (#928)', () => {
     );
     const at = new Date(Date.now() - 60_000).toISOString();
     await t.srv.db.withWorkspace(ws, (tx) =>
-      applyDeliveryEvents(tx, [{ eventId: 'evt-1', type: 'unsubscribed', messageId, at }], 'test', t.srv.keyProvider),
+      applyDeliveryEvents(tx, ws, [{ eventId: 'evt-1', type: 'unsubscribed', messageId, at }], 'test', t.srv.keyProvider),
     );
     expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
     expect((await history(profileId)).find((r) => r.status === 'withdrawn')).toMatchObject({ recordedAt: at });
@@ -512,6 +513,7 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
     await t.srv.db.withWorkspace(ws, (tx) =>
       applyDeliveryEvents(
         tx,
+        ws,
         [{ eventId: `evt_${randomBytes(6).toString('hex')}`, type: 'unsubscribed', messageId, at: at.toISOString() }],
         'test',
         t.srv.keyProvider,
@@ -603,7 +605,7 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
     const eventId = `evt_${randomBytes(6).toString('hex')}`;
     const redeliver = (at: Date) =>
       t.srv.db.withWorkspace(ws, (tx) =>
-        applyDeliveryEvents(tx, [{ eventId, type: 'unsubscribed', messageId, at: at.toISOString() }], 'test', t.srv.keyProvider),
+        applyDeliveryEvents(tx, ws, [{ eventId, type: 'unsubscribed', messageId, at: at.toISOString() }], 'test', t.srv.keyProvider),
       );
     await redeliver(new Date(Date.now() - 3 * 3_600_000));
     // The same event id again with a later action time: the event identity still deduplicates it.
@@ -703,11 +705,16 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
     expect(records.find((r) => r.recordedAt === t1.toISOString())).toMatchObject({ status: 'granted', source: 'sdk' });
   });
 
-  it('serialises two consent writers for one profile on the consent lock', async () => {
+  it('serialises the evidence read: a same-action race inserts once', async () => {
     const profileId = await newProfile();
-    const newer = new Date(Date.now() - 60_000);
-    const older = new Date(Date.now() - 120_000);
     const purposes = PURPOSES.purposes as Purposes;
+    const action = {
+      purpose: 'marketing',
+      status: 'granted' as const,
+      source: 'form' as const,
+      recordedAt: new Date(Date.now() - 60_000),
+      recordedAtExact: new Date(Date.now() - 60_000).toISOString(),
+    };
     let release!: () => void;
     const held = new Promise<void>((resolve) => {
       release = resolve;
@@ -717,41 +724,239 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
       locked = resolve;
     });
 
-    // The first transaction takes the lock, then pauses before reading evidence and writing.
+    // The first transaction takes the workspace lock, then pauses before its evidence read.
     const first = t.srv.db.withWorkspace(ws, async (tx) => {
-      await lockConsent(tx, ws, profileId);
+      await lockIdentity(tx, ws);
       locked();
       await held;
-      await recordConsentEvidence(tx, ws, profileId, purposes, [
-        { purpose: 'marketing', status: 'granted', source: 'form', recordedAt: newer },
-      ]);
+      await recordConsentEvidence(tx, ws, profileId, purposes, [action]);
     });
     await isLocked;
 
-    // A second writer for the same profile must wait for the first to commit.
+    let secondPid = 0;
     let secondStarted!: () => void;
     const inFlight = new Promise<void>((resolve) => {
       secondStarted = resolve;
     });
     const second = t.srv.db.withWorkspace(ws, async (tx) => {
+      const [{ pid }] = (await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows;
+      secondPid = pid;
       secondStarted();
-      await recordConsentEvidence(tx, ws, profileId, purposes, [
-        { purpose: 'marketing', status: 'withdrawn', source: 'form', recordedAt: older },
-      ]);
+      await recordConsentEvidence(tx, ws, profileId, purposes, [action]);
     });
     await inFlight;
-    const outcome = await Promise.race([
-      second.then(() => 'finished' as const),
-      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 1_000)),
-    ]);
-    expect(outcome).toBe('blocked');
+
+    // The second transaction must be waiting on the workspace identity lock before it can read
+    // evidence. Without the lock both would read "no duplicate" and insert the same action twice.
+    const waiting = await eventually(
+      async () =>
+        (
+          await t.srv.db.admin.query<{ n: number }>(
+            "SELECT count(*)::int AS n FROM pg_locks WHERE pid = $1 AND locktype = 'advisory' AND NOT granted",
+            [secondPid],
+          )
+        ).rows[0]!.n,
+      (n) => n > 0,
+      15_000,
+    );
+    expect(waiting).toBeGreaterThan(0);
 
     release();
     await Promise.all([first, second]);
-
-    // Both actions are kept and the state is rebuilt from both: the newer grant wins.
-    expect(await history(profileId)).toHaveLength(2);
+    expect(await history(profileId)).toHaveLength(1);
     expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
+  });
+
+  it('serialises with a merge: the merge waits, so Q keeps the writer’s withdrawal', async () => {
+    const purposes = PURPOSES.purposes as Purposes;
+    const p = await newProfile();
+    const q = await newProfile();
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      recordConsentEvidence(tx, ws, q, purposes, [
+        {
+          purpose: 'marketing',
+          status: 'granted',
+          source: 'form',
+          recordedAt: new Date(Date.now() - 120_000),
+          recordedAtExact: new Date(Date.now() - 120_000).toISOString(),
+        },
+      ]),
+    );
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let writerLocked!: () => void;
+    const writerIsLocked = new Promise<void>((resolve) => {
+      writerLocked = resolve;
+    });
+    const writer = t.srv.db.withWorkspace(ws, async (tx) => {
+      await lockIdentity(tx, ws);
+      writerLocked();
+      await held;
+      await recordConsentEvidence(tx, ws, p, purposes, [
+        {
+          purpose: 'marketing',
+          status: 'withdrawn',
+          source: 'form',
+          recordedAt: new Date(Date.now() - 60_000),
+          recordedAtExact: new Date(Date.now() - 60_000).toISOString(),
+        },
+      ]);
+    });
+    await writerIsLocked;
+
+    let mergePid = 0;
+    let mergeStarted!: () => void;
+    const mergeInFlight = new Promise<void>((resolve) => {
+      mergeStarted = resolve;
+    });
+    let mergeRan = false;
+    const merge = t.srv.db.withWorkspace(ws, async (tx) => {
+      const [{ pid }] = (await tx.execute<{ pid: number }>(sql`SELECT pg_backend_pid() AS pid`)).rows;
+      mergePid = pid;
+      mergeStarted();
+      await lockIdentity(tx, ws); // must wait for the paused writer
+      mergeRan = true;
+      await tx.execute(sql`INSERT INTO profile_merges (workspace_id, from_id, into_id, reason) VALUES (${ws}, ${p}, ${q}, 'merge test')`);
+      await tx.execute(sql`UPDATE profiles SET merged_into = ${q} WHERE workspace_id = ${ws} AND id = ${p}`);
+      await recomputeConsentState(tx, ws, q, purposes);
+    });
+    await mergeInFlight;
+
+    const waiting = await eventually(
+      async () =>
+        (
+          await t.srv.db.admin.query<{ n: number }>(
+            "SELECT count(*)::int AS n FROM pg_locks WHERE pid = $1 AND locktype = 'advisory' AND NOT granted",
+            [mergePid],
+          )
+        ).rows[0]!.n,
+      (n) => n > 0,
+      15_000,
+    );
+    expect(waiting).toBeGreaterThan(0);
+    expect(mergeRan).toBe(false);
+
+    release();
+    await Promise.all([writer, merge]);
+    expect(mergeRan).toBe(true);
+    expect((await api().call('profiles.get', { profileId: q })).consentEffective.find((c) => c.purpose === 'marketing')).toMatchObject({
+      status: 'withdrawn',
+      allowed: false,
+    });
+  });
+
+  it('a writer handed a merged-away profile records under the survivor', async () => {
+    const purposes = PURPOSES.purposes as Purposes;
+    const p = await newProfile();
+    const q = await newProfile();
+    await t.srv.db.withWorkspace(ws, async (tx) => {
+      await recordConsentEvidence(tx, ws, q, purposes, [
+        {
+          purpose: 'marketing',
+          status: 'granted',
+          source: 'form',
+          recordedAt: new Date(Date.now() - 120_000),
+          recordedAtExact: new Date(Date.now() - 120_000).toISOString(),
+        },
+      ]);
+      await tx.execute(sql`INSERT INTO profile_merges (workspace_id, from_id, into_id, reason) VALUES (${ws}, ${p}, ${q}, 'merge test')`);
+      await tx.execute(sql`UPDATE profiles SET merged_into = ${q} WHERE workspace_id = ${ws} AND id = ${p}`);
+      await recomputeConsentState(tx, ws, q, purposes);
+    });
+
+    // The caller still holds the pre-merge id; the writer must resolve it to Q.
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      recordConsentEvidence(tx, ws, p, purposes, [
+        {
+          purpose: 'marketing',
+          status: 'withdrawn',
+          source: 'form',
+          recordedAt: new Date(Date.now() - 60_000),
+          recordedAtExact: new Date(Date.now() - 60_000).toISOString(),
+        },
+      ]),
+    );
+
+    expect((await api().call('profiles.get', { profileId: q })).consentEffective.find((c) => c.purpose === 'marketing')).toMatchObject({
+      status: 'withdrawn',
+      allowed: false,
+    });
+    const onP = await t.srv.db.admin.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM consent_records WHERE workspace_id = $1 AND profile_id = $2 AND status = 'withdrawn'",
+      [ws, p],
+    );
+    const onQ = await t.srv.db.admin.query<{ n: number }>(
+      "SELECT count(*)::int AS n FROM consent_records WHERE workspace_id = $1 AND profile_id = $2 AND status = 'withdrawn'",
+      [ws, q],
+    );
+    expect(onP.rows[0]!.n).toBe(0);
+    expect(onQ.rows[0]!.n).toBe(1);
+  });
+
+  it('folds only the same action to the microsecond', async () => {
+    const profileId = await newProfile();
+    const purposes = PURPOSES.purposes as Purposes;
+    const later = '2026-10-01T10:00:00.123900Z';
+    const earlier = '2026-10-01T10:00:00.123100Z';
+    const record = (exact: string) =>
+      t.srv.db.withWorkspace(ws, (tx) =>
+        recordConsentEvidence(tx, ws, profileId, purposes, [
+          { purpose: 'marketing', status: 'granted', source: 'form', recordedAt: new Date(exact), recordedAtExact: exact },
+        ]),
+      );
+    await record(later);
+    await record(earlier);
+    expect(await history(profileId)).toHaveLength(2);
+
+    const times = await t.srv.db.admin.query<{ t: string }>(
+      `SELECT to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS t
+       FROM consent_records WHERE workspace_id = $1 AND profile_id = $2 AND purpose = 'marketing' ORDER BY t`,
+      [ws, profileId],
+    );
+    expect(times.rows.map((r) => r.t)).toEqual(['2026-10-01T10:00:00.123100Z', '2026-10-01T10:00:00.123900Z']);
+
+    // A redelivery of the same action time is folded at microsecond precision, not by Date.getTime.
+    await record(later);
+    expect(await history(profileId)).toHaveLength(2);
+  });
+
+  it('two mixed delivery batches in opposite orders complete without deadlock', async () => {
+    const profileId = await newProfile();
+    const messageId = () => `msg_${randomBytes(12).toString('hex')}`;
+    const m1 = messageId();
+    const m2 = messageId();
+    for (const m of [m1, m2])
+      await t.srv.db.admin.query(
+        `INSERT INTO messages (workspace_id, id, idempotency_key, channel, purpose, profile_id, status)
+         VALUES ($1, $2, $3, 'email', 'marketing', $4, 'sent')`,
+        [ws, m, `idem_${m}`, profileId],
+      );
+    const at1 = new Date(Date.now() - 60_000).toISOString();
+    const at2 = new Date(Date.now() - 30_000).toISOString();
+    const batchA = [
+      { eventId: 'batch-a-unsub', type: 'unsubscribed' as const, messageId: m1, at: at1 },
+      { eventId: 'batch-a-complaint', type: 'complained' as const, messageId: m2, at: at2 },
+    ];
+    const batchB = [
+      { eventId: 'batch-b-complaint', type: 'complained' as const, messageId: m2, at: at2 },
+      { eventId: 'batch-b-unsub', type: 'unsubscribed' as const, messageId: m1, at: at1 },
+    ];
+    await Promise.all([
+      t.srv.db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, ws, batchA, 'test', t.srv.keyProvider)),
+      t.srv.db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, ws, batchB, 'test', t.srv.keyProvider)),
+    ]);
+
+    expect(await effective(profileId)).toMatchObject({ status: 'withdrawn', allowed: false });
+    const statuses = await t.srv.db.admin.query<{ id: string; status: string }>(
+      'SELECT id, status FROM messages WHERE workspace_id = $1 AND id = ANY($2)',
+      [ws, [m1, m2]],
+    );
+    const status = new Map(statuses.rows.map((r) => [r.id, r.status]));
+    expect(status.get(m1)).toBe('sent'); // an unsubscribe does not change the delivery status
+    expect(status.get(m2)).toBe('complained');
   });
 
   it('leaves the current state, counts and export consistent with the evidence, not the row count', async () => {

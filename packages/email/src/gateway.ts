@@ -471,7 +471,7 @@ async function deliverOne(
     );
     event = decisionEvent(m, 'sent', '', provider.adapter);
     if (known?.length) {
-      const applied = await db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, known, provider.adapter, deps.kp));
+      const applied = await db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, ws, known, provider.adapter, deps.kp));
       reported = applied.events;
       escalations = applied.escalations;
     }

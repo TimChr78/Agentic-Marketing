@@ -14,9 +14,15 @@ import { sql } from 'drizzle-orm';
  *
  * Order: this lock precedes the row writes of the transaction that takes it. Nothing that takes it
  * also takes a broadcast run row or a send key (`lockSendKey`), and no send takes it at all, so the
- * two orders cannot cross. It also precedes the per-person consent lock (`lockConsent` in
- * `consent.ts`), never the other way round: `resolve.ts` holds this lock while it records SDK
- * consent, and every consent writer takes only the consent lock.
+ * two orders cannot cross.
+ *
+ * Every consent writer takes this lock first, before it resolves a canonical profile, and holds it
+ * through the consent-ledger insert and the `consent_state` rebuild (`recordConsentEvidence` and
+ * `recordConsent` in `consent.ts`). A delivery batch takes it once at the start of the batch
+ * transaction, before it touches any message or suppression row. So the order is always
+ * **identity lock first, then message/suppression rows (and the consent ledger), never the other
+ * way round**. That serialises consent writes with each other and with merges; there is no
+ * per-profile consent lock to order against.
  */
 export async function lockIdentity(tx: Tx, workspaceId: string): Promise<void> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
