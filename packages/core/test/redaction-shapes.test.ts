@@ -7,6 +7,21 @@ import { redactCredentials } from '../src/diagnostics';
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
 
+describe('a Pwd or Pass camel ending (#937)', () => {
+  it('replaces the value of a Pwd or Pass key', () => {
+    expect(redactCredentials(`userPwd=${SECRET}`)).toBe('userPwd=[redacted]');
+    expect(redactCredentials(`dbPwd: ${SECRET}`)).toBe('dbPwd: [redacted]');
+    expect(redactCredentials(`dbPass="${SECRET}"`)).toBe('dbPass=[redacted]');
+    expect(redactCredentials(`user_pwd=${SECRET}`)).toBe('user_pwd=[redacted]');
+    expect(redactCredentials(`db-pass=${SECRET}`)).toBe('db-pass=[redacted]');
+  });
+
+  it('leaves ordinary pass and pwd words alone', () => {
+    for (const input of ['pass=2', 'bypass=on', 'compass=123', 'surpass=true', 'passwordPolicy=strict'])
+      expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
 describe('escaped JSON inside a string (#937)', () => {
   it('replaces the escaped value', () => {
     expect(redactCredentials(`{\\"password\\":\\"${SECRET}\\"}`)).toBe('{\\"password\\":\\"[redacted]\\"}');

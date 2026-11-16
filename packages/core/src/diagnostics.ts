@@ -674,6 +674,7 @@ function redactPairValues(
   text: string,
   separator: (text: string, nameEnd: number) => number,
   valueSpan: (text: string, valueStart: number) => ValueSpan | null,
+  accept: (name: string) => boolean = isShapesCredentialKey,
 ): string {
   let out = '';
   let copied = 0;
@@ -693,7 +694,7 @@ function redactPairValues(
       continue;
     }
     const name = text.slice(index, nameEnd);
-    if (name.length > MAX_SHAPE_KEY_CHARS || !isShapesCredentialKey(name)) {
+    if (name.length > MAX_SHAPE_KEY_CHARS || !accept(name)) {
       index = nameEnd;
       continue;
     }
@@ -1132,6 +1133,23 @@ function redactUrlEncodedPairs(text: string): string {
 }
 
 /**
+ * `userPwd`, `dbPwd`, `dbPass`, `user_pass`: a `Pwd`/`Pass` ending the name after a camel boundary
+ * or a separator. The rules do not know the abbreviation, so this pass carries its own classifier
+ * (`isPwdPassKey`) and never widens the rules' one. A bare `pass` or `bypass` is an ordinary word
+ * and is not matched.
+ */
+function redactPwdKeys(text: string): string {
+  if (!/[a-z0-9](?:Pwd|Pass)/.test(text) && !/[_.-](?:pwd|pass)(?![A-Za-z0-9])/i.test(text)) return text;
+  const span = (value: string, start: number): ValueSpan | null => {
+    SCHEME_START.lastIndex = start;
+    if (SCHEME_START.test(value)) return null;
+    const end = pairValueEnd(value, start);
+    return end < 0 ? null : { start, end };
+  };
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), span, isPwdPassKey);
+}
+
+/**
  * The passes that run on the rules' output: their shapes survive the rules intact, so they must not
  * run before them (a pre-pass value can end at a nested key and hide its value). Each reads the
  * text once.
@@ -1140,6 +1158,7 @@ function redactSettledValueShapes(text: string): string {
   let out = redactShortSchemeValues(text);
   out = redactEscapedJsonPairs(out);
   out = redactUrlEncodedPairs(out);
+  out = redactPwdKeys(out);
   return out;
 }
 

@@ -397,6 +397,9 @@ const SHAPES: [string, (key: string, value: string) => string][] = [
   ['url encoded', (_key, value) => `password%3D${value}`],
   ['url encoded quoted', (_key, value) => `token%22%3A%22${value}`],
   ['url encoded name', (key, value) => `${key.replaceAll('_', '%5F')}=${value}`],
+  ['plain', (key, value) => `${key}=${value}`],
+  ['pwd pass', (_key, value) => `dbPass=${value}`],
+  ['pwd separator', (_key, value) => `user_pass: ${value}`],
 ];
 /** Shapes whose point is a value too short for the rules to see, so only the marker goes in. */
 const SHORT_SHAPES: [string, (key: string, value: string) => string][] = [
