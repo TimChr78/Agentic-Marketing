@@ -6,6 +6,8 @@ import {
   failOutbox,
   outboxRetrySeconds,
   pruneOutbox,
+  renewOutboxLease,
+  requeueFailedOutbox,
   sanitiseOutboxError,
 } from '../src/outbox';
 import { createDisposableDb, hasTestDatabase } from './disposable';
@@ -35,6 +37,7 @@ const row = async (operationKey: string) => {
     attempts: number;
     operation_key: string;
     payload: Record<string, unknown>;
+    claim_token: string | null;
     last_error: string | null;
     next_attempt_at: Date;
     lease_until: Date | null;
@@ -77,15 +80,20 @@ describe.skipIf(!hasTestDatabase())('transactional outbox (#978 part 2)', () => 
     const claims = await claimOutboxBatch(d.db, { limit: 10, leaseMs: 60_000 });
     const claim = claims.find((c) => c.operationKey === 'claim')!;
     expect(claim).toMatchObject({ workspaceId: d.workspace, kind: 'test', attempts: 1 });
+    expect(claim.claimToken).toMatch(/^[0-9a-f-]{36}$/);
     const claimed = (await row('claim'))!;
     expect(claimed.state).toBe('delivering');
     expect(claimed.lease_until!.getTime()).toBeGreaterThan(Date.now());
+    expect(claimed.claim_token).toBe(claim.claimToken);
 
-    await ackOutbox(d.db, claim);
+    await expect(ackOutbox(d.db, claim)).resolves.toBe(true);
     const delivered = (await row('claim'))!;
     expect(delivered.state).toBe('delivered');
     expect(delivered.delivered_at).not.toBeNull();
     expect(delivered.lease_until).toBeNull();
+    expect(delivered.claim_token).toBeNull();
+    // A second ack for the same claim is a no-op, not a new delivery.
+    await expect(ackOutbox(d.db, claim)).resolves.toBe(false);
   });
 
   it('redelivers a row whose lease expired, without a second enqueue', async () => {
@@ -98,6 +106,59 @@ describe.skipIf(!hasTestDatabase())('transactional outbox (#978 part 2)', () => 
     expect(second.attempts).toBe(2);
     expect(second.id).toBe(first.id);
     expect((await row('crash'))?.attempts).toBe(2);
+  });
+
+  it('fences a stale claim: it can neither ack nor fail the reclaimer’s row', async () => {
+    await enqueue('stale');
+    const [first] = (await claimOutboxBatch(d.db, { limit: 50 })).filter((c) => c.operationKey === 'stale');
+    // The lease expired, so another dispatcher claimed the row with a fresh token.
+    await expireLease('stale');
+    const [second] = (await claimOutboxBatch(d.db, { limit: 50 })).filter((c) => c.operationKey === 'stale');
+    expect(second.claimToken).not.toBe(first.claimToken);
+
+    await expect(ackOutbox(d.db, first)).resolves.toBe(false);
+    expect((await row('stale'))?.state).toBe('delivering');
+    expect((await row('stale'))?.claim_token).toBe(second.claimToken);
+
+    await expect(failOutbox(d.db, first, new Error('the old worker failed late'))).resolves.toBe('stale');
+    const owned = (await row('stale'))!;
+    expect(owned.state).toBe('delivering');
+    expect(owned.claim_token).toBe(second.claimToken);
+    expect(owned.last_error).toBeNull();
+
+    await expect(ackOutbox(d.db, second)).resolves.toBe(true);
+    expect((await row('stale'))?.state).toBe('delivered');
+  });
+
+  it('renews a waiting row’s lease and refuses a stale renewal', async () => {
+    for (const key of ['batch-1', 'batch-2', 'batch-3']) await enqueue(key);
+    const claims = (await claimOutboxBatch(d.db, { limit: 50 })).filter((c) => c.operationKey.startsWith('batch-'));
+    expect(claims).toHaveLength(3);
+    // A slow first row let the batch's lease expire before the later rows were handled.
+    for (const key of ['batch-1', 'batch-2', 'batch-3']) await expireLease(key);
+    for (const claim of claims) await expect(renewOutboxLease(d.db, claim, 60_000)).resolves.toBe(true);
+    // Renewed: no other dispatcher can take them while the batch is still being processed.
+    expect((await claimOutboxBatch(d.db, { limit: 50 })).some((c) => c.operationKey.startsWith('batch-'))).toBe(false);
+    // A token from before the reclamation cannot renew someone else's row.
+    await expect(renewOutboxLease(d.db, { ...claims[0]!, claimToken: 'stale-token' })).resolves.toBe(false);
+  });
+
+  it('requeues dead-lettered rows, all of them or one kind', async () => {
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts, last_error)
+       VALUES ($1, 'obx_rq_a', 'message_event', '{}', 'requeue-a', 'failed', 36, 'ClickHouse unavailable'),
+              ($1, 'obx_rq_b', 'doi_send', '{}', 'requeue-b', 'failed', 36, 'ClickHouse unavailable'),
+              ($1, 'obx_rq_c', 'doi_send', '{}', 'requeue-c', 'delivered', 1, NULL)`,
+      [d.workspace],
+    );
+    await expect(requeueFailedOutbox(d.db, { kind: 'message_event' })).resolves.toBe(1);
+    const a = (await row('requeue-a'))!;
+    expect(a).toMatchObject({ state: 'pending', attempts: 0, last_error: null, claim_token: null });
+    expect((await row('requeue-b'))?.state).toBe('failed');
+    expect((await row('requeue-c'))?.state).toBe('delivered');
+
+    await expect(requeueFailedOutbox(d.db)).resolves.toBe(1);
+    expect((await row('requeue-b'))?.state).toBe('pending');
   });
 
   it('backs off after a failure and stops after the attempt bound', async () => {

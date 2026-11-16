@@ -537,6 +537,7 @@ export const outbox = pgTable(
     attempts: integer('attempts').notNull().default(0),
     nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),
     leaseUntil: ts('lease_until'),
+    claimToken: text('claim_token'),
     lastError: text('last_error'),
     createdAt: ts('created_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),

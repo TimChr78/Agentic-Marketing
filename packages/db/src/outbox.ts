@@ -10,8 +10,12 @@ import * as schema from './schema';
 // ingest batch, a retried route) writes nothing. The payload carries the ids the consumer needs, so
 // a redelivery after a crash is harmless for an idempotent consumer.
 
-/** Attempts before a row stops being retried and stays `failed` for inspection. */
-export const OUTBOX_MAX_ATTEMPTS = 8;
+/**
+ * Attempts before a row stops being retried and stays `failed` for inspection. With the capped
+ * backoff below, a transient outage is retried for about 27 hours before the row is dead-lettered;
+ * malformed payloads are failed on their first attempt by the dispatcher instead.
+ */
+export const OUTBOX_MAX_ATTEMPTS = 36;
 /** Delivered rows are kept this long before pruning: long enough to inspect a settled batch. */
 export const OUTBOX_RETENTION_DAYS = 7;
 /** How long one delivery may hold a claim before another dispatcher may take it over. */
@@ -35,6 +39,8 @@ export interface OutboxClaim {
   operationKey: string;
   /** Already incremented by the claim: this is the attempt being run. */
   attempts: number;
+  /** Fences completion: only the claim holding the row's current token may ack or fail it. */
+  claimToken: string;
 }
 
 /**
@@ -85,6 +91,11 @@ export async function enqueueOutbox(tx: Tx, workspaceId: string, entry: OutboxEn
  * Claims up to `limit` due rows with `FOR UPDATE SKIP LOCKED` and a lease, in one short statement
  * that commits before any handler runs. A row whose lease expired (the dispatcher died) is claimed
  * again, which is what makes delivery at-least-once. `now` is PostgreSQL's clock.
+ *
+ * Every claim gets a fresh `claim_token`; ack, fail and renewal only apply while the row still
+ * carries it. Because a whole batch is claimed before the first handler runs, the dispatcher
+ * renews a row's lease immediately before handling it (see `renewOutboxLease`), so slow work on an
+ * early row cannot let a later row's lease expire under it.
  */
 export async function claimOutboxBatch(db: Db, opts: { limit?: number; leaseMs?: number } = {}): Promise<OutboxClaim[]> {
   const limit = opts.limit ?? 25;
@@ -96,6 +107,7 @@ export async function claimOutboxBatch(db: Db, opts: { limit?: number; leaseMs?:
     payload: Record<string, unknown>;
     operation_key: string;
     attempts: number;
+    claim_token: string;
   }>(
     `WITH ready AS (
        SELECT workspace_id, id FROM outbox
@@ -109,11 +121,12 @@ export async function claimOutboxBatch(db: Db, opts: { limit?: number; leaseMs?:
      SET state = 'delivering',
          attempts = o.attempts + 1,
          lease_until = now() + make_interval(secs => $2),
+         claim_token = gen_random_uuid()::text,
          last_error = NULL,
          updated_at = now()
      FROM ready
      WHERE o.workspace_id = ready.workspace_id AND o.id = ready.id
-     RETURNING o.workspace_id, o.id, o.kind, o.payload, o.operation_key, o.attempts`,
+     RETURNING o.workspace_id, o.id, o.kind, o.payload, o.operation_key, o.attempts, o.claim_token`,
     [limit, leaseMs / 1000],
   );
   return rows.map((r) => ({
@@ -123,42 +136,67 @@ export async function claimOutboxBatch(db: Db, opts: { limit?: number; leaseMs?:
     payload: r.payload,
     operationKey: r.operation_key,
     attempts: r.attempts,
+    claimToken: r.claim_token,
   }));
 }
 
-/** Marks a claimed row delivered. The operation key stays for dedupe until the row is pruned. */
-export async function ackOutbox(db: Db, claim: Pick<OutboxClaim, 'workspaceId' | 'id'>): Promise<void> {
-  await db.admin.query(
-    `UPDATE outbox SET state = 'delivered', delivered_at = now(), lease_until = NULL, updated_at = now()
-     WHERE workspace_id = $1 AND id = $2`,
-    [claim.workspaceId, claim.id],
+/**
+ * Extends the lease of a claim that is about to be handled. False when the row was reclaimed by
+ * another dispatcher (or settled), in which case this claim must do nothing.
+ */
+export async function renewOutboxLease(
+  db: Db,
+  claim: Pick<OutboxClaim, 'workspaceId' | 'id' | 'claimToken'>,
+  leaseMs = OUTBOX_LEASE_MS,
+): Promise<boolean> {
+  const { rowCount } = await db.admin.query(
+    `UPDATE outbox SET lease_until = now() + make_interval(secs => $4), updated_at = now()
+     WHERE workspace_id = $1 AND id = $2 AND claim_token = $3 AND state = 'delivering'`,
+    [claim.workspaceId, claim.id, claim.claimToken, leaseMs / 1000],
   );
+  return (rowCount ?? 0) > 0;
+}
+
+/**
+ * Marks a claimed row delivered. The token fences it: false means the claim expired and another
+ * dispatcher owns the row now, so this completion is a no-op. The operation key stays for dedupe
+ * until the row is pruned.
+ */
+export async function ackOutbox(db: Db, claim: Pick<OutboxClaim, 'workspaceId' | 'id' | 'claimToken'>): Promise<boolean> {
+  const { rowCount } = await db.admin.query(
+    `UPDATE outbox SET state = 'delivered', delivered_at = now(), lease_until = NULL, claim_token = NULL, updated_at = now()
+     WHERE workspace_id = $1 AND id = $2 AND claim_token = $3 AND state = 'delivering'`,
+    [claim.workspaceId, claim.id, claim.claimToken],
+  );
+  return (rowCount ?? 0) > 0;
 }
 
 /**
  * Records a failed attempt: back off with the bounded schedule, or stop after `maxAttempts` so a
- * permanently broken payload cannot retry forever. The lease is released either way.
+ * permanently broken payload cannot retry forever. The lease is released either way. A stale claim
+ * returns `'stale'` and changes nothing; the current owner settles the row.
  */
 export async function failOutbox(
   db: Db,
-  claim: Pick<OutboxClaim, 'workspaceId' | 'id' | 'attempts'>,
+  claim: Pick<OutboxClaim, 'workspaceId' | 'id' | 'attempts' | 'claimToken'>,
   err: unknown,
   opts: { maxAttempts?: number } = {},
-): Promise<'pending' | 'failed'> {
+): Promise<'pending' | 'failed' | 'stale'> {
   const maxAttempts = opts.maxAttempts ?? OUTBOX_MAX_ATTEMPTS;
   const retrySeconds = outboxRetrySeconds(claim.attempts);
   const { rows } = await db.admin.query<{ state: 'pending' | 'failed' }>(
     `UPDATE outbox SET
-       state = CASE WHEN attempts >= $3 THEN 'failed' ELSE 'pending' END,
-       next_attempt_at = CASE WHEN attempts >= $3 THEN next_attempt_at ELSE now() + make_interval(secs => $4) END,
+       state = CASE WHEN attempts >= $4 THEN 'failed' ELSE 'pending' END,
+       next_attempt_at = CASE WHEN attempts >= $4 THEN next_attempt_at ELSE now() + make_interval(secs => $5) END,
        lease_until = NULL,
-       last_error = $5,
+       claim_token = NULL,
+       last_error = $6,
        updated_at = now()
-     WHERE workspace_id = $1 AND id = $2
+     WHERE workspace_id = $1 AND id = $2 AND claim_token = $3 AND state = 'delivering'
      RETURNING state`,
-    [claim.workspaceId, claim.id, maxAttempts, retrySeconds, sanitiseOutboxError(err)],
+    [claim.workspaceId, claim.id, claim.claimToken, maxAttempts, retrySeconds, sanitiseOutboxError(err)],
   );
-  return rows[0]?.state ?? 'pending';
+  return rows[0]?.state ?? 'stale';
 }
 
 /** Removes delivered rows older than the retention window. Failed rows stay for inspection. */
@@ -166,6 +204,22 @@ export async function pruneOutbox(db: Db, retentionDays = OUTBOX_RETENTION_DAYS)
   const { rowCount } = await db.admin.query(
     `DELETE FROM outbox WHERE state = 'delivered' AND delivered_at < now() - make_interval(days => $1)`,
     [retentionDays],
+  );
+  return rowCount ?? 0;
+}
+
+/**
+ * Puts dead-lettered rows back in the queue, resetting their attempt budget. Operators run this
+ * after an outage (`am outbox [--kind KIND]`); without it a long ClickHouse outage would leave
+ * valid events `failed` forever. Returns how many rows were requeued.
+ */
+export async function requeueFailedOutbox(db: Db, opts: { kind?: string } = {}): Promise<number> {
+  const { rowCount } = await db.admin.query(
+    `UPDATE outbox
+     SET state = 'pending', attempts = 0, next_attempt_at = now(), lease_until = NULL,
+         claim_token = NULL, last_error = NULL, updated_at = now()
+     WHERE state = 'failed' AND ($1::text IS NULL OR kind = $1)`,
+    [opts.kind ?? null],
   );
   return rowCount ?? 0;
 }

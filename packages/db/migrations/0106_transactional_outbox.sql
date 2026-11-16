@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS outbox (
   attempts integer NOT NULL DEFAULT 0,
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
   lease_until timestamptz,
+  -- The token of the current claim. Every claim writes a fresh one, and completion only applies
+  -- while it still matches, so a dispatcher whose lease expired cannot overwrite the new owner's
+  -- result.
+  claim_token text,
   last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
@@ -48,3 +52,5 @@ COMMENT ON TABLE outbox IS
   'Durable queue of post-commit work a tenant transaction implies (#978 part 2); delivered rows are pruned.';
 COMMENT ON COLUMN outbox.operation_key IS
   'Stable id of the action this row delivers; unique per workspace so a redelivery enqueues nothing new.';
+COMMENT ON COLUMN outbox.claim_token IS
+  'Token of the current claim; ack and fail only apply while it matches, fencing an expired claim.';
