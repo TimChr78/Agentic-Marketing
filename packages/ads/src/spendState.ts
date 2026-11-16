@@ -159,5 +159,5 @@ export function incompleteSpendNote(affected: readonly IncompleteSpend[]): strin
     (entry) =>
       `${entry.platform} ${entry.account} ${entry.intervals.map((i) => (i.from === i.to ? i.from : `${i.from} to ${i.to}`)).join(', ')}`,
   );
-  return `Spend is incomplete for ${ranges.join('; ')}: an import stopped at the provider page limit for those days, so cost is missing, CPA is understated and ROAS is overstated. Import a narrower date range to fill the gap.`;
+  return `Spend is incomplete for ${ranges.join('; ')}: an import of those days did not complete (it reached the provider page limit, failed or was interrupted), so cost may be missing; where it is, CPA is understated and ROAS is overstated. Import those days again, as a narrower date range if the provider limit was the cause.`;
 }

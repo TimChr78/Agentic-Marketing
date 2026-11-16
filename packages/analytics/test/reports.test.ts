@@ -369,6 +369,24 @@ describe('journey funnel response is indistinguishable under one participant mov
     expect(funnel.steps.find((step) => step.step === 'h')).toMatchObject({ reached: null, suppressed: true });
     expect(funnel.meta.notes.join(' ')).toContain('Step h is its own hidden subtree');
     expect(funnel.meta.notes.join(' ')).toContain('k=5');
+    // The step does have a parent: itself (#959 review).
+    expect(funnel.meta.notes.join(' ')).toContain('no parent in the published graph other than itself');
+  });
+
+  it('names several hidden self-loop steps in the plural (#959 review)', () => {
+    const nodes: GraphNode[] = [
+      { id: 'trigger', kind: 'trigger', children: ['end'] },
+      { id: 'end', kind: 'exit', children: [] },
+      { id: 'h', kind: 'wait', children: ['h'] },
+      { id: 'j', kind: 'wait', children: ['j'] },
+    ];
+    const walks: Walk[] = [
+      ...Array.from({ length: 100 }, () => ({ visited: ['trigger', 'end'], converted: false })),
+      ...Array.from({ length: 3 }, () => ({ visited: ['h'], converted: false })),
+      ...Array.from({ length: 2 }, () => ({ visited: ['j'], converted: false })),
+    ];
+    const notes = response({ nodes, walks }).meta.notes.join(' ');
+    expect(notes).toContain('Steps h, j are each their own hidden subtree');
   });
 
   /** The path from `from` to `target` inside `allowed`, exclusive of `from`, inclusive of `target`. */

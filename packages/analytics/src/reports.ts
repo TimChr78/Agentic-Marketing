@@ -421,7 +421,7 @@ export function buildJourneyFunnel(
   if (funnel.allStepsHidden)
     suppressionNotes.push(
       published
-        ? `Every step row is hidden because a step below k=${K} has no parent in the published graph${
+        ? `Every step row is hidden because a step below k=${K} has no parent in the published graph other than itself${
             funnel.selfHidden.length ? ` (${funnel.selfHidden.join(', ')})` : ''
           }.`
         : `No published version is selected, and a step has fewer than k=${K} people, so every step row is hidden.`,
@@ -432,7 +432,9 @@ export function buildJourneyFunnel(
     // A disconnected self-loop has no parent whose subtree could be named, so it is its own (#959).
     if (funnel.selfHidden.length > 0)
       suppressionNotes.push(
-        `Step ${funnel.selfHidden.join(', ')} is its own hidden subtree because it has fewer than k=${K} people and no parent in the published graph.`,
+        funnel.selfHidden.length === 1
+          ? `Step ${funnel.selfHidden[0]} is its own hidden subtree because it has fewer than k=${K} people and no parent in the published graph other than itself.`
+          : `Steps ${funnel.selfHidden.join(', ')} are each their own hidden subtree because each has fewer than k=${K} people and no parent in the published graph other than itself.`,
       );
   }
   if (steps.some((step) => step.reached === null))

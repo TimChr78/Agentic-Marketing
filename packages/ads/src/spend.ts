@@ -437,7 +437,7 @@ export const clearSpendGapsCommand = defineCommand({
   name: 'ads.spendGaps.clear',
   title: 'Clear a spend-gap warning',
   description:
-    'Removes the recorded incomplete date ranges of one ad account, so ads.performance stops warning about it and stops discounting its CPA/ROAS. Use it for a gap no import can complete any more (a re-pointed or deleted connection kept its history); stored spend is untouched. Only people can clear a gap.',
+    'Acknowledges and removes the recorded incomplete date ranges of one ad account, so ads.performance stops warning about it and stops discounting its CPA/ROAS. It repairs nothing: stored spend is untouched, so for an account a connection still reads, partial cost stays partial and the warning does not come back, not even after reconnecting; import those days again instead. Use it for a gap no import can complete any more (a re-pointed or deleted connection kept its history). Only people can clear a gap.',
   input: z.object({ platform: z.enum(['meta', 'google']), account: z.string().min(1).max(120) }),
   output: z.object({ cleared: z.number().int().describe('Stored date ranges removed; 0 when the account had no gap') }),
   permission: 'artifacts:write',

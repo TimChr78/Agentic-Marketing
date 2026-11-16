@@ -87,6 +87,10 @@ describe('spend state intervals', () => {
     expect(note).toContain('meta act_A 2026-01-01 to 2026-01-31');
     expect(note).toContain('google 1234567890 2026-01-01 to 2026-01-31');
     expect(note).toContain('CPA is understated');
+    // A gap is kept for a failed or interrupted import too, so the note must not claim the page limit
+    // was the cause (#953 review).
+    expect(note).toContain('did not complete');
+    expect(note).not.toMatch(/stopped at the provider page limit/);
     expect(incompleteSpendNote([])).toBeNull();
   });
 
