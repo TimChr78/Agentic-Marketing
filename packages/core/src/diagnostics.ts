@@ -162,9 +162,31 @@ const KEY_QUALIFIERS = new Set([
   'restricted',
   'live',
   'test',
-  // Model providers (packages/ai: `openai-compatible`, `anthropic-compatible`).
+  // Model providers (packages/ai: `openai-compatible`, `anthropic-compatible`). The known provider
+  // names in packages/ai `modelProviderNames` are the same population, and the completeness test
+  // fails for one without a qualifier here (#956, #968 review).
   'openai',
   'anthropic',
+  'azureopenai',
+  'mistral',
+  'ollama',
+  'vllm',
+  'litellm',
+  'openrouter',
+  'lmstudio',
+  'groq',
+  'together',
+  'deepseek',
+  'gemini',
+  'cohere',
+  'perplexity',
+  'fireworks',
+  'huggingface',
+  'hf',
+  'replicate',
+  'xai',
+  'bedrock',
+  'vertex',
   // E-mail adapters (packages/email/src/adapters).
   'smtp',
   'ses',
@@ -285,7 +307,14 @@ function classifyCompoundKey(full: string): boolean {
   // A single word, or a word after a separator, is the first rule's business (`token`, `auth_token`).
   if (lastPart.split(CAMEL_BOUNDARY).length < 2) return false;
   if (CREDENTIAL_LAST_WORDS.has(last)) return true;
-  return (last === 'key' || last === 'keys') && words.slice(0, -1).some((word) => KEY_QUALIFIERS.has(word));
+  if (last !== 'key' && last !== 'keys') return false;
+  const stem = words.slice(0, -1);
+  if (stem.some((word) => KEY_QUALIFIERS.has(word))) return true;
+  // A provider name that is itself camelCase (`lmStudioKey`, `X-lmStudioKey`) splits into its own
+  // words, so the last few are also joined from each word boundary and checked (`lmstudio`).
+  const tail = stem.slice(-3);
+  for (let start = 0; start < tail.length; start += 1) if (KEY_QUALIFIERS.has(tail.slice(start).join(''))) return true;
+  return false;
 }
 
 /**

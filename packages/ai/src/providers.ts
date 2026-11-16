@@ -10,9 +10,49 @@ import { and, eq, gte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 
 // LLM providers with the workspace's own keys (agents-and-mcp.md §4). Two wire formats cover
-// most of the market: OpenAI-compatible (OpenAI, Azure, Mistral, Ollama, vLLM, LiteLLM,
-// OpenRouter…) and Anthropic-compatible. Keys are sealed with the workspace key and never
-// returned; each use (journeys, copilot) has one provider.
+// most of the market: OpenAI-compatible and Anthropic-compatible. The named model providers (see
+// `modelProviderNames`) are a known population, so redaction's `<provider>Key` qualifier list and
+// its completeness test read the same list instead of guessing (#956).
+
+/**
+ * Known model-provider names the platform documents for a workspace's own key (#956, #968 review),
+ * the way users spell them in a provider name. Redaction treats `<name>Key`, `<name>Token` and
+ * `<name>Secret` as credentials, and `apps/server/test/redaction-providers.test.ts` fails when one
+ * of these names has no qualifier. Runtime provider names are free text, so this is coverage of
+ * the names we know, not of every possible name.
+ *
+ * Keys are sealed with the workspace key and never returned; each use (journeys, copilot) has one
+ * provider.
+ */
+export const modelProviderNames = [
+  // Anthropic-compatible, and the original OpenAI service.
+  'openai',
+  'anthropic',
+  'azure',
+  'azureopenai',
+  // OpenAI-compatible servers the docs name.
+  'mistral',
+  'ollama',
+  'vllm',
+  'litellm',
+  'openrouter',
+  'lmstudio',
+  'groq',
+  'together',
+  'deepseek',
+  'gemini',
+  'google',
+  'cohere',
+  'perplexity',
+  'fireworks',
+  'huggingface',
+  'hf',
+  'replicate',
+  'xai',
+  // Amazon Bedrock and Google Vertex front several model families behind one key.
+  'bedrock',
+  'vertex',
+] as const;
 
 type ProviderRow = typeof schema.aiProviders.$inferSelect;
 
