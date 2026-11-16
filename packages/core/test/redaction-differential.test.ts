@@ -281,18 +281,56 @@ const PIECES = [
   '/',
 ];
 
+/** Pieces that carry a credential value, so the marker can be planted inside the payload. */
+const VALUE_PIECES = new Set(['TOPSECRET', 'Sh0rtPw', '"x"', "'x'", '="x"', '=x', 'user:Sh0rtPw@host']);
+/** Names that start with a separator, injected inside the random payload (#946, #968 review). */
+const PREFIXED_KEYS = ['_secretKey', '__authToken', '$$SIGNINGKEY', '.sessionKey', '-oauthToken', 'mistralKey'];
+
+/** A unique marker inside a piece, so the payload's own value is tracked, not only an appended one. */
+function markPiece(piece: string, token: string): string {
+  return plantValue(piece, token);
+}
+
 function* randomPairs(): Generator<Generated> {
   const random = seededRandom();
   for (let count = 0; count < 6_000 * SCALE; count += 1) {
-    let input = '';
+    const parts: string[] = [];
     const length = 2 + Math.floor(random() * 9);
-    for (let part = 0; part < length; part += 1) input += PIECES[Math.floor(random() * PIECES.length)]!;
+    for (let part = 0; part < length; part += 1) parts.push(PIECES[Math.floor(random() * PIECES.length)]!);
+    const secrets: string[] = [];
+    // Mark one value piece inside the payload itself.
+    const valueIndexes = parts.map((piece, index) => (VALUE_PIECES.has(piece) ? index : -1)).filter((index) => index >= 0);
+    if (valueIndexes.length) {
+      const at = valueIndexes[Math.floor(random() * valueIndexes.length)]!;
+      const token = marker();
+      parts[at] = markPiece(parts[at]!, token);
+      secrets.push(token);
+    }
+    // And plant a credential pair whose name starts with a separator.
     const token = marker();
-    yield {
-      input: `${input} password=${token} ${sentinel()}`,
-      name: `pairs ${JSON.stringify(input)}`,
-      secrets: [token],
-    };
+    const key = PREFIXED_KEYS[Math.floor(random() * PREFIXED_KEYS.length)]!;
+    const separator = ['=', ': ', ' = '][Math.floor(random() * 3)]!;
+    parts.splice(Math.floor(random() * (parts.length + 1)), 0, `${key}${separator}${token}`);
+    secrets.push(token);
+    const input = parts.join('');
+    yield { input: `${input} ${sentinel()}`, name: `pairs ${JSON.stringify(input)}`, secrets };
+  }
+}
+
+/** The regression inputs from the round-2 review, with the leading-separator variants (#968). */
+function* findings(): Generator<Generated> {
+  for (const prefix of ['_', '__', '.', '-', '$', '$$']) {
+    for (const key of ['secretKey', 'userPassword', 'authToken']) {
+      const token = marker();
+      const input = `${prefix}${key}=apiSecret :''TOPSECRET${token}`;
+      yield { input: `${input} ${sentinel()}`, name: `finding ${JSON.stringify(input)}`, secrets: [token] };
+      const paired = marker();
+      yield {
+        input: `${prefix}${key}=apiSecret :''TOPSECRET${token} password=${paired} ${sentinel()}`,
+        name: `finding paired ${prefix}${key}`,
+        secrets: [token, paired],
+      };
+    }
   }
 }
 
@@ -333,6 +371,7 @@ function* generated(): Generator<Generated> {
   yield* structured();
   yield* nested();
   yield* longKeys();
+  yield* findings();
   yield* randomPairs();
   yield* random();
 }

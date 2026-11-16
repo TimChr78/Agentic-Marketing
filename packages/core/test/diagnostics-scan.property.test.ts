@@ -304,6 +304,10 @@ describe('the leading-separator scan stays linear (#946 review)', () => {
       '$a',
       // Long camelCase, so the classifier is reached with a megabyte-long name.
       'aB',
+      // Overlapping chains: a matched pair whose value is the next pair, repeated.
+      'secretKey=',
+      '_secretKey=',
+      'a=b=c=',
     ];
     const slow: string[] = [];
     for (const shape of shapes)
@@ -330,7 +334,7 @@ describe('the leading-separator scan stays linear (#946 review)', () => {
 
   it('grows roughly linearly: 4× the input takes less than 8× the time', () => {
     const slow: string[] = [];
-    for (const shape of ['_a_', 'a.', '$a', 'aB']) {
+    for (const shape of ['_a_', 'a.', '$a', 'aB', 'secretKey=', '_secretKey=', 'a=b=c=']) {
       const unit = shape;
       const small = unit.repeat(2_000);
       const large = unit.repeat(8_000);

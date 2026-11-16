@@ -56,15 +56,32 @@ export function redactCredentials(text: string): string {
   // value can no longer be told from any other text. So the plain value of such a key is replaced
   // first (#898); see redactLongKeyValues for why that cannot change what the rules below remove.
   let out = applyRules(redactLongKeyValues(text));
-  // The two additions (#898, #920) work on what the rules produced and only ever replace more of
-  // it. They are repeated, together with the rules, until nothing changes, so a second call
-  // returns the same text: one replacement can complete a match for another rule
-  // (`token="authToken=\"`). Each round that changes the text turns ordinary characters into the
-  // marker, so it ends; the bound is a backstop.
+  // Main's 0.14.23 passes converge first, on exactly the release's rules and qualifiers. Only then
+  // do the #946/#956 additions run, so they can add redaction but can never consume a key main's
+  // next round would have needed. If an addition exposes a new main match, main settles again.
+  const settleMain = (input: string): string => {
+    let current = input;
+    for (let round = 0; round < 16; round += 1) {
+      const next = applyRules(redactCompoundKeys(redactUrlPasswords(current)));
+      if (next === current) break;
+      current = next;
+    }
+    return current;
+  };
+  const settleAdded = (input: string): string => {
+    let current = input;
+    for (let round = 0; round < 16; round += 1) {
+      const next = applyRules(redactJoinedCompoundKeys(redactPrefixedCompoundKeys(current)));
+      if (next === current) break;
+      current = next;
+    }
+    return current;
+  };
+  out = settleMain(out);
   for (let round = 0; round < 16; round += 1) {
-    const next = applyRules(redactCompoundKeys(redactUrlPasswords(out)));
-    if (next === out) break;
-    out = next;
+    const added = settleAdded(out);
+    if (added === out) break;
+    out = settleMain(added);
   }
   return out;
 }
@@ -226,6 +243,34 @@ const KEY_QUALIFIERS = new Set([
 ]);
 
 /**
+ * Provider qualifiers this batch added (#956). They are handled after main's 0.14.23 settle loop,
+ * so main's own classifier stays exactly the release's list and the additions are purely additive.
+ */
+const ADDED_PROVIDER_QUALIFIERS = new Set([
+  'mistral',
+  'ollama',
+  'vllm',
+  'litellm',
+  'openrouter',
+  'lmstudio',
+  'groq',
+  'together',
+  'deepseek',
+  'gemini',
+  'cohere',
+  'perplexity',
+  'fireworks',
+  'huggingface',
+  'hf',
+  'replicate',
+  'xai',
+  'bedrock',
+  'vertex',
+  'azureopenai',
+]);
+const MAIN_KEY_QUALIFIERS = new Set([...KEY_QUALIFIERS].filter((qualifier) => !ADDED_PROVIDER_QUALIFIERS.has(qualifier)));
+
+/**
  * The redaction marker. A second pass must leave it exactly as it is (#919 round 2), so it is
  * recognised before anything else that starts with `[`, and only when the value really ends there.
  */
@@ -307,75 +352,15 @@ function classifyCompoundKey(full: string): boolean {
   // A single word, or a word after a separator, is the first rule's business (`token`, `auth_token`).
   if (lastPart.split(CAMEL_BOUNDARY).length < 2) return false;
   if (CREDENTIAL_LAST_WORDS.has(last)) return true;
-  if (last !== 'key' && last !== 'keys') return false;
-  const stem = words.slice(0, -1);
-  if (stem.some((word) => KEY_QUALIFIERS.has(word))) return true;
-  // A provider name that is itself camelCase (`lmStudioKey`, `X-lmStudioKey`) splits into its own
-  // words, so the last few are also joined from each word boundary and checked (`lmstudio`).
-  const tail = stem.slice(-3);
-  for (let start = 0; start < tail.length; start += 1) if (KEY_QUALIFIERS.has(tail.slice(start).join(''))) return true;
-  return false;
+  return (last === 'key' || last === 'keys') && words.slice(0, -1).some((word) => MAIN_KEY_QUALIFIERS.has(word));
 }
 
 /**
  * A name, with its `_`, `-` and `.` separators, that is directly followed by `:` or `=` (an
- * optional closing quote in between). A run of leading separators is not part of the name, so the
- * candidate starts at the first letter after it: `_secretKey`, `__authToken` and `$$SIGNINGKEY`
- * are the same names as their unprefixed forms (#946). `$` splits a run because it is not part of
- * a name.
- *
- * The run is read by hand rather than by a back-tracking regex: `'_a_'.repeat(1 MiB)` has a
- * candidate start every other character, and a regex would retry the whole suffix at each one
- * (#946 review). Each maximal run is consumed once, and at most one candidate comes out of it
- * (the match that starts earliest and ends at the run's `:`/`=`).
+ * optional closing quote in between). It can only start where a name starts, so a long run is
+ * read once.
  */
-const isNameChar = (char: string): boolean =>
-  (char >= 'a' && char <= 'z') ||
-  (char >= 'A' && char <= 'Z') ||
-  (char >= '0' && char <= '9') ||
-  char === '_' ||
-  char === '.' ||
-  char === '-' ||
-  char === '$';
-const isNameLetter = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
-const isAlnum = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9');
-
-/** The original lookahead: an optional quote, whitespace, then `:` or `=`. */
-function assignmentAfter(text: string, pos: number): boolean {
-  let index = pos;
-  const quote = text.charAt(index);
-  if (quote === '"' || quote === "'") index += 1;
-  while (isSpace(text.charAt(index))) index += 1;
-  const mark = text.charAt(index);
-  return mark === ':' || mark === '=';
-}
-
-/**
- * Every candidate name as `[start, end)`, left to right. A maximal run of name characters is
- * consumed once; within it, `$` splits segments (it is not a name character), and the candidate is
- * the first letter whose predecessor is not alphanumeric. If the segment is followed by an
- * assignment, that is the only match the old regex could make in it.
- */
-function* compoundKeyCandidates(text: string): Generator<readonly [number, number]> {
-  let index = 0;
-  while (index < text.length) {
-    if (!isNameChar(text.charAt(index))) {
-      index += 1;
-      continue;
-    }
-    const runStart = index;
-    while (index < text.length && isNameChar(text.charAt(index))) index += 1;
-    const runEnd = index;
-    let segmentStart = runStart;
-    for (let pos = runStart; pos <= runEnd; pos += 1) {
-      if (pos !== runEnd && text.charAt(pos) !== '$') continue;
-      let start = segmentStart;
-      while (start < pos && !(isNameLetter(text.charAt(start)) && !isAlnum(text.charAt(start - 1)))) start += 1;
-      if (start < pos && assignmentAfter(text, pos)) yield [start, pos] as const;
-      segmentStart = pos + 1;
-    }
-  }
-}
+const COMPOUND_KEY = /(?<![A-Za-z0-9_.-])[A-Za-z][A-Za-z0-9_.-]*(?=["']?\s*[:=])/g;
 
 /** A name long enough for the bare-token rule to replace it before its value is looked at. */
 const TOKEN_SHAPED = /[A-Za-z0-9+/_-]{24,}/;
@@ -408,10 +393,10 @@ const SCHEME_WORD = /\b(?:bearer|basic)\b/i;
 function redactLongKeyValues(text: string): string {
   let out = '';
   let copied = 0;
-  for (const [keyStart, keyEnd] of compoundKeyCandidates(text)) {
-    if (keyStart < copied) continue;
-    const key = text.slice(keyStart, keyEnd);
-    if (key.length < 24 || !TOKEN_SHAPED.test(key) || !isCompoundCredentialKey(key)) continue;
+  COMPOUND_KEY.lastIndex = 0;
+  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
+    if (key[0].length < 24 || !TOKEN_SHAPED.test(key[0]) || !isCompoundCredentialKey(key[0])) continue;
+    const keyEnd = key.index + key[0].length;
     const start = separatorEnd(text, keyEnd, true);
     if (start < 0) continue;
     PLAIN_QUOTED.lastIndex = start;
@@ -426,6 +411,7 @@ function redactLongKeyValues(text: string): string {
     const inset = quoted ? 1 : 0;
     out += `${text.slice(copied, start + inset)}[redacted]`;
     copied = start + value.length - inset;
+    COMPOUND_KEY.lastIndex = copied;
   }
   return copied === 0 ? text : out + text.slice(copied);
 }
@@ -448,14 +434,12 @@ const SCHEME_START = /(?:bearer|basic)\s/iy;
  * through. Each character is read a bounded number of times.
  */
 function redactCompoundKeys(text: string): string {
-  // Replace from the right/merge adjacent spans: redacting an outer key first would otherwise
-  // swallow an inner key (`secretKey=apiSecret="…"`) before its own value is found, and the inner
-  // value would survive (#946 review). Every credential pair the scan finds is redacted, and
-  // adjacent or overlapping spans become one marker, so this only ever replaces more.
-  const spans: [number, number][] = [];
-  for (const [keyStart, keyEnd] of compoundKeyCandidates(text)) {
-    const key = text.slice(keyStart, keyEnd);
-    if (!isCompoundCredentialKey(key)) continue;
+  let out = '';
+  let copied = 0;
+  COMPOUND_KEY.lastIndex = 0;
+  for (let key = COMPOUND_KEY.exec(text); key; key = COMPOUND_KEY.exec(text)) {
+    const keyEnd = key.index + key[0].length;
+    if (!isCompoundCredentialKey(key[0])) continue;
     const start = separatorEnd(text, keyEnd, true);
     if (start < 0) continue;
     SCHEME_START.lastIndex = start;
@@ -463,49 +447,129 @@ function redactCompoundKeys(text: string): string {
     PAIR_VALUE.lastIndex = start;
     const value = PAIR_VALUE.exec(text);
     if (!value) continue;
-    let replacement = value[0];
-    // A bare prefix that ends in `=` or `:` is the start of an inner pair
-    // (`secretKey=apiSecret: "…"`, `secretKey=apiSecret: value`). Replacing only the prefix would
-    // swallow the inner key and leave its value, so the inner pair is replaced too.
-    const lastChar = replacement.charAt(replacement.length - 1);
-    if (lastChar === '=' || lastChar === ':') {
-      let cursor = start + replacement.length;
-      while (isSpace(text.charAt(cursor))) cursor += 1;
-      const quote = text.charAt(cursor);
-      let end = cursor;
-      if (quote === '"' || quote === "'") {
-        end = cursor + 1;
-        while (end < text.length) {
-          const char = text.charAt(end);
-          if (char === '\\') end += 2;
-          else if (char === quote) {
-            end += 1;
-            break;
-          } else end += 1;
-        }
-      } else {
-        while (end < text.length && !isSpace(text.charAt(end)) && !',;&}])"\'['.includes(text.charAt(end))) end += 1;
-      }
-      if (end > start + replacement.length) replacement = text.slice(start, end);
-    }
-    if (replacement === '[redacted]' || PLAIN_LITERAL.test(replacement)) continue;
-    spans.push([start, start + replacement.length]);
+    COMPOUND_KEY.lastIndex = start + value[0].length;
+    if (value[0] === '[redacted]' || PLAIN_LITERAL.test(value[0])) continue;
+    out += `${text.slice(copied, start)}[redacted]`;
+    copied = start + value[0].length;
   }
-  if (!spans.length) return text;
-  spans.sort((a, b) => a[0] - b[0]);
-  const merged: [number, number][] = [];
-  for (const span of spans) {
-    const last = merged[merged.length - 1];
-    if (last && span[0] <= last[1]) last[1] = Math.max(last[1], span[1]);
-    else merged.push([span[0], span[1]]);
-  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/**
+ * Main's compound pass takes a bare value up to whitespace or a quote. When that value is itself
+ * the key of an inner pair (`mistralKey=apiSecret :''x`, `mistralKey=apiSecret="…"`), it replaces
+ * the inner key and leaves the inner value behind. This pre-pass runs before that pass on the same
+ * round and redacts the whole nested pair instead, so nothing main would have removed can be lost.
+ * It only acts on a value that is a pair prefix, and only ever replaces more text.
+ */
+/**
+ * Two additive passes that run on the text main's `redactCompoundKeys` produced, inside the settle
+ * loop. Neither can take less than main: they only replace values the main pass left alone.
+ *
+ * 1. `redactPrefixedCompoundKeys` handles #946: `_secretKey`, `__authToken`, `$$SIGNINGKEY`. Main's
+ *    `COMPOUND_KEY` deliberately does not start after `_`, `.` or `-`. A candidate may begin only
+ *    at the start of a name run and must begin with one or more separators.
+ * 2. `redactJoinedCompoundKeys` handles names such as `lmStudioKey`, whose provider word is only
+ *    visible when camelCase words are joined (`lm` + `studio`). It runs after main so an inner pair
+ *    (`lmStudioKey=apiSecret="…"`) is already redacted by the time the outer key is considered.
+ *
+ * Both scan each run once, so `'_a_'.repeat(1 MiB)` and `'secretKey='.repeat(n)` stay linear
+ * (#968 review). Replacements are left-to-right and non-overlapping like a global regex: no
+ * re-scan of suffixes and no span merging.
+ */
+const isRunChar = (char: string): boolean =>
+  (char >= 'a' && char <= 'z') ||
+  (char >= 'A' && char <= 'Z') ||
+  (char >= '0' && char <= '9') ||
+  char === '_' ||
+  char === '.' ||
+  char === '-' ||
+  char === '$';
+const isRunSeparator = (char: string): boolean => char === '_' || char === '.' || char === '-' || char === '$';
+const isRunLetter = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
+const isRunNameChar = (char: string): boolean =>
+  isRunLetter(char) || (char >= '0' && char <= '9') || char === '_' || char === '.' || char === '-';
+
+/** A name whose qualifier this batch added, so main sees the 0.14.23 qualifier list. */
+function isAddedProviderKey(name: string): boolean {
+  if (!/[A-Z]/.test(name)) return false;
+  const parts = withoutTrailingDigits(name)
+    .split(/[_.-]+/)
+    .filter(Boolean);
+  const lastPart = parts[parts.length - 1];
+  if (!lastPart || !/[a-z]/.test(lastPart)) return false;
+  const words = parts.flatMap((part) => part.split(CAMEL_BOUNDARY)).map((word) => word.toLowerCase());
+  const last = words[words.length - 1];
+  if (last !== 'key' && last !== 'keys') return false;
+  const stem = words.slice(0, -1);
+  if (stem.some((word) => ADDED_PROVIDER_QUALIFIERS.has(word))) return true;
+  const tail = stem.slice(-3);
+  for (let start = 0; start < tail.length; start += 1) if (ADDED_PROVIDER_QUALIFIERS.has(tail.slice(start).join(''))) return true;
+  return false;
+}
+
+type CandidateStart = (text: string, runStart: number) => number;
+
+/** A run beginning with separators; the name starts at its first letter (#946). */
+const prefixedStart: CandidateStart = (text, runStart) => {
+  if (!isRunSeparator(text.charAt(runStart))) return -1;
+  let nameStart = runStart;
+  while (nameStart < text.length && isRunSeparator(text.charAt(nameStart))) nameStart += 1;
+  return isRunLetter(text.charAt(nameStart)) ? nameStart : -1;
+};
+
+/** A run beginning with a letter, for a joined provider name such as `lmStudioKey`. */
+const joinedStart: CandidateStart = (text, runStart) => (isRunLetter(text.charAt(runStart)) ? runStart : -1);
+
+/** Scans each name run once and replaces values with the same grammar `redactCompoundKeys` uses. */
+function redactCompoundRuns(text: string, candidateStart: CandidateStart, accept: (name: string) => boolean): string {
   let out = '';
   let copied = 0;
-  for (const [start, end] of merged) {
+  let index = 0;
+  while (index < text.length) {
+    if (!isRunChar(text.charAt(index))) {
+      index += 1;
+      continue;
+    }
+    const runStart = index;
+    while (index < text.length && isRunChar(text.charAt(index))) index += 1;
+    const runEnd = index;
+    const nameStart = candidateStart(text, runStart);
+    if (nameStart < 0 || nameStart >= runEnd) continue;
+    let nameEnd = nameStart + 1;
+    while (nameEnd < runEnd && isRunNameChar(text.charAt(nameEnd))) nameEnd += 1;
+    const name = text.slice(nameStart, nameEnd);
+    const start = separatorEnd(text, nameEnd, true);
+    if (start < 0 || !accept(name)) continue;
+    SCHEME_START.lastIndex = start;
+    if (SCHEME_START.test(text)) continue;
+    PAIR_VALUE.lastIndex = start;
+    const value = PAIR_VALUE.exec(text);
+    if (!value) continue;
+    const valueEnd = start + value[0].length;
+    // If the value is itself the start of an inner pair (`_secretKey=apiSecret :''x`), leave the
+    // outer key to the next round: redacting only `apiSecret` would remove the inner key and orphan
+    // the text after the inner redaction. Main handles the inner pair completely first.
+    let probe = valueEnd;
+    while (isSpace(text.charAt(probe))) probe += 1;
+    const following = text.charAt(probe);
+    if ((following === ':' || following === '=') && value[0] !== '[redacted]') continue;
+    if (value[0] === '[redacted]' || PLAIN_LITERAL.test(value[0])) continue;
     out += `${text.slice(copied, start)}[redacted]`;
-    copied = end;
+    copied = valueEnd;
+    index = valueEnd;
   }
-  return out + text.slice(copied);
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+function redactPrefixedCompoundKeys(text: string): string {
+  if (!/[_.$-][A-Za-z]/.test(text)) return text;
+  return redactCompoundRuns(text, prefixedStart, (name) => isCompoundCredentialKey(name) || isAddedProviderKey(name));
+}
+
+function redactJoinedCompoundKeys(text: string): string {
+  if (!/[A-Z]/.test(text)) return text;
+  return redactCompoundRuns(text, joinedStart, isAddedProviderKey);
 }
 
 /**

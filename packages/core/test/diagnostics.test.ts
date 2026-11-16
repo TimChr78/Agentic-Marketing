@@ -287,6 +287,25 @@ describe('a leading separator does not hide a camelCase credential key (#946)', 
   });
 });
 
+describe('the prefixed pass keeps what main redacted (#968 review)', () => {
+  it('does not expose a value main removed from a nested pair', () => {
+    for (const input of [`_secretKey=apiSecret :''swordfish`, `_secretKey=apiSecret :''probe-secret`]) {
+      const out = redactCredentials(input);
+      expect(out, input).not.toContain('swordfish');
+      expect(out, input).not.toContain('probe-secret');
+    }
+  });
+
+  it('keeps the field after a quoted outer value', () => {
+    expect(redactCredentials(`secretKey="apiSecret='"; status='OK'`)).toBe(`secretKey=[redacted]; status='OK'`);
+    // The underscore variant is main's behaviour plus the new pass; it must not expose the inner
+    // value either, even though main already consumed the text that followed it.
+    const underscored = redactCredentials(`_secretKey="apiSecret='"; status='OK'`);
+    expect(underscored).not.toContain(`apiSecret='`);
+    expect(underscored).not.toContain('status=OK');
+  });
+});
+
 describe('URL userinfo credentials (#920)', () => {
   it('replaces the password of a connection string and keeps the rest of the URL', () => {
     expect(redactCredentials('postgres://am:shortpw@db:5432/am')).toBe('postgres://am:[redacted]@db:5432/am');
