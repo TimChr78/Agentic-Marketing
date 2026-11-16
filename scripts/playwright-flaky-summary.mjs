@@ -61,7 +61,7 @@ if (!flaky.length) {
 const lines = [
   '### Playwright retries',
   '',
-  `**${flaky.length} test(s) passed only on retry.** Nothing is broken in this run, but the same flake will need a rerun again; treat it as a bug.`,
+  `**${flaky.length} test(s) passed only on retry.** ${(stats.unexpected ?? 0) > 0 ? `${stats.unexpected} other test(s) failed on every attempt; see the failures above.` : 'Nothing else failed in this run.'} Each flaky test will need a rerun again; treat it as a bug.`,
   '',
   '| Project | Test | File | First attempt |',
   '|---|---|---|---|',

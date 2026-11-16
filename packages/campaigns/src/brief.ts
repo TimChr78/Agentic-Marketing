@@ -54,8 +54,8 @@ export type CampaignPlan = z.output<typeof CampaignPlan>;
 const channelPurpose = (channel: 'email' | 'sms' | 'push') =>
   channel === 'email' ? 'marketing_email' : channel === 'sms' ? 'marketing_sms' : 'marketing_push';
 
-/** Trims '-' from both ends in one linear pass; `^-+|-+$` backtracks on a long run. */
-function trimDashes(value: string): string {
+/** Trims '-' from both ends in one linear pass; `^-+|-+$` backtracks on a long run. Exported for its test. */
+export function trimDashes(value: string): string {
   let start = 0;
   let end = value.length;
   while (start < end && value[start] === '-') start++;
