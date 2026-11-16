@@ -72,19 +72,42 @@ describe('spend state intervals', () => {
     expect(incompleteInWindow(state, { from: '2026-04-01', to: '2026-04-30' })).toEqual([]);
   });
 
-  it('reports incomplete spend per platform and names the range in the note', () => {
-    const gap = (platform: 'meta' | 'google', from: string, to: string) => ({ platform, from, to });
-    const gaps = [gap('meta', '2026-01-01', '2026-03-31'), gap('google', '2026-01-01', '2026-01-31')];
+  it('reports incomplete spend per platform and account and names them in the note', () => {
+    const gap = (platform: 'meta' | 'google', account: string, from: string, to: string) => ({ platform, account, from, to });
+    const gaps = [gap('meta', 'act_A', '2026-01-01', '2026-03-31'), gap('google', '1234567890', '2026-01-01', '2026-01-31')];
     const window = { since: '2026-01-01', until: '2026-01-31' };
     expect(incompleteSpendFor(gaps, window)).toEqual([
-      { platform: 'meta', intervals: [{ from: '2026-01-01', to: '2026-01-31' }] },
-      { platform: 'google', intervals: [{ from: '2026-01-01', to: '2026-01-31' }] },
+      { platform: 'meta', account: 'act_A', intervals: [{ from: '2026-01-01', to: '2026-01-31' }] },
+      { platform: 'google', account: '1234567890', intervals: [{ from: '2026-01-01', to: '2026-01-31' }] },
     ]);
     expect(incompleteSpendFor(gaps, { ...window, platform: 'meta' }).map((entry) => entry.platform)).toEqual(['meta']);
     expect(incompleteSpendFor(gaps, { since: '2026-04-01', until: '2026-04-30' })).toEqual([]);
     const note = incompleteSpendNote(incompleteSpendFor(gaps, window));
-    expect(note).toContain('meta 2026-01-01 to 2026-01-31');
+    // #953: the note names the account, so a reader knows which account the gap belongs to.
+    expect(note).toContain('meta act_A 2026-01-01 to 2026-01-31');
+    expect(note).toContain('google 1234567890 2026-01-01 to 2026-01-31');
     expect(note).toContain('CPA is understated');
     expect(incompleteSpendNote([])).toBeNull();
+  });
+
+  it('warns only for accounts a current connection reads (#953)', () => {
+    const gaps = [
+      { platform: 'meta' as const, account: 'act_old', from: '2026-01-01', to: '2026-01-31' },
+      { platform: 'meta' as const, account: 'act_new', from: '2026-01-01', to: '2026-01-31' },
+    ];
+    const window = { since: '2026-01-01', until: '2026-01-31' };
+    // Re-pointed connection: only the new account is read, so the old account's retained row is quiet.
+    expect(incompleteSpendFor(gaps, window, [{ platform: 'meta', account: 'act_new' }])).toEqual([
+      { platform: 'meta', account: 'act_new', intervals: [{ from: '2026-01-01', to: '2026-01-31' }] },
+    ]);
+    // No connection reads either account: no warning at all.
+    expect(incompleteSpendFor(gaps, window, [])).toEqual([]);
+    // Both read (for example two connections): both are named.
+    expect(
+      incompleteSpendFor(gaps, window, [
+        { platform: 'meta', account: 'act_old' },
+        { platform: 'meta', account: 'act_new' },
+      ]).map((entry) => entry.account),
+    ).toEqual(['act_old', 'act_new']);
   });
 });

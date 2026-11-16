@@ -1,15 +1,15 @@
 import { type ConversionMap, publishedSingleton } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, providerDiagnostic } from '@agentic-marketing/core';
-import { type Db, schema } from '@agentic-marketing/db';
+import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, EgressError, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { eq } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import { z } from 'zod';
-import { readSpendGapsForReport, recordSpendGaps } from './spendGaps';
-import { incompleteSpendFor, incompleteSpendNote } from './spendState';
+import { clearSpendGaps, readSpendGapsForReport, recordSpendGaps } from './spendGaps';
+import { incompleteSpendFor, incompleteSpendNote, type SpendKey } from './spendState';
 
 /**
  * Bounds on last-touch attribution work in ClickHouse (0.14.12 review round 4). Memory is bounded
@@ -310,6 +310,33 @@ export async function storeSpendPages(
   return { rows: inserted, truncated: result.truncated };
 }
 
+/**
+ * The (platform, account) keys a report can still read: every Meta and Google connection's account,
+ * enabled or not (#953). A gap for any other account is history whose spend rows remain but which no
+ * import can complete; `ads.spendGaps.clear` removes it.
+ */
+export async function readSpendAccounts(tx: Tx): Promise<SpendKey[]> {
+  const rows = await tx
+    .select({ connector: schema.connections.connector, settings: schema.connections.settings })
+    .from(schema.connections)
+    .where(or(eq(schema.connections.connector, metaAdsConnector.id), eq(schema.connections.connector, googleAdsConnector.id)));
+  const keys: SpendKey[] = [];
+  for (const row of rows) {
+    if (row.connector === metaAdsConnector.id) {
+      const s = metaAdsConnector.settings.safeParse(row.settings);
+      if (s.success && s.data.adAccountId)
+        keys.push({
+          platform: 'meta',
+          account: s.data.adAccountId.startsWith('act_') ? s.data.adAccountId : `act_${s.data.adAccountId}`,
+        });
+    } else if (row.connector === googleAdsConnector.id) {
+      const s = googleAdsConnector.settings.safeParse(row.settings);
+      if (s.success) keys.push({ platform: 'google', account: s.data.customerId });
+    }
+  }
+  return keys;
+}
+
 /** Imports the last `days` days of spend for one connection into ClickHouse. */
 export async function importSpend(
   db: Db,
@@ -406,6 +433,21 @@ export const importSpendCommand = defineCommand({
   },
 });
 
+export const clearSpendGapsCommand = defineCommand({
+  name: 'ads.spendGaps.clear',
+  title: 'Clear a spend-gap warning',
+  description:
+    'Removes the recorded incomplete date ranges of one ad account, so ads.performance stops warning about it and stops discounting its CPA/ROAS. Use it for a gap no import can complete any more (a re-pointed or deleted connection kept its history); stored spend is untouched. Only people can clear a gap.',
+  input: z.object({ platform: z.enum(['meta', 'google']), account: z.string().min(1).max(120) }),
+  output: z.object({ cleared: z.number().int().describe('Stored date ranges removed; 0 when the account had no gap') }),
+  permission: 'artifacts:write',
+  effect: 'write',
+  actionClass: 'data.write',
+  humansOnly: true,
+  target: (i) => `${i.platform}:${i.account}`,
+  handler: async (input, ctx) => ({ cleared: await clearSpendGaps(ctx.tx, ctx.principal.workspaceId, input) }),
+});
+
 const PLATFORM_OF_SOURCE: [RegExp, 'meta' | 'google' | 'microsoft'][] = [
   [/facebook|^fb$|instagram|^ig$|meta/i, 'meta'],
   [/google|adwords/i, 'google'],
@@ -476,8 +518,9 @@ export const adPerformance = defineCommand({
     // An incomplete spend read is never silent (#917): the import records the date ranges it could
     // not complete against the account whose spend it wrote, and the report says so when one
     // overlaps this window, whether or not that connection still exists.
+    const accounts = await readSpendAccounts(ctx.tx);
     const gaps = await readSpendGapsForReport(ctx.tx, { since, until, ...(input.platform ? { platform: input.platform } : {}) });
-    const incompleteSpend = incompleteSpendFor(gaps, { since, until, ...(input.platform ? { platform: input.platform } : {}) });
+    const incompleteSpend = incompleteSpendFor(gaps, { since, until, ...(input.platform ? { platform: input.platform } : {}) }, accounts);
     const spendTruncated = incompleteSpend.length > 0;
     const ch = ctx.services.events.client;
     const clickhouse_settings = await ctx.services.events.settingsFor(ws);
@@ -735,4 +778,4 @@ export const adPerformance = defineCommand({
   },
 });
 
-export const spendCommands = [importSpendCommand, adPerformance] as const;
+export const spendCommands = [importSpendCommand, adPerformance, clearSpendGapsCommand] as const;

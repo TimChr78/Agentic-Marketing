@@ -565,7 +565,7 @@ describe('spend and ROAS', () => {
     expect(fresh.settings).not.toHaveProperty('spendImport');
   });
 
-  it('keeps a gap with the spend across an account switch, a deletion and tenant isolation (#917 review rounds 2-3)', async () => {
+  it('matches gaps per account a connection still reads, and clears an orphaned gap (#953)', async () => {
     const work = await t.workspaceWith([[owner, 'owner']]);
     const api = t.api(owner, work);
     const day = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
@@ -590,26 +590,64 @@ describe('spend and ROAS', () => {
       metaPaging = 0;
     }
 
-    // Pointing the connection at another account: a complete import of B cannot clear A's gap,
-    // because A's partial spend rows still feed the report.
+    // The current connection's account is read, so its gap warns and the note names the account.
+    const named = await api.call('ads.performance', wide);
+    expect(named.spendTruncated).toBe(true);
+    expect(named.notes.join(' ')).toContain('meta act_1234567');
+
+    // Re-pointing the connection at another account keeps A's stored gap (its partial spend still
+    // feeds the report), but no connection reads A any more, so no import could ever complete it
+    // and the report stops warning (#953).
     await api.call('connections.update', {
       id,
       settings: { pixelId: '123456789', adAccountId: 'act_7654321', apiBase: platformUrl },
     });
     expect(await api.call('ads.importSpend', { connection: id, days: 3 })).toMatchObject({ truncated: false });
+    const afterSwitch = await api.call('ads.performance', wide);
+    expect(afterSwitch.spendTruncated).toBe(false);
+    expect(afterSwitch.notes.join(' ')).not.toContain('Spend is incomplete');
+    const { rows: kept } = await t.srv.db.admin.query<{ account: string }>(
+      `SELECT account FROM ad_spend_gaps WHERE workspace_id = $1 AND platform = 'meta'`,
+      [work],
+    );
+    expect(kept.map((row) => row.account)).toContain('act_1234567');
+
+    // A connection that reads A again makes its gap live again, with the account named.
+    const back = await meta('act_1234567', 'Gap meta again');
     expect((await api.call('ads.performance', wide)).spendTruncated).toBe(true);
 
-    // Deleting the connection does not delete the spend or the gap it warns about.
+    // Deleting the connections leaves the gap rows (history) but shows no warning for A.
+    await api.call('connections.delete', { id: back });
     await api.call('connections.delete', { id });
-    expect((await api.call('ads.performance', wide)).spendTruncated).toBe(true);
+    expect((await api.call('ads.performance', wide)).spendTruncated).toBe(false);
 
-    // Tenant isolation: another workspace's gap is invisible here, and empty workspaces have no gap.
+    // A person can clear an orphaned gap; the stored spend is untouched.
+    expect(await api.call('ads.spendGaps.clear', { platform: 'meta', account: 'act_1234567' })).toEqual({ cleared: 1 });
+    const { rows: cleared } = await t.srv.db.admin.query(
+      `SELECT 1 FROM ad_spend_gaps WHERE workspace_id = $1 AND platform = 'meta' AND account = 'act_1234567'`,
+      [work],
+    );
+    expect(cleared).toHaveLength(0);
+    expect(await api.call('ads.spendGaps.clear', { platform: 'meta', account: 'act_1234567' })).toEqual({ cleared: 0 });
+
+    // Tenant isolation: a gap warns only in a workspace whose own connection reads that account.
     const isolated = await t.workspaceWith([[owner, 'owner']]);
     const other = await t.workspaceWith([[owner, 'owner']]);
     await t.srv.db.admin.query(
-      `INSERT INTO ad_spend_gaps (workspace_id, platform, account, from_date, to_date) VALUES ($1, 'meta', 'act_other', $2, $3)`,
+      `INSERT INTO ad_spend_gaps (workspace_id, platform, account, from_date, to_date) VALUES ($1, 'meta', 'act_99999', $2, $3)`,
+      [isolated, day(89), today],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO ad_spend_gaps (workspace_id, platform, account, from_date, to_date) VALUES ($1, 'meta', 'act_99999', $2, $3)`,
       [other, day(89), today],
     );
+    await t.api(owner, other).call('connections.create', {
+      connector: 'meta_ads',
+      name: 'Other meta',
+      settings: { pixelId: '123456789', adAccountId: 'act_99999', apiBase: platformUrl },
+      secrets: { accessToken: 'gap-other-system-user-token-0123456789' },
+    });
+    // The isolated workspace has the row but no connection reading act_other, so it never warns.
     expect((await t.api(owner, isolated).call('ads.performance', wide)).spendTruncated).toBe(false);
     expect((await t.api(owner, other).call('ads.performance', wide)).spendTruncated).toBe(true);
 

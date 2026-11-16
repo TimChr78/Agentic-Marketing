@@ -459,7 +459,7 @@ describe('ads.performance unattributed and unmatched (#917)', () => {
     });
     const result = await adPerformance.handler({ since: '2026-01-01', until: '2026-01-10', windowDays: 30 }, ctx);
     expect(result.spendTruncated).toBe(true);
-    expect(result.notes.join(' ')).toContain('meta 2026-01-01 to 2026-01-10');
+    expect(result.notes.join(' ')).toContain('meta act_10001 2026-01-01 to 2026-01-10');
     expect(result.notes.join(' ')).toContain('CPA is understated and ROAS is overstated');
   });
 
@@ -627,3 +627,16 @@ describe('chunked spend import (#962)', () => {
   });
 });
 
+describe('spend gap clearing (#953)', () => {
+  it('is a people-only write that targets one account', async () => {
+    const { clearSpendGapsCommand } = await import('../src/spend');
+    expect(clearSpendGapsCommand.humansOnly).toBe(true);
+    expect(clearSpendGapsCommand.effect).toBe('write');
+    expect(clearSpendGapsCommand.permission).toBe('artifacts:write');
+    expect(clearSpendGapsCommand.input.parse({ platform: 'google', account: '1234567890' })).toEqual({
+      platform: 'google',
+      account: '1234567890',
+    });
+    expect(clearSpendGapsCommand.input.safeParse({ platform: 'microsoft', account: '1' }).success).toBe(false);
+  });
+});
