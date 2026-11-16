@@ -24,6 +24,16 @@ type Values = Record<string, ParamValue>;
 const initialValues = (recipe: Recipe): Values =>
   Object.fromEntries(recipe.parameters.filter((p) => p.default !== undefined).map((p) => [p.key, p.default as ParamValue]));
 
+/** "1 draft" and "2 drafts": the notice names how many the earlier install created. */
+const drafts = (count: number) => `${count} draft${count === 1 ? '' : 's'}`;
+
+/** The parameters an install sent, as the labels the form showed, so a late result can name them. */
+const parametersSummary = (recipe: Recipe, values: Values): string[] =>
+  recipe.parameters
+    .filter((p) => values[p.key] !== undefined && values[p.key] !== '')
+    .slice(0, 4)
+    .map((p) => `${p.label}: ${String(values[p.key])}`);
+
 export default function RecipesPage({ embedded = false }: { embedded?: boolean }) {
   useCrumbs([{ label: embedded ? 'Starters' : 'Recipes' }]);
   const { can } = useWorkspace();
@@ -33,6 +43,11 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
   const [values, setValues] = useState<Values>({});
   const [preview, setPreview] = useState<Preview | null>(null);
   const [installed, setInstalled] = useState<Installed | null>(null);
+  // An install that finished after the person edited a parameter (#961). Its drafts exist on the
+  // server, so it is reported as theirs — clearly labelled — instead of disappearing, but it never
+  // marks the parameters now on screen as installed.
+  const [earlierInstall, setEarlierInstall] = useState<{ artifacts: Installed['artifacts']; summary: string[] } | null>(null);
+  const [earlierInstallError, setEarlierInstallError] = useState<{ message: string; summary: string[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
@@ -70,6 +85,13 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
   }, [loadList]);
 
   const loadSeq = useRef(0);
+  // A parameter edit moves this generation, so an install that resolves later can tell that it no
+  // longer belongs to the values on screen (#961).
+  const paramsGeneration = useRef(0);
+  const selectedRef = useRef(selected);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
   const load = useCallback(async (recipeId: string) => {
     // Only the latest selection may commit state (#616): a slower earlier read must not overwrite
     // the starter the person is now looking at.
@@ -78,6 +100,8 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     setFailedRead(null);
     setCheckError(null);
     setInstalled(null);
+    setEarlierInstall(null);
+    setEarlierInstallError(null);
     setRecipe(null);
     setPreview(null);
     try {
@@ -111,9 +135,12 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     // check and an install success all describe the *old* parameters, so they are dropped, and
     // the sequence moves on so an in-flight check or install for them cannot commit.
     loadSeq.current += 1;
+    paramsGeneration.current += 1;
     setPreview(null);
     setCheckError(null);
     setInstalled(null);
+    setEarlierInstall(null);
+    setEarlierInstallError(null);
     setError(null);
     setFailedRead(null);
   };
@@ -147,14 +174,37 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     if (!recipe) return;
     // Same rule as `check`: an install result may land under another selection or other parameters.
     const seq = ++loadSeq.current;
+    // What this install sends, and the parameter generation it belongs to (#961).
+    const recipeId = recipe.id;
+    const params = values;
+    const generation = paramsGeneration.current;
+    const summary = parametersSummary(recipe, params);
     setInstalling(true);
     setError(null);
+    setEarlierInstall(null);
+    setEarlierInstallError(null);
     try {
-      const out = await api.call('recipes.install', { recipeId: recipe.id, params: values });
-      if (seq !== loadSeq.current) return;
-      setInstalled(out);
+      const out = await api.call('recipes.install', { recipeId, params });
+      if (seq === loadSeq.current) {
+        setInstalled(out);
+        return;
+      }
+      // The result no longer belongs to the parameters on screen. The server did create the
+      // drafts, so dropping the response silently made people install a second full set (#961):
+      // report it, labelled as the earlier parameters', without marking these as installed. A
+      // result for a starter the person has left stays dropped — that panel is another starter's
+      // (#792) — and so does any other stale sequence (a check does not change the values).
+      if (recipeId === selectedRef.current && generation !== paramsGeneration.current)
+        setEarlierInstall({ artifacts: out.artifacts, summary });
     } catch (e) {
-      if (seq === loadSeq.current) setError(errText(e));
+      if (seq === loadSeq.current) {
+        setError(errText(e));
+        return;
+      }
+      // A failure creates nothing to lose track of, but the person did click: it is shown rather
+      // than swallowed, labelled with the parameters it ran for (#961).
+      if (recipeId === selectedRef.current && generation !== paramsGeneration.current)
+        setEarlierInstallError({ message: errText(e), summary });
     } finally {
       setInstalling(false);
     }
@@ -398,6 +448,43 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
                           {a.name}
                         </Link>
                       </li>
+                    ))}
+                  </ul>
+                </Alert>
+              )}
+
+              {earlierInstall && (
+                <Alert tone="warn" title={`Your earlier install finished and created ${drafts(earlierInstall.artifacts.length)}`}>
+                  <p>
+                    It used the parameters from before your last edit, so these drafts are for those earlier values, not the ones above.
+                    They already exist: open one to review it, and create drafts again only if you want a second set.
+                  </p>
+                  <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
+                    {earlierInstall.summary.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                  <ul className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+                    {earlierInstall.artifacts.map((a) => (
+                      <li key={a.artifactId}>
+                        <Link to={`/artifacts/${a.artifactId}`} className="font-medium text-accent hover:underline">
+                          {a.name}
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                </Alert>
+              )}
+
+              {earlierInstallError && (
+                <Alert tone="bad" title="Your earlier install did not finish">
+                  <p>
+                    It ran with the parameters from before your last edit, so this is not an error for the values above:{' '}
+                    {earlierInstallError.message}
+                  </p>
+                  <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
+                    {earlierInstallError.summary.map((line) => (
+                      <li key={line}>{line}</li>
                     ))}
                   </ul>
                 </Alert>

@@ -14,7 +14,7 @@ const h = vi.hoisted(() => ({
   holdPreview: false,
   previewHeld: [] as { recipeId: string; resolve: (value: unknown) => void }[],
   holdInstall: false,
-  installHeld: [] as { recipeId: string; resolve: (value: unknown) => void }[],
+  installHeld: [] as { recipeId: string; resolve: (value: unknown) => void; reject: (reason: unknown) => void }[],
   held: [] as { which: 'A' | 'B'; resolve: (value: unknown) => void }[],
   checkError: null as Error | null,
   installError: null as Error | null,
@@ -137,7 +137,8 @@ vi.mock('../../../app/api', async (importOriginal) => {
         }
         if (name === 'recipes.install') {
           if (h.installError) throw h.installError;
-          if (h.holdInstall) return new Promise((resolve) => h.installHeld.push({ recipeId: String(input.recipeId), resolve }));
+          if (h.holdInstall)
+            return new Promise((resolve, reject) => h.installHeld.push({ recipeId: String(input.recipeId), resolve, reject }));
           return { artifacts: [{ artifactId: `eml_${'b'.repeat(32)}`, name: 'Weekly newsletter' }] };
         }
         throw new Error(`unexpected command ${name}`);
@@ -448,7 +449,7 @@ describe('Starters gallery (#526)', () => {
     expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
   });
 
-  it('does not show an install success under parameters it was not run for', async () => {
+  it('shows an install that finished after a parameter edit as a notice for the earlier parameters (#961)', async () => {
     renderPage();
     await screen.findByRole('button', { name: /Weekly newsletter/ });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
@@ -461,10 +462,49 @@ describe('Starters gallery (#526)', () => {
     await act(async () => {
       h.installHeld[0].resolve({ artifacts: [{ artifactId: `eml_${'e'.repeat(32)}`, name: 'Old parameters draft' }] });
     });
-    await act(async () => {});
 
-    expect(screen.queryByText(/Created 1 drafts/)).toBeNull();
-    expect(screen.queryByText('Old parameters draft')).toBeNull();
+    // The drafts exist on the server; the notice says so, names the parameters it used and links
+    // each draft, instead of leaving the person to install a second full set by mistake.
+    const notice = await screen.findByText(/Your earlier install finished and created 1 draft/);
+    expect(notice).toBeTruthy();
+    expect(screen.getByText('Newsletter name: Northstar Journal')).toBeTruthy();
+    const link = screen.getByRole('link', { name: 'Old parameters draft' });
+    expect(link.getAttribute('href')).toBe(`/artifacts/eml_${'e'.repeat(32)}`);
+    // It is not the current parameters' install: no success alert for those, and Create drafts
+    // stays unavailable until the new parameters are checked.
+    expect(screen.queryByText(/^Created 1 draft/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
+
+    // The new parameters are unaffected: a check makes them ready, and their own install is the
+    // one that shows the success alert (and replaces the earlier notice).
+    h.holdInstall = false;
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(screen.getByText('Everything is in place.')).toBeTruthy());
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    expect(await screen.findByText('Created 1 drafts')).toBeTruthy();
+    expect(screen.queryByText(/Your earlier install finished/)).toBeNull();
+    expect(h.calls.filter((c) => c.name === 'recipes.install').at(-1)?.input.params).toMatchObject({ newsletterName: 'Fjeldvej' });
+  });
+
+  it('shows an install error for the earlier parameters, labelled as theirs (#961)', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /Weekly newsletter/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    h.holdInstall = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+
+    await editParam('Fjeldvej');
+    await act(async () => {
+      h.installHeld[0].reject(new Error('The draft could not be created'));
+    });
+
+    expect(await screen.findByText(/Your earlier install did not finish/)).toBeTruthy();
+    expect(screen.getByText(/The draft could not be created/)).toBeTruthy();
+    expect(screen.getByText('Newsletter name: Northstar Journal')).toBeTruthy();
+    // It is not reported as the current parameters' error, which the person can still check.
+    expect(screen.queryByText('That did not work')).toBeNull();
     expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
   });
 });
