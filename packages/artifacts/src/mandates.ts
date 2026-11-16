@@ -213,7 +213,9 @@ publishValidators.set('agent_mandate', async (content, tx: Tx, artifact) => {
   if (until > Date.now() + 366 * 86_400_000) problems.push('validUntil is more than a year away; mandates are reviewed at least yearly');
   const others = await activeMandate(tx, m.agent);
   if (others && others.view.id !== artifact?.id)
-    problems.push(`agent ${m.agent} already has an active mandate (${others.view.id}); archive it or let it expire first`);
+    problems.push(
+      `agent ${m.agent} already has an active mandate (${others.view.id}); archive it with artifacts.archive or let it expire first`,
+    );
   return problems;
 });
 
@@ -311,6 +313,15 @@ export async function dueHolds(db: Db, now = new Date(), limit = 50) {
 /** The `data_repairs` name of this repair. Written and read through the admin pool only. */
 export const ACTIVE_MANDATE_REPAIR = 'single_active_mandate';
 
+/**
+ * The repair's own version, stored in `data_repairs.detail.version` (#955). A workspace is recorded
+ * only when every group was decided; a group left for a person stays unrecorded so the next pass
+ * looks again. A row written by an older repair (no version, or another one) is dropped first, so
+ * that an upgrade re-examines the workspaces the old rule recorded, including the ones it recorded
+ * although it had left a group alone.
+ */
+export const ACTIVE_MANDATE_REPAIR_VERSION = '2';
+
 /** How often the cheap follow-up pass looks for workspaces an earlier pass had to leave alone. */
 export const ACTIVE_MANDATE_REPAIR_INTERVAL_MS = 6 * 60 * 60_000;
 
@@ -336,6 +347,8 @@ export interface ActiveMandateRepairResult {
   archived: string[];
   /** Workspaces whose groups all ran, recorded in `data_repairs` so later passes skip them. */
   recorded: string[];
+  /** Workspaces left unrecorded because a group had no usable mandate; the next pass looks again. */
+  left: string[];
   /** Workspaces left unrecorded because at least one group failed; the next pass retries them. */
   failed: string[];
 }
@@ -368,7 +381,8 @@ async function lockMandateArtifacts(tx: Tx, workspaceId: string, ids: string[]):
  * Repair one agent's group in its own transaction: read it, lock its artifacts in id order, take
  * the mandate lock, then re-read and decide on what is there now. Nothing is archived when the
  * runtime would use none of the rows: a group with no usable mandate is left for a person rather
- * than guessed at (#922 A2).
+ * than guessed at (#922 A2), and reported as `left` so the workspace is not recorded as repaired
+ * (#955) — the next pass looks at it again.
  */
 async function repairMandateGroup(
   db: Db,
@@ -376,10 +390,10 @@ async function repairMandateGroup(
   agentId: string,
   clock: () => Date,
   log?: (msg: string) => void,
-): Promise<string[]> {
+): Promise<{ archived: string[]; left: boolean }> {
   return db.withWorkspace(workspaceId, async (tx) => {
     const before = await publishedMandateRows(tx, [agentId]);
-    if (before.length <= 1) return [];
+    if (before.length <= 1) return { archived: [], left: false };
     const locked = await lockMandateArtifacts(
       tx,
       workspaceId,
@@ -389,14 +403,16 @@ async function repairMandateGroup(
     // Re-read under both locks: the group may have changed while this transaction waited, and the
     // decision must be made on the rows that are live now.
     const rows = await publishedMandateRows(tx, [agentId]);
-    if (rows.length <= 1) return [];
+    if (rows.length <= 1) return { archived: [], left: false };
     if (rows.some((r) => !locked.has(r.id))) throw new MandateGroupChanged();
     // The runtime would call this now, not when the pass started (#922 A2).
     const now = clock();
     const keep = pickActiveMandate(rows, now);
     if (!keep) {
-      log?.(`single active mandate repair: agent ${agentId} has published mandates but none is usable; left untouched for a person`);
-      return [];
+      log?.(
+        `single active mandate repair: agent ${agentId} has published mandates but none is usable; left untouched for a person, and looked at again on the next pass`,
+      );
+      return { archived: [], left: true };
     }
     // `keep` is schema-valid and unexpired by construction, so a valid loser may be archived; when
     // no row qualifies the branch above returned and archived nothing (#922 A2).
@@ -413,7 +429,7 @@ async function repairMandateGroup(
         .where(and(eq(schema.artifacts.workspaceId, workspaceId), eq(schema.artifacts.id, row.id)));
       gone.push(row.id);
     }
-    return gone;
+    return { archived: gone, left: false };
   });
 }
 
@@ -428,6 +444,12 @@ export async function repairActiveMandates(db: Db, opts: ActiveMandateRepairOpti
   const attempts = opts.attempts ?? ACTIVE_MANDATE_REPAIR_ATTEMPTS;
   // `data_repairs` is admin-only by design: it is written and read through the admin pool, has no
   // grant for the app role, no RLS policy and no Drizzle mapping, like `schema_migrations`.
+  // A record written by another repair version is dropped so its workspace is re-examined (#955):
+  // the old rule recorded a workspace even when it had left a group with no usable mandate alone.
+  await db.admin.query(`DELETE FROM data_repairs WHERE name = $1 AND coalesce(detail->>'version', '') <> $2`, [
+    ACTIVE_MANDATE_REPAIR,
+    ACTIVE_MANDATE_REPAIR_VERSION,
+  ]);
   const { rows: candidates } = await db.admin.query<{ workspace_id: string }>(
     `SELECT DISTINCT a.workspace_id
        FROM artifacts a
@@ -445,6 +467,7 @@ export async function repairActiveMandates(db: Db, opts: ActiveMandateRepairOpti
   );
   const archived: string[] = [];
   const recorded: string[] = [];
+  const left: string[] = [];
   const failed: string[] = [];
   for (const { workspace_id: ws } of candidates) {
     // The groups to look at, read without locks; each one is re-read under its own locks.
@@ -465,14 +488,16 @@ export async function repairActiveMandates(db: Db, opts: ActiveMandateRepairOpti
     );
     const removedHere: string[] = [];
     let workspaceDone = true;
+    let leftHere = false;
     for (const { agent } of groups) {
       let done = false;
       let problem: unknown;
       for (let attempt = 1; attempt <= attempts && !done; attempt++) {
         try {
-          const removed = await repairMandateGroup(db, ws, agent, clock, opts.log);
-          removedHere.push(...removed);
-          archived.push(...removed);
+          const outcome = await repairMandateGroup(db, ws, agent, clock, opts.log);
+          removedHere.push(...outcome.archived);
+          archived.push(...outcome.archived);
+          if (outcome.left) leftHere = true;
           done = true;
         } catch (err) {
           problem = err;
@@ -486,20 +511,23 @@ export async function repairActiveMandates(db: Db, opts: ActiveMandateRepairOpti
         );
       }
     }
-    if (!workspaceDone) {
-      failed.push(ws);
+    if (!workspaceDone || leftHere) {
+      if (!workspaceDone) failed.push(ws);
+      // A group with no usable mandate is not a failure, but it is not repaired either: leaving the
+      // workspace unrecorded makes the next pass (a later tick, or the next start) look again.
+      if (leftHere) left.push(ws);
       continue;
     }
     recorded.push(ws);
-    // Recorded only when every group in the workspace ran; the repair is idempotent, so losing a
-    // record to a crash only means the next pass looks again and finds nothing.
+    // Recorded only when every group in the workspace was decided; the repair is idempotent, so
+    // losing a record to a crash only means the next pass looks again and finds nothing.
     await db.admin.query(
       `INSERT INTO data_repairs (name, workspace_id, detail) VALUES ($1, $2, $3)
        ON CONFLICT (name, workspace_id) DO UPDATE SET ran_at = now(), detail = EXCLUDED.detail`,
-      [ACTIVE_MANDATE_REPAIR, ws, JSON.stringify({ archived: removedHere })],
+      [ACTIVE_MANDATE_REPAIR, ws, JSON.stringify({ version: ACTIVE_MANDATE_REPAIR_VERSION, archived: removedHere })],
     );
   }
-  return { workspaces: candidates.length, archived, recorded, failed };
+  return { workspaces: candidates.length, archived, recorded, left, failed };
 }
 
 /**
@@ -521,6 +549,10 @@ export async function runActiveMandateRepair(
           `single active mandate repair: archived ${result.archived.length} extra mandate(s) in ${result.recorded.length} workspace(s)`,
         );
       if (result.failed.length) opts.log?.(`single active mandate repair: ${result.failed.length} workspace(s) left for the next pass`);
+      if (result.left.length)
+        opts.log?.(
+          `single active mandate repair: ${result.left.length} workspace(s) have a group with no usable mandate; it is left for a person and looked at again on the next pass`,
+        );
     } catch (err) {
       // A database still missing `data_repairs` (SKIP_MIGRATIONS) reports here; the next pass retries.
       opts.onError?.(err);

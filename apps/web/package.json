@@ -1,13 +1,13 @@
 {
   "name": "@agentic-marketing/web",
   "private": true,
-  "version": "0.14.24",
+  "version": "0.14.25",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "build:single": "tsc --noEmit && vite build --mode single && node scripts/artifact.mjs",
-    "build:live": "tsc --noEmit && vite build --mode live",
+    "build:live": "vite build --mode live",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit"
   },

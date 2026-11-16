@@ -394,7 +394,10 @@ export const getStatus = defineCommand({
       adapter: Adapter.nullable().describe('Adapter of the marketing provider, else the transactional one'),
       tracking: Tracking.nullable().describe('Whether that provider adds open and click tracking itself'),
     }),
-    pendingApprovals: z.number().int().describe('Approval requests waiting for a person to decide'),
+    pendingApprovals: z
+      .number()
+      .int()
+      .describe('Approval requests waiting for a person to decide; one whose artifact is archived is excluded (#957)'),
   }),
   permission: 'artifacts:read',
   effect: 'read',
@@ -407,10 +410,19 @@ export const getStatus = defineCommand({
     const marketing = providers.find((p) => p.useFor.includes('marketing'));
     const transactional = providers.find((p) => p.useFor.includes('transactional'));
     const shown = marketing ?? transactional;
+    // A request whose artifact is archived can never publish (#957): approvals.approve would close
+    // it as rejected, so it is not something waiting for a person and does not nag the shell.
     const [pending] = await ctx.tx
       .select({ count: sql<number>`count(*)::int` })
       .from(schema.approvalRequests)
-      .where(eq(schema.approvalRequests.status, 'pending'));
+      .innerJoin(
+        schema.artifacts,
+        and(
+          eq(schema.artifacts.workspaceId, schema.approvalRequests.workspaceId),
+          eq(schema.artifacts.id, schema.approvalRequests.artifactId),
+        ),
+      )
+      .where(and(eq(schema.approvalRequests.status, 'pending'), eq(schema.artifacts.archived, false)));
     return {
       serverVersion: ctx.services.serverVersion,
       emailProvider: {

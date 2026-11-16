@@ -2,6 +2,30 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.25] - 2026-11-16
+
+### Fixed
+
+- A signup that leaves the consent status unchanged is kept in the ledger as evidence, so a delayed unsubscribe callback with an older action time no longer overrides the later signup; imports, SDK consent events, unsubscribe callbacks and SMS STOP follow the same rule. Every distinct action is kept and genuinely repeated signups add a row each; that growth is accepted. Only a redelivered event or an exact duplicate is folded: millisecond precision is the system's precision end to end, so two actions in the same millisecond with the same purpose, channel, status and source count as one. There is no time-window fold, and concurrent writers and merges are not serialised beyond what the platform already does (tracked separately).
+- Spend-gap warnings now belong to the accounts a report actually reads: `ads.performance` matches a stored gap per (platform, account) against the workspace's Meta and Google connections, and the note names the account. A gap kept after a connection was re-pointed or deleted (its partial spend still feeds reports) no longer makes every report warn with `spendTruncated: true` and a remedy no import could carry out. The rows are kept as history; a person can clear one with the new people-only `ads.spendGaps.clear` command, which leaves the stored spend untouched.
+- `analytics.campaignSummary` no longer publishes `meta.currency` for a single suppressed currency or for `UNKNOWN`. It names a currency only when there is exactly one revenue row, its amount is visible and the currency is known, which is the same rule `analytics.query` applies; a client keying suppression detection on `meta.currency === null` no longer misses a withheld revenue figure.
+- A below-k step whose only parent is itself (a disconnected self-loop, as `journeys.migrate` can leave behind) now gets the suppression note the funnel contract promises: a note names the step and k and says it is its own hidden subtree. A parentless below-k step is named in the all-steps-hidden note as well, so a fully withheld funnel is always explained.
+- A large Google Ads spend import is stored page by page in bounded chunks instead of being read into memory twice and written in one ClickHouse call, so a 90-day read at the raised page ceiling no longer risks an out-of-memory kill on the API process. The incomplete date range is recorded before the first insert, so a crash or OOM mid-import leaves the `spendTruncated` warning in place instead of losing it with the insert; chunks of one import share an `updated_at`, so a re-import still replaces the previous rows rather than double counting.
+
+### Security
+
+- Credential redaction now replaces the value in shapes the released rules leave in part, as passes over their output: a JSON array or object under a credential key (`{"token":["shortpw"]}`, `{"secret":{"v":"x"}}`), a short Authorization value (`authToken=Bearer abc`, `password: Basic xyz`), escaped JSON inside a string (`{\"password\":\"x\"}`), URL-encoded pairs (`password%3Dsecret`, `token%22%3A%22abc`, `api%5Fkey=`), a `Pwd`/`Pass` camel ending (`userPwd`, `dbPwd`, `dbPass`), a credential pair nested in another (`SIGNINGKEY=AZUREOPENAIKEY='x'`), and text attached to an existing marker (`token=[redacted]shortpw`). A typographic-quoted value (`token: “short pw”`), a value after `=>` (`'password' => 'x'`) and PEM private-key blocks are left as the released pipeline leaves them: its output no longer shows the opening quote or the arrow, and PEM needs header/footer context, so a safe pass needs the original input. Ordinary JSON, counters such as `"tokens": 1234`, prose with quotes or `=>`, a quoted or mid-line `BEGIN … PRIVATE KEY` mention, and public `BEGIN CERTIFICATE` blocks keep their text, and a second pass still changes nothing.
+
+### Upgrading from 0.14.24
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `analytics.campaignSummary` returns `meta.currency: null` for a single suppressed or `UNKNOWN` currency, where 0.14.24 named the currency. `ads.performance` no longer warns or sets `spendTruncated: true` for a spend gap whose account no current Meta or Google connection reads. A new people-only `ads.spendGaps.clear` acknowledges and removes one account's gap (it repairs nothing). The consent ledger keeps every distinct signup action, so repeated signups add rows.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.25.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.25 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.25` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.25). Run `docker compose exec app am doctor`.
+
+<!-- issues: 936, 937, 953, 958, 959, 962 -->
+
 ## [0.14.24] - 2026-11-16
 
 ### Changed

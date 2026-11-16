@@ -508,6 +508,10 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
             async (tx) => {
               committed.length = 0;
               policy = undefined;
+              // Collect every ledger row this command writes, so its idempotency key can name all of
+              // them: config.import records one undoable publish per artifact besides its own row,
+              // and undoing any of them must reverse the stored response (#950 review).
+              ledgerActionsByTx.set(tx, []);
               // The agent-policy lock comes first for every agent write (#922 A2): before a
               // command's `impact`, which may lock artifacts for the independent check. Taking it
               // later is what let a held run and a publish request deadlock on the same artifact.
@@ -551,6 +555,15 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
                       reason: 'idempotency_key_reused',
                     });
+                  // The action this response described was undone since (#950): the stored answer
+                  // says something that is no longer true, so it is not replayed. Only an agent
+                  // write has a ledger row to undo, so a person's keys never reach this.
+                  if (hit.reversedAt)
+                    throw new AppError(
+                      'conflict',
+                      'The action this idempotency key answered was undone, so its stored response no longer holds. Nothing was re-run; use a new idempotency key.',
+                      { reason: 'idempotency_key_reversed' },
+                    );
                   const replay = hit.response as z.output<C['output']>;
                   // A replay returns before the handler, so computing targets only on the handler
                   // path left the replay's audit row without them (#905). Compute them from the
@@ -620,8 +633,32 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               target = cmd.auditTarget?.(out) ?? target;
               if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(out);
               if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-              if (agent && policy)
-                await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data), undo.get());
+              if (agent && policy) {
+                const actionId = await recordAgentAction(
+                  tx,
+                  agent.id,
+                  cmd,
+                  policy,
+                  opts.surface,
+                  target,
+                  null,
+                  intentOf(parsed.data),
+                  undo.get(),
+                );
+                // Link the stored response to every ledger row the command wrote, so agents.undo can
+                // mark this key reversed and a replay stops describing an action that was undone.
+                // `recordAgentAction` collected each row, including the ones nested handlers wrote
+                // (config.import records one undoable publish per artifact besides its own row).
+                const actionIds = ledgerActionsByTx.get(tx) ?? (actionId === undefined ? [] : [actionId]);
+                if (opts.idempotencyKey && actionIds.length)
+                  await tx.insert(schema.idempotencyKeyActions).values(
+                    actionIds.map((agentActionId) => ({
+                      workspaceId: principal.workspaceId,
+                      key: opts.idempotencyKey!,
+                      agentActionId,
+                    })),
+                  );
+              }
               return out;
             },
             // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
@@ -910,7 +947,15 @@ export function redactPolicyReasons(policy: PolicyOutcome): PolicyOutcome {
   return { ...policy, reasons, ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}) };
 }
 
-/** One agent write in the ledger (#218), with the decision that allowed, escalated or refused it. */
+/**
+ * The ledger rows each command transaction writes (#950 review). The executor registers a list for
+ * its transaction before the handler runs; `recordAgentAction` appends to it, so a nested handler
+ * (config.import's per-artifact publish) is linked to the same idempotency key as the outer command.
+ * A transaction without an entry (the scheduler, the held runner) records usually and links nothing.
+ */
+const ledgerActionsByTx = new WeakMap<object, number[]>();
+
+/** One agent write in the ledger (#218), with the decision that allowed, escalated or refused it. Returns the row id. */
 export async function recordAgentAction(
   tx: Tx,
   agentId: string,
@@ -921,31 +966,36 @@ export async function recordAgentAction(
   error: string | null,
   intent: string | null,
   undo?: AgentUndo | null,
-) {
-  await tx.insert(schema.agentActions).values({
-    workspaceId: sql`nullif(current_setting('app.workspace_id', true), '')::uuid`,
-    agentId,
-    command: cmd.name,
-    actionClass: policy.actionClass,
-    decision: policy.decision,
-    // Reasons may quote an exception (the independent check's failure does), so they are redacted
-    // before they are stored (#885), exactly like the error text beside them.
-    reasons: policy.reasons.map(redactCredentials),
-    impact: policy.impact as Record<string, unknown>,
-    ok: error === null,
-    // Redacted before it is cut (#885): a caller may pass raw text (a policy reason quoting an
-    // exception, an AppError built from a provider's answer), and this column is exposed to readers.
-    error: error === null ? null : safeErrorText(error, 1000),
-    target: target ?? null,
-    surface,
-    mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
-    mandateVersion: policy.mandate?.version ?? policy.shadow?.mandateVersion ?? null,
-    // The shadow decision's reasons are exposed by agents.activity too (#885 round 8).
-    shadow: policy.shadow ? { ...policy.shadow, reasons: policy.shadow.reasons.map(redactCredentials) } : null,
-    level: policy.level ?? null,
-    intent: intent?.slice(0, 2000) ?? null,
-    undo: undo ?? null,
-  });
+): Promise<number | undefined> {
+  const [row] = await tx
+    .insert(schema.agentActions)
+    .values({
+      workspaceId: sql`nullif(current_setting('app.workspace_id', true), '')::uuid`,
+      agentId,
+      command: cmd.name,
+      actionClass: policy.actionClass,
+      decision: policy.decision,
+      // Reasons may quote an exception (the independent check's failure does), so they are redacted
+      // before they are stored (#885), exactly like the error text beside them.
+      reasons: policy.reasons.map(redactCredentials),
+      impact: policy.impact as Record<string, unknown>,
+      ok: error === null,
+      // Redacted before it is cut (#885): a caller may pass raw text (a policy reason quoting an
+      // exception, an AppError built from a provider's answer), and this column is exposed to readers.
+      error: error === null ? null : safeErrorText(error, 1000),
+      target: target ?? null,
+      surface,
+      mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
+      mandateVersion: policy.mandate?.version ?? policy.shadow?.mandateVersion ?? null,
+      // The shadow decision's reasons are exposed by agents.activity too (#885 round 8).
+      shadow: policy.shadow ? { ...policy.shadow, reasons: policy.shadow.reasons.map(redactCredentials) } : null,
+      level: policy.level ?? null,
+      intent: intent?.slice(0, 2000) ?? null,
+      undo: undo ?? null,
+    })
+    .returning({ id: schema.agentActions.id });
+  if (row?.id !== undefined) ledgerActionsByTx.get(tx)?.push(row.id);
+  return row?.id;
 }
 
 /**

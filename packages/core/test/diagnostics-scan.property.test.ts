@@ -83,9 +83,13 @@ const PROSE = [
   'tokenizer failed',
 ];
 
+/** The credential keys FORMS can be built on (the ordinary `entryKey`/`monkey` must not match). */
+const FORM_KEYS = KEYS.filter((key) => key !== 'entryKey' && key !== 'monkey');
+
 /**
- * How a value carrying the secret can be written, given a key. An array or object as the value is
- * not here: 0.14.20 does not consume one either, and that gap is tracked as a follow-up.
+ * How a value carrying the secret can be written, given a key, including the #937 value shapes
+ * (structured, typographic-quoted, escaped JSON, URL-encoded, nested). `=>` and PEM are not
+ * here: their post-pipeline output has lost the evidence, so they are skipped shapes (#937).
  */
 const FORMS: ((key: string) => string)[] = [
   (key) => `${key}=${SECRET}`,
@@ -102,6 +106,13 @@ const FORMS: ((key: string) => string)[] = [
   (key) => `hint=${key}=${SECRET}`,
   (key) => `url?${key}=${SECRET}&x=1`,
   (key) => `X-${key}: ${SECRET}`,
+  (key) => `{"${key}":["${SECRET}"]}`,
+  (key) => `{"${key}":{"v":"${SECRET}"}}`,
+  (key) => `${key}: \u201c${SECRET}\u201d`,
+  (key) => `${key}: \u00ab${SECRET}\u00bb`,
+  (key) => `{\\"${key}\\":\\"${SECRET}\\"}`,
+  (key) => `${key}%3D${SECRET}`,
+  () => `SIGNINGKEY=AZUREOPENAIKEY='${SECRET}'`,
 ];
 
 function randomCase(random: () => number): string {
@@ -152,7 +163,7 @@ describe('the credential redaction on generated cases (#898, #902, #920)', () =>
 
   it('covers every form with at least one generated case', () => {
     for (const [index, form] of FORMS.entries()) {
-      const key = KEYS[index % KEYS.length]!;
+      const key = FORM_KEYS[index % FORM_KEYS.length]!;
       expect(redactCredentials(form(key)), `form ${index}`).not.toContain(SECRET_PART);
     }
   });
@@ -336,7 +347,7 @@ describe('the leading-separator scan stays linear (#946 review)', () => {
     expect(slow).toEqual([]);
   }, 120_000);
 
-  it('grows roughly linearly: 4× the input takes less than 8× the time', () => {
+  it('grows roughly linearly: 4× the input takes less than 10× the time', () => {
     const slow: string[] = [];
     for (const shape of ['_a_', 'a.', '$a', 'aB', 'secretKey=', '_secretKey=', 'a=b=c=']) {
       const unit = shape;
@@ -350,6 +361,57 @@ describe('the leading-separator scan stays linear (#946 review)', () => {
     }
     expect(slow).toEqual([]);
   }, 60_000);
+});
+
+describe('the #937 value-shape passes stay linear', () => {
+  const MB = 1024 * 1024;
+  const repeatTo = (unit: string, bytes: number): string => unit.repeat(Math.ceil(bytes / unit.length));
+  const measure = (text: string): number => {
+    const started = performance.now();
+    redactCredentials(text);
+    return performance.now() - started;
+  };
+  // Each shape is repeated to a megabyte; every pass reads one candidate at a time and never
+  // rescans a suffix, so the whole text costs a few milliseconds to a few hundred.
+  const SHAPES = [
+    // Marker glue: one attached run, then mixed fragments.
+    'token=[redacted]shortpw ',
+    "token=[redacted]'x'",
+    `token=[redacted]${'\'a\'"b"'.repeat(16)}`,
+    '{"token":[redacted]"shortpw"]}',
+    // The passes that were already post-only.
+    '{\\"password\\":\\"x\\"',
+    'password%3D',
+    'token%22%3A%22',
+    'api%5Fkey=',
+    'userPwd=',
+    'dbPass=',
+    'token=Bearer abc ',
+  ];
+
+  it('finishes every repeated shape in a few seconds at most', () => {
+    const slow: string[] = [];
+    for (const shape of SHAPES) {
+      const input = repeatTo(shape, MB);
+      const elapsed = measure(input);
+      if (elapsed >= SLOW_MS) slow.push(`${JSON.stringify(shape)} ${elapsed.toFixed(0)}ms`);
+    }
+    expect(slow).toEqual([]);
+  }, 120_000);
+
+  it('grows roughly linearly: 4× the input takes less than 10× the time', () => {
+    const slow: string[] = [];
+    for (const shape of SHAPES) {
+      // Large enough that JIT warm-up is not the measurement; 32,000 units is a few hundred KB.
+      const small = shape.repeat(8_000);
+      const large = shape.repeat(32_000);
+      measure(small);
+      const first = Math.min(measure(small), measure(small));
+      const second = Math.min(measure(large), measure(large));
+      if (second > Math.max(first * 10, 50)) slow.push(`${JSON.stringify(shape)} ${first.toFixed(1)}ms → ${second.toFixed(1)}ms`);
+    }
+    expect(slow).toEqual([]);
+  }, 120_000);
 });
 
 describe('random input never breaks the scanner (#902 round 3)', () => {

@@ -1,8 +1,7 @@
 import { execFile } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { buildTestCli } from '../../../test-support/cli';
 import { resetPasswordForEmail } from '../src/passwordReset';
 import { APP_ROLE, cookieOf, startTestServer, testDatabaseUrl, testPort, type User } from './harness';
 
@@ -10,13 +9,14 @@ import { APP_ROLE, cookieOf, startTestServer, testDatabaseUrl, testPort, type Us
 // person's sessions in the same operation: a stolen cookie must stop working, while nobody else's
 // session is touched.
 
+// Spawn the built artifact the global setup shared through `AM_TEST_CLI`, not a tsx compile of the
+// source: it is what an operator runs, and it is one Node start per call (docs/development.md).
 const root = fileURLToPath(new URL('../../..', import.meta.url));
-const cliSource = join(root, 'apps/server/src/cli.ts');
-const tsxLoader = createRequire(join(root, 'package.json')).resolve('tsx');
+let cliPath = '';
 
 function cli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
-    const child = execFile(process.execPath, ['--import', tsxLoader, '--', cliSource, ...args], {
+    const child = execFile(process.execPath, [cliPath, ...args], {
       cwd: root,
       env: { ...process.env, ...env },
       maxBuffer: 4 * 1024 * 1024,
@@ -47,6 +47,7 @@ const whoami = (cookie: string) =>
   });
 
 beforeAll(async () => {
+  cliPath = await buildTestCli();
   t = await startTestServer('cli_session', testPort(2506));
   user = await t.signUp(`cli-reset-${Date.now()}@example.com`);
   other = await t.signUp(`cli-other-${Date.now()}@example.com`);
