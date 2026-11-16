@@ -117,20 +117,43 @@ export function scanEnvReads(input: SourceInput): EnvScan {
     return false;
   };
 
+  /** Names holding an imported `env` (`const local = env`): their reads are reported as imported. */
+  const importedAliases = new Set<string>();
+  const holdsImportedEnv = (expression: Ast): boolean => {
+    const node = unwrap(expression);
+    return (
+      !!node &&
+      node.type === 'Identifier' &&
+      !bindings.has(node.name) &&
+      (importedEnvNames.has(node.name) || importedAliases.has(node.name))
+    );
+  };
+
+  // The nodes that can bind a name, collected once: each pass of the fixpoint below visits only
+  // these rather than the whole tree, so a long alias chain costs passes × candidates (#977 review).
+  const candidates: Ast[] = [];
+  walk(ast, (node) => {
+    if (node.type === 'VariableDeclarator' || node.type === 'AssignmentPattern' || isFunctionLike(node)) candidates.push(node);
+  });
+
   // A chain (`const first = process.env; const second = first; third = second`) needs repeated
   // passes: each one can bind the next link, until nothing new appears.
   let boundNewName = true;
   while (boundNewName) {
     boundNewName = false;
-    walk(ast, (node) => {
+    for (const node of candidates) {
       if (node.type === 'VariableDeclarator') {
         if (node.init && yieldsEnvObject(node.init) && bind(node.id)) boundNewName = true;
-        return;
+        else if (node.init && node.id.type === 'Identifier' && holdsImportedEnv(node.init) && !importedAliases.has(node.id.name)) {
+          importedAliases.add(node.id.name);
+          boundNewName = true;
+        }
+        continue;
       }
       // `const { env = process.env } = options`.
       if (node.type === 'AssignmentPattern' && node.right && yieldsEnvObject(node.right)) {
         if (bind(node.left)) boundNewName = true;
-        return;
+        continue;
       }
       if (isFunctionLike(node)) {
         for (const parameter of node.params) {
@@ -144,7 +167,7 @@ export function scanEnvReads(input: SourceInput): EnvScan {
           if ((defaultsToEnv || typedAsEnv) && bind(target)) boundNewName = true;
         }
       }
-    });
+    }
   }
 
   const isEnvRef = (expression: Ast): boolean => {
@@ -159,7 +182,7 @@ export function scanEnvReads(input: SourceInput): EnvScan {
   const isImportedEnvRef = (expression: Ast): boolean => {
     const node = unwrap(expression);
     if (!node || node.type !== 'Identifier' || bindings.has(node.name)) return false;
-    return importedEnvNames.has(node.name);
+    return importedEnvNames.has(node.name) || importedAliases.has(node.name);
   };
 
   /** A key expression that is a literal or a constant string, or undefined when it is dynamic. */
@@ -202,6 +225,12 @@ export function scanEnvReads(input: SourceInput): EnvScan {
       const key = keyOf(node.property);
       if (key) add(key);
       else addDynamic(node, 'element');
+      return;
+    }
+    // `const { PSI } = env` with an imported `env`: the names are real reads of an object this file
+    // cannot identify, so the whole pattern is reported (#977 review).
+    if (node.type === 'VariableDeclarator' && node.id.type === 'ObjectPattern' && node.init && isImportedEnvRef(node.init)) {
+      addDynamic(node, 'imported');
       return;
     }
     // `const { ALPHA, BETA: renamed } = process.env`

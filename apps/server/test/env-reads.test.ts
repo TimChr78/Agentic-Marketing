@@ -101,6 +101,27 @@ describe('the environment scan refuses what it cannot resolve', () => {
     expect(dynamic(source)).toEqual(['imported']);
   });
 
+  it('reports an imported env read through an alias or a destructuring pattern (#977 review)', () => {
+    const alias = ["import { env } from './shared';", 'const local = env;', 'const again = local;', 'again.PSI;'].join('\n');
+    expect(keys(alias)).toEqual([]);
+    expect(dynamic(alias)).toEqual(['imported']);
+    const destructured = ["import { env } from './shared';", 'const { PSI, OMEGA: renamed } = env;'].join('\n');
+    expect(keys(destructured)).toEqual([]);
+    expect(dynamic(destructured)).toEqual(['imported']);
+  });
+
+  it('resolves a long reverse-ordered alias chain without rescanning the file per link (#977 review)', () => {
+    // Declared in reverse, so each fixpoint pass binds only one more link.
+    const links = 2_000;
+    const lines = ['function f() {'];
+    for (let i = links; i >= 1; i--) lines.push(`  const a${i} = a${i - 1};`);
+    lines.push('  return a2000.CHAIN_END;', '}');
+    const source = ['const a0 = process.env;', ...lines].join('\n');
+    const started = performance.now();
+    expect(keys(source)).toEqual(['CHAIN_END']);
+    expect(performance.now() - started).toBeLessThan(2_000);
+  });
+
   it('reports a helper called with a name it cannot resolve', () => {
     expect(dynamic('resolvePassword({ envVar: someVariable });')).toEqual(['helper']);
     expect(dynamic('resolvePassword({});')).toEqual(['helper']);
