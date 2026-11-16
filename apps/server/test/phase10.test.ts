@@ -186,8 +186,8 @@ describe('experiences', () => {
     expect(await decide()).toBe('<h1>Old</h1>');
     await api.call('artifacts.updateDraft', { artifactId: exp, content: content('<h1>New</h1>') });
     await api.call('artifacts.requestPublish', { artifactId: exp, note: 'v2' });
-    const started = Date.now();
+    // The poll's 5 s deadline is the only bound: the decision propagates when the server has
+    // refreshed it, and a slow runner polls less often rather than failing (#990 timing sweep).
     await eventually(decide, (html) => html === '<h1>New</h1>', 5000);
-    expect(Date.now() - started).toBeLessThan(5000);
   });
 });

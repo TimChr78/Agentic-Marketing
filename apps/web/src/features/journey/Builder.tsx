@@ -67,6 +67,7 @@ import { edgesOf, type JNode, type JourneyContent, KINDS, maxEdges, type NodeKin
 import { type NodeData, nodeTypes } from './NodeView';
 import { addNode, connect, deleteNode, disconnect, duplicateNode, type EditResult, withPositions } from './ops';
 import { DND_TYPE, Palette } from './Palette';
+import { useCanvasReady } from './ready';
 import { COUNTS_LABEL, type JourneyCounts, withNodeCounts } from './report/counts';
 import { sameTopology } from './report/model';
 import { SimulatePanel } from './SimulatePanel';
@@ -104,6 +105,7 @@ export function JourneyBuilder(p: EditorProps<JourneyContent>) {
 
 function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverWarnings }: EditorProps<JourneyContent>) {
   const theme = useResolvedTheme();
+  const canvasReady = useCanvasReady();
   const toast = useToast();
   const rf = useReactFlow();
   const { user, workspace } = useSession();
@@ -611,6 +613,7 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
               minZoom={0.2}
               nodeDragThreshold={5}
               proOptions={{ hideAttribution: true }}
+              data-journey-ready={canvasReady ? 'true' : 'false'}
               deleteKeyCode={null}
               nodesConnectable={!readOnly}
               onNodesChange={(changes: NodeChange[]) =>

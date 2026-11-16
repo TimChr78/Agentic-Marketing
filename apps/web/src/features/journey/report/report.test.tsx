@@ -112,6 +112,9 @@ vi.mock('@xyflow/react', async () => {
     MarkerType: { ArrowClosed: 'arrow' },
     Handle: () => null,
     Position: { Top: 'top', Bottom: 'bottom' },
+    useReactFlow: () => ({ getNodes: () => [] }),
+    useUpdateNodeInternals: () => () => {},
+    useStore: (selector: (state: { nodeLookup: Map<string, unknown> }) => unknown) => selector({ nodeLookup: new Map() }),
   };
 });
 

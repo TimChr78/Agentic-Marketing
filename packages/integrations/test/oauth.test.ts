@@ -308,14 +308,15 @@ describe.skipIf(!hasTestDatabase())('OAuth callback (#375)', () => {
     const calls = connections.map(({ state }) => callback(app, state));
     await allStarted;
     // With the app pool capped at two, this probe would stall for the whole exchange if the
-    // callbacks held a transaction across HTTP.
+    // callbacks held a transaction across HTTP. The bound is generous: it only separates a free
+    // pool from a stall until release() below, which would otherwise never happen (#990).
     const began = Date.now();
     await t.db.withWorkspace(t.workspace, (tx) => tx.execute(sql`SELECT 1`));
     const probeMs = Date.now() - began;
     release();
     const responses = await Promise.all(calls);
     expect(responses.every((r) => r.status === 200)).toBe(true);
-    expect(probeMs).toBeLessThan(1_000);
+    expect(probeMs).toBeLessThan(5_000);
     for (const { id } of connections) expect(await connectionOf(id)).toMatchObject({ oauth_status: 'connected' });
   });
 });

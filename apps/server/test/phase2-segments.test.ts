@@ -94,14 +94,14 @@ describe('segments', () => {
       (r) => r.events.some((e) => e.name === 'Segment Entered' && e.properties.segment_id === artifactId),
     );
 
-    // Bo moves to Aarhus and looks at tents again: streaming puts him in right away.
-    const started = Date.now();
+    // Bo moves to Aarhus and looks at tents again: streaming puts him in right away. The poll's own
+    // 5 s deadline is the bound, so a slow runner polling less often cannot fail it (#990).
     await send([{ type: 'identify', userId: 'bo', traits: { city: 'Aarhus' } }, ...views('bo', 1)]);
     await eventually(
       () => api.call('segments.ofProfile', { profileId: ids.bo }),
       (r) => r.segments.some((s) => s.id === artifactId),
+      5_000,
     );
-    expect(Date.now() - started).toBeLessThan(5_000);
 
     // Ada moves away: she leaves, and the exit is an event too.
     await send([{ type: 'identify', userId: 'ada', traits: { city: 'Copenhagen' } }]);
