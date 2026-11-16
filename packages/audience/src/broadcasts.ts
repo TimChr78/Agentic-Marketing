@@ -278,6 +278,37 @@ async function publishedTemplateInfo(tx: Tx, templateId: string): Promise<{ vers
 }
 
 /**
+ * Which of a batch's segment members already have a message for this broadcast (#944).
+ *
+ * The dedupe key alone is not merge-safe: it embeds the profile id, and identity resolution
+ * rewrites that id on a merge (it also moves the person's messages to the survivor). So the run
+ * asks the question by person instead: the member's id, or any profile it was merged into, already
+ * has a row for this broadcast. One recursive walk covers both directions — a survivor the batch
+ * has not visited yet, and a merged-away id the audience still lists. Test sends are excluded: they
+ * are the sender's own copies, not this run's message to the person.
+ */
+async function handledMembers(tx: Tx, workspaceId: string, broadcastId: string, ids: string[]): Promise<Set<string>> {
+  if (!ids.length) return new Set();
+  const res = await tx.execute<{ member: string }>(sql`
+    WITH RECURSIVE chain(member, link, next_id) AS (
+      SELECT p.id, p.id, p.merged_into FROM profiles p
+      WHERE p.workspace_id = ${workspaceId} AND p.id IN (${sql.join(
+        ids.map((id) => sql`${id}`),
+        sql`, `,
+      )})
+      UNION
+      SELECT c.member, c.next_id, p.merged_into
+      FROM chain c
+      JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = c.next_id
+      WHERE c.next_id IS NOT NULL
+    )
+    SELECT DISTINCT c.member FROM chain c
+    JOIN messages m ON m.workspace_id = ${workspaceId} AND m.journey_id = ${broadcastId}
+      AND m.profile_id = c.link AND m.test = false`);
+  return new Set(res.rows.map((r) => r.member));
+}
+
+/**
  * Records a broadcast message that was not sent because the person is in the campaign's control
  * group. It is a suppression, like consent or a send window, not a failure: the message log and
  * ClickHouse keep it with the reason, and the run counts it as skipped.
@@ -1369,18 +1400,11 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       .orderBy(asc(schema.segmentMemberships.profileId))
       .limit(BATCH);
     const ids = members.map((m) => m.profileId);
-    // In the rest pass, everyone the sample already touched is left alone; the retry-safe
-    // idempotency key would prevent a second message, but skipping them keeps the counts honest.
-    const already = new Set(
-      (test?.state === 'winner_sent' || restPass) && ids.length
-        ? (
-            await tx
-              .select({ profileId: schema.messages.profileId })
-              .from(schema.messages)
-              .where(and(eq(schema.messages.journeyId, broadcastId), inArray(schema.messages.profileId, ids)))
-          ).flatMap((r) => (r.profileId ? [r.profileId] : []))
-        : [],
-    );
+    // One message per person per broadcast (#944): a member whose person already has a row for this
+    // broadcast is left alone, in every pass. That is what keeps the sample and the rest apart, and
+    // it survives a merge, because the row is found under the member's id or under the profile it
+    // was merged into — the key alone could not, since a merge rewrites the profile id it embeds.
+    const handled = await handledMembers(tx, ws, broadcastId, ids);
     const traits =
       def.sendWindow && ids.length
         ? new Map(
@@ -1404,8 +1428,12 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     for (const m of members) {
       if (canaryPass && stage && !canaryAssignment(m.profileId, broadcastId, stage.canaryPercent)) continue;
       if (test?.state === 'sampling' && !subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length)) continue;
-      if (test?.state === 'winner_sent' && already.has(m.profileId)) continue;
-      if (restPass && already.has(m.profileId)) continue;
+      if (handled.has(m.profileId)) {
+        // The person's message for this broadcast exists: a sample send, a rest pass, a replayed
+        // chunk, a control suppression, or a chunk that ran before a merge. Not a second send, and
+        // not counted again: the run counted this person when the row was written.
+        continue;
+      }
       const variant =
         test?.state === 'sampling'
           ? (subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length) ?? undefined)
