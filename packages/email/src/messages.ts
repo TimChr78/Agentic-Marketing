@@ -3,7 +3,9 @@ import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { fingerprintParts } from './fingerprint';
 import { requestEmail, sendRequestHash } from './gateway';
+import { sendIdempotencyKey } from './idempotency';
 import { directSendImpact, directSendLedger } from './sendTouches';
 
 const Status = z.enum(['queued', 'sending', 'sent', 'suppressed', 'failed', 'delivered', 'bounced', 'complained']);
@@ -35,7 +37,7 @@ export const sendEmail = defineCommand({
   input: z.object({
     profileId: z.string().regex(/^prf_[0-9a-f]{32}$/),
     templateId: z.string().regex(/^eml_[0-9a-f]{32}$/),
-    idempotencyKey: z.string().min(1).max(200).optional().describe('Same key, same message: a retry never sends twice'),
+    idempotencyKey: sendIdempotencyKey.describe('Same key, same message: a retry never sends twice'),
     data: z.record(z.string(), z.unknown()).optional().describe('Extra template variables, e.g. {"event":{"properties":{"sku":"TENT-2"}}}'),
   }),
   output: z.object({ messageId: z.string(), status: Status, reason: z.string().nullable(), duplicate: z.boolean() }),
@@ -51,12 +53,15 @@ export const sendEmail = defineCommand({
     requestEmail(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
-      requestHash: sendRequestHash('email', {
-        caller: callerHash(ctx.principal),
-        recipient: input.profileId,
-        template: input.templateId,
-        data: input.data ?? null,
-      }),
+      requestHash: sendRequestHash(
+        'email',
+        fingerprintParts.direct({
+          caller: callerHash(ctx.principal),
+          recipient: input.profileId,
+          template: input.templateId,
+          data: input.data ?? null,
+        }),
+      ),
     }),
 });
 

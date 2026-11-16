@@ -5,8 +5,9 @@ import { type BusEvent, CONSENT_EVENT } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { consentStateOf, currentConsent, lockIdentity, recomputeConsentState, recordConsentEvidence } from './consent';
+import { consentStateOf, currentConsent, recomputeConsentState, recordConsentEvidence } from './consent';
 import { type PersonCrypto, personCrypto } from './crypto';
+import { lockIdentity } from './identity';
 
 // Deterministic identity resolution (data-platform.md §3). Each event's identifiers are looked up;
 // unknown ones are attached, and when they point at several profiles those are merged, as long as
@@ -95,8 +96,9 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
     }
 
     // Anything that creates, attaches or merges is serialised per workspace, so concurrent shard
-    // consumers cannot interleave on the same people. Identity first; the SDK consent write below
-    // takes the per-person consent lock second, never the other way round (#936).
+    // consumers cannot interleave on the same people (and a broadcast batch can order against it).
+    // Identity first; the SDK consent write below takes the per-person consent lock second, never
+    // the other way round (#936).
     await lockIdentity(tx, workspaceId);
     const profileId = await resolve(tx, workspaceId, ids, crypto, e);
     await updateProfile(tx, workspaceId, profileId, e, crypto);

@@ -1,6 +1,6 @@
-import { newId, redactCredentials } from '@agentic-marketing/core';
+import { newId } from '@agentic-marketing/core';
 import { type AlertChannel, type AlertKind, type AlertNotification, type DeliveryStatus, schema, type Tx } from '@agentic-marketing/db';
-import { MESSAGE_ID_HEADER, sendRequestHash, transportFor } from '@agentic-marketing/email';
+import { failureText, fingerprintParts, MESSAGE_ID_HEADER, sendRequestHash, transportFor } from '@agentic-marketing/email';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import type { NotifyDeps } from './deps';
@@ -396,7 +396,7 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
           status: 'sending',
           data: email.data ?? {},
           // The member's stable user id and this notification's own key, never a profile id.
-          requestHash: sendRequestHash('email', { caller: 'system:alert', recipient: email.userId, key: email.idempotencyKey }),
+          requestHash: sendRequestHash('email', fingerprintParts.alert({ recipient: email.userId, key: email.idempotencyKey })),
         });
       try {
         const { providerMessageId } = await transport.send({
@@ -416,7 +416,9 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
           .where(eq(schema.messages.id, messageId));
         out.push({ userId: email.userId, status: 'sent' });
       } catch (err) {
-        const error = redactCredentials((err as Error).message).split('\n')[0]!; // redact whole, then cut (#885)
+        // Redacted while complete, then its first line, then cut to the stored reason's bound
+        // (#964, the same `failureText` every send path uses; #919).
+        const error = failureText((err as Error).message);
         logger.warn({ err, idempotencyKey: email.idempotencyKey, userId: email.userId }, 'member e-mail failed');
         await tx
           .update(schema.messages)
@@ -426,7 +428,7 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
       }
     }
   } catch (err) {
-    const error = redactCredentials((err as Error).message).split('\n')[0]!; // redact whole, then cut (#885)
+    const error = failureText((err as Error).message);
     logger.warn({ err }, 'member e-mail transport could not be created');
     for (const email of emails)
       if (!out.some((n) => n.userId === email.userId && n.status === 'failed')) out.push({ userId: email.userId, status: 'failed', error });

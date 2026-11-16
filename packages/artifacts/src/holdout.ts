@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 // Holdout groups (#67): a deterministic share of a scope's entrants is held back from marketing
 // messages while still being measured. Assignment is a pure function of workspace, scope id,
@@ -28,6 +28,28 @@ export interface HoldoutAssignment {
   percent: number;
 }
 
+/** Where a stored arm came from and when: the two fields every holdout read orders by. */
+export interface HoldoutStamp {
+  profileId: string;
+  /**
+   * `assigned_at` in microseconds since the epoch, as PostgreSQL stores it. A JavaScript Date keeps
+   * only milliseconds, so two rows inside one millisecond would compare equal here while the
+   * database orders them, and the send and the report could pick different arms (#944 review).
+   */
+  assignedMicros: bigint;
+}
+
+/**
+ * Whether `a` is the person's decision before `b` (#944): the earliest `assigned_at` wins, and the
+ * lower profile id breaks a tie. `assignHoldout` (sending) and `campaigns.holdoutResult` (reporting)
+ * both use this order, so a tie cannot let the send and the report pick different arms.
+ */
+export function earlierAssignment(a: HoldoutStamp, b: HoldoutStamp): boolean {
+  if (a.assignedMicros !== b.assignedMicros) return a.assignedMicros < b.assignedMicros;
+  // Code-unit order, the same as the SQL side's `COLLATE "C"`.
+  return a.profileId < b.profileId;
+}
+
 /**
  * The scope version for a percentage. Deliberately covers only the percentage: re-publishing an
  * unrelated edit keeps every assignment, while a changed percentage is a new scope. Publishing a
@@ -49,8 +71,97 @@ export function armFor(percent: number, workspaceId: string, scopeId: string, ha
 }
 
 /**
+ * Maps each profile id to the person it belongs to today: itself, or the end of the chain of
+ * `merged_into` links (#944). Used where a decision must be made once per person even though a row
+ * can sit on an id the person was merged away from.
+ */
+export async function canonicalPeople(tx: Tx, workspaceId: string, profileIds: readonly string[]): Promise<Map<string, string>> {
+  const canonical = new Map<string, string>();
+  const ids = [...new Set(profileIds)];
+  if (!ids.length) return canonical;
+  /** id → merged_into, for every id the walk reached (null or missing means "no survivor"). */
+  const survivorOf = new Map<string, string | null>();
+  const seen = new Set(ids);
+  let frontier = ids;
+  while (frontier.length) {
+    // One array parameter, not one per id: a large campaign's frontier is far past PostgreSQL's
+    // 65,535-parameter limit, and `holdoutResult` would fail even without a single merge (#944).
+    const rows = await tx
+      .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
+      .from(schema.profiles)
+      .where(and(eq(schema.profiles.workspaceId, workspaceId), sql`${schema.profiles.id} = ANY(${sql.param(frontier)}::text[])`));
+    const next: string[] = [];
+    for (const row of rows) {
+      survivorOf.set(row.id, row.mergedInto);
+      if (row.mergedInto && !seen.has(row.mergedInto)) {
+        seen.add(row.mergedInto);
+        next.push(row.mergedInto);
+      }
+    }
+    frontier = next;
+  }
+  const rootOf = (id: string): string => {
+    let current = id;
+    const visited = new Set([id]);
+    // A merge chain is short and acyclic; the bound only guards against a corrupted chain.
+    for (let hop = 0; hop < 20; hop++) {
+      const next = survivorOf.get(current);
+      if (!next || visited.has(next)) return current;
+      visited.add(next);
+      current = next;
+    }
+    return current;
+  };
+  for (const id of ids) canonical.set(id, rootOf(id));
+  return canonical;
+}
+
+interface StoredArm {
+  profileId: string;
+  arm: HoldoutArm;
+  assignedAt: Date;
+}
+
+/**
+ * The arm this person already holds in one scope version (#944): their own row, or one written
+ * under a profile that was merged into them. A merge moves assignments to the survivor (migration
+ * 0041), but a run that selected a stale alias after a merge wrote its row on the alias — that row
+ * is still this person's arm, and the earliest one wins when two disagree, so an arm is never
+ * replaced by a later one. The walk starts at the person the id belongs to today, so an id that was
+ * merged away finds the arm stored on its survivor too.
+ */
+async function oldestArm(
+  tx: Tx,
+  workspaceId: string,
+  scope: HoldoutScope,
+  hashVersion: string,
+  profileId: string,
+): Promise<{ person: string; arm: StoredArm | null }> {
+  const person = (await canonicalPeople(tx, workspaceId, [profileId])).get(profileId) ?? profileId;
+  const res = await tx.execute<{ profile_id: string; arm: HoldoutArm; assigned_at: Date }>(sql`
+    WITH RECURSIVE person(id) AS (
+      SELECT p.id FROM profiles p WHERE p.workspace_id = ${workspaceId} AND p.id = ${person}
+      UNION
+      SELECT p.id FROM profiles p JOIN person ON p.merged_into = person.id WHERE p.workspace_id = ${workspaceId}
+    )
+    SELECT a.profile_id, a.arm, a.assigned_at
+    FROM holdout_assignments a
+    JOIN person ON person.id = a.profile_id
+    WHERE a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type} AND a.scope_id = ${scope.id}
+      AND a.hash_version = ${hashVersion}
+    -- The shared order (earlierAssignment): earliest decision to the microsecond, then the lower
+    -- profile id in code-unit order.
+    ORDER BY a.assigned_at, a.profile_id COLLATE "C"
+    LIMIT 1`);
+  const row = res.rows[0];
+  return { person, arm: row ? { profileId: row.profile_id, arm: row.arm, assignedAt: new Date(row.assigned_at) } : null };
+}
+
+/**
  * Records the person's arm once per scope version and returns the stored one. Re-entry and a
  * second trigger read the first row, so the arm never changes while the percentage is the same.
+ * An arm already held under a profile this person was merged from is theirs, so it is reused and
+ * recorded under the person as well — never replaced by a freshly hashed one.
  */
 export async function assignHoldout(
   tx: Tx,
@@ -61,30 +172,36 @@ export async function assignHoldout(
 ): Promise<{ assignment: HoldoutAssignment; created: boolean } | null> {
   if (!config) return null;
   const hashVersion = holdoutHashVersion(config.percent);
+  const found = await oldestArm(tx, workspaceId, scope, hashVersion, profileId);
+  const existing = found.arm;
+  if (existing) {
+    if (existing.profileId !== found.person)
+      // Same arm, original time: reporting's earliest-wins rule and any later read are unchanged.
+      // A row the person already has is never overwritten (the app role may only insert).
+      await tx
+        .insert(schema.holdoutAssignments)
+        .values({
+          workspaceId,
+          scopeType: scope.type,
+          scopeId: scope.id,
+          hashVersion,
+          profileId: found.person,
+          arm: existing.arm,
+          assignedAt: existing.assignedAt,
+        })
+        .onConflictDoNothing();
+    return { assignment: { arm: existing.arm, hashVersion, percent: config.percent }, created: false };
+  }
   const arm = armFor(config.percent, workspaceId, scope.id, hashVersion, profileId);
   const [inserted] = await tx
     .insert(schema.holdoutAssignments)
     .values({ workspaceId, scopeType: scope.type, scopeId: scope.id, hashVersion, profileId, arm })
     .onConflictDoNothing()
     .returning({ arm: schema.holdoutAssignments.arm });
-  const stored =
-    inserted?.arm ??
-    (
-      await tx
-        .select({ arm: schema.holdoutAssignments.arm })
-        .from(schema.holdoutAssignments)
-        .where(
-          and(
-            eq(schema.holdoutAssignments.workspaceId, workspaceId),
-            eq(schema.holdoutAssignments.scopeType, scope.type),
-            eq(schema.holdoutAssignments.scopeId, scope.id),
-            eq(schema.holdoutAssignments.hashVersion, hashVersion),
-            eq(schema.holdoutAssignments.profileId, profileId),
-          ),
-        )
-        .limit(1)
-    )[0]?.arm;
-  return { assignment: { arm: stored ?? arm, hashVersion, percent: config.percent }, created: !!inserted };
+  if (inserted) return { assignment: { arm: inserted.arm, hashVersion, percent: config.percent }, created: true };
+  // A concurrent caller recorded first: answer with the stored arm (never a second decision).
+  const stored = await oldestArm(tx, workspaceId, scope, hashVersion, profileId);
+  return { assignment: { arm: stored.arm?.arm ?? arm, hashVersion, percent: config.percent }, created: false };
 }
 
 /** The detail stored on a `holdout_assigned` event; the campaign id names the outer scope. */

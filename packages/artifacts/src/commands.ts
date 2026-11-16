@@ -6,7 +6,15 @@ import {
   lockAgentPolicy,
   recordAgentAction,
 } from '@agentic-marketing/commands';
-import { AppError, canonicalJson, decodeTimestampCursor, encodeTimestampCursor, hashValue, newId } from '@agentic-marketing/core';
+import {
+  AppError,
+  canonicalJson,
+  decodeTimestampCursor,
+  encodeTimestampCursor,
+  hashValue,
+  newId,
+  safeErrorText,
+} from '@agentic-marketing/core';
 import { type AgentUndo, schema, type VersionState } from '@agentic-marketing/db';
 import { and, asc, count, desc, eq, gt, inArray, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -1653,7 +1661,10 @@ export const approve = defineCommand({
       if (problem) problems.push(problem);
     }
     if (problems.length) {
-      const reason = problems.join(' ');
+      // The archive problem quotes the artifact name, which a person (or an agent) chose. This
+      // reason is returned and stored in `approval_requests.decision_note`, so it is redacted and
+      // bounded before either (#940).
+      const reason = safeErrorText(problems.join(' '), 1000);
       await closeRejected(ctx, members, reason);
       return { status: 'rejected' as const, artifactId: r.artifactId, version: r.version, published: [], reason };
     }
@@ -1901,7 +1912,9 @@ export async function runHeldChange(
     if (problem) archivedProblems.push(problem);
   }
   if (archivedProblems.length) {
-    const reason = archivedProblems.join(' ');
+    // The same archive problem quotes the artifact name; this one is stored in the approval note
+    // and returned as the held run's reason (#940).
+    const reason = safeErrorText(archivedProblems.join(' '), 1000);
     await closeRejected(ctx, members, `Not run after its veto window: ${reason}`);
     return { status: 'needs_person', reason };
   }
@@ -1915,13 +1928,16 @@ export async function runHeldChange(
     const verdict = await check(agent.id, held);
     if ('person' in verdict) problem = verdict.person;
     else if ('wait' in verdict) {
+      // The wait text may quote a mandate or an exception; it is stored in the approval note and
+      // the ledger and returned, so it is redacted and bounded like the problem below (#940).
+      const wait = safeErrorText(verdict.wait, 1000);
       const firstWait = !r.note.includes(WAIT_MARK);
       const runsAt = new Date(Date.now() + HOLD_RECHECK_MS);
       await ctx.tx
         .update(schema.approvalRequests)
         .set({
           holdUntil: runsAt,
-          ...(firstWait ? { note: sql`${schema.approvalRequests.note} || ${`\n\n${WAIT_MARK}: ${verdict.wait}`}` } : {}),
+          ...(firstWait ? { note: sql`${schema.approvalRequests.note} || ${`\n\n${WAIT_MARK}: ${wait}`}` } : {}),
         })
         .where(
           and(
@@ -1933,10 +1949,13 @@ export async function runHeldChange(
           ),
         );
       // Announced once, when it first has to wait (#282); later rechecks only move the time.
-      if (firstWait) await recordHeldTransition(ctx, agent.id, held, members, 'hold', `${WAIT_MARK}: ${verdict.wait}`);
-      return { status: 'waiting', reason: verdict.wait };
+      if (firstWait) await recordHeldTransition(ctx, agent.id, held, members, 'hold', `${WAIT_MARK}: ${wait}`);
+      return { status: 'waiting', reason: wait };
     }
   }
+  // The paused agent's name (or the check's own text) is quoted into the note and the response;
+  // a name is free text, so it is redacted and bounded before either (#940).
+  if (problem) problem = safeErrorText(problem, 1000);
   const ids = members.map((m) => m.id);
   const scope = and(eq(schema.approvalRequests.workspaceId, ctx.principal.workspaceId), inArray(schema.approvalRequests.id, ids));
   if (problem) {

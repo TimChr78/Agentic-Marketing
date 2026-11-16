@@ -606,7 +606,7 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
         applyDeliveryEvents(tx, [{ eventId, type: 'unsubscribed', messageId, at: at.toISOString() }], 'test', t.srv.keyProvider),
       );
     await redeliver(new Date(Date.now() - 3 * 3_600_000));
-    // The same event id again, outside the repeat window: the event identity still deduplicates it.
+    // The same event id again with a later action time: the event identity still deduplicates it.
     await redeliver(new Date());
     expect((await history(profileId)).filter((r) => r.status === 'withdrawn')).toHaveLength(1);
   });

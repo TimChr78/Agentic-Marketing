@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import type { Db, Tx } from '@agentic-marketing/db';
-import { type LinkSigner, requestEmail, sendRequestHash } from '@agentic-marketing/email';
+import { fingerprintParts, type LinkSigner, requestEmail, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
 import { type ConsentInput, type ResolvedEvent, recordConsentEvidence } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -26,10 +26,9 @@ export interface ConsentHookDeps {
 const purposesOf = async (tx: Tx) => (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
 
 /**
- * Records the evidence a form or import adds (#936). A status change is always evidence; a
- * signup that leaves the status granted is too when its action time is newer than the newest
- * row, so a delayed withdrawal with an older time cannot win. Identical repeats inside the
- * evidence window add no row.
+ * Records the evidence a form or import adds (#936). Every distinct action is evidence, whether
+ * or not it changes the current status: keeping a same-status signup means a delayed withdrawal
+ * with an older action time cannot win. Only an exact duplicate or a redelivered event is folded.
  */
 async function recordChanges(tx: Tx, ws: string, profileId: string, records: ConsentInput[]) {
   if (!records.length) return 0;
@@ -84,13 +83,16 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
       idempotencyKey: `doi:${e.messageId}`,
       // Stable identifiers only: a redelivery of the same submission replays the confirmation,
       // including after a profile merge (the resolved profile id is deliberately absent).
-      requestHash: sendRequestHash('email', {
-        caller: 'system:doi',
-        submission: e.messageId,
-        form: p.form_id,
-        formVersion: p.form_version,
-        template: form.def.confirmationTemplate,
-      }),
+      requestHash: sendRequestHash(
+        'email',
+        fingerprintParts.doi({
+          submission: e.messageId,
+          // The values the form wrote into the event, unchanged: only the hash's field names moved.
+          form: p.form_id as string,
+          formVersion: p.form_version as number,
+          template: form.def.confirmationTemplate,
+        }),
+      ),
       data: { confirm_url: `${linksUrl}/f/confirm/${deps.links.sign(token)}` },
     });
     if (d.status !== 'queued') logger.warn({ form: p.form_id, status: d.status, reason: d.reason }, 'confirmation e-mail not queued');

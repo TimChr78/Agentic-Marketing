@@ -115,11 +115,14 @@ export async function applyDeliveryEvents(
       logger.warn({ provider, event: e.type, providerMessageId: e.providerMessageId }, 'delivery event for an unknown message');
       continue;
     }
-    const atDate = e.at && !Number.isNaN(Date.parse(e.at)) ? new Date(e.at) : new Date();
+    const now = Date.now();
+    const reported = e.at && !Number.isNaN(Date.parse(e.at)) ? new Date(e.at) : new Date(now);
+    // The provider's own time, but never in the future: a callback cannot post-date a consent past
+    // a withdrawal that happened after the event (#928), and a replayed or misconfigured webhook
+    // must not write a far-future event, send time or suppression that skews every trend bucketed
+    // on it (#960). One clamped instant feeds all of them; a past time is kept exactly.
+    const atDate = new Date(Math.min(reported.getTime(), now));
     const at = atDate.toISOString();
-    // The provider's own time, but never in the future: a callback cannot post-date a consent
-    // past a withdrawal that happened after the event (#928).
-    const actedAt = new Date(Math.min(atDate.getTime(), Date.now()));
     // Test sends never enter reporting or change consent. Their status and suppressions still count.
     if (!m.test)
       out.push(
@@ -174,7 +177,8 @@ export async function applyDeliveryEvents(
       if (changed?.updated && changed.reason === reason) escalations.push({ workspaceId: m.workspaceId, channel: m.channel, reason });
     }
     if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
-      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp, actedAt, `evt:${e.eventId}`);
+      // The same clamped instant, so the consent record cannot post-date the event either.
+      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp, atDate, `evt:${e.eventId}`);
   }
   return { events: out, escalations };
 }

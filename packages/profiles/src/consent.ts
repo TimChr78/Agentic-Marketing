@@ -9,6 +9,7 @@ import {
   type Tx,
 } from '@agentic-marketing/db';
 import { and, eq, inArray, type SQL, sql } from 'drizzle-orm';
+import { lockIdentity } from './identity';
 
 // The consent and objection ledger (security-and-privacy.md §2). Records are append-only;
 // consent_state is the latest record per purpose and channel, over a profile and every profile
@@ -124,23 +125,14 @@ export function consentProofFor(
 }
 
 /**
- * The workspace identity lock: taken before a merge, an identifier attach or a topic preference
- * write. Lock order is always this lock first, then `lockConsent` for one person (#936). Never
- * take the per-person lock and then this one: `resolve.ts` holds the identity lock while it calls
- * `recordSdkConsent`, which takes the consent lock.
- */
-export async function lockIdentity(tx: Tx, workspaceId: string) {
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
-}
-
-/**
  * Serialises consent evidence writes for one canonical profile (#936): the evidence read, the
  * insert and the `consent_state` rebuild must not interleave, or two writers can each miss the
  * other's row and one rebuild can drop the newer state. `profileId` must already be the survivor
  * of any merge (identity resolution, or `profileForMessage` for a message).
  *
- * Lock order: `lockIdentity` first when the caller needs it (as `resolve.ts` does), then this
- * lock. Never the other way round. The transaction-scoped lock is released on commit/rollback.
+ * Lock order: `lockIdentity` (per workspace, `./identity.ts`) first when the caller needs it (as
+ * `resolve.ts` does), then this lock. Never the other way round. The transaction-scoped lock is
+ * released on commit/rollback.
  */
 export async function lockConsent(tx: Tx, workspaceId: string, profileId: string) {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`consent:${workspaceId}:${profileId}`}, 0))`);

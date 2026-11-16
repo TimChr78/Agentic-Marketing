@@ -2,14 +2,25 @@ import { describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { redactCredentials } from '../src/diagnostics';
 import { redactCredentials as redact01420 } from './redaction-01420-reference';
+import { redactCredentials as redact01423 } from './redaction-01423-reference';
 
-// #902 round 5: a standing differential check against the vendor ed 0.14.20 redactor, not only a
+// #902 round 5: a standing differential check against the vendored 0.14.20 redactor, not only a
 // fixed fixture. Its rule is mechanical: a maximal run of non-space characters that 0.14.20 removed
 // from the input (present in the input, absent from its output) is a credential, so it must be
 // absent from the new output too. A scheme value must also keep its trailing explanation, which is
 // what the old implementation did and what A4 broke.
 //
+// The same differential runs against the 0.14.23 redactor (the release this batch started from, #946
+// and #956): whatever it removed must stay removed, and a second pass must change nothing. New code
+// may only remove more, never less.
+//
 // Every generated input ends with a unique sentinel word, so an assertion failure names its case.
+
+/**
+ * Multiplies the free-form generators. The structured ones are exhaustive and need no scaling; a
+ * large run for the release gate sets `REDACTION_DIFFERENTIAL_SCALE=160` (about 1.3 million cases).
+ */
+const SCALE = Math.max(1, Math.floor(Number(process.env.REDACTION_DIFFERENTIAL_SCALE) || 1));
 
 const KEYS = [
   'token',
@@ -34,6 +45,16 @@ const KEYS = [
   'developer-token',
   'entryKey',
   'monkey',
+  // #946/#956 shapes: the 0.14.23 code leaves them, so the differential only requires that the new
+  // code does not undo anything it did remove around them.
+  '_secretKey',
+  '__authToken',
+  '$$SIGNINGKEY',
+  'mistralKey',
+  'lmStudioKey',
+  'openrouterKey',
+  'vllmKey',
+  'ollamaKey',
 ];
 // `=>` is covered by the explicit tests; with a scheme value the old redactor ate the arrow as
 // part of the value, which is a formatting difference rather than a leak.
@@ -94,6 +115,8 @@ const runs = (text: string): string[] => text.split(/\s+/u).filter((run) => run.
 interface Generated {
   input: string;
   name: string;
+  /** Values planted in this input, each unique so a failure cannot match text from another part. */
+  secrets: string[];
 }
 
 let sentinelIndex = 0;
@@ -102,6 +125,27 @@ const sentinel = (): string => {
   return `tail${sentinelIndex}`;
 };
 
+/**
+ * A unique, short token appended to (or inside) every planted value. Without it, a short value such
+ * as `x` occurs elsewhere in the input (`x-api-key`), and "did the reference remove it" cannot be
+ * answered for that occurrence. The token is not a credential by itself, so only the reference's
+ * own decision on the surrounding value is measured.
+ */
+let markerIndex = 0;
+const marker = (): string => {
+  markerIndex += 1;
+  return `Qa${markerIndex}Zx`;
+};
+
+/** Put the marker inside a quoted value, or append it to a bare one. */
+function plantValue(value: string, token: string): string {
+  const first = value.charAt(0);
+  const last = value.charAt(value.length - 1);
+  if (value.length >= 2 && ((first === '"' && last === '"') || (first === "'" && last === "'")))
+    return `${first}${value.slice(1, -1)}${token}${last}`;
+  return `${value}${token}`;
+}
+
 /** Keys × separators × value shapes × multi-line values × trailing prose × scheme words. */
 function* structured(): Generator<Generated> {
   for (const key of KEYS) {
@@ -109,9 +153,11 @@ function* structured(): Generator<Generated> {
       for (const secret of SECRETS) {
         for (const value of VALUES) {
           for (const tail of TAILS) {
-            const marker = sentinel();
-            const input = `${key}${separator}${value(secret)}${tail === '' ? '' : tail} ${marker}`;
-            yield { input, name: `${key}${separator}${value(secret).slice(0, 20)}${tail}` };
+            const token = marker();
+            const planted = `${secret}${token}`;
+            const sentinelWord = sentinel();
+            const input = `${key}${separator}${value(planted)}${tail === '' ? '' : tail} ${sentinelWord}`;
+            yield { input, name: `${key}${separator}${value(planted).slice(0, 20)}${tail}`, secrets: [token] };
           }
         }
       }
@@ -122,11 +168,16 @@ function* structured(): Generator<Generated> {
 /** Free-form text from the scanner's own alphabet, as the fuzz test uses it. */
 function* random(): Generator<Generated> {
   const random = seededRandom();
-  for (let count = 0; count < 1_500; count += 1) {
+  for (let count = 0; count < 1_500 * SCALE; count += 1) {
     let input = '';
     const length = 1 + Math.floor(random() * 30);
     for (let part = 0; part < length; part += 1) input += ALPHABET[Math.floor(random() * ALPHABET.length)]!;
-    yield { input: `${input} ${sentinel()}`, name: `random ${JSON.stringify(input)}` };
+    const token = marker();
+    yield {
+      input: `${input} password=${token} ${sentinel()}`,
+      name: `random ${JSON.stringify(input)}`,
+      secrets: [token],
+    };
   }
 }
 
@@ -146,6 +197,16 @@ const OUTER_KEYS = [
   'AUTHTOKEN',
   'credentials',
   'meta_adsKey',
+  // #946/#956 shapes in a nested position too.
+  '_secretKey',
+  '__authToken',
+  '$$SIGNINGKEY',
+  '.sessionKey',
+  '-oauthToken',
+  'lmStudioKey',
+  'X-lmStudioKey',
+  'mistralKey',
+  'vertexKey',
 ];
 const INNER_KEYS = ['token', 'password', 'api_key', 'apiSecret', 'authToken', 'secret', 'x-api-key', 'Authorization'];
 const NEST_SEPARATORS = ['=', ': ', '://', ' = ', '":"', "='", '="'];
@@ -167,8 +228,10 @@ function* nested(): Generator<Generated> {
         for (const innerSeparator of ['=', ': ', '://'])
           for (const value of INNER_VALUES)
             for (const close of ['', '"', "'"]) {
-              const input = `${outer}${outerSeparator}${inner}${innerSeparator}${value('TOPSECRET')}${close} ${sentinel()}`;
-              yield { input, name: `nested ${JSON.stringify(input)}` };
+              const token = marker();
+              const planted = `TOPSECRET${token}`;
+              const input = `${outer}${outerSeparator}${inner}${innerSeparator}${value(planted)}${close} ${sentinel()}`;
+              yield { input, name: `nested ${JSON.stringify(input)}`, secrets: [token] };
             }
 }
 
@@ -181,6 +244,10 @@ const PIECES = [
   ...INNER_KEYS,
   'entryKey',
   'note',
+  '_a_b_c',
+  '$$authToken',
+  'lmStudioKey',
+  'vertexKey',
   '=',
   ':',
   ': ',
@@ -214,13 +281,60 @@ const PIECES = [
   '/',
 ];
 
+/** Pieces that carry a credential value, so the marker can be planted inside the payload. */
+const VALUE_PIECES = new Set(['TOPSECRET', 'Sh0rtPw', '"x"', "'x'", '="x"', '=x', 'user:Sh0rtPw@host']);
+/** Names that start with a separator, injected inside the random payload (#946, #968 review). */
+const PREFIXED_KEYS = ['_secretKey', '__authToken', '$$SIGNINGKEY', '.sessionKey', '-oauthToken', 'mistralKey'];
+
+/** A unique marker inside a piece, so the payload's own value is tracked, not only an appended one. */
+function markPiece(piece: string, token: string): string {
+  // The marker must sit in the part main removes. In a URL userinfo that is the password, not the
+  // host (`https://user:Sh0rtPwQa@host`), otherwise main leaves it and the check skips the case
+  // (#968 round 3).
+  if (piece.startsWith('user:Sh0rtPw@')) return piece.replace('Sh0rtPw@', `Sh0rtPw${token}@`);
+  return plantValue(piece, token);
+}
+
 function* randomPairs(): Generator<Generated> {
   const random = seededRandom();
-  for (let count = 0; count < 6_000; count += 1) {
-    let input = '';
+  for (let count = 0; count < 6_000 * SCALE; count += 1) {
+    const parts: string[] = [];
     const length = 2 + Math.floor(random() * 9);
-    for (let part = 0; part < length; part += 1) input += PIECES[Math.floor(random() * PIECES.length)]!;
-    yield { input: `${input} ${sentinel()}`, name: `pairs ${JSON.stringify(input)}` };
+    for (let part = 0; part < length; part += 1) parts.push(PIECES[Math.floor(random() * PIECES.length)]!);
+    const secrets: string[] = [];
+    // Mark one value piece inside the payload itself.
+    const valueIndexes = parts.map((piece, index) => (VALUE_PIECES.has(piece) ? index : -1)).filter((index) => index >= 0);
+    if (valueIndexes.length) {
+      const at = valueIndexes[Math.floor(random() * valueIndexes.length)]!;
+      const token = marker();
+      parts[at] = markPiece(parts[at]!, token);
+      secrets.push(token);
+    }
+    // And plant a credential pair whose name starts with a separator.
+    const token = marker();
+    const key = PREFIXED_KEYS[Math.floor(random() * PREFIXED_KEYS.length)]!;
+    const separator = ['=', ': ', ' = '][Math.floor(random() * 3)]!;
+    parts.splice(Math.floor(random() * (parts.length + 1)), 0, `${key}${separator}${token}`);
+    secrets.push(token);
+    const input = parts.join('');
+    yield { input: `${input} ${sentinel()}`, name: `pairs ${JSON.stringify(input)}`, secrets };
+  }
+}
+
+/** The regression inputs from the round-2 review, with the leading-separator variants (#968). */
+function* findings(): Generator<Generated> {
+  for (const prefix of ['_', '__', '.', '-', '$', '$$']) {
+    for (const key of ['secretKey', 'userPassword', 'authToken']) {
+      const token = marker();
+      const input = `${prefix}${key}=apiSecret :''TOPSECRET${token}`;
+      yield { input: `${input} ${sentinel()}`, name: `finding ${JSON.stringify(input)}`, secrets: [token] };
+      const paired = marker();
+      yield {
+        input: `${prefix}${key}=apiSecret :''TOPSECRET${token} password=${paired} ${sentinel()}`,
+        name: `finding paired ${prefix}${key}`,
+        secrets: [token, paired],
+      };
+    }
   }
 }
 
@@ -251,8 +365,9 @@ function* longKeys(): Generator<Generated> {
       for (const separator of ['=', ': ', '":"', ' = '])
         for (const value of PLAIN_VALUES)
           for (const after of AFTER) {
-            const input = `${before}${key}${separator}${value}${after} ${sentinel()}`;
-            yield { input, name: `long ${JSON.stringify(input)}` };
+            const token = marker();
+            const input = `${before}${key}${separator}${plantValue(value, token)}${after} ${sentinel()}`;
+            yield { input, name: `long ${JSON.stringify(input)}`, secrets: [token] };
           }
 }
 
@@ -260,9 +375,39 @@ function* generated(): Generator<Generated> {
   yield* structured();
   yield* nested();
   yield* longKeys();
+  yield* findings();
   yield* randomPairs();
   yield* random();
 }
+
+describe('the new redactor never keeps what 0.14.23 removed (#946, #956)', () => {
+  it('removes every planted credential the 0.14.23 implementation removed', () => {
+    // A run-level comparison is too strict here: 0.14.23's compound-key rule can replace part of a
+    // non-space run, which leaves the rest in its output and makes the whole run look "removed".
+    // Every generated case carries the values it planted, so this checks each of them: a value the
+    // reference removed (including a short one, or one with a space) must be absent from the new
+    // output too.
+    const leaks: string[] = [];
+    for (const { input, name, secrets } of generated()) {
+      const before = redact01423(input);
+      const after = redactCredentials(input);
+      for (const secret of secrets)
+        if (input.includes(secret) && !before.includes(secret) && after.includes(secret)) leaks.push(`${secret} kept in ${name}`);
+    }
+    expect(leaks.slice(0, 10)).toEqual([]);
+    expect(leaks).toHaveLength(0);
+  });
+
+  it('stays idempotent on every generated input', () => {
+    const unstable: string[] = [];
+    for (const { input, name } of generated()) {
+      const once = redactCredentials(input);
+      if (redactCredentials(once) !== once) unstable.push(name);
+    }
+    expect(unstable.slice(0, 10)).toEqual([]);
+    expect(unstable).toHaveLength(0);
+  });
+});
 
 describe('the new redactor never keeps what 0.14.20 removed (#902 round 5)', () => {
   it('removes every run the old implementation removed', () => {
