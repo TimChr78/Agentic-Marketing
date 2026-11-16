@@ -551,6 +551,15 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
                       reason: 'idempotency_key_reused',
                     });
+                  // The action this response described was undone since (#950): the stored answer
+                  // says something that is no longer true, so it is not replayed. Only an agent
+                  // write has a ledger row to undo, so a person's keys never reach this.
+                  if (hit.reversedAt)
+                    throw new AppError(
+                      'conflict',
+                      'The action this idempotency key answered was undone, so its stored response no longer holds. Nothing was re-run; use a new idempotency key.',
+                      { reason: 'idempotency_key_reversed' },
+                    );
                   const replay = hit.response as z.output<C['output']>;
                   // A replay returns before the handler, so computing targets only on the handler
                   // path left the replay's audit row without them (#905). Compute them from the
@@ -620,8 +629,31 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
               target = cmd.auditTarget?.(out) ?? target;
               if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(out);
               if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-              if (agent && policy)
-                await recordAgentAction(tx, agent.id, cmd, policy, opts.surface, target, null, intentOf(parsed.data), undo.get());
+              if (agent && policy) {
+                const actionId = await recordAgentAction(
+                  tx,
+                  agent.id,
+                  cmd,
+                  policy,
+                  opts.surface,
+                  target,
+                  null,
+                  intentOf(parsed.data),
+                  undo.get(),
+                );
+                // Link the stored response to its ledger row, so agents.undo can mark this key
+                // reversed and a replay stops describing an action that was undone (#950).
+                if (opts.idempotencyKey && actionId !== undefined)
+                  await tx
+                    .update(schema.idempotencyKeys)
+                    .set({ agentActionId: actionId })
+                    .where(
+                      and(
+                        eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
+                        eq(schema.idempotencyKeys.key, opts.idempotencyKey),
+                      ),
+                    );
+              }
               return out;
             },
             // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
@@ -910,7 +942,7 @@ export function redactPolicyReasons(policy: PolicyOutcome): PolicyOutcome {
   return { ...policy, reasons, ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}) };
 }
 
-/** One agent write in the ledger (#218), with the decision that allowed, escalated or refused it. */
+/** One agent write in the ledger (#218), with the decision that allowed, escalated or refused it. Returns the row id. */
 export async function recordAgentAction(
   tx: Tx,
   agentId: string,
@@ -921,31 +953,35 @@ export async function recordAgentAction(
   error: string | null,
   intent: string | null,
   undo?: AgentUndo | null,
-) {
-  await tx.insert(schema.agentActions).values({
-    workspaceId: sql`nullif(current_setting('app.workspace_id', true), '')::uuid`,
-    agentId,
-    command: cmd.name,
-    actionClass: policy.actionClass,
-    decision: policy.decision,
-    // Reasons may quote an exception (the independent check's failure does), so they are redacted
-    // before they are stored (#885), exactly like the error text beside them.
-    reasons: policy.reasons.map(redactCredentials),
-    impact: policy.impact as Record<string, unknown>,
-    ok: error === null,
-    // Redacted before it is cut (#885): a caller may pass raw text (a policy reason quoting an
-    // exception, an AppError built from a provider's answer), and this column is exposed to readers.
-    error: error === null ? null : safeErrorText(error, 1000),
-    target: target ?? null,
-    surface,
-    mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
-    mandateVersion: policy.mandate?.version ?? policy.shadow?.mandateVersion ?? null,
-    // The shadow decision's reasons are exposed by agents.activity too (#885 round 8).
-    shadow: policy.shadow ? { ...policy.shadow, reasons: policy.shadow.reasons.map(redactCredentials) } : null,
-    level: policy.level ?? null,
-    intent: intent?.slice(0, 2000) ?? null,
-    undo: undo ?? null,
-  });
+): Promise<number | undefined> {
+  const [row] = await tx
+    .insert(schema.agentActions)
+    .values({
+      workspaceId: sql`nullif(current_setting('app.workspace_id', true), '')::uuid`,
+      agentId,
+      command: cmd.name,
+      actionClass: policy.actionClass,
+      decision: policy.decision,
+      // Reasons may quote an exception (the independent check's failure does), so they are redacted
+      // before they are stored (#885), exactly like the error text beside them.
+      reasons: policy.reasons.map(redactCredentials),
+      impact: policy.impact as Record<string, unknown>,
+      ok: error === null,
+      // Redacted before it is cut (#885): a caller may pass raw text (a policy reason quoting an
+      // exception, an AppError built from a provider's answer), and this column is exposed to readers.
+      error: error === null ? null : safeErrorText(error, 1000),
+      target: target ?? null,
+      surface,
+      mandateId: policy.mandate?.id ?? policy.shadow?.mandateId ?? null,
+      mandateVersion: policy.mandate?.version ?? policy.shadow?.mandateVersion ?? null,
+      // The shadow decision's reasons are exposed by agents.activity too (#885 round 8).
+      shadow: policy.shadow ? { ...policy.shadow, reasons: policy.shadow.reasons.map(redactCredentials) } : null,
+      level: policy.level ?? null,
+      intent: intent?.slice(0, 2000) ?? null,
+      undo: undo ?? null,
+    })
+    .returning({ id: schema.agentActions.id });
+  return row?.id;
 }
 
 /**

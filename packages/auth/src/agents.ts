@@ -738,6 +738,13 @@ export async function undoAgentAction(tx: Tx, ctx: CommandContext, actionId: num
   const result = [steps.join(' '), note ? `Note: ${note}` : ''].filter(Boolean).join(' ').slice(0, 2000);
   const undoneAt = new Date();
   await tx.update(schema.agentActions).set({ undoneAt, undoneBy: by, undoResult: result }).where(eq(schema.agentActions.id, actionId));
+  // A retry that presents the idempotency key of the action just undone must not receive its stored
+  // response: that response describes something the world no longer matches (#950). Only an agent
+  // write has a ledger row, so only its key can be reversed.
+  await tx
+    .update(schema.idempotencyKeys)
+    .set({ reversedAt: undoneAt })
+    .where(and(eq(schema.idempotencyKeys.workspaceId, ctx.principal.workspaceId), eq(schema.idempotencyKeys.agentActionId, actionId)));
   return { actionId, undoneAt: undoneAt.toISOString(), result, steps };
 }
 

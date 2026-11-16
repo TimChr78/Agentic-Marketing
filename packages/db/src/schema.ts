@@ -300,6 +300,10 @@ export const idempotencyKeys = pgTable(
     command: text('command').notNull(),
     inputHash: text('input_hash').notNull(),
     response: jsonb('response').notNull(),
+    /** The agent ledger row this stored response belongs to (#950); null for a person's writes. */
+    agentActionId: bigint('agent_action_id', { mode: 'number' }),
+    /** When the action behind this response was undone; a replay then answers 409 (#950). */
+    reversedAt: ts('reversed_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.key] })],
