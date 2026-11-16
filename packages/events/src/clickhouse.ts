@@ -140,7 +140,7 @@ export interface EventStore {
     },
   ): Promise<ConversionEvent[]>;
   /** People who unsubscribed from any message sent by these journeys or broadcasts, in a time window. */
-  unsubscribedProfiles(workspaceId: string, q: { journeyIds: string[]; from?: Date; to?: Date }): Promise<string[]>;
+  unsubscribedProfiles(workspaceId: string, q: { journeyIds: string[]; from?: Date; to?: Date; profileIds?: string[] }): Promise<string[]>;
   messageEventsOf(workspaceId: string, filter: { messageIds?: string[]; profileId?: string }, limit?: number): Promise<MessageEvent[]>;
   ping(): Promise<boolean>;
   close(): Promise<void>;
@@ -764,6 +764,33 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     },
     async unsubscribedProfiles(workspaceId, q) {
       if (!q.journeyIds.length) return [];
+      if (q.profileIds !== undefined && !q.profileIds.length) return [];
+      // Scope by the people being counted when the caller has them (the holdout report's page),
+      // so a page reads only its own unsubscribes. Chunk the array like conversionEvents: one
+      // form field stays below the transport limit on a large page (#972 review).
+      const profileScopes: string[] = [];
+      const profileParams: Record<string, unknown> = {};
+      if (q.profileIds) {
+        let chunk: string[] = [];
+        let bytes = 2;
+        const flush = () => {
+          if (!chunk.length) return;
+          const name = `profiles${profileScopes.length}`;
+          profileScopes.push(`profile_id IN {${name}:Array(String)}`);
+          profileParams[name] = chunk;
+          chunk = [];
+          bytes = 2;
+        };
+        for (const value of q.profileIds) {
+          const size = Buffer.byteLength(JSON.stringify(value)) * 2 + 3;
+          if (size > 64 * 1024) throw new Error('Measurement identifier exceeds the query parameter size limit');
+          if (bytes + size > 64 * 1024) flush();
+          chunk.push(value);
+          bytes += size;
+        }
+        flush();
+      }
+      const profileScope = profileScopes.length ? `AND (${profileScopes.join(' OR ')})` : '';
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');
       const rs = await query(workspaceId, {
@@ -771,8 +798,15 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
                 WHERE workspace_id = {ws:UUID} AND journey_id IN {ids:Array(String)}
                   AND type = 'unsubscribed' AND channel = 'email'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
-                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
-        query_params: { ws: workspaceId, ids: q.journeyIds, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}
+                ${profileScope}`,
+        query_params: {
+          ws: workspaceId,
+          ids: q.journeyIds,
+          ...(from ? { from } : {}),
+          ...(to ? { to } : {}),
+          ...profileParams,
+        },
         format: 'JSONEachRow',
       });
       return (await rs.json<{ profile_id: string }>()).map((r) => r.profile_id);
