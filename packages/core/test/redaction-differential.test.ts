@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { redactCredentials } from '../src/diagnostics';
 import { redactCredentials as redact01420 } from './redaction-01420-reference';
@@ -21,6 +21,11 @@ import { redactCredentials as redact01424 } from './redaction-01424-reference';
  * Multiplies the free-form generators. The structured ones are exhaustive and need no scaling; a
  * large run for the release gate sets `REDACTION_DIFFERENTIAL_SCALE=160` (about 1.3 million cases).
  */
+// Each comparison runs every generated case through several full redactor implementations. On a
+// loaded CI runner one of them took longer than the global 20 s test timeout (release 0.14.25 CI),
+// so this file allows two minutes per test; growth is guarded by the scaling tests elsewhere.
+vi.setConfig({ testTimeout: 120_000 });
+
 const SCALE = Math.max(1, Math.floor(Number(process.env.REDACTION_DIFFERENTIAL_SCALE) || 1));
 
 const KEYS = [
