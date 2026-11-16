@@ -963,6 +963,25 @@ export const profileCommands = [
 ] as const;
 
 /**
+ * The profile a reference points at today, following `merged_into` in SQL only. Nothing personal is
+ * decrypted, so a caller that only needs the id (a delivery withdrawal, say) never touches the
+ * key provider and can run under the identity lock in part 3.
+ */
+export async function canonicalProfile(tx: CommandContext['tx'], workspaceId: string, profileId: string): Promise<{ id: string } | null> {
+  let id = profileId;
+  for (let i = 0; i < 20; i++) {
+    const [p] = await tx
+      .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
+      .from(schema.profiles)
+      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
+    if (!p) return null;
+    if (!p.mergedInto) return { id: p.id };
+    id = p.mergedInto;
+  }
+  return null;
+}
+
+/**
  * A person as message templates see them: traits and personal data merged, plus their e-mail
  * address, for the profile or the profile it was merged into. Null when there is no such person.
  */
