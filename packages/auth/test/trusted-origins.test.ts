@@ -158,7 +158,8 @@ describe('the callback origins handed to Better Auth (#947)', () => {
     const resolve = betterAuthTrustedOrigins(['https://*.example.com']);
     const body = 'callbackURL=%2F&callbackURL=https%3A%2F%2Fadmin.example.com%2Fafter';
     expect(await resolve(request({ 'content-type': 'application/x-www-form-urlencoded' }, body))).toEqual(['https://admin.example.com']);
-    const query = 'https://marketing.example.com/api/auth/sign-in/social?callbackURL=%2F&callbackURL=https%3A%2F%2Fadmin.example.com%2Fafter';
+    const query =
+      'https://marketing.example.com/api/auth/sign-in/social?callbackURL=%2F&callbackURL=https%3A%2F%2Fadmin.example.com%2Fafter';
     expect(await resolve(new Request(query))).toEqual(['https://admin.example.com']);
   });
 
