@@ -216,8 +216,11 @@ const Env = z.object({
     .number()
     .int()
     .min(1)
+    .max(3650)
     .default(IDEMPOTENCY_RETENTION_DAYS)
-    .describe('Days an idempotency key replays; older requests run again and the scheduler removes the expired rows'),
+    .describe(
+      'Days an idempotency key replays, 1 to 3650 (ten years); older requests run again and the scheduler removes the expired rows',
+    ),
   ERASURE_GRACE_HOURS: z.coerce
     .number()
     .int()

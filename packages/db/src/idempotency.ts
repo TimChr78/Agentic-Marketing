@@ -5,36 +5,39 @@ import type pg from 'pg';
 // lookup, so the behaviour is exact even before the scheduler's cleanup reaches them, and this
 // job then removes them so `idempotency_keys` does not grow without limit.
 //
-// Rows are written when a request commits, so a request still in progress has no row to delete.
-// The batch also takes its candidate rows with `FOR UPDATE SKIP LOCKED`, like the sent_at
-// backfill: several replicas can run the cleanup at once without waiting on each other, and a row
-// a live transaction is touching is left for a later pass rather than blocked on or removed
-// underneath it. Each batch is its own statement, so no long lock is held.
+// Every cutoff is computed by PostgreSQL (`now() - make_interval(days => …)`), the same clock that
+// wrote `created_at`; the application's clock never takes part, so a skewed process cannot move the
+// retention edge.
 //
-// Nothing references an idempotency row (no foreign key on main points at the table), so a plain
-// DELETE is enough; a future child table should gain ON DELETE CASCADE or be deleted first.
+// Rows are written when a request commits, so a request still in progress has no newly committed
+// result to delete. An expired key can keep its previous row visible until its reuse replaces it.
+// The batch takes its candidate rows with `FOR UPDATE SKIP LOCKED`, like the sent_at backfill:
+// several replicas can run the cleanup at once without waiting on each other, and a row a live
+// transaction is touching is left for a later pass rather than blocked on or removed underneath it.
+// Each batch is its own statement, so no long lock is held.
+//
+// Nothing references an idempotency row today. The 0.14.26 branch (#975) adds a link table with
+// ON DELETE CASCADE, so this plain DELETE then removes the links with its row; a future child
+// table without a cascade must be deleted first.
 
 /** How long a key replays. The command layer and the cleanup read the same default. */
 export const IDEMPOTENCY_RETENTION_DAYS = 30;
 /** Rows deleted per statement: bounded locks on a table every keyed write touches. */
 export const IDEMPOTENCY_CLEANUP_BATCH_SIZE = 5_000;
+/** The most batches one scheduler tick runs, so a large backlog never monopolises a tick. */
+export const IDEMPOTENCY_CLEANUP_MAX_BATCHES = 20;
+/** The most time one scheduler tick spends deleting; the next tick continues the backlog. */
+export const IDEMPOTENCY_CLEANUP_TIME_BUDGET_MS = 30_000;
 /** The cleanup runs on the scheduler role; hourly keeps a busy table close to the retention edge. */
 export const IDEMPOTENCY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** The instant before which a row no longer replays; the lookup and the cleanup share it. */
-export function idempotencyCutoff(retentionDays = IDEMPOTENCY_RETENTION_DAYS, now: Date = new Date()): Date {
-  return new Date(now.getTime() - retentionDays * DAY_MS);
-}
 
 export interface IdempotencyCleanupOptions {
   retentionDays?: number;
   batchSize?: number;
-  /** The clock a batch is measured against; tests pin it. */
-  now?: Date;
-  /** Stop after this many batches; defaults to draining everything expired. */
+  /** Batches per sweep; defaults to IDEMPOTENCY_CLEANUP_MAX_BATCHES; the next tick continues. */
   maxBatches?: number;
+  /** Wall-clock budget per sweep; defaults to IDEMPOTENCY_CLEANUP_TIME_BUDGET_MS. */
+  timeBudgetMs?: number;
   signal?: AbortSignal;
   log?: (message: string) => void;
 }
@@ -42,47 +45,55 @@ export interface IdempotencyCleanupOptions {
 export interface IdempotencyCleanupResult {
   batches: number;
   deleted: number;
-  /** True when the last batch was full, so more expired rows may still be waiting. */
+  /** True when the sweep stopped before draining every expired row; the next tick continues. */
   more: boolean;
 }
 
-/** Delete one batch of expired rows, using the `idempotency_keys_created_at` index. */
+/**
+ * Delete one batch of expired rows. The candidates are locked and ordered through the
+ * `idempotency_keys_created_at` index, and the DELETE joins them by `ctid`, so it touches only the
+ * batch instead of building a hash semi-join over the whole table.
+ */
 export async function deleteExpiredIdempotencyKeyBatch(
   admin: Pick<pg.Pool, 'query'>,
-  opts: Pick<IdempotencyCleanupOptions, 'retentionDays' | 'batchSize' | 'now'> = {},
+  opts: Pick<IdempotencyCleanupOptions, 'retentionDays' | 'batchSize'> = {},
 ): Promise<number> {
-  const cutoff = idempotencyCutoff(opts.retentionDays, opts.now);
   const { rowCount } = await admin.query(
     `DELETE FROM idempotency_keys
-      WHERE (workspace_id, key) IN (
-              SELECT workspace_id, key
+      WHERE ctid = ANY (ARRAY(
+              SELECT ctid
                 FROM idempotency_keys
-               WHERE created_at < $1
+               WHERE created_at < now() - make_interval(days => $1)
                ORDER BY created_at
                LIMIT $2
                FOR UPDATE SKIP LOCKED
-            )`,
-    [cutoff, opts.batchSize ?? IDEMPOTENCY_CLEANUP_BATCH_SIZE],
+            ))`,
+    [opts.retentionDays ?? IDEMPOTENCY_RETENTION_DAYS, opts.batchSize ?? IDEMPOTENCY_CLEANUP_BATCH_SIZE],
   );
   return rowCount ?? 0;
 }
 
-/** Run batches until no expired row is left, `maxBatches` is reached or the signal aborts. */
+/**
+ * Run batches until no expired row is left, the batch or time budget is spent, or the signal
+ * aborts. A budget stop reports `more: true`, so the runner continues on its next tick.
+ */
 export async function deleteExpiredIdempotencyKeys(
   admin: Pick<pg.Pool, 'query'>,
   opts: IdempotencyCleanupOptions = {},
 ): Promise<IdempotencyCleanupResult> {
   const batchSize = opts.batchSize ?? IDEMPOTENCY_CLEANUP_BATCH_SIZE;
-  const maxBatches = opts.maxBatches ?? Number.POSITIVE_INFINITY;
+  const maxBatches = opts.maxBatches ?? IDEMPOTENCY_CLEANUP_MAX_BATCHES;
+  const deadline = Date.now() + (opts.timeBudgetMs ?? IDEMPOTENCY_CLEANUP_TIME_BUDGET_MS);
   let batches = 0;
   let deleted = 0;
   while (batches < maxBatches && !opts.signal?.aborted) {
-    const count = await deleteExpiredIdempotencyKeyBatch(admin, { retentionDays: opts.retentionDays, batchSize, now: opts.now });
+    const count = await deleteExpiredIdempotencyKeyBatch(admin, { retentionDays: opts.retentionDays, batchSize });
     if (!count) return { batches, deleted, more: false };
     batches++;
     deleted += count;
     opts.log?.(`idempotency key cleanup: ${deleted} expired key(s) removed`);
     if (count < batchSize) return { batches, deleted, more: false };
+    if (Date.now() >= deadline) return { batches, deleted, more: true };
   }
   return { batches, deleted, more: true };
 }
@@ -93,7 +104,8 @@ export interface IdempotencyCleanupRunnerOptions extends IdempotencyCleanupOptio
 }
 
 /**
- * The scheduler job: a pass at start, then one every `tickMs`. A failed pass is reported and the
+ * The scheduler job: a pass at start, then one every `tickMs`. Each tick has a finite batch and
+ * time budget; when it stops early, the next tick continues. A failed pass is reported and the
  * next tick retries; the rows are still ignored by the replay lookup in the meantime.
  */
 export async function runIdempotencyKeyCleanup(

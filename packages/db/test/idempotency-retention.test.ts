@@ -4,19 +4,22 @@ import {
   deleteExpiredIdempotencyKeyBatch,
   deleteExpiredIdempotencyKeys,
   IDEMPOTENCY_CLEANUP_BATCH_SIZE,
+  IDEMPOTENCY_CLEANUP_MAX_BATCHES,
+  IDEMPOTENCY_CLEANUP_TIME_BUDGET_MS,
   IDEMPOTENCY_RETENTION_DAYS,
-  idempotencyCutoff,
   runIdempotencyKeyCleanup,
 } from '../src/idempotency';
 import { createDisposableDb, type DisposableDb, hasTestDatabase } from './disposable';
 
 // #976: the scheduler deletes idempotency keys past their retention in bounded batches. The
 // batches must remove only expired rows, must not remove a row a live transaction is touching (a
-// replay in progress), and must use the created_at index rather than scan the whole table.
+// replay in progress), must use the created_at index rather than scan the whole table, and must
+// stop at a per-tick budget so a large backlog is drained over several ticks.
 
 let d: DisposableDb;
 let client: pg.PoolClient;
 
+/** Age the row with PostgreSQL's clock, the clock the retention cutoffs use. */
 async function seed(key: string, days: number, workspace = d.workspace) {
   await d.db.admin.query(
     `INSERT INTO idempotency_keys (workspace_id, key, command, input_hash, response, created_at)
@@ -79,8 +82,34 @@ describe.skipIf(!hasTestDatabase())('idempotency key cleanup (#976)', () => {
     await seed('single-expired', IDEMPOTENCY_RETENTION_DAYS + 1);
     expect(await deleteExpiredIdempotencyKeyBatch(d.db.admin)).toBe(1);
     expect(IDEMPOTENCY_CLEANUP_BATCH_SIZE).toBe(5_000);
-    const thirtyDays = IDEMPOTENCY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-    expect(Math.abs(Date.now() - thirtyDays - idempotencyCutoff().getTime())).toBeLessThan(5_000);
+    // A tick is bounded: at most 20 batches or 30 seconds, then the next tick continues.
+    expect(IDEMPOTENCY_CLEANUP_MAX_BATCHES).toBe(20);
+    expect(IDEMPOTENCY_CLEANUP_TIME_BUDGET_MS).toBe(30_000);
+  });
+
+  it('stops at its batch budget and drains the backlog on the next tick', async () => {
+    await d.db.admin.query('DELETE FROM idempotency_keys');
+    for (let i = 0; i < 5; i++) await seed(`backlog-${i}`, 31);
+
+    const first = await deleteExpiredIdempotencyKeys(d.db.admin, { batchSize: 2, maxBatches: 2 });
+    expect(first).toEqual({ batches: 2, deleted: 4, more: true });
+    expect(await keys()).toEqual(['backlog-4']);
+
+    const second = await deleteExpiredIdempotencyKeys(d.db.admin, { batchSize: 2, maxBatches: 2 });
+    expect(second).toEqual({ batches: 1, deleted: 1, more: false });
+    expect(await keys()).toEqual([]);
+  });
+
+  it('stops when its time budget is spent and continues on the next tick', async () => {
+    await d.db.admin.query('DELETE FROM idempotency_keys');
+    for (let i = 0; i < 4; i++) await seed(`timebudget-${i}`, 31);
+
+    const first = await deleteExpiredIdempotencyKeys(d.db.admin, { batchSize: 2, timeBudgetMs: 0 });
+    expect(first).toEqual({ batches: 1, deleted: 2, more: true });
+
+    const second = await deleteExpiredIdempotencyKeys(d.db.admin, { batchSize: 2 });
+    expect(second).toEqual({ batches: 1, deleted: 2, more: false });
+    expect(await keys()).toEqual([]);
   });
 
   it('sweeps at start and again on its interval, until the signal aborts', async () => {
@@ -98,38 +127,56 @@ describe.skipIf(!hasTestDatabase())('idempotency key cleanup (#976)', () => {
     }
   });
 
-  it('uses the created_at index for the cleanup and the primary key for the replay lookup', async () => {
+  it('uses the created_at index, touches only one batch, and the replay filter is an index scan', async () => {
+    await d.db.admin.query('DELETE FROM idempotency_keys');
+    // A realistic table: most rows expired, a recent minority. Normal planner settings, no
+    // enable_seqscan override, so the plan is the one an install would get.
+    await d.db.admin.query(
+      `INSERT INTO idempotency_keys (workspace_id, key, command, input_hash, response, created_at)
+         SELECT $1, 'bulk-' || g, 'test.write', 'hash', '{"ok":true}'::jsonb, now() - make_interval(days => 31)
+           FROM generate_series(1, 50000) AS g`,
+      [d.workspace],
+    );
+    await d.db.admin.query(
+      `INSERT INTO idempotency_keys (workspace_id, key, command, input_hash, response, created_at)
+         SELECT $1, 'recent-' || g, 'test.write', 'hash', '{"ok":true}'::jsonb, now() - make_interval(days => 1)
+           FROM generate_series(1, 5000) AS g`,
+      [d.workspace],
+    );
     await d.db.admin.query('ANALYZE idempotency_keys');
+
     const plan = async (sql: string, values: unknown[]) => {
-      await client.query('SET enable_seqscan = off');
-      try {
-        const { rows } = await client.query<{ 'QUERY PLAN': string }>(`EXPLAIN (COSTS OFF) ${sql}`, values);
-        return rows.map((row) => row['QUERY PLAN']).join('\n');
-      } finally {
-        await client.query('SET enable_seqscan = on');
-      }
+      const { rows } = await client.query<{ 'QUERY PLAN': string }>(`EXPLAIN (COSTS OFF) ${sql}`, values);
+      return rows.map((row) => row['QUERY PLAN']).join('\n');
     };
 
     const cleanup = await plan(
       `DELETE FROM idempotency_keys
-        WHERE (workspace_id, key) IN (
-                SELECT workspace_id, key
+        WHERE ctid = ANY (ARRAY(
+                SELECT ctid
                   FROM idempotency_keys
-                 WHERE created_at < $1
+                 WHERE created_at < now() - make_interval(days => $1)
                  ORDER BY created_at
                  LIMIT $2
                  FOR UPDATE SKIP LOCKED
-              )`,
-      [idempotencyCutoff(), 10],
+              ))`,
+      [IDEMPOTENCY_RETENTION_DAYS, 100],
     );
     expect(cleanup).toContain('idempotency_keys_created_at');
+    expect(cleanup).toContain('Limit');
+
+    const before = await d.db.admin.query<{ n: number }>('SELECT count(*)::int AS n FROM idempotency_keys');
+    expect(await deleteExpiredIdempotencyKeyBatch(d.db.admin, { batchSize: 100 })).toBe(100);
+    const after = await d.db.admin.query<{ n: number }>('SELECT count(*)::int AS n FROM idempotency_keys');
+    expect(before.rows[0]!.n - after.rows[0]!.n).toBe(100);
 
     const lookup = await plan(
       `SELECT response FROM idempotency_keys
-        WHERE workspace_id = $1 AND key = $2 AND created_at > $3`,
-      [d.workspace, 'busy', idempotencyCutoff()],
+        WHERE workspace_id = $1 AND key = $2
+          AND created_at > now() - make_interval(days => $3)`,
+      [d.workspace, 'recent-1', IDEMPOTENCY_RETENTION_DAYS],
     );
-    // The composite index covers this predicate too (equality on workspace/key, range on
+    // The composite index covers the predicate too (equality on workspace/key, range on
     // created_at); on a larger table the planner may instead take the primary key. Either is an
     // index scan, never a scan of the whole table.
     expect(lookup).toMatch(/Index Scan using idempotency_keys_(created_at|pkey)/);
