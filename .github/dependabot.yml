@@ -22,6 +22,15 @@ updates:
           - '@better-fetch/fetch'
       minor-and-patch:
         update-types: [minor, patch]
+        # Never split Better Auth: the plugins must ship in the group above with the core, or a
+        # plugin pin and `better-auth` end up on different patches and typecheck fails (#980/#981).
+        # Dependabot matched `@better-auth/*` here even though the group above names the same
+        # pattern, so the exclusion is explicit.
+        exclude-patterns:
+          - 'better-auth'
+          - '@better-auth/*'
+          - 'better-call'
+          - '@better-fetch/fetch'
     # The spikes are throwaway benchmarks, not part of CI or the image.
     exclude-paths:
       - spikes/**
