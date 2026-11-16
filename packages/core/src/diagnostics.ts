@@ -619,12 +619,13 @@ function redactJoinedCompoundKeys(text: string): string {
  * value, a Unicode-quoted value, `=>` as the separator, a PEM block, escaped JSON, URL-encoded
  * pairs, a `Pwd`/`Pass` name and a nested all-capitals pair.
  *
- * Every pass below reads the text once and replaces a value with the marker. They run before the
- * rules as well as on their output, for the same reason `redactLongKeyValues` runs before them: the
- * rules destroy the delimiters these shapes need (a Unicode quote's opening half, the `>` of `=>`,
- * the `-----BEGIN` of a PEM header, the `[` of an array). A shape is therefore replaced while it is
- * still intact; the second run is the additive pass over everything the rules produced, and only
- * ever replaces more.
+ * Every pass below reads the text once and replaces a value with the marker, and only ever replaces
+ * more. Some shapes need the rules' output (`redactSettledValueShapes`): they survive the rules
+ * intact, and a pre-pass could end a value at a nested key and hide it. The others need the text
+ * before the rules (`redactIntactValueShapes`), for the same reason `redactLongKeyValues` runs
+ * first: the rules destroy the delimiter the shape needs (a Unicode quote's opening half, the `>`
+ * of `=>`, the `-----BEGIN` of a PEM header, the `[` of an array). Each of those replaces a whole
+ * delimited span, so it cannot leave a nested pair's value behind.
  */
 const MAX_SHAPE_KEY_CHARS = 256;
 const MAX_SHAPE_DEPTH = 32;
@@ -852,15 +853,18 @@ function arrowSeparatorEnd(text: string, nameEnd: number): number {
  * formatting and keeps the pass idempotent.
  */
 function arrowValueSpan(text: string, valueStart: number): ValueSpan | null {
-  let start = valueStart;
-  let index = start - 1;
+  // Walk back to the arrow. If it cannot be confirmed within the bound, skip: leaving a `=>`
+  // before the marker would let the first rule keep replacing its `>` and grow the text.
+  let index = valueStart - 1;
   let budget = MAX_SHAPE_KEY_CHARS;
   while (index >= 0 && isSpace(text.charAt(index)) && budget > 0) {
     index -= 1;
     budget -= 1;
   }
-  if (text.charAt(index) === '>') index -= 1;
-  if (text.charAt(index) === '=') start = index;
+  if (text.charAt(index) !== '>') return null;
+  index -= 1;
+  if (text.charAt(index) !== '=') return null;
+  const start = index;
   const unicode = unicodeValueSpan(text, valueStart);
   if (unicode) return { start, end: unicode.end };
   let end = pairValueEnd(text, valueStart);
@@ -1008,7 +1012,7 @@ function redactEscapedJsonPairs(text: string): string {
     if (open < 0) break;
     const nameStart = open + ESCAPED_QUOTE.length;
     let nameEnd = nameStart;
-    while (nameEnd < text.length && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
+    while (nameEnd < text.length && isRunChar(text.charAt(nameEnd))) nameEnd += 1;
     const name = text.slice(nameStart, nameEnd);
     if (
       name.length === 0 ||
