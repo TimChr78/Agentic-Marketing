@@ -17,15 +17,17 @@
 //
 // Entries are normalised the way the CSRF check always normalised them: an exact entry goes through
 // `URL` (lower-case host, default port dropped, no trailing slash), and a wildcard entry has its
-// scheme and host lower-cased and a trailing slash dropped. Better Auth compares a pattern verbatim,
-// so it would refuse `https://Example.COM/` that this accepts — the same entry a wildcard-free
-// configuration accepted before #902, and only the spelling of the entry, never a host the operator
-// did not name.
+// scheme and host lower-cased, its default port dropped (a numeric port is compared without leading
+// zeros) and a trailing slash removed. Better Auth compares a pattern verbatim, so it would refuse
+// `https://Example.COM/` that this accepts — the same entry a wildcard-free configuration accepted
+// before #902, and only the spelling of the entry, never a host the operator did not name.
 //
-// Matching is bounded: an Origin header over `MAX_ORIGIN_LENGTH` is refused without looking at it, an
-// entry over `MAX_PATTERN_LENGTH` or with more than `MAX_PATTERN_WILDCARDS` wildcards is refused by
-// the configuration loader, and the glob itself is the two-pointer match below, which visits every
-// character of the origin a bounded number of times (`O(length × pattern)`, with the pattern capped).
+// Matching is bounded: an Origin header over `MAX_ORIGIN_LENGTH` is refused without looking at it, a
+// candidate origin that carries a wildcard character (`*`, `?`, or `%2a` that decodes to one) is
+// refused rather than matched (#947 review), an entry over `MAX_PATTERN_LENGTH` or with more than
+// `MAX_PATTERN_WILDCARDS` wildcards is refused by the configuration loader, and the glob itself is
+// the two-pointer match below, which visits every character of the origin a bounded number of times
+// (`O(length × pattern)`, with the pattern capped).
 
 /** The longest Origin header worth matching; a browser never sends one anywhere near this. */
 export const MAX_ORIGIN_LENGTH = 2_048;
@@ -136,8 +138,12 @@ function normalizeExact(entry: string): string {
 }
 
 /**
- * A wildcard entry with the scheme and host lower-cased and a trailing slash dropped. Only the
- * spelling of the entry changes, never the set of hosts it covers.
+ * A wildcard entry with the scheme and host lower-cased, its default port dropped, a numeric port
+ * written without leading zeros and a trailing slash removed. Only the spelling of the entry
+ * changes, never the set of hosts it covers: a browser never writes `:443` for an `https` origin (or
+ * `:80` for an `http` one), so an entry that spells it out names the same origins as one that does
+ * not — which is what an exact entry has always done (#943). Any other port, and the wildcard port
+ * `:*`, stay.
  */
 function normalizeWildcard(entry: string): string {
   const trimmed = trimTrailingSlashes(entry.trim());
@@ -146,8 +152,50 @@ function normalizeWildcard(entry: string): string {
   const scheme = trimmed.slice(0, schemeEnd).toLowerCase();
   const rest = trimmed.slice(schemeEnd + 3);
   const authorityEnd = rest.search(/[/?#]/);
-  const authority = (authorityEnd === -1 ? rest : rest.slice(0, authorityEnd)).toLowerCase();
+  const rawAuthority = (authorityEnd === -1 ? rest : rest.slice(0, authorityEnd)).toLowerCase();
+  const authority = normalizePort(rawAuthority, scheme);
   return `${scheme}://${authority}${authorityEnd === -1 ? '' : rest.slice(authorityEnd)}`;
+}
+
+/** The port a scheme serializes away, or null when it keeps every port. */
+function defaultPortOf(scheme: string): string | null {
+  if (scheme === 'https') return '443';
+  if (scheme === 'http') return '80';
+  return null;
+}
+
+/** Drops a wildcard entry's default port, so it matches the serialized origin a browser sends (#943). */
+function normalizePort(authority: string, scheme: string): string {
+  const colon = authority.lastIndexOf(':');
+  if (colon === -1) return authority;
+  const port = authority.slice(colon + 1);
+  // A port is a number, and `URL` writes it without leading zeros (`:0443` is `:443`, `:08443` is
+  // `:8443`), so the spelling has to agree with the candidate. `:*` is not a number and stays, and a
+  // last colon that does not separate a port (an IPv6 address such as `[::1]`) is left alone.
+  // Any number of leading zeros is accepted (the pattern-length bound limits the digits); a value
+  // above 65535 is no port at all and is left for start-up validation to refuse.
+  if (!/^\d+$/.test(port)) return authority;
+  const value = Number(port);
+  if (value > 65535) return authority;
+  const numeric = String(value);
+  const defaultPort = defaultPortOf(scheme);
+  return defaultPort !== null && numeric === defaultPort ? authority.slice(0, colon) : `${authority.slice(0, colon)}:${numeric}`;
+}
+
+/**
+ * Whether a `TRUSTED_ORIGINS` entry has a wildcard (`*` or `?`), and so must be matched by the
+ * bounded matcher here rather than handed to a third-party matcher (#947).
+ */
+export function originPatternHasWildcard(entry: string): boolean {
+  return hasWildcard(entry.trim());
+}
+
+/**
+ * An exact `TRUSTED_ORIGINS` entry in the form a matcher compares verbatim: its serialized origin.
+ * A wildcard entry has no such form and is resolved per request instead (#947).
+ */
+export function serializeTrustedOrigin(entry: string): string {
+  return normalizeExact(entry);
 }
 
 /**
@@ -186,23 +234,26 @@ export function originPatternProblem(entry: string): string | null {
  * in `Origin`, and refusing an unrecognized shape fails closed.
  */
 export function originPatternMatches(origin: string, pattern: string): boolean {
-  if (!origin || origin.length > MAX_ORIGIN_LENGTH || originPatternProblem(pattern) !== null) return false;
+  // A candidate is never a pattern: Better Auth compiles an entry it is given as one, so a request
+  // that could name `*` or `?` in its origin must not be resolved to an entry at all (#947 review).
+  if (!origin || origin.length > MAX_ORIGIN_LENGTH || hasWildcard(origin) || originPatternProblem(pattern) !== null) return false;
   const wildcard = pattern.trim();
   const hasPatternWildcard = hasWildcard(wildcard);
   if (hasPatternWildcard && !wildcard.includes('://')) {
     // A host pattern (`*.example.com`): it names the host, not the origin.
     const host = hostOf(origin);
-    if (!host) return false;
+    if (!host || hasWildcard(host)) return false;
     return globMatches(normalizeWildcard(wildcard), host) && admitsAuthority(normalizeWildcard(wildcard), host);
   }
   const protocol = protocolOf(origin);
   if (protocol === 'http:' || protocol === 'https:' || !protocol) {
     const actual = serializedOrigin(origin);
-    if (actual === null) return false;
+    if (actual === null || hasWildcard(actual)) return false;
     if (!hasPatternWildcard) return normalizeExact(wildcard) === actual;
     const normalised = normalizeWildcard(wildcard);
     if (!globMatches(normalised, actual)) return false;
     return admitsAuthority(normalised.slice(normalised.indexOf('://') + 3), actual.slice(actual.indexOf('://') + 3));
   }
-  return normalizeExact(wildcard) === serializedOrigin(origin);
+  const actual = serializedOrigin(origin);
+  return actual !== null && !hasWildcard(actual) && normalizeExact(wildcard) === actual;
 }

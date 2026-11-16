@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { isIpOrCidr, originPatternProblem } from '@agentic-marketing/core';
+import { isIpOrCidr, originPatternHasWildcard, originPatternProblem } from '@agentic-marketing/core';
 import { z } from 'zod';
 
 // The runtime roles a process can take. `ROLE` is a comma-separated list of these; any other value
@@ -333,6 +333,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   for (const entry of trustedOrigins) {
     const problem = originPatternProblem(entry);
     if (problem) throw new ConfigError(`Configuration is incomplete: TRUSTED_ORIGINS entry "${entry}" ${problem}`);
+  }
+  // Better Auth appends BETTER_AUTH_TRUSTED_ORIGINS verbatim to its own list (#947), outside the
+  // bounded matcher, so a wildcard in it would reintroduce the RegExp this release removes. Refuse
+  // it at start-up, naming the entry, rather than let it through; exact entries are safe (Better
+  // Auth compares them without compiling a pattern).
+  const externalOrigins = (env.BETTER_AUTH_TRUSTED_ORIGINS?.split(',') ?? []).map((o) => o.trim()).filter(Boolean);
+  for (const entry of externalOrigins) {
+    if (originPatternHasWildcard(entry))
+      throw new ConfigError(
+        `Configuration is incomplete: BETTER_AUTH_TRUSTED_ORIGINS entry "${entry}" has a wildcard; list wildcard origins in TRUSTED_ORIGINS instead`,
+      );
+  }
+  // Better Auth also trusts the base URL's own origin, outside the resolver (#947 review): a
+  // `%2a` in its host serializes to `*` and would become a pattern there, so refuse it here.
+  if (e.PUBLIC_URL) {
+    let publicOrigin = '';
+    try {
+      publicOrigin = new URL(e.PUBLIC_URL).origin;
+    } catch {
+      // z.url() has already refused a value URL cannot parse.
+    }
+    if (originPatternHasWildcard(publicOrigin))
+      throw new ConfigError(`Configuration is incomplete: PUBLIC_URL origin "${publicOrigin}" has a wildcard; use the real host name`);
   }
   const appUrl = databaseUrl(e.DATABASE_URL);
   appUrl.username = e.APP_DB_ROLE;

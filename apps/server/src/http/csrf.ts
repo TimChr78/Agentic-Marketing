@@ -77,6 +77,24 @@ export function csrfRefusal(req: Request, policy: BrowserRequestPolicy, bodyType
 /** The part of a Hono context these helpers read: the underlying request. */
 type RawRequestContext = Pick<Context, 'req'>;
 
+/**
+ * Refuses a request whose Origin (or, when it has none, Referer) is longer than any browser sends
+ * (#947). Better Auth runs its own origin check on every cookie-bearing non-GET `/api/auth/*`
+ * request and compiles each configured entry into a RegExp; bounding the header it reads is what
+ * keeps that check cheap. Only the header Better Auth would validate is capped, so a long but
+ * unread header can never turn a legitimate request into a 403. Returns null when the request may
+ * proceed.
+ */
+export function originLengthRefusal(req: Request): Response | null {
+  const origin = req.headers.get('origin') || req.headers.get('referer');
+  if (origin === null || origin.length <= MAX_ORIGIN_LENGTH) return null;
+  return refusal(
+    403,
+    'forbidden',
+    `The Origin or Referer header is longer than ${MAX_ORIGIN_LENGTH} characters. Send this request from the app itself.`,
+  );
+}
+
 /** The same check for a Hono handler whose body may be JSON or a native form. */
 export function formCsrfRefusal(c: RawRequestContext, policy: BrowserRequestPolicy): Response | null {
   return csrfRefusal(c.req.raw, policy, JSON_OR_FORM_BODY);

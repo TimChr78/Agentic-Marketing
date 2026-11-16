@@ -68,6 +68,32 @@ describe('configuration', () => {
     expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*.example.com,http://localhost:5173' })).not.toThrow();
     // A trailing comma or a blank element is ignored, as it always was.
     expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*.example.com, ,' })).not.toThrow();
+    // #943: a default port in a wildcard entry is a spelling, not a wildcard, so it is accepted.
+    expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://*.example.com:443' })).not.toThrow();
+    expect(() => loadConfig({ ...base, TRUSTED_ORIGINS: 'https://192.168.*.*:*' })).not.toThrow();
+  });
+
+  // #947 review: Better Auth appends BETTER_AUTH_TRUSTED_ORIGINS verbatim, outside the bounded
+  // matcher, so a wildcard in it would reintroduce the RegExp this release removes. Refuse it at
+  // start-up rather than let it through.
+  it('refuses a wildcard in BETTER_AUTH_TRUSTED_ORIGINS (#947)', () => {
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: 'https://*.example.com' })).toThrow(
+      /BETTER_AUTH_TRUSTED_ORIGINS entry "https:\/\/\*\.example\.com" has a wildcard/,
+    );
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: 'https://?.example.com' })).toThrow(/has a wildcard/);
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: 'https://app.example.com,https://*.example.com' })).toThrow(
+      /BETTER_AUTH_TRUSTED_ORIGINS entry "https:\/\/\*\.example\.com"/,
+    );
+    // An exact entry is safe: Better Auth compares it verbatim, compiling nothing.
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: 'https://app.example.com' })).not.toThrow();
+    // Compose passes an unset variable as an empty string, which is not an entry.
+    expect(() => loadConfig({ ...base, BETTER_AUTH_TRUSTED_ORIGINS: '' })).not.toThrow();
+  });
+
+  // #947 review round 2: Better Auth adds the base URL's origin to its own list, outside the resolver.
+  it('refuses a PUBLIC_URL whose origin carries a wildcard (#947)', () => {
+    expect(() => loadConfig({ ...base, PUBLIC_URL: 'https://%2a.%2a.%2a:8443' })).toThrow(/PUBLIC_URL .*wildcard/);
+    expect(() => loadConfig({ ...base, PUBLIC_URL: 'https://app.example.com/%2a' })).not.toThrow();
   });
 
   it('accepts a percent-encoded password in DATABASE_URL (#647)', () => {

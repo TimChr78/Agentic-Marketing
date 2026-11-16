@@ -23,6 +23,10 @@ export const NO_BODY_READ = new Map([
   ['ALL /scim', 'API-root 404 for a role that does not mount SCIM'],
   ['ALL /scim/*', 'API-root 404 for a role that does not mount SCIM'],
   [
+    'ALL /api/auth/*',
+    'the Origin/Referer length guard (#947): it reads two request headers and refuses or passes on; the body is read only by the auth routes below, each behind its own limit',
+  ],
+  [
     'ALL /*',
     'the app-wide middleware chain (metrics, security headers, path rejection, brand resolution, static files): it observes or rejects requests and never parses a body; every endpoint below still needs its own guard',
   ],

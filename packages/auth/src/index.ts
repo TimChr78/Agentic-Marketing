@@ -13,6 +13,7 @@ import type { JWTPayload } from 'jose';
 import { agentForCredential, oauthClientName } from './agents';
 import { boundMembership, consentWorkspaceId, isWorkspaceReference } from './oauthWorkspace';
 import { type SsoConfig, ssoGuard, ssoPlugin } from './sso';
+import { betterAuthTrustedOrigins } from './trustedOrigins';
 
 /** Better Auth stores reset tokens under this prefix in its `verification` table. */
 const RESET_PREFIX = 'reset-password:';
@@ -107,7 +108,9 @@ export function authOptions(config: AuthConfig) {
     baseURL: config.baseUrl,
     secret: config.secret,
     database: config.db.admin,
-    trustedOrigins: config.trustedOrigins,
+    // Wildcard entries are resolved here, per request, with the bounded matcher (#947): Better Auth
+    // compiles each entry into a RegExp and runs it against the attacker's Origin/Referer.
+    trustedOrigins: betterAuthTrustedOrigins(config.trustedOrigins),
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 10,
@@ -274,3 +277,4 @@ export * from './oauthWorkspace';
 export * from './scim';
 export * from './sso';
 export * from './tokens';
+export * from './trustedOrigins';

@@ -15,13 +15,13 @@ curl -X POST https://marketing.example.com/api/auth/sso/register -H 'content-typ
 }'
 ```
 
-A command-line call that sends the session cookie must also send an `Origin` header matching `PUBLIC_URL` (or one listed in `TRUSTED_ORIGINS`): the CSRF check refuses a cookie-authenticated write without one with `403 MISSING_OR_NULL_ORIGIN`. A browser sends it automatically; a script must add it as above. Bearer-token calls need no `Origin`.
+A command-line call that sends the session cookie must also send an `Origin` header matching `PUBLIC_URL` (or one listed in `TRUSTED_ORIGINS`): the CSRF check refuses a cookie-authenticated write without one with `403 MISSING_OR_NULL_ORIGIN`. A browser sends it automatically; a script must add it as above. Bearer-token calls need no `Origin`. An `Origin` (or, when there is none, `Referer`) longer than 2048 characters is refused with `403` before the auth handler runs. Better Auth's own `BETTER_AUTH_TRUSTED_ORIGINS` is appended to its list verbatim, outside the bounded matcher, so the server refuses to start if an entry in it carries a wildcard; put wildcard entries in `TRUSTED_ORIGINS` instead.
 
 - Register `https://marketing.example.com/api/auth/sso/callback/<providerId>` as the redirect URI at the identity provider.
 - SAML: pass `samlConfig` (the IdP's `entryPoint`, `cert`, or its metadata XML) instead of `oidcConfig`; the service provider metadata is at `/api/auth/sso/saml2/sp/metadata?providerId=<providerId>` and the assertion consumer service at `/api/auth/sso/saml2/sp/acs/<providerId>`.
 - **Domain verification** (on by default): before anyone signs in through a provider, prove the domain with a DNS TXT record. `POST /api/auth/sso/request-domain-verification {providerId}` returns the token to publish; `POST /api/auth/sso/verify-domain {providerId}` checks it. This stops a workspace from claiming another company's domain. `SSO_DOMAIN_VERIFICATION=false` turns it off for development only.
 - **Enforcing SSO:** `POST /api/auth/sso/update-provider {providerId, enforced: true}` turns off password sign-in and sign-up for the provider's (verified) domain.
-- Identity providers on private addresses (a Keycloak on the company network) must be listed in `TRUSTED_ORIGINS`.
+- Identity providers on private addresses (a Keycloak on the company network) must be listed in `TRUSTED_ORIGINS` as an exact origin: a wildcard entry covers the origin a browser request comes from and the callback URLs it names, not the provider's discovery endpoints. A SAML assertion consumer service return is the same: its callback rides in `RelayState`, which is not resolved against a wildcard, so a SAML callback origin needs an exact entry.
 - `sso.list` shows a workspace's providers (also to agents with `workspace:admin`). People sign in at `/login` with "Sign in with SSO" (`POST /api/auth/sign-in/sso {email}`).
 
 ## SCIM provisioning
