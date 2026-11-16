@@ -7,6 +7,38 @@ import { redactCredentials } from '../src/diagnostics';
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
 
+describe('escaped JSON inside a string (#937)', () => {
+  it('replaces the escaped value', () => {
+    expect(redactCredentials(`{\\"password\\":\\"${SECRET}\\"}`)).toBe('{\\"password\\":\\"[redacted]\\"}');
+    expect(redactCredentials(`\\"token\\":\\"${SECRET}\\"`)).toBe('\\"token\\":\\"[redacted]\\"');
+    expect(redactCredentials(`\\"apiSecret\\": \\"${SECRET}\\"`)).toBe('\\"apiSecret\\": \\"[redacted]\\"');
+  });
+
+  it('leaves ordinary escaped JSON and prose alone', () => {
+    for (const input of ['{\\"note\\":\\"x\\"}', 'a \\"quoted\\" word', '\\"tokens\\":1234'])
+      expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
+describe('URL-encoded pairs (#937)', () => {
+  it('replaces the value of an encoded pair', () => {
+    expect(redactCredentials(`password%3D${SECRET}`)).toBe('password%3D[redacted]');
+    expect(redactCredentials(`a=1&password%3D${SECRET}&b=2`)).toBe('a=1&password%3D[redacted]&b=2');
+    expect(redactCredentials(`token%22%3A%22${SECRET}`)).toBe('token%22%3A%22[redacted]');
+    expect(redactCredentials(`token%22%3A%22${SECRET}%22`)).toBe('token%22%3A%22[redacted]%22');
+  });
+
+  it('decodes an encoded name only to match it', () => {
+    expect(redactCredentials(`api%5Fkey=${SECRET}`)).toBe('api%5Fkey=[redacted]');
+    expect(redactCredentials(`apiSecret%3D${SECRET}`)).toBe('apiSecret%3D[redacted]');
+  });
+
+  it('leaves ordinary encoded text alone', () => {
+    for (const input of ['progress%3D50', '100%25done', 'the%20query%20was%20empty', 'note%3Dhello'])
+      expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
 describe('a PEM private key block (#937)', () => {
   const block = (name: string, body: string): string => `-----BEGIN ${name}-----\n${body}\n-----END ${name}-----`;
 

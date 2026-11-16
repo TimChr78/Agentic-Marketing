@@ -952,13 +952,194 @@ function redactIntactValueShapes(text: string): string {
   return out;
 }
 
+const ESCAPED_QUOTE = '\\"';
+
+/**
+ * JSON written inside a string, where every quote is escaped: `{\"password\":\"x\"}`. The rules do
+ * not recognise the key because an escaped quote sits where the separator starts, so this reads
+ * `\"name\"`, the colon and the `\"value\"` pair by hand. Only the value between the escaped quotes
+ * is replaced; the rest of the text keeps its escapes.
+ */
+function redactEscapedJsonPairs(text: string): string {
+  if (!text.includes(ESCAPED_QUOTE)) return text;
+  let out = '';
+  let copied = 0;
+  let index = 0;
+  while (index < text.length) {
+    const open = text.indexOf(ESCAPED_QUOTE, index);
+    if (open < 0) break;
+    const nameStart = open + ESCAPED_QUOTE.length;
+    let nameEnd = nameStart;
+    while (nameEnd < text.length && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
+    const name = text.slice(nameStart, nameEnd);
+    if (
+      name.length === 0 ||
+      name.length > MAX_SHAPE_KEY_CHARS ||
+      !isShapesCredentialKey(name) ||
+      !text.startsWith(ESCAPED_QUOTE, nameEnd)
+    ) {
+      index = nameStart;
+      continue;
+    }
+    let cursor = nameEnd + ESCAPED_QUOTE.length;
+    while (isSpace(text.charAt(cursor))) cursor += 1;
+    if (text.charAt(cursor) !== ':') {
+      index = nameStart;
+      continue;
+    }
+    cursor += 1;
+    while (isSpace(text.charAt(cursor))) cursor += 1;
+    if (!text.startsWith(ESCAPED_QUOTE, cursor)) {
+      index = nameStart;
+      continue;
+    }
+    const valueStart = cursor + ESCAPED_QUOTE.length;
+    const close = text.indexOf(ESCAPED_QUOTE, valueStart);
+    if (close < 0) {
+      index = valueStart;
+      continue;
+    }
+    const value = text.slice(valueStart, close);
+    if (value === '[redacted]' || PLAIN_LITERAL.test(value)) {
+      index = close + ESCAPED_QUOTE.length;
+      continue;
+    }
+    out += `${text.slice(copied, valueStart)}[redacted]`;
+    copied = close;
+    index = close + ESCAPED_QUOTE.length;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/** The end of a name run that may carry percent-encoded characters, stopping at an encoded separator. */
+function urlNameEnd(text: string, start: number): number {
+  let index = start;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (isShapeNameChar(char)) {
+      index += 1;
+      continue;
+    }
+    if (char === '%' && index + 2 < text.length) {
+      const hex = text.slice(index + 1, index + 3).toLowerCase();
+      if (hex === '3d' || hex === '3a') break;
+      // Only an encoded NAME character continues the run; `%22` and the other delimiters end it.
+      if (/^[0-9a-f]{2}$/.test(hex) && isShapeNameChar(String.fromCharCode(Number.parseInt(hex, 16)))) {
+        index += 3;
+        continue;
+      }
+    }
+    break;
+  }
+  return index;
+}
+
+/** The name with its `%XX` sequences decoded, so only the matching sees the readable letters. */
+function decodeUrlName(name: string): string {
+  let out = '';
+  for (let index = 0; index < name.length; index += 1) {
+    const char = name.charAt(index);
+    if (char === '%' && index + 2 < name.length && /^[0-9a-f]{2}$/i.test(name.slice(index + 1, index + 3))) {
+      out += String.fromCharCode(Number.parseInt(name.slice(index + 1, index + 3), 16));
+      index += 2;
+      continue;
+    }
+    out += char;
+  }
+  return out;
+}
+
+/** The next `%XX` at or after `from`, compared case-insensitively (`hex` is two digits), or -1. */
+function indexOfEncoded(text: string, hex: string, from: number): number {
+  let index = from;
+  while (index + 2 < text.length) {
+    if (text.charAt(index) === '%' && text.slice(index + 1, index + 3).toLowerCase() === hex) return index;
+    index += 1;
+  }
+  return -1;
+}
+
+/** A bare URL-encoded value ends at an encoded or plain delimiter. */
+function urlValueEnd(text: string, start: number): number {
+  if (text.startsWith('[redacted]', start)) return start + '[redacted]'.length;
+  let index = start;
+  while (index < text.length) {
+    const char = text.charAt(index);
+    if (isSpace(char) || '&,;}]"\''.includes(char)) break;
+    if (char === '%') {
+      const hex = text.slice(index + 1, index + 3).toLowerCase();
+      if (hex === '26' || hex === '3b' || hex === '2c' || hex === '7d' || hex === '5d' || hex === '22' || hex === '27') break;
+      if (/^[0-9a-f]{2}$/.test(hex)) {
+        index += 3;
+        continue;
+      }
+    }
+    index += 1;
+  }
+  return index > start ? index : -1;
+}
+
+/**
+ * URL-encoded pairs: `password%3Dsecret`, `token%22%3A%22abc`, and `api%5Fkey=`, whose NAME is
+ * encoded but whose separator is not. The name is decoded only to decide whether it is a
+ * credential; the text keeps its encoding and only the value is replaced.
+ */
+function redactUrlEncodedPairs(text: string): string {
+  if (!text.includes('%')) return text;
+  let out = '';
+  let copied = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (!isShapeNameStart(text.charAt(index))) {
+      index += 1;
+      continue;
+    }
+    const nameEnd = urlNameEnd(text, index);
+    const name = decodeUrlName(text.slice(index, nameEnd));
+    if (name.length > MAX_SHAPE_KEY_CHARS || !isShapesCredentialKey(name)) {
+      index = nameEnd;
+      continue;
+    }
+    const quoted = text.slice(nameEnd, nameEnd + 9).toLowerCase();
+    const encoded = text.slice(nameEnd, nameEnd + 3).toLowerCase();
+    let valueStart: number;
+    let valueEnd: number;
+    if (quoted === '%22%3a%22' || quoted === '%22%3d%22') {
+      valueStart = nameEnd + 9;
+      const close = indexOfEncoded(text, '22', valueStart);
+      valueEnd = close < 0 ? lineEnd(text, valueStart) : close;
+    } else if (encoded === '%3d' || encoded === '%3a') {
+      valueStart = nameEnd + 3;
+      valueEnd = urlValueEnd(text, valueStart);
+    } else {
+      valueStart = separatorEnd(text, nameEnd, true);
+      valueEnd = valueStart < 0 ? -1 : pairValueEnd(text, valueStart);
+    }
+    if (valueStart < 0 || valueEnd <= valueStart) {
+      index = Math.max(nameEnd, valueStart);
+      continue;
+    }
+    const value = text.slice(valueStart, valueEnd);
+    if (value === '[redacted]' || PLAIN_LITERAL.test(value)) {
+      index = Math.max(valueEnd, nameEnd);
+      continue;
+    }
+    out += `${text.slice(copied, valueStart)}[redacted]`;
+    copied = valueEnd;
+    index = Math.max(valueEnd, nameEnd);
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
 /**
  * The passes that run on the rules' output: their shapes survive the rules intact, so they must not
  * run before them (a pre-pass value can end at a nested key and hide its value). Each reads the
  * text once.
  */
 function redactSettledValueShapes(text: string): string {
-  const out = redactShortSchemeValues(text);
+  let out = redactShortSchemeValues(text);
+  out = redactEscapedJsonPairs(out);
+  out = redactUrlEncodedPairs(out);
   return out;
 }
 

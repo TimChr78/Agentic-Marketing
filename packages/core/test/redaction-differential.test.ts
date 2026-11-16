@@ -393,6 +393,10 @@ const SHAPES: [string, (key: string, value: string) => string][] = [
   ['pem', (_key, value) => `-----BEGIN PRIVATE KEY-----\n${value}\n-----END PRIVATE KEY-----`],
   ['pem keyed', (key, value) => `${key}=-----BEGIN RSA PRIVATE KEY-----\n${value}\n-----END RSA PRIVATE KEY-----`],
   ['pem unclosed', (_key, value) => `-----BEGIN PRIVATE KEY-----\n${value}`],
+  ['escaped json', (key, value) => `{\\"${key}\\":\\"${value}\\"}`],
+  ['url encoded', (_key, value) => `password%3D${value}`],
+  ['url encoded quoted', (_key, value) => `token%22%3A%22${value}`],
+  ['url encoded name', (key, value) => `${key.replaceAll('_', '%5F')}=${value}`],
 ];
 /** Shapes whose point is a value too short for the rules to see, so only the marker goes in. */
 const SHORT_SHAPES: [string, (key: string, value: string) => string][] = [
