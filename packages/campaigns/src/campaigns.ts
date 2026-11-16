@@ -3,6 +3,7 @@ import {
   artifactTypes,
   type CampaignDefinition,
   canonicalPeople,
+  earlierAssignment,
   holdoutBelowK,
   holdoutHashVersion,
   K,
@@ -15,7 +16,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/events';
-import { and, eq, gte, inArray, isNotNull, lte, max } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, max } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
 import { goalEventsFor } from './goal';
@@ -446,6 +447,9 @@ export const campaignHoldoutResult = defineCommand({
     const hashVersion = holdoutHashVersion(cg.percent);
     const from = input.from ? new Date(input.from) : undefined;
     const to = input.to ? new Date(input.to) : undefined;
+    // The whole scope version, not just the requested window: a person's arm is their earliest
+    // assignment, and applying the date range first would let a later row on another of their
+    // profiles decide the arm while the send used the earlier one (#944).
     const assignments = await ctx.tx
       .select({
         profileId: schema.holdoutAssignments.profileId,
@@ -459,8 +463,6 @@ export const campaignHoldoutResult = defineCommand({
           eq(schema.holdoutAssignments.scopeType, 'campaign'),
           eq(schema.holdoutAssignments.scopeId, input.campaignId),
           eq(schema.holdoutAssignments.hashVersion, hashVersion),
-          from ? gte(schema.holdoutAssignments.assignedAt, from) : undefined,
-          to ? lte(schema.holdoutAssignments.assignedAt, to) : undefined,
         ),
       );
     const counts = {
@@ -474,18 +476,26 @@ export const campaignHoldoutResult = defineCommand({
     const converters: Record<'control' | 'treatment', Map<string, Set<string>>> = { control: new Map(), treatment: new Map() };
     // One person, one arm (#944). An assignment can sit on a profile the person was merged from — a
     // run that selected a stale alias wrote it there — so each row is resolved to the person and the
-    // earliest arm is theirs, exactly as `assignHoldout` reads it. A duplicate row must never put
-    // one person in both arms or count them twice.
+    // earliest arm is theirs (`earlierAssignment`, the same order `assignHoldout` reads), which also
+    // breaks a timestamp tie the same way, so the send and the report cannot disagree. The requested
+    // window then applies to that winning assignment, never to a row that did not decide the arm.
     const personOf = await canonicalPeople(
       ctx.tx,
       ws,
       assignments.map((a) => a.profileId),
     );
-    const people = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date }>();
+    const decided = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date; profileId: string }>();
     for (const r of assignments) {
       const person = personOf.get(r.profileId) ?? r.profileId;
-      const current = people.get(person);
-      if (!current || r.assignedAt < current.assignedAt) people.set(person, { arm: r.arm, assignedAt: r.assignedAt });
+      const current = decided.get(person);
+      const candidate = { arm: r.arm, assignedAt: r.assignedAt, profileId: r.profileId };
+      if (!current || earlierAssignment(candidate, current)) decided.set(person, candidate);
+    }
+    const people = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date }>();
+    for (const [person, win] of decided) {
+      if (from && win.assignedAt < from) continue;
+      if (to && win.assignedAt > to) continue;
+      people.set(person, { arm: win.arm, assignedAt: win.assignedAt });
     }
     for (const person of people.values()) counts[person.arm].entered++;
 

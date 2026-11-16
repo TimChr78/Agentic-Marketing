@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 // Holdout groups (#67): a deterministic share of a scope's entrants is held back from marketing
 // messages while still being measured. Assignment is a pure function of workspace, scope id,
@@ -26,6 +26,22 @@ export interface HoldoutAssignment {
   arm: HoldoutArm;
   hashVersion: string;
   percent: number;
+}
+
+/** Where a stored arm came from and when: the two fields every holdout read orders by. */
+export interface HoldoutStamp {
+  profileId: string;
+  assignedAt: Date;
+}
+
+/**
+ * Whether `a` is the person's decision before `b` (#944): the earliest `assigned_at` wins, and the
+ * lower profile id breaks a tie. `assignHoldout` (sending) and `campaigns.holdoutResult` (reporting)
+ * both use this order, so a tie cannot let the send and the report pick different arms.
+ */
+export function earlierAssignment(a: HoldoutStamp, b: HoldoutStamp): boolean {
+  const delta = a.assignedAt.getTime() - b.assignedAt.getTime();
+  return delta !== 0 ? delta < 0 : a.profileId < b.profileId;
 }
 
 /**
@@ -62,10 +78,12 @@ export async function canonicalPeople(tx: Tx, workspaceId: string, profileIds: r
   const seen = new Set(ids);
   let frontier = ids;
   while (frontier.length) {
+    // One array parameter, not one per id: a large campaign's frontier is far past PostgreSQL's
+    // 65,535-parameter limit, and `holdoutResult` would fail even without a single merge (#944).
     const rows = await tx
       .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
       .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), inArray(schema.profiles.id, frontier)));
+      .where(and(eq(schema.profiles.workspaceId, workspaceId), sql`${schema.profiles.id} = ANY(${sql.param(frontier)}::text[])`));
     const next: string[] = [];
     for (const row of rows) {
       survivorOf.set(row.id, row.mergedInto);
@@ -125,6 +143,7 @@ async function oldestArm(
     JOIN person ON person.id = a.profile_id
     WHERE a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type} AND a.scope_id = ${scope.id}
       AND a.hash_version = ${hashVersion}
+    -- The shared order (earlierAssignment): earliest decision, then the lower profile id.
     ORDER BY a.assigned_at, a.profile_id
     LIMIT 1`);
   const row = res.rows[0];

@@ -149,8 +149,9 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
     try {
       await d.db.admin.query(`CREATE ROLE ${role} LOGIN CREATEROLE PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
       await d.db.admin.query(`GRANT CREATE ON SCHEMA public TO ${role}`);
-      // The migration role owns the tables the migration files alter. It is deliberately not a
-      // superuser and has no BYPASSRLS, so FORCE RLS applies to it.
+      // The migration role owns the tables the migration files alter or index (profiles for 0099's
+      // merged-into index). It is deliberately not a superuser and has no BYPASSRLS, so FORCE RLS
+      // applies to it.
       for (const table of [
         'artifacts',
         'artifact_versions',
@@ -164,6 +165,7 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'oauth_workspace_selections',
         'ai_calls',
         'ai_token_reservations',
+        'profiles',
       ])
         await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
       await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);

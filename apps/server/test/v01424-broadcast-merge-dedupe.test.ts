@@ -550,6 +550,76 @@ describe('a merge mid-broadcast still sends one message (#944)', () => {
     expect(new Date(arms[0]!.assigned_at).getTime()).toBe(at.getTime());
   }, 90_000);
 
+  it('breaks a timestamp tie the same way when sending and reporting', async () => {
+    const { anon, user } = await twoProfiles('alias-tie');
+    // The higher id survives, so the alias wins a same-instant tie (the shared order breaks it by
+    // profile id) while the survivor's row is inserted first, which is what an unordered report
+    // query happens to return.
+    const survivor = anon > user ? anon : user;
+    const alias = survivor === anon ? user : anon;
+    const segment = await audienceOf('alias-tie', [survivor, alias]);
+    const id = await scheduledBroadcast('alias-tie', segment);
+    await grant([survivor, alias]);
+    const campaign = await campaignFor(id, 'alias tie');
+    await mergeProfiles('alias-tie', survivor, alias);
+    await keepAliasInAudience(segment, alias);
+    const at = new Date(Date.now() - 3_600_000);
+    await assignCampaignArms(campaign, holdoutHashVersion(50), [
+      { profile: survivor, arm: 'treatment', at },
+      { profile: alias, arm: 'control', at },
+    ]);
+    // Five more people in each arm, so both clear k and the counts are visible.
+    for (const [arm, people] of [
+      ['control', 5],
+      ['treatment', 5],
+    ] as const)
+      for (let i = 0; i < people; i++) {
+        await identify({ userId: `tie-${arm}-${i}`, traits: { email: `tie-${arm}-${i}@example.com` } });
+        const person = await profileOf({ type: 'user_id', value: `tie-${arm}-${i}` });
+        await assignCampaignArms(campaign, holdoutHashVersion(50), [{ profile: person, arm, at }]);
+      }
+
+    await startRunAt(id, '');
+    await awaitDone(id);
+    const rows = await messagesOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('suppressed');
+    expect(rows[0]!.reason).toContain('holdout_control');
+    // The report agrees with the send: the same-instant tie is control.
+    const result = await api().call('campaigns.holdoutResult', { campaignId: campaign });
+    expect([result.control.entered, result.treatment.entered]).toEqual([6, 5]);
+  }, 120_000);
+
+  it('applies the report window to the person’s winning assignment, not to an alias row', async () => {
+    const campaign = await createPublished('campaign', 'merge keys window', campaignContent(50));
+    const hashVersion = holdoutHashVersion(50);
+    const from = new Date(Date.now() - 3_600_000);
+    // Six held out and five treatment people inside the window...
+    for (const [arm, people] of [
+      ['control', 6],
+      ['treatment', 5],
+    ] as const)
+      for (let i = 0; i < people; i++) {
+        await identify({ userId: `window-${arm}-${i}`, traits: { email: `window-${arm}-${i}@example.com` } });
+        const person = await profileOf({ type: 'user_id', value: `window-${arm}-${i}` });
+        await assignCampaignArms(campaign, hashVersion, [{ profile: person, arm, at: new Date(Date.now() - 1_800_000) }]);
+      }
+    // ...and one merged person whose earliest arm (control) predates the window while a later row on
+    // their survivor (treatment) is inside it. The send uses control, so the report must too — and
+    // the winner is outside the window, so this person is not counted at all.
+    const { anon, user } = await twoProfiles('window-dup');
+    const survivor = anon > user ? anon : user;
+    const alias = survivor === anon ? user : anon;
+    await mergeProfiles('window-dup', survivor, alias);
+    await assignCampaignArms(campaign, hashVersion, [
+      { profile: alias, arm: 'control', at: new Date(from.getTime() - 3_600_000) },
+      { profile: survivor, arm: 'treatment', at: new Date(from.getTime() + 60_000) },
+    ]);
+
+    const result = await api().call('campaigns.holdoutResult', { campaignId: campaign, from: from.toISOString() });
+    expect([result.control.entered, result.treatment.entered]).toEqual([6, 5]);
+  }, 120_000);
+
   it('replays a chunk whose messages committed without its cursor, without duplicating', async () => {
     const profiles: string[] = [];
     for (let i = 0; i < 3; i++) {

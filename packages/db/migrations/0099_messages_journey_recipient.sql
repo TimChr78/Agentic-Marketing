@@ -15,3 +15,11 @@
 CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_journey_recipient
   ON messages (workspace_id, journey_id, profile_id)
   WHERE journey_id IS NOT NULL AND test = false;
+
+-- The holdout reads walk a person's merge chain backwards (`merged_into`), which has no index: the
+-- only index on the column family is `profiles_recent` (workspace, last_seen) and it excludes
+-- tombstones, exactly the rows this walk needs. An assignment lookup per send/report entry is a
+-- sequential scan of the workspace's profiles without it (#944).
+CREATE INDEX CONCURRENTLY IF NOT EXISTS profiles_merged_into
+  ON profiles (workspace_id, merged_into)
+  WHERE merged_into IS NOT NULL;
