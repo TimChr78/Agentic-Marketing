@@ -273,7 +273,7 @@ export const testPrompt = defineCommand({
   name: 'prompts.test',
   title: 'Run a prompt’s test cases',
   description:
-    'Queues every test case of a prompt version (default: the latest) to run against the journeys AI provider; the AI worker runs them within seconds. Read the results with prompts.testRun. Uses tokens; each call is logged.',
+    'Queues every test case of a prompt version (default: the latest) to run against the journeys AI provider; the AI worker runs them within seconds. Read the results with prompts.testRun. Spends the workspace’s LLM budget: agents need a mandate with a spend level.',
   input: z.object({
     artifactId: z.string().regex(/^prm_[0-9a-f]{32}$/),
     version: z.number().int().min(1).optional().describe('Default: the latest version, draft included'),
@@ -281,7 +281,7 @@ export const testPrompt = defineCommand({
   output: z.object({ runId: z.string(), version: z.number(), queued: z.number() }),
   permission: 'artifacts:write',
   effect: 'write',
-  actionClass: 'draft',
+  actionClass: 'spend',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
