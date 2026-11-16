@@ -4,12 +4,13 @@ import { join, relative } from 'node:path';
 import { parse } from '@babel/parser';
 
 // A syntax-aware scan of the environment the server reads (#965 review A): `process.env.X` is only
-// the obvious spelling. The code also reads an environment object through a variable, a default
-// parameter, a parameter typed `NodeJS.ProcessEnv` or `Record<string, string | undefined>`, a
-// destructuring pattern, a constant key and known helper functions that take the variable name.
-// This parses the file and resolves those, and reports an access it cannot reduce to a name so a
-// genuinely dynamic read needs an explicit, reasoned exception instead of silently escaping the
-// deployment guard.
+// the obvious spelling. The code also reads an environment object through a variable (including a
+// chain of aliases), a default parameter, a parameter typed `NodeJS.ProcessEnv` or
+// `Record<string, string | undefined>`, a destructuring pattern, a constant key, a global spelling
+// (`globalThis.process.env`) and known helper functions that take the variable name. This parses
+// the file and resolves those, and reports an access it cannot reduce to a name — including an
+// `env` imported from another module, whose binding this scan cannot see — so a genuinely dynamic
+// read needs an explicit, reasoned exception instead of silently escaping the deployment guard.
 //
 // The parser is @babel/parser rather than the TypeScript compiler API: `typescript` 7 in this repo
 // is the native (tsgo) package and ships no `createSourceFile`, so its AST cannot be built here.
@@ -29,8 +30,10 @@ export interface DynamicEnvRead {
    * `element`: an index expression whose key is not a literal or a constant string.
    * `enumerate`: `Object.entries/keys/values` over the environment object.
    * `helper`: a known helper called with a variable name that is not a literal or a constant.
+   * `imported`: reads through an `env` imported from another module, whose binding this scan cannot
+   * see (the importing file cannot prove it is the process environment).
    */
-  kind: 'element' | 'enumerate' | 'helper';
+  kind: 'element' | 'enumerate' | 'helper' | 'imported';
   /** The access as written, for the failure message. */
   text: string;
 }
@@ -81,14 +84,18 @@ export function scanEnvReads(input: SourceInput): EnvScan {
   const envTypes = envTypeAliases(ast, input.source);
   const bindings = new Set<string>();
   const constants = stringConstants(ast);
+  const importedEnvNames = importedEnvLocalNames(ast);
 
   /** An environment object handed around under another name: `const env = process.env`,
-   * `opts.env ?? process.env`, `{ ...process.env }`, a default parameter, or a parameter typed as
-   * an environment map. */
+   * `opts.env ?? process.env`, `{ ...process.env }`, a default parameter, a parameter typed as
+   * an environment map, or another name that already holds one. */
   const yieldsEnvObject = (expression: Ast): boolean => {
     const node = unwrap(expression);
     if (!node) return false;
     if (isProcessEnv(node)) return true;
+    // An alias: `const second = first` where `first` was bound to the environment. Names are
+    // tracked across the file (not per block), which errs toward reporting a read.
+    if (node.type === 'Identifier') return bindings.has(node.name);
     if (node.type === 'LogicalExpression' && ['??', '||', '&&'].includes(node.operator))
       return yieldsEnvObject(node.left) || yieldsEnvObject(node.right);
     if (node.type === 'ConditionalExpression') return yieldsEnvObject(node.consequent) || yieldsEnvObject(node.alternate);
@@ -97,42 +104,62 @@ export function scanEnvReads(input: SourceInput): EnvScan {
     return false;
   };
 
-  const bind = (pattern: Ast): void => {
-    if (!pattern) return;
-    if (pattern.type === 'Identifier') bindings.add(pattern.name);
-    else if (pattern.type === 'AssignmentPattern') bind(pattern.left);
-    else if (pattern.type === 'RestElement') bind(pattern.argument);
+  /** Binds the names in a pattern; true when at least one was new (so the fixpoint continues). */
+  const bind = (pattern: Ast): boolean => {
+    if (!pattern) return false;
+    if (pattern.type === 'Identifier') {
+      if (bindings.has(pattern.name)) return false;
+      bindings.add(pattern.name);
+      return true;
+    }
+    if (pattern.type === 'AssignmentPattern') return bind(pattern.left);
+    if (pattern.type === 'RestElement') return bind(pattern.argument);
+    return false;
   };
 
-  walk(ast, (node) => {
-    if (node.type === 'VariableDeclarator') {
-      if (node.init && yieldsEnvObject(node.init)) bind(node.id);
-      return;
-    }
-    // `const { env = process.env } = options`.
-    if (node.type === 'AssignmentPattern' && node.right && yieldsEnvObject(node.right)) {
-      bind(node.left);
-      return;
-    }
-    if (isFunctionLike(node)) {
-      for (const parameter of node.params) {
-        const target = parameter.type === 'AssignmentPattern' ? parameter.left : parameter;
-        if (target.type !== 'Identifier') continue;
-        const defaultsToEnv = parameter.type === 'AssignmentPattern' && yieldsEnvObject(parameter.right);
-        // Only a parameter *named* `env` counts on its type alone: a header map or an options bag
-        // shares the `Record<string, string | undefined>` / `NodeJS.ProcessEnv` shape, and binding
-        // those would report their keys as environment variables.
-        const typedAsEnv = target.name === 'env' && isEnvType(target.typeAnnotation?.typeAnnotation, envTypes, input.source);
-        if (defaultsToEnv || typedAsEnv) bindings.add(target.name);
+  // A chain (`const first = process.env; const second = first; third = second`) needs repeated
+  // passes: each one can bind the next link, until nothing new appears.
+  let boundNewName = true;
+  while (boundNewName) {
+    boundNewName = false;
+    walk(ast, (node) => {
+      if (node.type === 'VariableDeclarator') {
+        if (node.init && yieldsEnvObject(node.init) && bind(node.id)) boundNewName = true;
+        return;
       }
-    }
-  });
+      // `const { env = process.env } = options`.
+      if (node.type === 'AssignmentPattern' && node.right && yieldsEnvObject(node.right)) {
+        if (bind(node.left)) boundNewName = true;
+        return;
+      }
+      if (isFunctionLike(node)) {
+        for (const parameter of node.params) {
+          const target = parameter.type === 'AssignmentPattern' ? parameter.left : parameter;
+          if (target.type !== 'Identifier') continue;
+          const defaultsToEnv = parameter.type === 'AssignmentPattern' && yieldsEnvObject(parameter.right);
+          // Only a parameter *named* `env` counts on its type alone: a header map or an options
+          // bag shares the `Record<string, string | undefined>` / `NodeJS.ProcessEnv` shape, and
+          // binding those would report their keys as environment variables.
+          const typedAsEnv = target.name === 'env' && isEnvType(target.typeAnnotation?.typeAnnotation, envTypes, input.source);
+          if ((defaultsToEnv || typedAsEnv) && bind(target)) boundNewName = true;
+        }
+      }
+    });
+  }
 
   const isEnvRef = (expression: Ast): boolean => {
     const node = unwrap(expression);
     if (!node) return false;
     if (isProcessEnv(node)) return true;
     return node.type === 'Identifier' && bindings.has(node.name);
+  };
+
+  /** An `env` imported from another module: it may be the process environment, but this file
+   * cannot show that, so its reads are reported rather than guessed at. */
+  const isImportedEnvRef = (expression: Ast): boolean => {
+    const node = unwrap(expression);
+    if (!node || node.type !== 'Identifier' || bindings.has(node.name)) return false;
+    return importedEnvNames.has(node.name);
   };
 
   /** A key expression that is a literal or a constant string, or undefined when it is dynamic. */
@@ -159,6 +186,14 @@ export function scanEnvReads(input: SourceInput): EnvScan {
   };
 
   walk(ast, (node) => {
+    if (
+      (node.type === 'MemberExpression' || node.type === 'ElementAccessExpression') &&
+      isImportedEnvRef(node.object) &&
+      !isWriteTarget(node, parents)
+    ) {
+      addDynamic(node, 'imported');
+      return;
+    }
     if (node.type === 'MemberExpression' && isEnvRef(node.object) && !isWriteTarget(node, parents)) {
       if (!node.computed && node.property.type === 'Identifier') {
         add(node.property.name);
@@ -255,11 +290,41 @@ export async function serverSourceFiles(root: string): Promise<string[]> {
   return found;
 }
 
-/** `process.env` and `process['env']`. */
+/** `process.env`, `process['env']`, and the same through `globalThis` or `global`. */
 function isProcessEnv(node: Ast): boolean {
-  if (node?.type !== 'MemberExpression' || node.object?.type !== 'Identifier' || node.object.name !== 'process') return false;
-  if (!node.computed) return node.property?.type === 'Identifier' && node.property.name === 'env';
-  return node.property?.type === 'StringLiteral' && node.property.value === 'env';
+  if (node?.type !== 'MemberExpression' || !memberNamed(node, 'env')) return false;
+  return isProcessObject(node.object);
+}
+
+/** The `process` object, including `globalThis.process` and `global.process`. */
+function isProcessObject(node: Ast): boolean {
+  const target = unwrap(node);
+  if (!target) return false;
+  if (target.type === 'Identifier') return target.name === 'process';
+  if (target.type !== 'MemberExpression' || !memberNamed(target, 'process')) return false;
+  const base = unwrap(target.object);
+  return base?.type === 'Identifier' && (base.name === 'globalThis' || base.name === 'global');
+}
+
+/** A member access by name, whether written `.name` or `['name']`. */
+function memberNamed(node: Ast, name: string): boolean {
+  if (!node.computed) return node.property?.type === 'Identifier' && node.property.name === name;
+  return node.property?.type === 'StringLiteral' && node.property.value === name;
+}
+
+/** Local names of imports that are called `env` (or import an `env` under another name). */
+function importedEnvLocalNames(ast: Ast): Set<string> {
+  const names = new Set<string>();
+  walk(ast, (node) => {
+    if (node.type === 'ImportSpecifier') {
+      const imported = propertyName(node.imported);
+      const local = node.local?.type === 'Identifier' ? node.local.name : undefined;
+      if (local && (imported === 'env' || local === 'env')) names.add(local);
+    } else if (node.type === 'ImportDefaultSpecifier' || node.type === 'ImportNamespaceSpecifier') {
+      if (node.local?.type === 'Identifier' && node.local.name === 'env') names.add(node.local.name);
+    }
+  });
+  return names;
 }
 
 /** Strips the wrappers that do not change the value. */

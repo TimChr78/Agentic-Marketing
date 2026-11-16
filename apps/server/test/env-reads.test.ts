@@ -60,6 +60,21 @@ describe('the environment scan resolves every bound spelling', () => {
   it('reads process.env through an element access of the object itself', () => {
     expect(keys("process['env'].PI;")).toEqual(['PI']);
   });
+
+  it('follows a chain of aliases, however long', () => {
+    const source = ['const first = process.env;', 'const second = first;', 'const third = second;', 'third.RHO;'].join('\n');
+    expect(keys(source)).toEqual(['RHO']);
+    expect(dynamic(source)).toEqual([]);
+  });
+
+  it('recognises the global spellings of the process environment', () => {
+    expect(keys('globalThis.process.env.SIGMA;')).toEqual(['SIGMA']);
+    expect(keys('global.process.env.TAU;')).toEqual(['TAU']);
+    expect(keys("globalThis.process['env'].UPSILON;")).toEqual(['UPSILON']);
+    expect(keys("global['process'].env.PHI;")).toEqual(['PHI']);
+    const alias = 'const env = globalThis.process.env;\nenv.CHI;';
+    expect(keys(alias)).toEqual(['CHI']);
+  });
 });
 
 describe('the environment scan refuses what it cannot resolve', () => {
@@ -78,6 +93,12 @@ describe('the environment scan refuses what it cannot resolve', () => {
   it('reports enumerating the whole environment', () => {
     expect(dynamic('Object.entries(process.env);')).toEqual(['enumerate']);
     expect(dynamic('Object.keys(process.env);')).toEqual(['enumerate']);
+  });
+
+  it('reports reads through an env imported from another module', () => {
+    const source = ["import { env } from './shared';", 'env.PSI;'].join('\n');
+    expect(keys(source)).toEqual([]);
+    expect(dynamic(source)).toEqual(['imported']);
   });
 
   it('reports a helper called with a name it cannot resolve', () => {
