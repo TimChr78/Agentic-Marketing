@@ -400,6 +400,9 @@ const SHAPES: [string, (key: string, value: string) => string][] = [
   ['plain', (key, value) => `${key}=${value}`],
   ['pwd pass', (_key, value) => `dbPass=${value}`],
   ['pwd separator', (_key, value) => `user_pass: ${value}`],
+  ['nested pair', (key, value) => `SIGNINGKEY=${key}='${value}'`],
+  ['nested pair upper', (key, value) => `AZUREOPENAIKEY=${key}="${value}"`],
+  ['glued marker', (key, value) => `${key}=[redacted]${value}`],
 ];
 /** Shapes whose point is a value too short for the rules to see, so only the marker goes in. */
 const SHORT_SHAPES: [string, (key: string, value: string) => string][] = [

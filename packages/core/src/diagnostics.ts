@@ -941,6 +941,42 @@ function redactPemBlocks(text: string): string {
 }
 
 /**
+ * A credential pair whose value is itself a credential pair: `SIGNINGKEY=AZUREOPENAIKEY='x'`,
+ * `AZUREOPENAIKEY=apiSecret='x'`. The rules replace the inner key as the outer value and leave the
+ * inner value behind, so this replaces the whole nested pair while both are intact. It only acts
+ * on a quoted inner value: a bare inner pair is consumed whole by the rules already, and an
+ * `innerKey://scheme` value belongs to the scheme rule.
+ */
+function nestedValueSpan(text: string, valueStart: number): ValueSpan | null {
+  if (!isShapeNameStart(text.charAt(valueStart))) return null;
+  let nameEnd = valueStart + 1;
+  while (nameEnd < text.length && isShapeNameChar(text.charAt(nameEnd))) nameEnd += 1;
+  const innerName = text.slice(valueStart, nameEnd);
+  if (innerName.length > MAX_SHAPE_KEY_CHARS || !isShapesCredentialKey(innerName)) return null;
+  const innerStart = separatorEnd(text, nameEnd, true);
+  if (innerStart < 0) return null;
+  const quote = text.charAt(innerStart);
+  if (quote !== '"' && quote !== "'") return null;
+  let innerEnd = pairValueEnd(text, innerStart);
+  if (innerEnd < 0) return null;
+  // A value glued after the inner quote (`oauthToken="x"tail`) goes with it: the rules replace a
+  // marker plus glued text as one value in a later round, and consuming the key here would take
+  // that anchor away.
+  const next = text.charAt(innerEnd);
+  if (next !== '' && !isSpace(next) && !BARE_VALUE_STOP.has(next)) {
+    const tail = pairValueEnd(text, innerEnd);
+    if (tail > innerEnd) innerEnd = tail;
+  }
+  return { start: valueStart, end: innerEnd };
+}
+
+function redactNestedPairs(text: string): string {
+  if (!text.includes('=') && !text.includes(':')) return text;
+  if (!text.includes('"') && !text.includes("'")) return text;
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), nestedValueSpan);
+}
+
+/**
  * The passes that must see a shape before the rules do, because they consume a delimiter the rules
  * would otherwise take (`[`, a Unicode opening quote, `>`, `-----BEGIN`, an inner `=`). Each one
  * replaces a whole delimited span, so it cannot leave a nested pair's value behind.
@@ -950,6 +986,7 @@ function redactIntactValueShapes(text: string): string {
   out = redactUnicodeQuotedValues(out);
   out = redactArrowPairs(out);
   out = redactPemBlocks(out);
+  out = redactNestedPairs(out);
   return out;
 }
 
@@ -1150,6 +1187,26 @@ function redactPwdKeys(text: string): string {
 }
 
 /**
+ * A value the rules replaced only in part: the marker is followed by the rest of the value
+ * (`token=[redacted]shortpw`). Only a marker glued to a word is taken; a space or a delimiter means
+ * the value already ended there.
+ */
+function gluedMarkerSpan(text: string, start: number): ValueSpan | null {
+  const marker = '[redacted]';
+  if (!text.startsWith(marker, start)) return null;
+  const restStart = start + marker.length;
+  const char = text.charAt(restStart);
+  if (char === '' || isSpace(char) || BARE_VALUE_STOP.has(char)) return null;
+  const end = pairValueEnd(text, restStart);
+  return end < 0 ? null : { start, end };
+}
+
+function redactGluedMarkers(text: string): string {
+  if (!text.includes('[redacted]')) return text;
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), gluedMarkerSpan);
+}
+
+/**
  * The passes that run on the rules' output: their shapes survive the rules intact, so they must not
  * run before them (a pre-pass value can end at a nested key and hide its value). Each reads the
  * text once.
@@ -1159,6 +1216,7 @@ function redactSettledValueShapes(text: string): string {
   out = redactEscapedJsonPairs(out);
   out = redactUrlEncodedPairs(out);
   out = redactPwdKeys(out);
+  out = redactGluedMarkers(out);
   return out;
 }
 

@@ -7,6 +7,30 @@ import { redactCredentials } from '../src/diagnostics';
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
 
+describe('a credential pair nested in another pair (#937)', () => {
+  it('replaces the whole nested pair', () => {
+    expect(redactCredentials(`SIGNINGKEY=AZUREOPENAIKEY='${SECRET}'`)).toBe('SIGNINGKEY=[redacted]');
+    expect(redactCredentials(`AZUREOPENAIKEY=apiSecret='${SECRET}'`)).toBe('AZUREOPENAIKEY=[redacted]');
+    expect(redactCredentials(`authToken=apiSecret="${SECRET}"`)).toBe('authToken=[redacted]');
+  });
+
+  it('leaves ordinary quoted values alone', () => {
+    for (const input of [`entryKey='ascending'`, `sortKey="asc"`, `note='x'`]) expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
+describe('text glued to an existing marker (#937)', () => {
+  it('removes the text after the marker', () => {
+    expect(redactCredentials(`token=[redacted]${SECRET}`)).toBe('token=[redacted]');
+    expect(redactCredentials(`token=[redacted]${SECRET} more`)).toBe('token=[redacted] more');
+  });
+
+  it('leaves a finished marker alone', () => {
+    for (const input of ['token=[redacted]', 'token=[redacted], next', 'token=[redacted]\nnext'])
+      expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
 describe('a Pwd or Pass camel ending (#937)', () => {
   it('replaces the value of a Pwd or Pass key', () => {
     expect(redactCredentials(`userPwd=${SECRET}`)).toBe('userPwd=[redacted]');
