@@ -91,7 +91,8 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
     // The migration role owns the tables later migrations touch (suppressions for 0088, deliveries
     // for 0089's index, artifacts for 0092's singleton index, artifact_versions for 0093's
     // one-published-version index, workspaces for 0094's data_repairs and 0095's gap table foreign
-    // keys, messages for 0096's request fingerprint); FORCE RLS applies to it as well, which is the
+    // keys, messages for 0096's request fingerprint, ai_calls and ai_token_reservations for 0097's
+    // billing columns and 0098's index); FORCE RLS applies to it as well, which is the
     // small-install path this guards.
     for (const table of [
       'artifacts',
@@ -101,6 +102,8 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'oauth_workspace_selections',
       'workspaces',
       'messages',
+      'ai_calls',
+      'ai_token_reservations',
     ])
       await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
     await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);

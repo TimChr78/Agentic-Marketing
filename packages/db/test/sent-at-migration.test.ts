@@ -162,6 +162,8 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'suppressions',
         'deliveries',
         'oauth_workspace_selections',
+        'ai_calls',
+        'ai_token_reservations',
       ])
         await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
       await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
