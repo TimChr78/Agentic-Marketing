@@ -1,6 +1,16 @@
 import type { Purposes } from '@agentic-marketing/artifacts';
+import type { ConsentStatus } from '@agentic-marketing/db';
 import { describe, expect, it } from 'vitest';
-import { type ConsentRow, consentProofFor, currentConsent, purposeAllowed, refusedPurposes } from '../src/consent';
+import {
+  CONSENT_REPEAT_WINDOW_MS,
+  type ConsentInput,
+  type ConsentRow,
+  consentProofFor,
+  currentConsent,
+  newConsentEvidence,
+  purposeAllowed,
+  refusedPurposes,
+} from '../src/consent';
 import { CASES, P, row } from './consentCases';
 
 // The one rule for "current status of a purpose" (ADR 0014), as every reader applies it.
@@ -118,5 +128,77 @@ describe('refusedPurposes (journeys exit on these, #108)', () => {
 
   it('never a contract purpose, which a refusal does not stop', () => {
     expect(refusedPurposes([row('', 'denied', 1, 'onboarding')], purposes)).toEqual([]);
+  });
+});
+
+// #936: a signup that leaves the status unchanged is still evidence when its action is newer
+// than the newest ledger row. Deduplicating by status silently dropped it, so a delayed
+// withdrawal that arrived later won although the person's latest action was the signup.
+describe('newConsentEvidence (#936)', () => {
+  const at = (minute: number) => new Date(Date.UTC(2026, 9, 24, 12, minute));
+  const consent = (minute: number, status: ConsentStatus = 'granted', extra: Partial<ConsentInput> = {}): ConsentInput => ({
+    purpose: P,
+    status,
+    source: 'form',
+    recordedAt: at(minute),
+    ...extra,
+  });
+  const stored = (minute: number, status: ConsentStatus = 'granted', source: ConsentInput['source'] = 'form', channel = '') => ({
+    purpose: P,
+    channel,
+    status,
+    source,
+    recordedAt: at(minute),
+  });
+  const state = (minute: number, status: ConsentStatus = 'granted', channel = '') => [row(channel, status, minute)];
+
+  it('keeps a newer same-status signup as evidence (the out-of-order case)', () => {
+    const kept = newConsentEvidence([consent(120)], [stored(0)], state(0));
+    expect(kept.map((r) => r.recordedAt)).toEqual([at(120)]);
+  });
+
+  it('does not add an identical repeat inside the window', () => {
+    const inside = new Date(at(20).getTime() + CONSENT_REPEAT_WINDOW_MS / 2);
+    const kept = newConsentEvidence([{ ...consent(20), recordedAt: inside }], [stored(20)], state(20));
+    expect(kept).toEqual([]);
+  });
+
+  it('adds the same action again once the window has passed', () => {
+    const outside = new Date(at(20).getTime() + CONSENT_REPEAT_WINDOW_MS + 1);
+    const kept = newConsentEvidence([{ ...consent(20), recordedAt: outside }], [stored(20)], state(20));
+    expect(kept).toHaveLength(1);
+  });
+
+  it('drops a repeat of the same event (the same action time) even after the window', () => {
+    const kept = newConsentEvidence([consent(20)], [stored(20)], state(20));
+    expect(kept).toEqual([]);
+  });
+
+  it('drops a re-signup older than the newest row when the status is unchanged', () => {
+    const kept = newConsentEvidence([consent(10)], [stored(20)], state(20));
+    expect(kept).toEqual([]);
+  });
+
+  it('still keeps an older row that records a different action, e.g. a delayed withdrawal', () => {
+    const kept = newConsentEvidence([consent(10, 'withdrawn')], [stored(20)], state(20));
+    expect(kept).toHaveLength(1);
+  });
+
+  it('counts evidence per scope and source, not across them', () => {
+    // A newer import grant is evidence even when the newest form grant is identical in status.
+    expect(newConsentEvidence([consent(30, 'granted', { source: 'import' })], [stored(20)], state(20))).toHaveLength(1);
+    // The channel scope is independent: an all-channels grant does not dedupe an e-mail row.
+    expect(newConsentEvidence([consent(30, 'granted', { channel: 'email' })], [stored(20)], state(20))).toHaveLength(1);
+  });
+
+  it('measures the repeat window from the newest identical row, not from another source', () => {
+    // The import at minute 10 does not make the form signup at minute 20 a new form action.
+    const rows = [stored(0), stored(10, 'granted', 'import')];
+    expect(newConsentEvidence([consent(20)], rows, state(10))).toEqual([]);
+  });
+
+  it('keeps the newest of several actions in one batch and drops its repeat', () => {
+    const kept = newConsentEvidence([consent(120), consent(120)], [stored(0)], state(0));
+    expect(kept.map((r) => r.recordedAt)).toEqual([at(120)]);
   });
 });

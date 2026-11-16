@@ -470,6 +470,188 @@ describe('an async consent write carries the action time (#928)', () => {
   });
 });
 
+describe('a newer same-status signup is consent evidence (#936)', () => {
+  // The ledger used to keep a row only when the current status changed. A signup while already
+  // granted was therefore dropped, and a withdrawal whose provider callback arrived later could
+  // win although the person's latest action was the signup.
+  let hook: ReturnType<typeof consentHook>;
+  const api = () => t.api(owner, ws);
+  const newProfile = async () => {
+    const id = `prf_${randomBytes(16).toString('hex')}`;
+    await t.srv.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [ws, id]);
+    return id;
+  };
+  const formEvent = (profileId: string, at: Date): BusEvent => ({
+    workspaceId: ws,
+    sourceId: 'frm_936',
+    messageId: `msg_${randomBytes(12).toString('hex')}`,
+    type: 'track',
+    name: 'Form Submitted',
+    anonymousId: '',
+    userId: profileId,
+    timestamp: at.toISOString(),
+    receivedAt: at.toISOString(),
+    properties: { purposes: ['marketing'], double_opt_in: false },
+    traits: {},
+    piiTraits: {},
+    context: {},
+    consent: {},
+  });
+  const handle = (profileId: string, e: BusEvent) => hook(ws, [{ event: e, profileId }]);
+  const history = async (profileId: string) => (await api().call('consent.history', { profileId })).records;
+  const effective = async (profileId: string) =>
+    (await api().call('profiles.get', { profileId })).consentEffective.find((c) => c.purpose === 'marketing')!;
+  const providerUnsubscribe = async (profileId: string, at: Date) => {
+    const messageId = `msg_${randomBytes(12).toString('hex')}`;
+    await t.srv.db.admin.query(
+      `INSERT INTO messages (workspace_id, id, idempotency_key, channel, purpose, profile_id, status)
+       VALUES ($1, $2, $3, 'email', 'marketing', $4, 'sent')`,
+      [ws, messageId, `idem_${messageId}`, profileId],
+    );
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      applyDeliveryEvents(
+        tx,
+        [{ eventId: `evt_${randomBytes(6).toString('hex')}`, type: 'unsubscribed', messageId, at: at.toISOString() }],
+        'test',
+        t.srv.keyProvider,
+      ),
+    );
+  };
+
+  beforeAll(() => {
+    hook = consentHook({
+      db: t.srv.db,
+      kp: t.srv.keyProvider,
+      events: t.srv.events,
+      links: t.srv.email.links,
+      linksUrl: t.srv.linksUrl,
+    });
+  });
+
+  it('keeps the signup at T2 and resolves to granted when the withdrawal at T1 arrives late', async () => {
+    const profileId = await newProfile();
+    const t0 = new Date(Date.now() - 3 * 3_600_000);
+    const t1 = new Date(Date.now() - 2 * 3_600_000);
+    const t2 = new Date(Date.now() - 60_000);
+
+    await handle(profileId, formEvent(profileId, t0));
+    // The person signs up again while the ledger still says granted: the provider's withdrawal
+    // callback for T1 has not arrived yet.
+    await handle(profileId, formEvent(profileId, t2));
+    const grants = (await history(profileId)).filter((r) => r.status === 'granted');
+    expect(grants).toHaveLength(2);
+
+    // The delayed callback now records the withdrawal at its own (older) action time.
+    await providerUnsubscribe(profileId, t1);
+    expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
+    const records = await history(profileId);
+    expect(records.find((r) => r.status === 'withdrawn')).toMatchObject({ recordedAt: t1.toISOString() });
+    expect(records.filter((r) => r.status === 'granted')).toHaveLength(2);
+  });
+
+  it('does not add a row for an identical repeat inside the window', async () => {
+    const profileId = await newProfile();
+    const first = new Date(Date.now() - 30 * 60_000);
+    const repeat = new Date(Date.now() - 20 * 60_000);
+    await handle(profileId, formEvent(profileId, first));
+    const before = (await history(profileId)).length;
+    await handle(profileId, formEvent(profileId, repeat));
+    expect((await history(profileId)).length).toBe(before);
+    expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
+  });
+
+  it('does not add a row for a redelivered event', async () => {
+    const profileId = await newProfile();
+    const submitted = formEvent(profileId, new Date(Date.now() - 30 * 60_000));
+    await handle(profileId, submitted);
+    const before = (await history(profileId)).length;
+    await handle(profileId, submitted);
+    expect((await history(profileId)).length).toBe(before);
+  });
+
+  it('does not add a row when a provider redelivers the same event id', async () => {
+    const profileId = await newProfile();
+    await handle(profileId, formEvent(profileId, new Date(Date.now() - 5 * 3_600_000)));
+    const messageId = `msg_${randomBytes(12).toString('hex')}`;
+    await t.srv.db.admin.query(
+      `INSERT INTO messages (workspace_id, id, idempotency_key, channel, purpose, profile_id, status)
+       VALUES ($1, $2, $3, 'email', 'marketing', $4, 'sent')`,
+      [ws, messageId, `idem_${messageId}`, profileId],
+    );
+    const eventId = `evt_${randomBytes(6).toString('hex')}`;
+    const redeliver = (at: Date) =>
+      t.srv.db.withWorkspace(ws, (tx) =>
+        applyDeliveryEvents(tx, [{ eventId, type: 'unsubscribed', messageId, at: at.toISOString() }], 'test', t.srv.keyProvider),
+      );
+    await redeliver(new Date(Date.now() - 3 * 3_600_000));
+    // The same event id again, outside the repeat window: the event identity still deduplicates it.
+    await redeliver(new Date());
+    expect((await history(profileId)).filter((r) => r.status === 'withdrawn')).toHaveLength(1);
+  });
+
+  it('an older re-signup adds nothing and leaves the outcome unchanged', async () => {
+    const profileId = await newProfile();
+    const newest = new Date(Date.now() - 10 * 60_000);
+    const older = new Date(Date.now() - 20 * 60_000);
+    await handle(profileId, formEvent(profileId, newest));
+    await handle(profileId, formEvent(profileId, older));
+    expect(await history(profileId)).toHaveLength(1);
+    expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
+  });
+
+  it('the SDK carries the same rule: a newer same-status choice is evidence', async () => {
+    const anonymousId = `dev-936-${randomBytes(5).toString('hex')}`;
+    const change = (at: Date, allowed: boolean) => ({
+      type: 'track',
+      event: 'Segment Consent Preference Updated',
+      anonymousId,
+      timestamp: at.toISOString(),
+      context: { consent: { categoryPreferences: { marketing: allowed } } },
+    });
+    const t0 = new Date(Date.now() - 3 * 3_600_000);
+    const t1 = new Date(Date.now() - 2 * 3_600_000);
+    const t2 = new Date(Date.now() - 60_000);
+    await send([change(t0, true)]);
+    const found = await eventually(
+      () => api().call('profiles.find', { type: 'anonymous_id', value: anonymousId }),
+      (r) => !!r.profileId,
+    );
+    const profileId = found.profileId!;
+    await eventually(
+      () => api().call('consent.history', { profileId }),
+      (r) => r.records.length === 1,
+    );
+    await send([change(t2, true)]);
+    await eventually(
+      () => api().call('consent.history', { profileId }),
+      (r) => r.records.filter((x) => x.status === 'granted').length === 2,
+    );
+    await providerUnsubscribe(profileId, t1);
+    expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
+  });
+
+  it('leaves the current state, counts and export consistent with the evidence, not the row count', async () => {
+    const grantedCount = async () =>
+      (await api().call('consent.summary', {})).purposes.find((p) => p.purpose === 'marketing')?.granted ?? 0;
+    const before = await grantedCount();
+    const profileId = await newProfile();
+    await handle(profileId, formEvent(profileId, new Date(Date.now() - 3 * 3_600_000)));
+    await handle(profileId, formEvent(profileId, new Date(Date.now() - 60_000)));
+    const records = await history(profileId);
+    expect(records.filter((r) => r.status === 'granted')).toHaveLength(2);
+
+    // The same-status evidence row does not create a second current state or count the person twice.
+    const profile = await api().call('profiles.get', { profileId });
+    expect(profile.consent.filter((c) => c.purpose === 'marketing' && c.channel === '')).toHaveLength(1);
+    expect(profile.consentEffective.find((c) => c.purpose === 'marketing')).toMatchObject({ status: 'granted', allowed: true });
+    expect((await grantedCount()) - before).toBe(1);
+
+    // An export is the data subject's record: it carries both actions as evidence.
+    const exported = await api().call('profiles.export', { profileId, maxEvents: 0 });
+    expect(exported.consentRecords.filter((r) => r.status === 'granted')).toHaveLength(2);
+  });
+});
+
 describe('journeys.simulate previews refused webhooks (#626)', () => {
   let journeyId: string;
 

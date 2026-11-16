@@ -123,6 +123,110 @@ export function consentProofFor(
   return { proof: visible, proofWithheld: withheld };
 }
 
+/**
+ * How long an identical action counts as the same evidence (#936). One hour absorbs a double
+ * submission, a retried hook or a reopened confirmation without swallowing a genuine later
+ * signup: an action beyond the window is evidence that must beat a delayed withdrawal.
+ */
+export const CONSENT_REPEAT_WINDOW_MS = 3_600_000;
+
+/** The part of an existing ledger row that deduplication needs. */
+export interface ConsentEvidenceRow {
+  purpose: string;
+  channel: string;
+  status: ConsentStatus;
+  source: ConsentSource;
+  recordedAt: Date;
+}
+
+const evidenceScope = (purpose: string, channel: string) => `${purpose}\u0000${channel}`;
+const evidenceIdentity = (scope: string, status: ConsentStatus, source: ConsentSource) => `${scope}\u0000${status}\u0000${source}`;
+
+/**
+ * Keeps the records that add evidence to the ledger (#936). Deduplicating by current status alone
+ * dropped a signup that arrived while the person was already granted, so a delayed withdrawal
+ * with an older action time could win although the person's latest action was the signup.
+ *
+ * A record is kept when it changes the current status (as before), or when its action time is
+ * newer than the newest row for the same person, purpose and channel scope. Older records that
+ * change the status are still kept: that is how a delayed withdrawal leaves its proof.
+ *
+ * Ledger growth is bounded: an identical action (same status, source and scope) within
+ * `windowMs` of the newest identical row is the same standing choice and adds no row. A redelivery
+ * of the same event is additionally deduplicated by the ledger's (message_id, purpose, channel)
+ * index in `recordConsent`.
+ */
+export function newConsentEvidence<T extends ConsentInput>(
+  records: T[],
+  existing: ConsentEvidenceRow[],
+  current: ConsentRow[],
+  windowMs = CONSENT_REPEAT_WINDOW_MS,
+): T[] {
+  const newest = new Map<string, number>();
+  const newestIdentical = new Map<string, number>();
+  for (const row of existing) {
+    const scope = evidenceScope(row.purpose, row.channel);
+    const at = row.recordedAt.getTime();
+    newest.set(scope, Math.max(at, newest.get(scope) ?? Number.NEGATIVE_INFINITY));
+    const identity = evidenceIdentity(scope, row.status, row.source);
+    newestIdentical.set(identity, Math.max(at, newestIdentical.get(identity) ?? Number.NEGATIVE_INFINITY));
+  }
+
+  const kept: T[] = [];
+  for (const record of records) {
+    const scope = evidenceScope(record.purpose, record.channel ?? '');
+    const at = record.recordedAt.getTime();
+    const newestRow = newest.get(scope);
+    let keep: boolean;
+    if (currentConsent(current, record.purpose)?.status !== record.status) {
+      // A different choice is evidence even when it happened before the newest row (a delayed
+      // withdrawal must stay in the ledger), so it is kept as before.
+      keep = true;
+    } else if (newestRow === undefined || at > newestRow) {
+      const identity = evidenceIdentity(scope, record.status, record.source);
+      const last = newestIdentical.get(identity);
+      keep = last === undefined || at - last >= windowMs;
+    } else {
+      // Same standing choice, older than the newest row: nothing changes and nothing is added.
+      keep = false;
+    }
+    if (!keep) continue;
+    kept.push(record);
+    newest.set(scope, Math.max(at, newest.get(scope) ?? Number.NEGATIVE_INFINITY));
+    const identity = evidenceIdentity(scope, record.status, record.source);
+    newestIdentical.set(identity, Math.max(at, newestIdentical.get(identity) ?? Number.NEGATIVE_INFINITY));
+  }
+  return kept;
+}
+
+/**
+ * Records only the evidence a write adds (#936): the current-status change, or a newer action even
+ * when the status is unchanged, with identical repeats inside the window deduplicated. Use this in
+ * every writer that knows the person's action time; `recordConsent` remains the raw append.
+ */
+export async function recordConsentEvidence(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
+  if (!records.length) return 0;
+  const family = await mergedFamily(tx, workspaceId, profileId);
+  const current = await consentStateOf(tx, workspaceId, profileId);
+  const existing = await tx
+    .select({
+      purpose: schema.consentRecords.purpose,
+      channel: schema.consentRecords.channel,
+      status: schema.consentRecords.status,
+      source: schema.consentRecords.source,
+      recordedAt: schema.consentRecords.recordedAt,
+    })
+    .from(schema.consentRecords)
+    .where(
+      and(
+        eq(schema.consentRecords.workspaceId, workspaceId),
+        inArray(schema.consentRecords.profileId, family),
+        inArray(schema.consentRecords.purpose, [...new Set(records.map((r) => r.purpose))]),
+      ),
+    );
+  return recordConsent(tx, workspaceId, profileId, purposes, newConsentEvidence(records, existing, current));
+}
+
 export async function recordConsent(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
   if (!records.length) return 0;
   const inserted = await tx

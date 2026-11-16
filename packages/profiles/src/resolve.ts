@@ -5,7 +5,7 @@ import { type BusEvent, CONSENT_EVENT } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { consentStateOf, currentConsent, recomputeConsentState, recordConsent } from './consent';
+import { consentStateOf, currentConsent, recomputeConsentState, recordConsentEvidence } from './consent';
 import { type PersonCrypto, personCrypto } from './crypto';
 
 // Deterministic identity resolution (data-platform.md §3). Each event's identifiers are looked up;
@@ -358,9 +358,9 @@ async function recordSdkConsent(tx: Tx, workspaceId: string, profileId: string, 
       page: (e.context.page as { url?: string } | undefined)?.url,
     },
   }));
-  // Only changes are worth a record; a page load repeating the same choice is not one.
-  const changed = records.filter(
-    (r) => current.get(r.purpose) !== r.status && !(r.status === 'denied' && current.get(r.purpose) === 'withdrawn'),
-  );
-  await recordConsent(tx, workspaceId, profileId, purposes, changed);
+  // Regular page loads send no consent event (the SDK enqueues one only when the choice changes),
+  // so the evidence rule (#936) applies here as everywhere the action time is known: a newer
+  // repeat of the same choice is real evidence, an identical repeat inside the window is not.
+  const meaningful = records.filter((r) => !(r.status === 'denied' && current.get(r.purpose) === 'withdrawn'));
+  await recordConsentEvidence(tx, workspaceId, profileId, purposes, meaningful);
 }

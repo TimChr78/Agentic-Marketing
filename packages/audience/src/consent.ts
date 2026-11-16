@@ -2,7 +2,7 @@ import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifac
 import type { Db, Tx } from '@agentic-marketing/db';
 import { type LinkSigner, requestEmail, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore } from '@agentic-marketing/events';
-import { type ConsentInput, consentStateOf, currentConsent, type ResolvedEvent, recordConsent } from '@agentic-marketing/profiles';
+import { type ConsentInput, type ResolvedEvent, recordConsentEvidence } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { CONFIRMED, DOI_DAYS, type DoiToken, publishedForm, SUBMITTED } from './forms';
@@ -25,12 +25,15 @@ export interface ConsentHookDeps {
 
 const purposesOf = async (tx: Tx) => (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
 
-/** Records only what changes the person's current state (a repeated signup is not a new consent). */
+/**
+ * Records the evidence a form or import adds (#936). A status change is always evidence; a
+ * signup that leaves the status granted is too when its action time is newer than the newest
+ * row, so a delayed withdrawal with an older time cannot win. Identical repeats inside the
+ * evidence window add no row.
+ */
 async function recordChanges(tx: Tx, ws: string, profileId: string, records: ConsentInput[]) {
-  // Compared with the current status, so signing up again after an unsubscribe is a new consent.
-  const state = await consentStateOf(tx, ws, profileId);
-  const changed = records.filter((r) => currentConsent(state, r.purpose)?.status !== r.status);
-  if (changed.length) await recordConsent(tx, ws, profileId, await purposesOf(tx), changed);
+  if (!records.length) return 0;
+  return recordConsentEvidence(tx, ws, profileId, await purposesOf(tx), records);
 }
 
 async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent, deps: ConsentHookDeps) {
