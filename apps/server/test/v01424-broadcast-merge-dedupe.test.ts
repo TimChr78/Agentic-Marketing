@@ -183,7 +183,11 @@ async function campaignHashingTo(name: string, profileId: string, arm: 'control'
 }
 
 /** Assigns campaign arms directly, so the test decides them (and their times) instead of the hash. */
-const assignCampaignArms = (campaign: string, hashVersion: string, rows: { profile: string; arm: 'control' | 'treatment'; at?: Date }[]) =>
+const assignCampaignArms = (
+  campaign: string,
+  hashVersion: string,
+  rows: { profile: string; arm: 'control' | 'treatment'; at?: Date | string }[],
+) =>
   t.srv.db.admin.query(
     `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm, assigned_at)
      SELECT $1, 'campaign', $2, $3, x.profile, x.arm, COALESCE(x.at, now())
@@ -586,6 +590,46 @@ describe('a merge mid-broadcast still sends one message (#944)', () => {
     expect(rows[0]!.status).toBe('suppressed');
     expect(rows[0]!.reason).toContain('holdout_control');
     // The report agrees with the send: the same-instant tie is control.
+    const result = await api().call('campaigns.holdoutResult', { campaignId: campaign });
+    expect([result.control.entered, result.treatment.entered]).toEqual([6, 5]);
+  }, 120_000);
+
+  it('orders assignments a fraction of a millisecond apart the same way when sending and reporting', async () => {
+    const { anon, user } = await twoProfiles('alias-micro');
+    // PostgreSQL keeps microseconds; a JavaScript Date keeps milliseconds. The survivor (higher id)
+    // holds control 800 µs before the alias (lower id) holds treatment: the send reads the
+    // database order and holds the person out, so the report must not call it a tie and let the
+    // lower id win.
+    const survivor = anon > user ? anon : user;
+    const alias = survivor === anon ? user : anon;
+    const segment = await audienceOf('alias-micro', [survivor, alias]);
+    const id = await scheduledBroadcast('alias-micro', segment);
+    await grant([survivor, alias]);
+    const campaign = await campaignFor(id, 'alias micro');
+    await mergeProfiles('alias-micro', survivor, alias);
+    await keepAliasInAudience(segment, alias);
+    const second = new Date(Date.now() - 3_600_000).toISOString().slice(0, 19);
+    await assignCampaignArms(campaign, holdoutHashVersion(50), [
+      { profile: alias, arm: 'treatment', at: `${second}.123900Z` },
+      { profile: survivor, arm: 'control', at: `${second}.123100Z` },
+    ]);
+    const at = new Date(Date.now() - 3_600_000);
+    for (const [arm, people] of [
+      ['control', 5],
+      ['treatment', 5],
+    ] as const)
+      for (let i = 0; i < people; i++) {
+        await identify({ userId: `micro-${arm}-${i}`, traits: { email: `micro-${arm}-${i}@example.com` } });
+        const person = await profileOf({ type: 'user_id', value: `micro-${arm}-${i}` });
+        await assignCampaignArms(campaign, holdoutHashVersion(50), [{ profile: person, arm, at }]);
+      }
+
+    await startRunAt(id, '');
+    await awaitDone(id);
+    const rows = await messagesOf(id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.status).toBe('suppressed');
+    expect(rows[0]!.reason).toContain('holdout_control');
     const result = await api().call('campaigns.holdoutResult', { campaignId: campaign });
     expect([result.control.entered, result.treatment.entered]).toEqual([6, 5]);
   }, 120_000);

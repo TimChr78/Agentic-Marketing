@@ -16,7 +16,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/events';
-import { and, eq, inArray, isNotNull, max } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, max, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { campaignFromBrief, planCampaign } from './brief';
 import { goalEventsFor } from './goal';
@@ -455,6 +455,8 @@ export const campaignHoldoutResult = defineCommand({
         profileId: schema.holdoutAssignments.profileId,
         arm: schema.holdoutAssignments.arm,
         assignedAt: schema.holdoutAssignments.assignedAt,
+        // Full precision for the earliest-wins order (see HoldoutStamp.assignedMicros).
+        assignedMicros: sql<string>`(extract(epoch from ${schema.holdoutAssignments.assignedAt}) * 1000000)::bigint::text`,
       })
       .from(schema.holdoutAssignments)
       .where(
@@ -484,11 +486,11 @@ export const campaignHoldoutResult = defineCommand({
       ws,
       assignments.map((a) => a.profileId),
     );
-    const decided = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date; profileId: string }>();
+    const decided = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date; assignedMicros: bigint; profileId: string }>();
     for (const r of assignments) {
       const person = personOf.get(r.profileId) ?? r.profileId;
       const current = decided.get(person);
-      const candidate = { arm: r.arm, assignedAt: r.assignedAt, profileId: r.profileId };
+      const candidate = { arm: r.arm, assignedAt: r.assignedAt, assignedMicros: BigInt(r.assignedMicros), profileId: r.profileId };
       if (!current || earlierAssignment(candidate, current)) decided.set(person, candidate);
     }
     const people = new Map<string, { arm: 'control' | 'treatment'; assignedAt: Date }>();
@@ -523,9 +525,10 @@ export const campaignHoldoutResult = defineCommand({
     );
     let identityLimit: number | null = null;
     if (people.size && names.length) {
-      const assignedTimes = [...people.values()].map((p) => p.assignedAt.getTime());
-      const first = new Date(Math.min(...assignedTimes));
-      const last = new Date(Math.max(...assignedTimes) + c.goal.attributionDays * 86_400_000);
+      // A loop, not Math.min(...times): a spread of 100k+ arguments overflows the call stack.
+      const bounds = assignedTimeBounds(people.values());
+      const first = new Date(bounds.first);
+      const last = new Date(bounds.last + c.goal.attributionDays * 86_400_000);
       const windowTo = to && to < last ? to : last;
       // One identity map, shared with the campaign summary and the measure queries (#590): sent
       // recipients union this campaign's holdout assignments, both arms. The union is what keeps
@@ -758,3 +761,15 @@ export const campaignCommands = [
   planCampaign,
   campaignFromBrief,
 ] as const;
+
+/** The earliest and latest assignment time in milliseconds, in one pass over any number of people. */
+export function assignedTimeBounds(people: Iterable<{ assignedAt: Date }>): { first: number; last: number } {
+  let first = Number.POSITIVE_INFINITY;
+  let last = Number.NEGATIVE_INFINITY;
+  for (const person of people) {
+    const time = person.assignedAt.getTime();
+    if (time < first) first = time;
+    if (time > last) last = time;
+  }
+  return { first, last };
+}

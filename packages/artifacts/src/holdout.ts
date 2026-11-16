@@ -31,7 +31,12 @@ export interface HoldoutAssignment {
 /** Where a stored arm came from and when: the two fields every holdout read orders by. */
 export interface HoldoutStamp {
   profileId: string;
-  assignedAt: Date;
+  /**
+   * `assigned_at` in microseconds since the epoch, as PostgreSQL stores it. A JavaScript Date keeps
+   * only milliseconds, so two rows inside one millisecond would compare equal here while the
+   * database orders them, and the send and the report could pick different arms (#944 review).
+   */
+  assignedMicros: bigint;
 }
 
 /**
@@ -40,8 +45,9 @@ export interface HoldoutStamp {
  * both use this order, so a tie cannot let the send and the report pick different arms.
  */
 export function earlierAssignment(a: HoldoutStamp, b: HoldoutStamp): boolean {
-  const delta = a.assignedAt.getTime() - b.assignedAt.getTime();
-  return delta !== 0 ? delta < 0 : a.profileId < b.profileId;
+  if (a.assignedMicros !== b.assignedMicros) return a.assignedMicros < b.assignedMicros;
+  // Code-unit order, the same as the SQL side's `COLLATE "C"`.
+  return a.profileId < b.profileId;
 }
 
 /**
@@ -143,8 +149,9 @@ async function oldestArm(
     JOIN person ON person.id = a.profile_id
     WHERE a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type} AND a.scope_id = ${scope.id}
       AND a.hash_version = ${hashVersion}
-    -- The shared order (earlierAssignment): earliest decision, then the lower profile id.
-    ORDER BY a.assigned_at, a.profile_id
+    -- The shared order (earlierAssignment): earliest decision to the microsecond, then the lower
+    -- profile id in code-unit order.
+    ORDER BY a.assigned_at, a.profile_id COLLATE "C"
     LIMIT 1`);
   const row = res.rows[0];
   return { person, arm: row ? { profileId: row.profile_id, arm: row.arm, assignedAt: new Date(row.assigned_at) } : null };
