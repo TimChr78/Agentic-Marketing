@@ -28,6 +28,7 @@ import {
   type Decision,
   deliveryPolicy,
   type EmailRequest,
+  enqueueMessageEvents,
   fingerprintParts,
   requestEmail,
   requestPush,
@@ -349,7 +350,6 @@ async function handledPeople(
  */
 async function suppressForControl(
   tx: Tx,
-  deps: BroadcastDeps,
   ws: string,
   broadcastId: string,
   def: BroadcastDefinition,
@@ -390,7 +390,8 @@ async function suppressForControl(
     .returning({ id: schema.messages.id });
   if (!m) return;
   // Same shape as the gateway's decision event, so reports see one suppressed message per person.
-  await deps.events.insertMessageEvents([
+  // It is published after the run transaction commits by the outbox dispatcher (#978 part 2).
+  await enqueueMessageEvents(tx, ws, [
     {
       workspaceId: ws,
       messageId: m.id,
@@ -419,7 +420,6 @@ async function suppressForControl(
  */
 async function recordSendConflict(
   tx: Tx,
-  deps: BroadcastDeps,
   ws: string,
   broadcastId: string,
   def: BroadcastDefinition,
@@ -452,7 +452,7 @@ async function recordSendConflict(
     .onConflictDoNothing()
     .returning({ id: schema.messages.id });
   if (!m) return;
-  await deps.events.insertMessageEvents([
+  await enqueueMessageEvents(tx, ws, [
     {
       workspaceId: ws,
       messageId: m.id,
@@ -1571,7 +1571,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       if (campaign && controlTemplate && holdout?.assignment.arm === 'control') {
         // Under the canonical id, so a later batch that reaches the person by another alias finds
         // this decision through their own id as well as through the merge chain.
-        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, person, variant, campaign.id, artifact.ownerAgentId);
+        await suppressForControl(tx, ws, broadcastId, def, controlTemplate, person, variant, campaign.id, artifact.ownerAgentId);
         recorded.add(person);
         skipped++;
         continue;
@@ -1626,7 +1626,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           { err, broadcast: broadcastId, profile: m.profileId },
           'broadcast member blocked by an idempotency key conflict; recorded as failed and the run continues',
         );
-        await recordSendConflict(tx, deps, ws, broadcastId, def, person, variant, artifact.ownerAgentId);
+        await recordSendConflict(tx, ws, broadcastId, def, person, variant, artifact.ownerAgentId);
         return null;
       });
       // One decision per person: every path below wrote (or found) that person's row for this run.

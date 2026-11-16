@@ -7,7 +7,7 @@ The Helm chart in [`deploy/helm/agentic-marketing`](../../deploy/helm/agentic-ma
 | `api` | UI, REST, MCP, copilot, e-mail links and provider webhooks | 2+ replicas, by request rate |
 | `ingest` | `/v1/*` (events, decide, consent purposes), `/f/*` signup forms, `/hooks/in/*` | 2+ replicas; optional CPU autoscaling |
 | `worker` | ClickHouse sink, profile workers, journeys, AI steps, deliveries | 2+ replicas; consumers share work through NATS and `SKIP LOCKED` claims |
-| `scheduler` | segment refreshes, broadcasts, retention, token refresh, audience sync, spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications and events, hosted agents, content sources, segment enrollment jobs | exactly 1 (`Recreate`) |
+| `scheduler` | segment refreshes, broadcasts, the transactional outbox (message events and double opt-in confirmations), retention, token refresh, audience sync, spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications and events, hosted agents, content sources, segment enrollment jobs | exactly 1 (`Recreate`) |
 
 The Ingress sends the public collection paths to `ingest` and everything else to `api`. The Job runs `cli migrate` (Postgres, auth tables, ClickHouse and its row policies) as a **pre-install/pre-upgrade** hook: before any role Deployment exists on a first install and before the new ReplicaSets roll on an upgrade. The roles start with `SKIP_MIGRATIONS=true`, because the hook has already migrated the database before they start.
 

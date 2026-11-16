@@ -63,6 +63,11 @@ describe('am without configuration', { timeout: 60_000 }, () => {
     const backup = await am(['backup', '--help'], dir);
     expect(backup.code).toBe(0);
     expect(backup.stdout).toContain('usage: am backup');
+
+    const outbox = await am(['outbox', '--help'], dir);
+    expect(outbox.code).toBe(0);
+    expect(outbox.stdout).toContain('usage: am outbox');
+    expect(outbox.stdout).toContain('--kind');
   });
 
   it('prints the version', async () => {

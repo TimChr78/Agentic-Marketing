@@ -96,6 +96,7 @@ These run only when the configuration itself is valid. Each network operation gi
 | `queue.messages` | Counts messages in `queued` or `sending` and reports the age of the oldest. Warns when the oldest has waited more than 15 minutes; an empty queue passes. | A queue that does not drain means the worker role is not running or is stuck: check `ROLE=worker` and the worker logs. |
 | `queue.journeys` | Counts journey participants whose next step is due and reports the age of the oldest. Warns above 15 minutes. | Journey steps run in the worker role; check its logs for the journey sweeper. |
 | `queue.broadcasts` | Counts broadcast runs past their send time that the scheduler has not finished, and how long the oldest is overdue. Warns above 10 minutes. | Broadcasts run in the scheduler role; keep it at one replica and check its logs. |
+| `queue.outbox` | Counts transactional-outbox rows still waiting and reports the age of the oldest; counts rows that failed after their retries. Warns when a row has waited more than 15 minutes or any row is failed. | The scheduler role publishes the outbox (message events and double opt-in confirmations); check that `ROLE` includes `scheduler` and its logs, then requeue dead letters with `am outbox`. |
 | `queue.warehouse` | Reports enabled warehouse exports that are due or were requested (informational; a large warehouse export is expected to be "due" while it runs). | Check the export's schedule and last error in the admin UI. |
 | `deliveries` | Counts webhook and action deliveries that ended `dead` in the last 24 hours and, in the message, the dead share of the last hour. Any dead delivery warns. | A dead delivery stopped after its retries: check the endpoint URL, its response and `EGRESS_ALLOWED_HOSTS`. |
 
@@ -104,6 +105,30 @@ The queue and delivery rows are computed from the same tables the workers claim 
 ClickHouse insert lag is deliberately not a row: the events table's `received_at` is the ingest time, so an idle install would look permanently "lagging". The `clickhouse` row proves reachability, and `am_dependency_up{name="clickhouse"}` does the same for monitoring.
 
 DNS and egress checks only see enabled e-mail providers. With no providers configured they pass without network traffic.
+
+## The transactional outbox
+
+Message decision events and double opt-in confirmation sends are written to an `outbox` table in the
+transaction that decides them and published afterwards, so ClickHouse or the mail provider is never
+called while a consent write holds its locks. Delivery is at-least-once with stable ids.
+
+- **The scheduler publishes it.** `ROLE` must include `scheduler` on exactly one replica (the same
+  role that runs broadcasts and retention). A deployment without a scheduler replica never publishes
+  queued message events and never creates the double opt-in confirmation messages: forms still
+  accept submissions and consent is still recorded, but the confirmations are not sent. The Compose
+  and Helm defaults run all roles; a split deployment must keep a scheduler.
+- **Latency.** The dispatcher polls every half second and claims a small batch per round, so a
+  decision event or confirmation normally appears within a second. A large burst is drained in
+  batches, and a failing dependency backs off: 5 s, 10 s … capped at one hour.
+- **Retries and dead letters.** Transient failures (ClickHouse or the database unavailable) are
+  retried for about 27 hours before the row is marked `failed`; malformed payloads fail at once.
+  `am doctor` warns on `queue.outbox` when rows are waiting too long or any row is failed.
+- **Requeue.** After an outage is fixed, `am outbox` puts every failed row back in the queue with a
+  fresh attempt budget; `am outbox --kind message_event` (or `doi_send`) limits it to one kind. The
+  scheduler publishes them at its next round; duplicates are harmless (message events collapse on
+  their ClickHouse key and a confirmation replays on its message key).
+- **Retention.** Delivered rows are pruned after seven days. Failed rows are kept until requeued, so
+  they can be inspected.
 
 ## Password reset mail
 

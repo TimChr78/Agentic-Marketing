@@ -80,6 +80,7 @@ const PLACEHOLDERS = new Set(['change-me', 'change-me-too', 'changeme', 'placeho
 /** Pending work older than this means nothing is draining the queue (#147). */
 const QUEUE_LAG_WARN_SECONDS = 15 * 60;
 const BROADCAST_LAG_WARN_SECONDS = 10 * 60;
+const OUTBOX_LAG_WARN_SECONDS = 15 * 60;
 
 /** A short human duration for a check message: 45 s, 12 min, 2 h 10 min. */
 function duration(seconds: number): string {
@@ -799,6 +800,9 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
         deliveries_dead_24h: string;
         deliveries_dead_hour: string;
         deliveries_finished_hour: string;
+        outbox_pending: string;
+        outbox_oldest_seconds: string;
+        outbox_failed: string;
       }
     | undefined;
   try {
@@ -825,7 +829,11 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
               WHERE status = 'dead' AND finished_at > now() - interval '24 hours') AS deliveries_dead_24h,
            (SELECT count(*) FROM deliveries
               WHERE status = 'dead' AND finished_at > now() - interval '1 hour') AS deliveries_dead_hour,
-           (SELECT count(*) FROM deliveries WHERE finished_at > now() - interval '1 hour') AS deliveries_finished_hour`,
+           (SELECT count(*) FROM deliveries WHERE finished_at > now() - interval '1 hour') AS deliveries_finished_hour,
+           (SELECT count(*) FROM outbox WHERE state IN ('pending', 'delivering')) AS outbox_pending,
+           (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM outbox
+              WHERE state IN ('pending', 'delivering')) AS outbox_oldest_seconds,
+           (SELECT count(*) FROM outbox WHERE state = 'failed') AS outbox_failed`,
       ),
       'queue health',
     );
@@ -918,6 +926,34 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
           message: `${dead24h} webhook/action delivery(ies) ended dead in the last 24 hours (${deadHour} of ${finishedHour} finished in the last hour)`,
           hint: 'A dead delivery stopped after its retries: check the endpoint URL, its response and the egress allow list (EGRESS_ALLOWED_HOSTS).',
         },
+  );
+
+  const outboxPending = Number(row.outbox_pending);
+  const outboxOldest = Number(row.outbox_oldest_seconds);
+  const outboxFailed = Number(row.outbox_failed);
+  const outboxWaiting = outboxPending ? `${outboxPending} waiting, the oldest ${duration(outboxOldest)}` : 'none waiting';
+  checks.push(
+    outboxFailed > 0
+      ? {
+          id: 'queue.outbox',
+          status: 'warn',
+          message: `${outboxFailed} outbox row(s) failed after their retries; ${outboxWaiting}`,
+          hint: 'Message events and double opt-in confirmations are queued here. Check ClickHouse and the scheduler role, then requeue with `am outbox` (or `am outbox --kind message_event`).',
+        }
+      : outboxPending === 0
+        ? { id: 'queue.outbox', status: 'ok', message: 'the transactional outbox is empty' }
+        : outboxOldest > OUTBOX_LAG_WARN_SECONDS
+          ? {
+              id: 'queue.outbox',
+              status: 'warn',
+              message: `${outboxPending} outbox row(s) waiting; the oldest has waited ${duration(outboxOldest)}`,
+              hint: 'The scheduler role publishes the outbox (message events, double opt-in confirmations): check that ROLE includes scheduler and that its logs show the dispatcher running.',
+            }
+          : {
+              id: 'queue.outbox',
+              status: 'ok',
+              message: `${outboxPending} outbox row(s) publishing; the oldest has waited ${duration(outboxOldest)}`,
+            },
   );
   return checks;
 }

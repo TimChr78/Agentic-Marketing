@@ -8,6 +8,7 @@ import {
   OUTBOX_RETENTION_DAYS,
   type OutboxClaim,
   pruneOutbox,
+  renewOutboxLease,
   sanitiseOutboxError,
 } from '@agentic-marketing/db';
 import { type EmailRequest, requestEmail } from '@agentic-marketing/email';
@@ -73,20 +74,32 @@ async function deliver(deps: OutboxDispatcherDeps, claim: OutboxClaim): Promise<
  * and back off failures. Returns counts so a test (and the loop's idle pause) needs no clock.
  */
 export async function dispatchOutboxOnce(deps: OutboxDispatcherDeps, opts: OutboxDispatchOptions = {}): Promise<OutboxDispatchResult> {
+  const leaseMs = opts.leaseMs ?? OUTBOX_LEASE_MS;
   const claims = await claimOutboxBatch(deps.db, {
     ...(opts.batch === undefined ? {} : { limit: opts.batch }),
-    ...(opts.leaseMs === undefined ? {} : { leaseMs: opts.leaseMs }),
+    leaseMs,
   });
   const result: OutboxDispatchResult = { claimed: claims.length, delivered: 0, retried: 0, failed: 0 };
   for (const claim of claims) {
+    // The whole batch was claimed at once, so a slow handler on an early row could let a later
+    // row's lease expire. Renew immediately before handling it; a false answer means another
+    // dispatcher took the row over, so this one must not run the handler.
+    if (!(await renewOutboxLease(deps.db, claim, leaseMs))) {
+      logger.debug({ outboxId: claim.id, kind: claim.kind }, 'outbox claim was taken over; skipping');
+      continue;
+    }
     try {
       await deliver(deps, claim);
-      await ackOutbox(deps.db, claim);
-      result.delivered++;
+      if (await ackOutbox(deps.db, claim)) result.delivered++;
+      else logger.debug({ outboxId: claim.id, kind: claim.kind }, 'outbox ack was stale; another claim owns the row');
     } catch (err) {
       const state = await failOutbox(deps.db, claim, err, {
         maxAttempts: err instanceof PermanentOutboxError ? 0 : (opts.maxAttempts ?? OUTBOX_MAX_ATTEMPTS),
       });
+      if (state === 'stale') {
+        logger.debug({ outboxId: claim.id, kind: claim.kind }, 'outbox failure was stale; another claim owns the row');
+        continue;
+      }
       if (state === 'failed') result.failed++;
       else result.retried++;
       // The payload can hold personal data; only the row id, kind, attempt and a bounded error go
