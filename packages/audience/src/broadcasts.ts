@@ -332,7 +332,11 @@ async function suppressForControl(
     .values({
       workspaceId: ws,
       id: newId('msg'),
-      idempotencyKey: `bct:${broadcastId}:${profileId}`,
+      // Its own namespace: a control row and a real send are different requests for the same person
+      // and broadcast, so they must not share a key with different fingerprints (#945). A control
+      // row from before this namespace existed still counts as "this member was handled as
+      // control": the run recognises it by the person's message for the broadcast, not by the key.
+      idempotencyKey: `bctc:${broadcastId}:${profileId}`,
       channel,
       profileId,
       purpose: info.purpose,
@@ -360,6 +364,68 @@ async function suppressForControl(
       messageId: m.id,
       eventId: 'decision:suppressed:holdout',
       type: 'suppressed',
+      at: new Date().toISOString(),
+      profileId,
+      channel,
+      purpose: info.purpose,
+      provider: '',
+      templateId: def.template,
+      templateVersion: info.version,
+      journeyId: broadcastId,
+      variant: variant ?? '',
+      reason,
+      url: '',
+    },
+  ]);
+}
+
+/**
+ * Records one member's send as failed when the key it would use is bound to a different request
+ * (#945). One member never stops the run: the row is keyed apart from the conflicting one, carries
+ * the reason a person can act on, and is the person's message for this broadcast from then on, so a
+ * retry does not raise the conflict again.
+ */
+async function recordSendConflict(
+  tx: Tx,
+  deps: BroadcastDeps,
+  ws: string,
+  broadcastId: string,
+  def: BroadcastDefinition,
+  profileId: string,
+  variant: string | undefined,
+  agentId: string | null,
+): Promise<void> {
+  const channel = def.template.startsWith('sms_') ? 'sms' : def.template.startsWith('psh_') ? 'push' : 'email';
+  const info = await publishedTemplateInfo(tx, def.template);
+  const reason =
+    'idempotency_conflict: the key this send would use belongs to a different request; check that message before resending this person';
+  const [m] = await tx
+    .insert(schema.messages)
+    .values({
+      workspaceId: ws,
+      id: newId('msg'),
+      idempotencyKey: `bct:${broadcastId}:${profileId}:conflict`,
+      channel,
+      profileId,
+      purpose: info.purpose,
+      templateId: def.template,
+      templateVersion: info.version,
+      journeyId: broadcastId,
+      status: 'failed',
+      reason,
+      variant: variant ?? null,
+      agentId,
+      requestHash: sendRequestHash(channel, { caller: 'system:broadcast', recipient: profileId, broadcast: broadcastId }),
+    })
+    .onConflictDoNothing()
+    .returning({ id: schema.messages.id });
+  if (!m) return;
+  await deps.events.insertMessageEvents([
+    {
+      workspaceId: ws,
+      messageId: m.id,
+      eventId: 'decision:failed:idempotency_conflict',
+      type: 'failed',
       at: new Date().toISOString(),
       profileId,
       channel,
@@ -1503,7 +1569,28 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           recipient: m.profileId,
           broadcast: broadcastId,
         }),
+      }).catch(async (err: unknown) => {
+        // The key is bound to a different request: a caller who pre-claimed it before the system
+        // prefixes were reserved, or a control row and a send that disagree (#945). Throwing would
+        // roll back the batch and leave every later tick failing on the same member, so this member
+        // is recorded as failed and the run continues.
+        if (
+          !(err instanceof AppError) ||
+          err.code !== 'conflict' ||
+          (err.details as { reason?: string } | undefined)?.reason !== 'idempotency_key_reused'
+        )
+          throw err;
+        logger.error(
+          { err, broadcast: broadcastId, profile: m.profileId },
+          'broadcast member blocked by an idempotency key conflict; recorded as failed and the run continues',
+        );
+        await recordSendConflict(tx, deps, ws, broadcastId, def, m.profileId, variant, artifact.ownerAgentId);
+        return null;
       });
+      if (!d) {
+        skipped++;
+        continue;
+      }
       if (test?.state === 'sampling' && d.status === 'queued' && !windowSkip) {
         const at = notBefore ?? now;
         if (!sampleStartsAt || at < sampleStartsAt) sampleStartsAt = at;

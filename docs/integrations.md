@@ -24,6 +24,8 @@ How other systems talk to the platform and back. Design: [ADR-0013](architecture
 
 Generate one key per logical operation, not per HTTP attempt, and reuse it for every retry. The typed client's `callWithRetry(client, command, input)` does that (see `packages/client/README.md`), and MCP write tools accept the same key as an optional `idempotencyKey` argument. Both new surfaces use the strict rule — 1 to 200 printable ASCII characters without spaces — and the client's generated keys satisfy it; a caller-supplied key that breaks the rule is refused before a request is sent (client) or with `400 invalid_input` (MCP). Commands whose own input already has an `idempotencyKey` (a send, a bulk enrollment) keep that field's meaning: it is the repeat-safe key for the handler and not stripped.
 
+A send's or an enrollment's own `idempotencyKey` is the platform's key for that send, so it may not start with a reserved system prefix: `adc:`, `agent-digest:`, `agent-event:`, `agent-expiry:`, `alert:`, `bct:`, `bctc:`, `doi:`, `experience-rollout:`, `guardian:`, `hosted-run:`, `jrn:`, `password-reset:`, `test:`, `wh:`. Broadcasts, journeys, double opt-in confirmations, alerts and the platform's own notifications build those keys, and a caller who claimed one in advance would make the platform's send fail with `409 idempotency_key_reused`. Such a key is refused with `400 invalid_input` naming the prefixes, on REST and MCP; use a key of your own, for example one per order or job.
+
 For OAuth/MCP connections, the consent page asks which brand the client acts in when the person belongs to several; the grant and its access tokens are bound to that brand. See [identity.md](identity.md#one-brand-per-token-or-connection-187).
 
 ```sh

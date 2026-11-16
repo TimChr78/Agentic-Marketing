@@ -4,6 +4,7 @@ export * from './blockTags';
 export * from './checks';
 export * from './deliverability';
 export * from './gateway';
+export * from './idempotency';
 export * from './links';
 export * from './messages';
 export * from './policy';

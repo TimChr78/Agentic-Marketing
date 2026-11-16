@@ -12,7 +12,7 @@ import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
 import { callerIdentity, defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId, newUuid, personalDataInText, safeErrorText } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
+import { checkPushRecipient, checkRecipient, checkSmsRecipient, sendIdempotencyKey } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
 import { consentStateOf, currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
@@ -488,7 +488,7 @@ export const enrollSegment = defineCommand({
     segmentId: SegmentId,
     limit: z.number().int().min(1).max(100_000).optional().describe('Try at most this many members; default: the whole segment'),
     reason: z.string().min(1).max(200).describe('Why this backfill runs; kept on the job and in the audit log'),
-    idempotencyKey: z.string().min(1).max(200).optional().describe('The same key returns the same job instead of starting another'),
+    idempotencyKey: sendIdempotencyKey.describe('The same key returns the same job instead of starting another'),
   }),
   output: z.object({
     jobId: z.string(),
