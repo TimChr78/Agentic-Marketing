@@ -81,9 +81,9 @@ export function redactCredentials(text: string): string {
   };
   out = settleMain(out);
   for (let round = 0; round < 16; round += 1) {
-    // The #937 passes run on the output of everything above, then main settles again so an
-    // addition that exposes a main match is still handled.
-    const shaped = redactValueShapes(settleAdded(out));
+    // The #937 passes that survive the rules run on the output of everything above, then main
+    // settles again so an addition that exposes a main match is still handled.
+    const shaped = redactSettledValueShapes(settleAdded(out));
     if (shaped === out) break;
     out = settleMain(shaped);
   }
@@ -795,6 +795,7 @@ function schemeValueSpan(text: string, start: number): ValueSpan | null {
 }
 
 function redactShortSchemeValues(text: string): string {
+  if (!/bearer|basic/i.test(text)) return text;
   return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), schemeValueSpan);
 }
 
@@ -827,7 +828,54 @@ function unicodeValueSpan(text: string, start: number): ValueSpan | null {
 }
 
 function redactUnicodeQuotedValues(text: string): string {
+  if (!/[\u201c\u2018\u00ab\u201e\u2039]/.test(text)) return text;
   return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), unicodeValueSpan);
+}
+
+/** The value after `=>`, the arrow PHP and Ruby arrays use (`'password' => 'x'`). */
+function arrowSeparatorEnd(text: string, nameEnd: number): number {
+  let index = nameEnd;
+  const quote = text.charAt(index);
+  if (quote === '"' || quote === "'") index += 1;
+  while (isSpace(text.charAt(index))) index += 1;
+  if (text.charAt(index) !== '=' || text.charAt(index + 1) !== '>') return -1;
+  index += 2;
+  while (isSpace(text.charAt(index))) index += 1;
+  return index;
+}
+
+/**
+ * The span a pair after `=>` replaces. It starts at the arrow, not at the value: the rules read
+ * `'password' => 'x'` as `password` = `>`, so leaving `=> [redacted]` would let the first rule
+ * keep replacing that `>` and grow the text on every round. Removing the arrow costs a little
+ * formatting and keeps the pass idempotent.
+ */
+function arrowValueSpan(text: string, valueStart: number): ValueSpan | null {
+  let start = valueStart;
+  let index = start - 1;
+  let budget = MAX_SHAPE_KEY_CHARS;
+  while (index >= 0 && isSpace(text.charAt(index)) && budget > 0) {
+    index -= 1;
+    budget -= 1;
+  }
+  if (text.charAt(index) === '>') index -= 1;
+  if (text.charAt(index) === '=') start = index;
+  const unicode = unicodeValueSpan(text, valueStart);
+  if (unicode) return { start, end: unicode.end };
+  let end = pairValueEnd(text, valueStart);
+  if (end < 0) return null;
+  // A bare value that ends at a quote (`inner="x"`) is a nested pair's key; extend through its
+  // value so this pre-pass cannot leave that value behind.
+  if ((text.charAt(end) === '"' || text.charAt(end) === "'") && /[:=]$/.test(text.slice(valueStart, end))) {
+    const inner = pairValueEnd(text, end);
+    if (inner > end) end = inner;
+  }
+  return { start, end };
+}
+
+function redactArrowPairs(text: string): string {
+  if (!text.includes('=>')) return text;
+  return redactPairValues(text, arrowSeparatorEnd, arrowValueSpan);
 }
 
 /**
@@ -838,13 +886,17 @@ function redactUnicodeQuotedValues(text: string): string {
 function redactIntactValueShapes(text: string): string {
   let out = redactStructuredValues(text);
   out = redactUnicodeQuotedValues(out);
+  out = redactArrowPairs(out);
   return out;
 }
 
-/** Every #937 shape pass, in the order it runs on the rules' output. Each one reads the text once. */
-function redactValueShapes(text: string): string {
-  let out = redactIntactValueShapes(text);
-  out = redactShortSchemeValues(out);
+/**
+ * The passes that run on the rules' output: their shapes survive the rules intact, so they must not
+ * run before them (a pre-pass value can end at a nested key and hide its value). Each reads the
+ * text once.
+ */
+function redactSettledValueShapes(text: string): string {
+  const out = redactShortSchemeValues(text);
   return out;
 }
 

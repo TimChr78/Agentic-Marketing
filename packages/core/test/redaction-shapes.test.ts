@@ -7,6 +7,25 @@ import { redactCredentials } from '../src/diagnostics';
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
 
+describe('`=>` as the separator (#937)', () => {
+  it('replaces the value after the arrow', () => {
+    expect(redactCredentials(`'password' => '${SECRET}'`)).toBe("'password' [redacted]");
+    expect(redactCredentials(`:password => "${SECRET}"`)).toBe(':password [redacted]');
+    expect(redactCredentials(`token => '${SECRET} with spaces'`)).toBe('token [redacted]');
+    expect(redactCredentials(`apiSecret => ${SECRET}`)).toBe('apiSecret [redacted]');
+  });
+
+  it('replaces a nested pair after the arrow whole', () => {
+    const out = redactCredentials(`'password' => organizationSecondaryAuthToken="${SECRET}"`);
+    expect(out).not.toContain(SECRET);
+  });
+
+  it('leaves an arrow without a credential key alone', () => {
+    for (const input of ['result => value', 'const f = (a) => a + 1', 'callback => response', 'entryKey => ascending'])
+      expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
 describe('a typographic-quoted value under a credential key (#937)', () => {
   it('replaces the whole quoted value in every quote pair', () => {
     const pairs: [string, string][] = [
