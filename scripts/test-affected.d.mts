@@ -35,13 +35,10 @@ export interface BaseChoice {
   reason: string;
 }
 
-/** Remote `origin/feat/phase-*` branches, or an empty list when git cannot be read. */
-export function phaseBranches(root?: string): string[];
+/** The base to diff against when the caller names none: origin/main. */
+export function resolveDefaultBase(): BaseChoice;
 
-/** The nearest phase branch that is an ancestor of HEAD, or the default base with the reason. */
-export function resolveDefaultBase(options?: { root?: string }): BaseChoice;
-
-/** The explicit base, then `AM_AFFECTED_BASE`, then the nearest phase branch, then origin/main. */
+/** The explicit base, then `AM_AFFECTED_BASE`, then `origin/main`. */
 export function resolveBase(options?: { root?: string; explicit?: string | null; env?: Record<string, string | undefined> }): BaseChoice;
 
 export function collectChangedFiles(options?: { root?: string; base?: string | null; env?: Record<string, string | undefined> }): {

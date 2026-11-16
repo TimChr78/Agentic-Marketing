@@ -248,54 +248,24 @@ describe('the comparison base (#552)', () => {
     return gitIn(dir, 'rev-parse', 'HEAD');
   };
 
-  it('falls back to origin/main when no phase branch is an ancestor of HEAD', () => {
+  it('uses origin/main by default, even when a phase branch is an ancestor of HEAD', () => {
     const dir = repo();
-    commit(dir, 'only');
-
-    const chosen = resolveBase({ root: dir, env: {} });
-
-    expect(chosen.base).toBe('origin/main');
-    expect(chosen.reason).toMatch(/no origin\/feat\/phase-.* branch is an ancestor of HEAD/);
-  });
-
-  it('uses the phase branch a task branch was cut from', () => {
-    const dir = repo();
-    commit(dir, 'main');
+    const main = commit(dir, 'main');
+    gitIn(dir, 'update-ref', 'refs/remotes/origin/main', main);
     const phase = commit(dir, 'phase');
+    // Development happens on main in patch releases; an old phase branch must not become the base.
     gitIn(dir, 'update-ref', 'refs/remotes/origin/feat/phase-9', phase);
     commit(dir, 'task');
 
     const chosen = resolveBase({ root: dir, env: {} });
 
-    expect(chosen.base).toBe('origin/feat/phase-9');
-    expect(chosen.reason).toMatch(/ancestor of HEAD with the most recent merge-base/);
+    expect(chosen.base).toBe('origin/main');
+    expect(chosen.reason).toContain('default base');
   });
 
-  it('picks the nearest ancestor when several phase branches qualify, and ignores a diverged one', () => {
-    const dir = repo();
-    const main = commit(dir, 'main');
-    const first = commit(dir, 'phase-1');
-    gitIn(dir, 'update-ref', 'refs/remotes/origin/feat/phase-1', first);
-    const second = commit(dir, 'phase-2');
-    gitIn(dir, 'update-ref', 'refs/remotes/origin/feat/phase-2', second);
-    // A later phase branched off main and never merged: reachable ref, not this branch's base.
-    gitIn(dir, 'checkout', '-q', '-b', 'side', main);
-    const diverged = commit(dir, 'phase-3');
-    gitIn(dir, 'update-ref', 'refs/remotes/origin/feat/phase-3', diverged);
-    gitIn(dir, 'checkout', '-q', 'main');
-    commit(dir, 'task');
-
-    const chosen = resolveBase({ root: dir, env: {} });
-
-    expect(chosen.base).toBe('origin/feat/phase-2');
-    expect(chosen.reason).toContain('2 phase branch(es)');
-  });
-
-  it('lets AM_AFFECTED_BASE override the phase branch and an explicit --base override both', () => {
+  it('lets AM_AFFECTED_BASE override the default and an explicit --base override both', () => {
     const dir = repo();
     commit(dir, 'main');
-    const phase = commit(dir, 'phase');
-    gitIn(dir, 'update-ref', 'refs/remotes/origin/feat/phase-7', phase);
     commit(dir, 'task');
 
     expect(resolveBase({ root: dir, env: { AM_AFFECTED_BASE: 'origin/from-env' } })).toEqual({
@@ -308,17 +278,17 @@ describe('the comparison base (#552)', () => {
     });
   });
 
-  it('diffs from the chosen phase branch, so an earlier task in the phase is not in the change set', () => {
+  it('diffs from origin/main, so an earlier merge is not in the change set', () => {
     const dir = repo();
     commit(dir, 'main');
-    const phase = commit(dir, 'phase');
-    gitIn(dir, 'update-ref', 'refs/remotes/origin/feat/phase-4', phase);
+    const merged = commit(dir, 'merged');
+    gitIn(dir, 'update-ref', 'refs/remotes/origin/main', merged);
     commit(dir, 'task');
 
     const collected = collectChangedFiles({ root: dir, env: {} });
 
-    expect(collected.base).toBe('origin/feat/phase-4');
+    expect(collected.base).toBe('origin/main');
     expect(collected.files).toEqual(['task.txt']);
-    expect(collected.reason).toMatch(/most recent merge-base/);
+    expect(collected.reason).toContain('default base');
   });
 });

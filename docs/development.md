@@ -373,9 +373,8 @@ pnpm test:affected                        # run it with Vitest, one invocation p
 `scripts/test-affected.mjs` takes the changed files from `git diff --name-only <base>...HEAD`
 plus staged, unstaged and untracked files, then maps them:
 
-- the base is the nearest `origin/feat/phase-*` branch that is an ancestor of HEAD (the phase
-  branch a task branch was cut from), or `origin/main` when none qualifies; `--print` shows which
-  base it chose and why. `AM_AFFECTED_BASE` overrides the default and `--base <ref>` overrides both;
+- the base is `origin/main`, where development and patch releases land; `--print` shows which base
+  it chose and why. `AM_AFFECTED_BASE` overrides the default and `--base <ref>` overrides both;
 
 - a changed test file runs that file in its own Vitest project; the docs project's file list is read
   from `vitest.config.mts`, so a new docs test is routed without editing the script;
