@@ -519,6 +519,32 @@ export const erasureTombstones = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.identHash] })],
 );
 
+export type OutboxState = 'pending' | 'delivering' | 'delivered' | 'failed';
+/**
+ * Post-commit work a tenant transaction implies (#978 part 2): a network call is enqueued in the
+ * transaction that decides it, then a dispatcher performs it outside any transaction. At-least-once,
+ * with a stable `operation_key` so a redelivery enqueues nothing new.
+ */
+export const outbox = pgTable(
+  'outbox',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    operationKey: text('operation_key').notNull(),
+    state: text('state').$type<OutboxState>().notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),
+    leaseUntil: ts('lease_until'),
+    lastError: text('last_error'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    deliveredAt: ts('delivered_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('outbox_operation_key').on(t.workspaceId, t.operationKey)],
+);
+
 export const emailProviders = pgTable(
   'email_providers',
   {
