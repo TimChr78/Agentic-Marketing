@@ -14,9 +14,13 @@ export default defineConfig({
   testMatch: '*.spec.ts',
   fullyParallel: false,
   workers: 1,
+  // CI retries a failed test once. A pass on retry is still reported as flaky: the JSON reporter
+  // writes reports/playwright.json and scripts/playwright-flaky-summary.mjs lists it in the job
+  // summary, so retries absorb a known flake without hiding it (#990).
+  retries: process.env.CI ? 1 : 0,
   timeout: 60_000,
   expect: { timeout: 10_000 },
-  reporter: [['list']],
+  reporter: process.env.CI ? [['list'], ['json', { outputFile: 'reports/playwright.json' }]] : [['list']],
   // The functional suite is the default; the axe checks (#206) are its own project so they can run
   // alone (`pnpm e2e --project axe`). Visual regression has its own config (playwright.visual.config.ts).
   projects: [

@@ -374,7 +374,9 @@ describe('the answer does not depend on the account (#379)', () => {
     const res = await forgot(account.email);
     const elapsed = Date.now() - started;
     expect(res.status).toBe(200);
-    expect(elapsed).toBeLessThan(1000);
+    // Generous on purpose: this only separates "answered" from "hung". The empty queue and mail
+    // assertions below prove the response did not wait for the 1.5 s provider (#990 timing sweep).
+    expect(elapsed).toBeLessThan(10_000);
     // Nothing has been mailed yet: the request only queued a sealed address.
     expect(mailsTo(account.email)).toHaveLength(0);
     expect(await rowFor(account.email)).toMatchObject({ status: 'queued', attempts: 0, user_id: null, token_sealed: null });

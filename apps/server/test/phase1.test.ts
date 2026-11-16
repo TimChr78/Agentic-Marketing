@@ -114,7 +114,6 @@ describe('profiles, identity and consent', () => {
   });
 
   it('resolves an anonymous visitor to a known person within seconds', async () => {
-    const started = Date.now();
     await send(key, {
       batch: [
         { type: 'page', name: 'Tents', anonymousId: 'dev-a', timestamp: '2026-10-21T08:00:00Z', context: yes },
@@ -129,17 +128,20 @@ describe('profiles, identity and consent', () => {
       ],
     });
     const owners = t.api(owner);
+    // The poll's own 5 s deadline is the bound: a loaded runner polls less often, it does not
+    // resolve later (#990 timing sweep).
     const found = await eventually(
       () => owners.call('profiles.find', { type: 'email', value: 'ada@example.com ' }),
       (r) => !!r.profileId,
+      5_000,
     );
     profileId = found.profileId!;
     const events = await eventually(
       () => owners.call('profiles.events', { profileId }),
       (r) => r.events.length === 2,
+      5_000,
     );
     expect(events.events.map((e) => e.name)).toEqual(['identify', 'Tents']);
-    expect(Date.now() - started).toBeLessThan(5_000);
 
     const p = await owners.call('profiles.get', { profileId });
     expect(p.traits).toEqual({ plan: 'pro' });

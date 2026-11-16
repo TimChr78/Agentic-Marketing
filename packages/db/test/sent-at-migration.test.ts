@@ -51,7 +51,10 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
     let inserts = 0;
     let maxInsertMs = 0;
     let shareLockSamples = 0;
-    let exclusiveSamples = 0;
+    // The longest *continuous* grant, not a sample count: a slow runner samples more often, so a
+    // count is a wall-clock bound in disguise (#990).
+    let exclusiveSince = 0;
+    let maxExclusiveHoldMs = 0;
     let probeId = 0;
     const sendLoop = (async () => {
       while (!stop) {
@@ -72,12 +75,17 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
           `SELECT mode FROM pg_locks
               WHERE relation = 'messages'::regclass
                 AND mode IN ('ShareLock', 'AccessExclusiveLock')
+                AND granted
                 AND pid <> pg_backend_pid()`,
         );
-        for (const row of rows) {
-          if (row.mode === 'ShareLock') shareLockSamples++;
-          else exclusiveSamples++;
-        }
+        // A waiting request (granted = false) is not holding anything; counting it was what made
+        // the old bound report 48 "exclusive samples" for an instant catalog change.
+        const exclusive = rows.some((row) => row.mode !== 'ShareLock');
+        for (const row of rows) if (row.mode === 'ShareLock') shareLockSamples++;
+        if (exclusive) {
+          exclusiveSince ||= Date.now();
+          maxExclusiveHoldMs = Math.max(maxExclusiveHoldMs, Date.now() - exclusiveSince);
+        } else exclusiveSince = 0;
         await delay(5);
       }
     })();
@@ -104,11 +112,13 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
     expect(applied).toContain('applied 0086_message_sent_at_index.sql (no transaction)');
 
     // CREATE INDEX CONCURRENTLY takes ShareUpdateExclusive, never ShareLock; the only exclusive
-    // lock is the instant ADD COLUMN changes the catalog, not a table rewrite.
+    // lock is the instant ADD COLUMN changes the catalog, not a table rewrite. A catalog change is
+    // milliseconds; a rewrite of 200,000 rows is seconds. The generous bound only separates the
+    // two, and the batch check below pins the real invariant: the lock is not held across work.
     expect(shareLockSamples, 'a normal CREATE INDEX would have blocked writes with ShareLock').toBe(0);
-    expect(exclusiveSamples, 'ADD COLUMN must release its ACCESS EXCLUSIVE lock immediately').toBeLessThan(40);
+    expect(maxExclusiveHoldMs, `ACCESS EXCLUSIVE was held for ${maxExclusiveHoldMs} ms during the migration`).toBeLessThan(2_000);
     expect(inserts).toBeGreaterThan(0);
-    expect(maxInsertMs, `a send waited ${maxInsertMs} ms during the migration`).toBeLessThan(2_000);
+    expect(maxInsertMs, `a send waited ${maxInsertMs} ms during the migration`).toBeLessThan(5_000);
 
     const indexes = await d.db.admin.query<{ name: string; valid: boolean }>(
       `SELECT c.relname AS name, i.indisvalid AS valid
@@ -124,10 +134,39 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
     );
     expect(Number(before.rows[0]?.count)).toBe(0);
 
-    const first = await backfillSentAtOnce(d.db.admin, { batchSize: 10_000, maxBatches: 2 });
-    expect(first.updated).toBe(20_000);
-    expect(first.more).toBe(true);
-    const rest = await backfillSentAtOnce(d.db.admin, { batchSize: 10_000 });
+    // The invariant behind the old "< 40 ms" bound, checked at a point we control: while the
+    // batches do their work, a second connection must never see ACCESS EXCLUSIVE on messages. If
+    // the backfill were still part of the migration, the lock would be held here for every batch.
+    const batchSampler = new pg.Client({ connectionString: d.url.toString() });
+    await batchSampler.connect();
+    let batchStop = false;
+    const batchExclusive: string[] = [];
+    const batchLockLoop = (async () => {
+      while (!batchStop) {
+        const { rows } = await batchSampler.query<{ mode: string }>(
+          `SELECT mode FROM pg_locks
+              WHERE relation = 'messages'::regclass
+                AND mode = 'AccessExclusiveLock'
+                AND granted
+                AND pid <> pg_backend_pid()`,
+        );
+        for (const row of rows) batchExclusive.push(row.mode);
+        await delay(5);
+      }
+    })();
+    let first!: Awaited<ReturnType<typeof backfillSentAtOnce>>;
+    let rest!: Awaited<ReturnType<typeof backfillSentAtOnce>>;
+    try {
+      first = await backfillSentAtOnce(d.db.admin, { batchSize: 10_000, maxBatches: 2 });
+      expect(first.updated).toBe(20_000);
+      expect(first.more).toBe(true);
+      rest = await backfillSentAtOnce(d.db.admin, { batchSize: 10_000 });
+    } finally {
+      batchStop = true;
+      await batchLockLoop;
+      await batchSampler.end();
+    }
+    expect(batchExclusive, 'the batch backfill must not hold ACCESS EXCLUSIVE on messages').toEqual([]);
     expect(first.updated + rest.updated).toBe(SEEDED);
     expect(rest.more).toBe(false);
 

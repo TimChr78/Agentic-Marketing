@@ -6,20 +6,10 @@ import { Legend } from './Legend';
 import { positionsOf } from './layout';
 import { edgesOf, type JNode, summary } from './model';
 import { type NodeData, nodeTypes } from './NodeView';
+import { useCanvasReady } from './ready';
 import { countFor, countText, type JourneyCounts, withNodeCounts } from './report/counts';
 
-/**
- * A read-only journey graph, e.g. in the approval drawer, the report or the builder preview.
- * It renders counts supplied by its host and never fetches anything itself (#507).
- */
-export function JourneyGraph({
-  nodes,
-  warnings = {},
-  names,
-  height = 480,
-  counts,
-  countsLabel,
-}: {
+type JourneyGraphProps = {
   nodes: JNode[];
   warnings?: Record<string, string[]>;
   names?: (id: string) => string | undefined;
@@ -27,8 +17,31 @@ export function JourneyGraph({
   /** Node counts from one shared journeys.stats read; a missing key stays unavailable. */
   counts?: JourneyCounts;
   countsLabel?: string;
-}) {
+};
+
+/**
+ * A destructured default (`warnings = {}`) would be a new object on every render. That rebuilt
+ * `flowNodes`, React Flow re-adopted them without their measurements, and a re-render caused by
+ * the readiness hook could then reset them forever (#990). One shared empty map keeps the node
+ * array stable across renders that do not change the graph.
+ */
+const NO_WARNINGS: Record<string, string[]> = {};
+
+/**
+ * A read-only journey graph, e.g. in the approval drawer, the report or the builder preview.
+ * It renders counts supplied by its host and never fetches anything itself (#507).
+ */
+export function JourneyGraph(props: JourneyGraphProps) {
+  return (
+    <ReactFlowProvider>
+      <JourneyGraphCanvas {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function JourneyGraphCanvas({ nodes, warnings = NO_WARNINGS, names, height = 480, counts, countsLabel }: JourneyGraphProps) {
   const theme = useResolvedTheme();
+  const ready = useCanvasReady();
   const pos = useMemo(() => positionsOf(nodes), [nodes]);
   const flowNodes = useMemo<Node[]>(
     () =>
@@ -69,24 +82,23 @@ export function JourneyGraph({
         style={{ height }}
         aria-label={`Journey graph with ${nodes.length} steps; the list below describes it`}
       >
-        <ReactFlowProvider>
-          <ReactFlow
-            nodes={flowNodes}
-            edges={flowEdges}
-            nodeTypes={nodeTypes}
-            fitView
-            fitViewOptions={{ padding: 0.15 }}
-            nodesDraggable={false}
-            nodesConnectable={false}
-            elementsSelectable={false}
-            colorMode={theme}
-            proOptions={{ hideAttribution: true }}
-            minZoom={0.2}
-          >
-            <Background gap={16} size={1} />
-            <Controls showInteractive={false} />
-          </ReactFlow>
-        </ReactFlowProvider>
+        <ReactFlow
+          nodes={flowNodes}
+          edges={flowEdges}
+          nodeTypes={nodeTypes}
+          fitView
+          fitViewOptions={{ padding: 0.15 }}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+          colorMode={theme}
+          proOptions={{ hideAttribution: true }}
+          minZoom={0.2}
+          data-journey-ready={ready ? 'true' : 'false'}
+        >
+          <Background gap={16} size={1} />
+          <Controls showInteractive={false} />
+        </ReactFlow>
       </section>
       <Legend />
       <details className="text-[13px]">

@@ -37,4 +37,21 @@ pnpm lint && pnpm typecheck && npx vitest run --project docs
   after the release's rules have settled, and `packages/core/test/redaction-differential.test.ts`
   checks the result differentially against the vendored 0.14.20 and 0.14.23 redactors.
 
+## Repo-wide guards — run them when you touch…
+
+| Change | Guards (run with `npx vitest run --project <project> <path>`) |
+|---|---|
+| routes or request bodies | `apps/server/test/body-limits.test.ts` |
+| migrations | `packages/db/test/migrate.test.ts`, `packages/db/test/sent-at-migration.test.ts`, and the owned-table lists in `packages/db/test/suppressions-delete.test.ts` |
+| environment variables | `apps/server/test/deploy-config.test.ts` and `apps/server/test/env-reads.test.ts` |
+| error text stored or returned | `packages/core/test/error-text-bounds.test.ts` |
+| command descriptions or outputs | `npx vitest run --project docs` and `npx tsx scripts/gen-mcp-tools.ts` |
+
+## CodeQL patterns
+
+- Never put an end-anchored (`$`) or `\s*`-sticky regex on uncontrolled text. A backtracking pattern
+  can pin the event loop; write a hand-written scan and keep it linear.
+- Never hash a password with a plain digest, not even in test tooling. A fingerprint must leave
+  secrets out rather than "protect" them.
+
 Secrets never go into a commit, a log line or a test fixture.

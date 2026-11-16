@@ -47,6 +47,20 @@ describe('settle() timeout diagnostics (#732)', () => {
     await expect(settle(stubPage(4, state))).rejects.toThrow(/the e-mail editor to be ready.*not ready: email-editor/);
   });
 
+  it('names a canvas whose nodes React Flow never measured', async () => {
+    const state = { ...clean, flows: [{ name: 'react-flow dark', ready: false, nodes: 7, unmeasured: 7 }] };
+    await expect(settle(stubPage(5, state))).rejects.toThrow(
+      /the journey canvas to report its nodes ready.*react-flow dark \(7 node\(s\), 7 not measured\)/,
+    );
+  });
+
+  it('names a canvas that reported ready but drew no visible node', async () => {
+    const state = { ...clean, flows: [{ name: 'react-flow dark', ready: true, nodes: 7, unmeasured: 7 }] };
+    await expect(settle(stubPage(6, state))).rejects.toThrow(
+      /the journey canvas to draw a visible node.*react-flow dark \(ready, but no visible node among 7\)/,
+    );
+  });
+
   it('settles when every condition is met', async () => {
     await expect(settle(stubPage(0, clean))).resolves.toBeUndefined();
   });
