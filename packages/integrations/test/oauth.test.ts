@@ -6,7 +6,7 @@ import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, type DisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import type { EgressPolicy, SafeResponse } from '../src/egress';
-import { type OAuthDeps, type OAuthRequest, oauthRoutes, refreshConnection } from '../src/oauth';
+import { type OAuthDeps, type OAuthRequest, oauthRoutes, refreshConnection, safeOAuthText } from '../src/oauth';
 
 // #375 and #376: the OAuth code exchange runs outside the app transaction, and a rotating refresh
 // token is redeemed by one replica at a time. The fake provider is deterministic, delayed and
@@ -420,5 +420,29 @@ describe.skipIf(!hasTestDatabase())('OAuth refresh serialization (#376)', () => 
     await refreshConnection(t.db, t.workspace, id, { db: t.db, kp, egress: EGRESS, http });
     expect(await connectionOf(id)).toMatchObject({ oauth_status: 'connected', oauth_refresh_lease_until: null });
     expect((await secretsOf(id)).__oauth).toMatchObject({ accessToken: 'AT1', refreshToken: 'RT1' });
+  });
+});
+
+describe('safeOAuthText keeps the exact-boundary diagnostic unchanged (#968 review)', () => {
+  const exact300 = `${'abc '.repeat(74)}abcd`;
+
+  it('leaves a diagnostic of exactly 300 characters untouched', () => {
+    expect(exact300).toHaveLength(300);
+    expect(safeOAuthText(exact300)).toBe(exact300);
+  });
+
+  it('cuts a longer diagnostic to 299 characters and an ellipsis', () => {
+    const longer = `${'abc '.repeat(75)}abcd`;
+    const out = safeOAuthText(longer);
+    expect(out).toHaveLength(300);
+    expect(out.endsWith('…')).toBe(true);
+    expect(out).toBe(`${longer.slice(0, 299)}…`);
+  });
+
+  it('redacts the whole text and keeps its first line before the bound', () => {
+    const out = safeOAuthText(`password=probe-secret\nrest ${'x '.repeat(400)}`);
+    expect(out).not.toContain('probe-secret');
+    expect(out).toContain('password=[redacted]');
+    expect(out).not.toContain('\n');
   });
 });

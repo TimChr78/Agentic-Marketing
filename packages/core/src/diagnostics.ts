@@ -56,15 +56,32 @@ export function redactCredentials(text: string): string {
   // value can no longer be told from any other text. So the plain value of such a key is replaced
   // first (#898); see redactLongKeyValues for why that cannot change what the rules below remove.
   let out = applyRules(redactLongKeyValues(text));
-  // The two additions (#898, #920) work on what the rules produced and only ever replace more of
-  // it. They are repeated, together with the rules, until nothing changes, so a second call
-  // returns the same text: one replacement can complete a match for another rule
-  // (`token="authToken=\"`). Each round that changes the text turns ordinary characters into the
-  // marker, so it ends; the bound is a backstop.
+  // Main's 0.14.23 passes converge first, on exactly the release's rules and qualifiers. Only then
+  // do the #946/#956 additions run, so they can add redaction but can never consume a key main's
+  // next round would have needed. If an addition exposes a new main match, main settles again.
+  const settleMain = (input: string): string => {
+    let current = input;
+    for (let round = 0; round < 16; round += 1) {
+      const next = applyRules(redactCompoundKeys(redactUrlPasswords(current)));
+      if (next === current) break;
+      current = next;
+    }
+    return current;
+  };
+  const settleAdded = (input: string): string => {
+    let current = input;
+    for (let round = 0; round < 16; round += 1) {
+      const next = applyRules(redactJoinedCompoundKeys(redactPrefixedCompoundKeys(current)));
+      if (next === current) break;
+      current = next;
+    }
+    return current;
+  };
+  out = settleMain(out);
   for (let round = 0; round < 16; round += 1) {
-    const next = applyRules(redactCompoundKeys(redactUrlPasswords(out)));
-    if (next === out) break;
-    out = next;
+    const added = settleAdded(out);
+    if (added === out) break;
+    out = settleMain(added);
   }
   return out;
 }
@@ -162,9 +179,31 @@ const KEY_QUALIFIERS = new Set([
   'restricted',
   'live',
   'test',
-  // Model providers (packages/ai: `openai-compatible`, `anthropic-compatible`).
+  // Model providers (packages/ai: `openai-compatible`, `anthropic-compatible`). The known provider
+  // names in packages/ai `modelProviderNames` are the same population, and the completeness test
+  // fails for one without a qualifier here (#956, #968 review).
   'openai',
   'anthropic',
+  'azureopenai',
+  'mistral',
+  'ollama',
+  'vllm',
+  'litellm',
+  'openrouter',
+  'lmstudio',
+  'groq',
+  'together',
+  'deepseek',
+  'gemini',
+  'cohere',
+  'perplexity',
+  'fireworks',
+  'huggingface',
+  'hf',
+  'replicate',
+  'xai',
+  'bedrock',
+  'vertex',
   // E-mail adapters (packages/email/src/adapters).
   'smtp',
   'ses',
@@ -202,6 +241,34 @@ const KEY_QUALIFIERS = new Set([
   's3',
   'openbao',
 ]);
+
+/**
+ * Provider qualifiers this batch added (#956). They are handled after main's 0.14.23 settle loop,
+ * so main's own classifier stays exactly the release's list and the additions are purely additive.
+ */
+const ADDED_PROVIDER_QUALIFIERS = new Set([
+  'mistral',
+  'ollama',
+  'vllm',
+  'litellm',
+  'openrouter',
+  'lmstudio',
+  'groq',
+  'together',
+  'deepseek',
+  'gemini',
+  'cohere',
+  'perplexity',
+  'fireworks',
+  'huggingface',
+  'hf',
+  'replicate',
+  'xai',
+  'bedrock',
+  'vertex',
+  'azureopenai',
+]);
+const MAIN_KEY_QUALIFIERS = new Set([...KEY_QUALIFIERS].filter((qualifier) => !ADDED_PROVIDER_QUALIFIERS.has(qualifier)));
 
 /**
  * The redaction marker. A second pass must leave it exactly as it is (#919 round 2), so it is
@@ -249,7 +316,7 @@ function isUpperCredentialKey(name: string): boolean {
   if (UPPER_SUFFIXES.some((word) => lower.length > word.length && lower.endsWith(word))) return true;
   if (!lower.endsWith('key')) return false;
   const stem = lower.slice(0, -3);
-  for (const qualifier of KEY_QUALIFIERS) if (stem.endsWith(qualifier)) return true;
+  for (const qualifier of MAIN_KEY_QUALIFIERS) if (stem.endsWith(qualifier)) return true;
   return false;
 }
 
@@ -285,7 +352,7 @@ function classifyCompoundKey(full: string): boolean {
   // A single word, or a word after a separator, is the first rule's business (`token`, `auth_token`).
   if (lastPart.split(CAMEL_BOUNDARY).length < 2) return false;
   if (CREDENTIAL_LAST_WORDS.has(last)) return true;
-  return (last === 'key' || last === 'keys') && words.slice(0, -1).some((word) => KEY_QUALIFIERS.has(word));
+  return (last === 'key' || last === 'keys') && words.slice(0, -1).some((word) => MAIN_KEY_QUALIFIERS.has(word));
 }
 
 /**
@@ -386,6 +453,161 @@ function redactCompoundKeys(text: string): string {
     copied = start + value[0].length;
   }
   return copied === 0 ? text : out + text.slice(copied);
+}
+
+/**
+ * Main's compound pass takes a bare value up to whitespace or a quote. When that value is itself
+ * the key of an inner pair (`mistralKey=apiSecret :''x`, `mistralKey=apiSecret="…"`), it replaces
+ * the inner key and leaves the inner value behind. This pre-pass runs before that pass on the same
+ * round and redacts the whole nested pair instead, so nothing main would have removed can be lost.
+ * It only acts on a value that is a pair prefix, and only ever replaces more text.
+ */
+/**
+ * Two additive passes that run on the text main's `redactCompoundKeys` produced, inside the settle
+ * loop. Neither can take less than main: they only replace values the main pass left alone.
+ *
+ * 1. `redactPrefixedCompoundKeys` handles #946: `_secretKey`, `__authToken`, `$$SIGNINGKEY`. Main's
+ *    `COMPOUND_KEY` deliberately does not start after `_`, `.` or `-`. A candidate may begin only
+ *    at the start of a name run and must begin with one or more separators.
+ * 2. `redactJoinedCompoundKeys` handles names such as `lmStudioKey`, whose provider word is only
+ *    visible when camelCase words are joined (`lm` + `studio`). It runs after main so an inner pair
+ *    (`lmStudioKey=apiSecret="…"`) is already redacted by the time the outer key is considered.
+ *
+ * Both scan each run once, so `'_a_'.repeat(1 MiB)` and `'secretKey='.repeat(n)` stay linear
+ * (#968 review). Replacements are left-to-right and non-overlapping like a global regex: no
+ * re-scan of suffixes and no span merging.
+ */
+const isRunChar = (char: string): boolean =>
+  (char >= 'a' && char <= 'z') ||
+  (char >= 'A' && char <= 'Z') ||
+  (char >= '0' && char <= '9') ||
+  char === '_' ||
+  char === '.' ||
+  char === '-' ||
+  char === '$';
+const isRunSeparator = (char: string): boolean => char === '_' || char === '.' || char === '-' || char === '$';
+const isRunLetter = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
+const isRunNameChar = (char: string): boolean =>
+  isRunLetter(char) || (char >= '0' && char <= '9') || char === '_' || char === '.' || char === '-';
+
+/** A name whose qualifier this batch added, so main sees the 0.14.23 qualifier list. */
+function isAddedProviderKey(name: string): boolean {
+  if (!/[A-Z]/.test(name)) return false;
+  const parts = withoutTrailingDigits(name)
+    .split(/[_.-]+/)
+    .filter(Boolean);
+  const lastPart = parts[parts.length - 1];
+  if (!lastPart) return false;
+  if (!/[a-z]/.test(lastPart)) {
+    const lower = lastPart.toLowerCase();
+    if (!lower.endsWith('key')) return false;
+    const stem = lower.slice(0, -3);
+    for (const qualifier of ADDED_PROVIDER_QUALIFIERS) if (stem.endsWith(qualifier)) return true;
+    return false;
+  }
+  const words = parts.flatMap((part) => part.split(CAMEL_BOUNDARY)).map((word) => word.toLowerCase());
+  const last = words[words.length - 1];
+  if (last !== 'key' && last !== 'keys') return false;
+  const stem = words.slice(0, -1);
+  if (stem.some((word) => ADDED_PROVIDER_QUALIFIERS.has(word))) return true;
+  const tail = stem.slice(-3);
+  for (let start = 0; start < tail.length; start += 1) if (ADDED_PROVIDER_QUALIFIERS.has(tail.slice(start).join(''))) return true;
+  return false;
+}
+
+type CandidateStart = (text: string, runStart: number) => number;
+
+/** A run beginning with separators; the name starts at its first letter (#946). */
+const prefixedStart: CandidateStart = (text, runStart) => {
+  if (!isRunSeparator(text.charAt(runStart))) return -1;
+  let nameStart = runStart;
+  while (nameStart < text.length && isRunSeparator(text.charAt(nameStart))) nameStart += 1;
+  return isRunLetter(text.charAt(nameStart)) ? nameStart : -1;
+};
+
+/** A run beginning with a letter, for a joined provider name such as `lmStudioKey`. */
+const joinedStart: CandidateStart = (text, runStart) => (isRunLetter(text.charAt(runStart)) ? runStart : -1);
+
+/** Characters that end a bare value in `PAIR_VALUE`'s third alternative. */
+const BARE_VALUE_STOP = new Set([',', ';', '&', '}', ']', '"', "'"]);
+
+/**
+ * The end of the value `PAIR_VALUE` would match at `start`, or -1 when it matches nothing: a
+ * double-quoted string with backslash escapes, a single-quoted string, or a bare run (which may
+ * contain `[redacted]`). A hand-written scan of the same grammar, so the additive passes do not
+ * hand a sticky regex to text CodeQL treats as uncontrolled (#946 review); main's pass keeps the
+ * regex unchanged.
+ */
+function pairValueEnd(text: string, start: number): number {
+  const first = text.charAt(start);
+  if (first === '"') {
+    for (let index = start + 1; index < text.length; index += 1) {
+      const char = text.charAt(index);
+      if (char === '\\') {
+        if (index + 1 >= text.length) return -1;
+        index += 1;
+      } else if (char === '"') return index + 1;
+    }
+    return -1;
+  }
+  if (first === "'") {
+    const close = text.indexOf("'", start + 1);
+    return close < 0 ? -1 : close + 1;
+  }
+  let index = start;
+  while (index < text.length) {
+    if (text.startsWith('[redacted]', index)) {
+      index += '[redacted]'.length;
+      continue;
+    }
+    const char = text.charAt(index);
+    if (isSpace(char) || BARE_VALUE_STOP.has(char)) break;
+    index += 1;
+  }
+  return index > start ? index : -1;
+}
+
+/** Scans each name run once and replaces values with the same grammar `redactCompoundKeys` uses. */
+function redactCompoundRuns(text: string, candidateStart: CandidateStart, accept: (name: string) => boolean): string {
+  let out = '';
+  let copied = 0;
+  let index = 0;
+  while (index < text.length) {
+    if (!isRunChar(text.charAt(index))) {
+      index += 1;
+      continue;
+    }
+    const runStart = index;
+    while (index < text.length && isRunChar(text.charAt(index))) index += 1;
+    const runEnd = index;
+    const nameStart = candidateStart(text, runStart);
+    if (nameStart < 0 || nameStart >= runEnd) continue;
+    let nameEnd = nameStart + 1;
+    while (nameEnd < runEnd && isRunNameChar(text.charAt(nameEnd))) nameEnd += 1;
+    const name = text.slice(nameStart, nameEnd);
+    const start = separatorEnd(text, nameEnd, true);
+    if (start < 0 || !accept(name)) continue;
+    SCHEME_START.lastIndex = start;
+    if (SCHEME_START.test(text)) continue;
+    const valueEnd = pairValueEnd(text, start);
+    if (valueEnd < 0) continue;
+    const value = text.slice(start, valueEnd);
+    if (value === '[redacted]' || PLAIN_LITERAL.test(value)) continue;
+    out += `${text.slice(copied, start)}[redacted]`;
+    copied = valueEnd;
+    index = valueEnd;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+function redactPrefixedCompoundKeys(text: string): string {
+  if (!/[_.$-][A-Za-z]/.test(text)) return text;
+  return redactCompoundRuns(text, prefixedStart, (name) => isCompoundCredentialKey(name) || isAddedProviderKey(name));
+}
+
+function redactJoinedCompoundKeys(text: string): string {
+  if (!/[A-Z]/.test(text)) return text;
+  return redactCompoundRuns(text, joinedStart, isAddedProviderKey);
 }
 
 /**

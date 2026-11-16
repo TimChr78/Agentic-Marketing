@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { providerDiagnostic, redactCredentials, redactedText, safeErrorText } from '../src/diagnostics';
+import { redactCredentials as redactCredentials01423 } from './redaction-01423-reference';
 
 // #885: a provider's error body is copied into an AppError whose message reaches the caller, the
 // audit log and the agent ledger. Only its own code and message fields may survive, and a token
@@ -233,6 +234,133 @@ describe('camelCase and PascalCase credential keys (#898)', () => {
     expect(redactCredentials(`{"code":"INVALID_AUTHENTICATION_CREDENTIALS","message":"sign-in failed"}`)).toBe(
       '{"code":"INVALID_AUTHENTICATION_CREDENTIALS","message":"sign-in failed"}',
     );
+  });
+});
+
+describe('a leading separator does not hide a camelCase credential key (#946)', () => {
+  const SHORT = 'abc1234567';
+
+  it('redacts a key after a run of leading separators', () => {
+    for (const prefix of ['_', '.', '-', '$', '__', '$$']) {
+      for (const key of ['secretKey', 'userPassword', 'authToken', 'oauthToken', 'sessionKey'])
+        expect(redactCredentials(`${prefix}${key}: ${SHORT}`), `${prefix}${key}`).toBe(`${prefix}${key}: [redacted]`);
+      expect(redactCredentials(`${prefix}SIGNINGKEY=${SHORT}`), `${prefix}SIGNINGKEY`).toBe(`${prefix}SIGNINGKEY=[redacted]`);
+    }
+  });
+
+  it('redacts the issue’s examples in every separator form', () => {
+    const examples: [string, string][] = [
+      ['_secretKey: "abc"', '_secretKey: [redacted]'],
+      ['_userPassword=hunter2', '_userPassword=[redacted]'],
+      ['_authToken=abc', '_authToken=[redacted]'],
+      ['_oauthToken=abc', '_oauthToken=[redacted]'],
+      ['_sessionKey=abc', '_sessionKey=[redacted]'],
+      ['_SIGNINGKEY=abc', '_SIGNINGKEY=[redacted]'],
+      ['_clientSecret=abc', '_clientSecret=[redacted]'],
+      ['__secretKey=abc', '__secretKey=[redacted]'],
+      ['$$authToken=abc', '$$authToken=[redacted]'],
+    ];
+    for (const [input, expected] of examples) expect(redactCredentials(input), input).toBe(expected);
+  });
+
+  it('treats a separator-prefixed name inside a longer name the same way', () => {
+    for (const name of ['a.b_secretKey', 'a.b-_secretKey', 'x._authToken', 'config.userPassword'])
+      expect(redactCredentials(`${name}=${SHORT}`), name).toBe(`${name}=[redacted]`);
+  });
+
+  it('does not over-redact ordinary words after a separator', () => {
+    for (const [input, expected] of [
+      ['_id=123', '_id=123'],
+      ['_type=user', '_type=user'],
+      ['__proto__=value', '__proto__=value'],
+      ['_keyboard=on', '_keyboard=on'],
+      ['_entryKey=ascending', '_entryKey=ascending'],
+      ['_idempotencyKey=abc123', '_idempotencyKey=abc123'],
+    ] as const)
+      expect(redactCredentials(input), input).toBe(expected);
+  });
+
+  it('is still idempotent on the new shapes', () => {
+    for (const input of ['_secretKey=abc1234567', '__authToken: "abc1234567"', '$$SIGNINGKEY=abc']) {
+      const once = redactCredentials(input);
+      expect(redactCredentials(once), input).toBe(once);
+    }
+  });
+});
+
+describe('the prefixed pass keeps what main redacted (#968 review)', () => {
+  it('does not expose a value main removed from a nested pair', () => {
+    for (const input of [`_secretKey=apiSecret :''swordfish`, `_secretKey=apiSecret :''probe-secret`]) {
+      const out = redactCredentials(input);
+      expect(out, input).not.toContain('swordfish');
+      expect(out, input).not.toContain('probe-secret');
+    }
+  });
+
+  it('keeps the field after a quoted outer value', () => {
+    expect(redactCredentials(`secretKey="apiSecret='"; status='OK'`)).toBe(`secretKey=[redacted]; status='OK'`);
+    // The underscore variant is main's behaviour plus the new pass; it must not expose the inner
+    // value either, even though main already consumed the text that followed it.
+    const underscored = redactCredentials(`_secretKey="apiSecret='"; status='OK'`);
+    expect(underscored).not.toContain(`apiSecret='`);
+    expect(underscored).not.toContain('status=OK');
+  });
+
+  it('redacts an uppercase provider key only in the additive pass (#968 round 3)', () => {
+    const qualifiers = [
+      'MISTRAL',
+      'OLLAMA',
+      'VLLM',
+      'LITELLM',
+      'OPENROUTER',
+      'LMSTUDIO',
+      'GROQ',
+      'TOGETHER',
+      'DEEPSEEK',
+      'GEMINI',
+      'COHERE',
+      'PERPLEXITY',
+      'FIREWORKS',
+      'HUGGINGFACE',
+      'HF',
+      'REPLICATE',
+      'XAI',
+      'BEDROCK',
+      'VERTEX',
+    ];
+    for (const qualifier of qualifiers) {
+      const input = `${qualifier}KEY=apiSecret='probe-secret'`;
+      const out = redactCredentials(input);
+      expect(out, input).not.toContain('probe-secret');
+      expect(out, input).toContain(`${qualifier}KEY=[redacted]`);
+      expect(redactCredentials(out), input).toBe(out);
+    }
+    // The exact review input: main leaves MISTRALKEY alone and redacts the inner value.
+    expect(redactCredentials(`MISTRALKEY=apiSecret='swordfish'`)).toBe('MISTRALKEY=[redacted]');
+  });
+
+  it('keeps every all-capitals name main recognised in main, even when an added name ends the same way (#968 round 4)', () => {
+    // main matched AZUREOPENAIKEY through its `openai` ending and redacted the nested value; the
+    // prefixed pass must not reach that inner key first. Every case compares with the released
+    // 0.14.23 function: nothing it removed may survive.
+    expect(redactCredentials(`_secretKey=AZUREOPENAIKEY='swordfish'`)).not.toContain('swordfish');
+    for (const outer of ['_secretKey', '__authToken', '$$SIGNINGKEY', 'SIGNINGKEY', 'mistralKey', 'secretKey'])
+      for (const inner of ['AZUREOPENAIKEY', 'OPENAIKEY', 'AZUREKEY', 'GOOGLEKEY', 'ANTHROPICKEY'])
+        for (const value of [`'swordfish'`, `"swordfish"`, 'swordfish']) {
+          const input = `${outer}=${inner}=${value}`;
+          const out = redactCredentials(input);
+          if (!redactCredentials01423(input).includes('swordfish')) expect(out, input).not.toContain('swordfish');
+          expect(redactCredentials(out), input).toBe(out);
+        }
+  });
+
+  it('defers a value only when the following token is itself a credential key (#968 round 3)', () => {
+    expect(redactCredentials('_secretKey=swordfish : rejected')).toBe('_secretKey=[redacted] : rejected');
+    expect(redactCredentials('mistralKey=swordfish : rejected')).toBe('mistralKey=[redacted] : rejected');
+    // A real inner pair still gets main's complete treatment.
+    const nested = redactCredentials(`_secretKey=apiSecret :''swordfish`);
+    expect(nested).not.toContain('swordfish');
+    expect(redactCredentials(`secretKey="apiSecret='"; status='OK'`)).toBe(`secretKey=[redacted]; status='OK'`);
   });
 });
 

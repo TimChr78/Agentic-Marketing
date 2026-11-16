@@ -283,6 +283,75 @@ describe('the scanner stays linear on very large input (#902 round 5)', () => {
   }, 120_000);
 });
 
+// A shared CI runner takes ~1.2 s for the slowest linear megabyte; the quadratic shapes this guards
+// against took minutes. Growth itself is pinned by the scaling assertion.
+const SLOW_MS = 5_000;
+
+describe('the leading-separator scan stays linear (#946 review)', () => {
+  const MB = 1024 * 1024;
+  const repeatTo = (unit: string, bytes: number): string => unit.repeat(Math.ceil(bytes / unit.length));
+  const measure = (text: string): number => {
+    const started = performance.now();
+    redactCredentials(text);
+    return performance.now() - started;
+  };
+
+  it('finishes every uninterrupted megabyte in a few seconds at most, with and without a pair', () => {
+    const shapes = [
+      // A long run of separators before the only candidate.
+      '_',
+      // Only separators: no letter to start a name, and no assignment to end one.
+      '-_.',
+      // Many short names with no separator between them, so the old regex retried at every letter.
+      '_a_',
+      'a.',
+      '$a',
+      // Long camelCase, so the classifier is reached with a megabyte-long name.
+      'aB',
+      // Overlapping chains: a matched pair whose value is the next pair, repeated.
+      'secretKey=',
+      '_secretKey=',
+      'a=b=c=',
+    ];
+    const slow: string[] = [];
+    for (const shape of shapes)
+      for (const suffix of ['', '=x']) {
+        const input = `${repeatTo(shape, MB)}${suffix}`;
+        const elapsed = measure(input);
+        if (elapsed >= SLOW_MS) slow.push(`${JSON.stringify(shape)}${suffix} ${elapsed.toFixed(0)}ms`);
+      }
+    // A handful of separator-prefixed names, with and without a pair, so the classifier runs often.
+    for (const input of [
+      `${'_'.repeat(MB)}secretKey=abc`,
+      `${'_.-$'.repeat(MB / 4)}authToken=abc`,
+      repeatTo('_a_b_c ', MB),
+      repeatTo('_secretKey=abc ', MB),
+      repeatTo('__authToken: "x" ', MB),
+      repeatTo('$$SIGNINGKEY=abc ', MB),
+      repeatTo('a.b_secretKey=abc ', MB),
+    ]) {
+      const elapsed = measure(input);
+      if (elapsed >= SLOW_MS) slow.push(`${JSON.stringify(input.slice(0, 12))} ${elapsed.toFixed(0)}ms`);
+    }
+    expect(slow).toEqual([]);
+  }, 120_000);
+
+  it('grows roughly linearly: 4× the input takes less than 8× the time', () => {
+    const slow: string[] = [];
+    for (const shape of ['_a_', 'a.', '$a', 'aB', 'secretKey=', '_secretKey=', 'a=b=c=']) {
+      const unit = shape;
+      const small = unit.repeat(2_000);
+      const large = unit.repeat(8_000);
+      measure(small);
+      const first = Math.min(measure(small), measure(small));
+      const second = Math.min(measure(large), measure(large));
+      // The floor keeps sub-millisecond measurements from making the ratio noise.
+      if (second > Math.max(first * 8, 50)) slow.push(`${JSON.stringify(unit)} ${first.toFixed(1)}ms → ${second.toFixed(1)}ms`);
+    }
+    expect(slow).toEqual([]);
+  }, 60_000);
+});
+
 describe('random input never breaks the scanner (#902 round 3)', () => {
   // An alphabet biased to the scanner's own special characters: separators, quotes (ASCII and
   // Unicode), structures, escapes, URL punctuation, schemes, markers and the whitespace that ends
