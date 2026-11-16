@@ -878,6 +878,67 @@ function redactArrowPairs(text: string): string {
   return redactPairValues(text, arrowSeparatorEnd, arrowValueSpan);
 }
 
+const PEM_BEGIN = '-----BEGIN ';
+const PEM_END = '-----END ';
+const PEM_DASHES = '-----';
+const PEM_HEADER_LIMIT = 64;
+
+/**
+ * The end of a `[A-Z ]*PRIVATE KEY-----` header that starts just after `-----BEGIN `/`-----END `,
+ * or -1. The name is bounded (64 characters) and only capitals and spaces are read, so a long run
+ * of dashes or text cannot make the scan grow.
+ */
+function pemKeyHeaderEnd(text: string, afterPrefix: number): number {
+  let index = afterPrefix;
+  const limit = Math.min(text.length, afterPrefix + PEM_HEADER_LIMIT);
+  while (index < limit) {
+    const char = text.charAt(index);
+    if ((char >= 'A' && char <= 'Z') || char === ' ') index += 1;
+    else break;
+  }
+  if (!text.slice(afterPrefix, index).endsWith('PRIVATE KEY')) return -1;
+  if (!text.startsWith(PEM_DASHES, index)) return -1;
+  return index + PEM_DASHES.length;
+}
+
+/**
+ * A PEM private key block, whole: `-----BEGIN [A-Z ]*PRIVATE KEY-----` through its matching
+ * `-----END …-----`. Public blocks (`BEGIN CERTIFICATE`, `BEGIN PUBLIC KEY`) are left alone because
+ * the header must end in `PRIVATE KEY`. An unterminated block runs to the end of the text, so a
+ * body line is never left behind.
+ */
+function redactPemBlocks(text: string): string {
+  if (!text.includes(PEM_BEGIN)) return text;
+  let out = '';
+  let copied = 0;
+  let search = 0;
+  while (search < text.length) {
+    const begin = text.indexOf(PEM_BEGIN, search);
+    if (begin < 0) break;
+    const headerEnd = pemKeyHeaderEnd(text, begin + PEM_BEGIN.length);
+    if (headerEnd < 0) {
+      search = begin + 1;
+      continue;
+    }
+    let end = text.length;
+    let cursor = headerEnd;
+    for (;;) {
+      const close = text.indexOf(PEM_END, cursor);
+      if (close < 0) break;
+      const closeEnd = pemKeyHeaderEnd(text, close + PEM_END.length);
+      if (closeEnd >= 0) {
+        end = closeEnd;
+        break;
+      }
+      cursor = close + 1;
+    }
+    out += `${text.slice(copied, begin)}[redacted]`;
+    copied = end;
+    search = end;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
 /**
  * The passes that must see a shape before the rules do, because they consume a delimiter the rules
  * would otherwise take (`[`, a Unicode opening quote, `>`, `-----BEGIN`, an inner `=`). Each one
@@ -887,6 +948,7 @@ function redactIntactValueShapes(text: string): string {
   let out = redactStructuredValues(text);
   out = redactUnicodeQuotedValues(out);
   out = redactArrowPairs(out);
+  out = redactPemBlocks(out);
   return out;
 }
 

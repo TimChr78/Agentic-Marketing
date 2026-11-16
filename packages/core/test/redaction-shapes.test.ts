@@ -7,6 +7,26 @@ import { redactCredentials } from '../src/diagnostics';
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
 
+describe('a PEM private key block (#937)', () => {
+  const block = (name: string, body: string): string => `-----BEGIN ${name}-----\n${body}\n-----END ${name}-----`;
+
+  it('replaces the whole block, with or without a credential key', () => {
+    expect(redactCredentials(block('PRIVATE KEY', SECRET))).toBe('[redacted]');
+    expect(redactCredentials(block('RSA PRIVATE KEY', SECRET))).toBe('[redacted]');
+    expect(redactCredentials(`password=${block('EC PRIVATE KEY', SECRET)}`)).toBe('password=[redacted]');
+    expect(redactCredentials(`see ${block('OPENSSH PRIVATE KEY', SECRET)} here`)).toBe('see [redacted] here');
+  });
+
+  it('replaces an unterminated block to the end of the text', () => {
+    expect(redactCredentials(`-----BEGIN PRIVATE KEY-----\n${SECRET}`)).toBe('[redacted]');
+  });
+
+  it('leaves public blocks and prose alone', () => {
+    for (const input of [block('CERTIFICATE', SECRET), block('PUBLIC KEY', SECRET), 'the header -----BEGIN CERTIFICATE----- is public'])
+      expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
 describe('`=>` as the separator (#937)', () => {
   it('replaces the value after the arrow', () => {
     expect(redactCredentials(`'password' => '${SECRET}'`)).toBe("'password' [redacted]");

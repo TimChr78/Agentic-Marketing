@@ -390,6 +390,9 @@ const SHAPES: [string, (key: string, value: string) => string][] = [
   ['arrow quoted', (key, value) => `'${key}' => '${value}'`],
   ['arrow double', (key, value) => `:${key} => "${value}"`],
   ['arrow bare', (key, value) => `${key} => ${value}`],
+  ['pem', (_key, value) => `-----BEGIN PRIVATE KEY-----\n${value}\n-----END PRIVATE KEY-----`],
+  ['pem keyed', (key, value) => `${key}=-----BEGIN RSA PRIVATE KEY-----\n${value}\n-----END RSA PRIVATE KEY-----`],
+  ['pem unclosed', (_key, value) => `-----BEGIN PRIVATE KEY-----\n${value}`],
 ];
 /** Shapes whose point is a value too short for the rules to see, so only the marker goes in. */
 const SHORT_SHAPES: [string, (key: string, value: string) => string][] = [
