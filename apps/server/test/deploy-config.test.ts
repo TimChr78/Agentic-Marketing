@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ENV_KEYS } from '../src/config';
+import { scanServerSources } from './env-reads';
 
 // The repository root, so this test reads the deployment files an operator sees (no Docker, no network).
 const root = fileURLToPath(new URL('../../../', import.meta.url));
@@ -79,6 +80,16 @@ function serviceNames(text: string): string[] {
   const end = rest.search(/^\S/m);
   const body = end < 0 ? rest : rest.slice(0, end);
   return [...body.matchAll(/^ {2}([a-z][\w-]*):$/gm)].map((match) => match[1]);
+}
+
+/** One top-level block of values.yaml, up to the next line that starts at column 0. */
+function helmSection(text: string, name: string): string {
+  const marker = `\n${name}:\n`;
+  const start = text.indexOf(marker);
+  if (start < 0) throw new Error(`values.yaml has no ${name} block`);
+  const body = text.slice(start + marker.length);
+  const end = body.search(/\n(?=\S)/);
+  return end < 0 ? body : body.slice(0, end);
 }
 
 describe('compose deployment configuration', () => {
@@ -245,6 +256,117 @@ describe('compose environment completeness (#385)', () => {
 
   it('documents that Compose now forwards every documented variable', () => {
     expect(composeDoc).toContain('Every variable the server reads is passed into the `app` container');
+  });
+});
+
+// #965: the #385 guard above keys off config.ts's Env schema, so a variable the server reads from
+// process.env directly (the three OTLP settings #931 introduced, for example) could be documented
+// and still never reach the container. Compose without env_file and the chart's ConfigMap are
+// explicit allow-lists, so this scans the source instead of a schema. The scan follows a variable,
+// a default parameter, a parameter typed as an environment map, destructuring and constant keys
+// (apps/server/test/env-reads.ts); an access it cannot resolve fails until it is named below.
+describe('every environment read reaches the containers (#965)', () => {
+  // Read by the server-side source but deliberately not part of a deployment's configuration.
+  const NOT_FORWARDED = new Map([
+    [
+      'INIT_CWD',
+      'pnpm sets it to the directory the command ran in; the CLI resolves .env, CHANGELOG and --env-file paths from it. Compose and Helm run `am` directly, so no pnpm and no value.',
+    ],
+    ['AM_TOKEN', 'an input to the `am smoke` helper only (apps/server/src/ops/smoke.ts); the server itself never reads it.'],
+    ['AM_GIT_SHA', 'baked into the image by the Dockerfile (ARG GIT_SHA), so the build sets it, never the operator.'],
+    [
+      'CAMPAIGN_IDENTITY_SCOPE_LIMIT',
+      'a test-only override of the campaign identity scope bound (packages/campaigns/src/identity.ts); production never sets it.',
+    ],
+    [
+      'AM_BOOTSTRAP_PASSWORD',
+      'a CLI-only input to `am bootstrap` (apps/server/src/cli.ts, via resolvePassword): .env.example documents it as not server configuration, and putting an admin password into every container buys nothing.',
+    ],
+    ['AM_RESET_PASSWORD', 'the CLI-only counterpart for `am reset-password`; same reason. Neither is read by the running server.'],
+    [
+      'AM_BIND',
+      'the host address the admin port is published on: a Compose interpolation value for `ports:`, not what the container binds (PORT). The doctor reads it only to describe the host side and falls back to docker-compose.yml, so forwarding it would report the host port as the container port.',
+    ],
+    [
+      'AM_PORT',
+      'the published admin port, the same Compose host-side setting as AM_BIND. The container listens on PORT; AM_PORT never reaches it.',
+    ],
+    [
+      'PUBLIC_BIND',
+      'the host:port the public listener is published on; the container sees PUBLIC_PORT. The doctor describes the host side from it and falls back to docker-compose.yml.',
+    ],
+    [
+      'POSTGRES_PASSWORD',
+      'the Postgres superuser password, which Compose interpolates into DATABASE_URL. The app connects as APP_DB_ROLE under row-level security and never needs this password, so it stays out of the app container (least privilege); the doctor says when it is not set here.',
+    ],
+  ]);
+
+  // An environment access the syntax scan cannot reduce to a name. Each needs a reason here, and
+  // the test fails if an entry stops matching a real finding, so this cannot become a blanket pass.
+  const DYNAMIC_READS = new Map([
+    [
+      'apps/server/src/config.ts|enumerate',
+      'loadConfig enumerates the whole environment once and validates it with the Env schema. Every name it accepts is an ENV_KEYS entry, and the completeness tests above require each of those in Compose and the chart, so the names are known even though this access is not.',
+    ],
+  ]);
+
+  const id = (file: string, kind: string) => `${file}|${kind}`;
+
+  it('forwards every environment read through Compose and the chart', async () => {
+    const scan = await scanServerSources(root);
+    const reads = new Set(scan.reads.map((read) => read.key));
+    // The scan must find the reads this guard was written for, by every spelling, or a broken
+    // resolver would pass silently: a property access, a constant-keyed access, and a helper call.
+    for (const key of [
+      'OTEL_EXPORTER_OTLP_ENDPOINT',
+      'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT',
+      'OTEL_EXPORTER_OTLP_HEADERS',
+      'OTEL_EXPORTER_OTLP_TRACES_HEADERS',
+      'BACKUP_KEEP_DAYS',
+      'BETTER_AUTH_TRUSTED_ORIGINS',
+      'AM_BOOTSTRAP_PASSWORD',
+      'AM_RESET_PASSWORD',
+    ]) {
+      expect(reads.has(key), `${key} was not found in the server-side source`).toBe(true);
+    }
+    // A key reached through a bound environment object, not a literal `process.env.X` (#965 review).
+    expect(scan.reads.find((read) => read.key === 'BACKUP_KEEP_DAYS')?.file).toBe('apps/server/src/ops/backup-lib.ts');
+
+    const composeKeys = new Set([...service(compose, 'app').matchAll(/^ {6}([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]));
+    const helmConfig = new Set([...helmSection(helmValues, 'config').matchAll(/^ {2}([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]));
+    const helmSecretExamples = new Set(
+      [...helmSection(helmValues, 'secrets').matchAll(/^ {2}#\s+([A-Z][A-Z0-9_]+):/gm)].map((match) => match[1]),
+    );
+
+    const missing: string[] = [];
+    for (const key of [...reads].sort()) {
+      if (NOT_FORWARDED.has(key)) continue;
+      if (!composeKeys.has(key)) missing.push(`docker-compose.yml app environment: ${key}`);
+      // A key is forwarded by the chart either as a plain `config` value or through the Secret the
+      // roles read with envFrom: `secrets.values` accepts any key, and its documented examples are
+      // the chart's statement of what belongs there (a credential stays out of the ConfigMap).
+      if (!helmConfig.has(key) && !helmSecretExamples.has(key)) missing.push(`Helm config (or a documented secrets.values key): ${key}`);
+    }
+    expect(missing).toEqual([]);
+
+    // Every exception must still describe a real read, so the lists cannot rot into a blanket pass.
+    expect([...NOT_FORWARDED.keys()].filter((key) => !reads.has(key))).toEqual([]);
+    // The credential keys that motivated the Secret rule (#965) stay documented there.
+    for (const key of ['OTEL_EXPORTER_OTLP_HEADERS', 'OTEL_EXPORTER_OTLP_TRACES_HEADERS']) {
+      expect(helmSecretExamples.has(key), `${key} must be documented under secrets.values`).toBe(true);
+    }
+  });
+
+  it('names every environment access the scan cannot resolve', async () => {
+    const scan = await scanServerSources(root);
+    const findings = scan.dynamic.map((read) => ({ id: id(read.file, read.kind), where: `${read.file}:${read.line}`, text: read.text }));
+
+    const unexplained = findings
+      .filter((finding) => !DYNAMIC_READS.has(finding.id))
+      .map((finding) => `${finding.where} (${finding.id}): ${finding.text}`);
+    expect(unexplained).toEqual([]);
+    // And an entry that no longer matches a finding is stale, not permission for the next one.
+    expect([...DYNAMIC_READS.keys()].filter((entry) => !findings.some((finding) => finding.id === entry))).toEqual([]);
   });
 });
 
