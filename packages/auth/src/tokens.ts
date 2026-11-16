@@ -425,7 +425,13 @@ export async function principalFromApiToken(db: Db, token: string): Promise<Prin
   const t = rows[0];
   if (!t?.role || t.revoked_at || (t.expires_at && t.expires_at < new Date())) return null;
   if (!t.last_used_at || Date.now() - t.last_used_at.getTime() > 60_000)
-    await db.admin.query('UPDATE api_tokens SET last_used_at = now() WHERE workspace_id = $1 AND id = $2', [t.workspace_id, t.id]);
+    // A tenant write runs as the app role under RLS, not through the owner pool (#838, #942).
+    await db.withWorkspace(t.workspace_id, (tx) =>
+      tx
+        .update(schema.apiTokens)
+        .set({ lastUsedAt: new Date() })
+        .where(and(eq(schema.apiTokens.workspaceId, t.workspace_id), eq(schema.apiTokens.id, t.id))),
+    );
   const agent = await agentForCredential(db, t.workspace_id, 'api_token', t.id, t.user_id, async () => t.name);
   return agentPrincipal(t.user_id, `token:${t.id}`, t.workspace_id, t.role, t.scopes, agent);
 }

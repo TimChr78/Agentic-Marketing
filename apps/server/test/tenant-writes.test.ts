@@ -3,6 +3,7 @@ import {
   chooseOAuthWorkspace,
   cleanupExpiredOAuthWorkspaceSelections,
   consentWorkspaceId,
+  principalFromApiToken,
   withConsentRequest,
 } from '@agentic-marketing/auth';
 import { newUuid } from '@agentic-marketing/core';
@@ -77,6 +78,23 @@ describe('tenant writes on the auth path (#838)', () => {
       tx.execute<{ id: string }>(sql`SELECT id FROM agents WHERE id = ${agent.id}`),
     );
     expect(elsewhere.rows).toEqual([]);
+  });
+
+  it('records an API token’s last use as the app role under RLS (#942)', async () => {
+    const { id, token } = await t.api(owner).call('apiTokens.create', { name: 'Last-used probe', scopes: ['artifacts:read'] });
+    const { db, attempted } = refusingOwnerWrites(t.srv.db);
+    const principal = await principalFromApiToken(db, token);
+    expect(principal).toMatchObject({ workspaceId: ws, type: 'agent' });
+    expect(attempted).toEqual([]);
+
+    const { rows } = await t.srv.db.withWorkspace(ws, (tx) =>
+      tx.execute<{ last_used_at: Date | null }>(sql`SELECT last_used_at FROM api_tokens WHERE id = ${id}`),
+    );
+    expect(rows[0]?.last_used_at).not.toBeNull();
+
+    // Within the minute the stamp is not written again.
+    expect(await principalFromApiToken(db, token)).not.toBeNull();
+    expect(attempted).toEqual([]);
   });
 
   it('records a consent workspace choice as the app role under RLS', async () => {
