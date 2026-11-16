@@ -57,7 +57,7 @@ export function redactCredentials(text: string): string {
   // first (#898); see redactLongKeyValues for why that cannot change what the rules below remove.
   // The #937 value shapes have the same problem: a rule consumes the delimiter the shape needs
   // (`[`, a Unicode opening quote, `>`, `-----BEGIN`), so those passes run first too.
-  let out = applyRules(redactLongKeyValues(redactValueShapes(text)));
+  let out = applyRules(redactLongKeyValues(redactIntactValueShapes(text)));
   // Main's 0.14.23 passes converge first, on exactly the release's rules and qualifiers. Only then
   // do the #946/#956 additions run, so they can add redaction but can never consume a key main's
   // next round would have needed. If an addition exposes a new main match, main settles again.
@@ -770,9 +770,48 @@ function redactStructuredValues(text: string): string {
   return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), span);
 }
 
-/** Every #937 shape pass, in the order it runs. Each one reads the text once. */
-function redactValueShapes(text: string): string {
+/**
+ * A short Authorization value under a key: `authToken=Bearer abc`, `password: Basic xyz`. The
+ * scheme rule above needs six characters, so a short token is left behind; the scheme word is kept
+ * (it says what was sent) and only the token after it is replaced. It runs after the rules, not
+ * before them: a pre-pass value can end at a nested key (`Authorization: Basic
+ * organizationSecondaryAuthToken="x"`), and replacing that key would hide the value from
+ * `redactLongKeyValues`.
+ */
+function schemeValueSpan(text: string, start: number): ValueSpan | null {
+  let index = start;
+  let schemes = 0;
+  for (;;) {
+    SCHEME_START.lastIndex = index;
+    const scheme = SCHEME_START.exec(text);
+    if (!scheme) break;
+    index += scheme[0].length;
+    schemes += 1;
+    while (isSpace(text.charAt(index))) index += 1;
+  }
+  if (schemes === 0) return null;
+  const end = pairValueEnd(text, index);
+  return end < 0 ? null : { start: index, end };
+}
+
+function redactShortSchemeValues(text: string): string {
+  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), schemeValueSpan);
+}
+
+/**
+ * The passes that must see a shape before the rules do, because they consume a delimiter the rules
+ * would otherwise take (`[`, a Unicode opening quote, `>`, `-----BEGIN`, an inner `=`). Each one
+ * replaces a whole delimited span, so it cannot leave a nested pair's value behind.
+ */
+function redactIntactValueShapes(text: string): string {
   const out = redactStructuredValues(text);
+  return out;
+}
+
+/** Every #937 shape pass, in the order it runs on the rules' output. Each one reads the text once. */
+function redactValueShapes(text: string): string {
+  let out = redactIntactValueShapes(text);
+  out = redactShortSchemeValues(out);
   return out;
 }
 

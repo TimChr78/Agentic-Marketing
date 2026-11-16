@@ -384,12 +384,23 @@ const SHAPES: [string, (key: string, value: string) => string][] = [
   ['bare array', (key, value) => `${key}=[${value}]`],
   ['bare object', (key, value) => `${key}: {"v":"${value}"}`],
 ];
+/** Shapes whose point is a value too short for the rules to see, so only the marker goes in. */
+const SHORT_SHAPES: [string, (key: string, value: string) => string][] = [
+  ['scheme', (key, value) => `${key}=Bearer ${value}`],
+  ['scheme basic', (key, value) => `${key}: Basic ${value}`],
+];
 
 function* shapes(): Generator<Generated> {
   for (const key of SHAPE_KEYS)
     for (const [shape, build] of SHAPES) {
       const token = marker();
       const text = build(key, `S3cr3tV4l${token}`);
+      yield { input: `${text} ${sentinel()}`, name: `shape ${shape} ${key} ${JSON.stringify(text)}`, secrets: [token] };
+    }
+  for (const key of SHAPE_KEYS)
+    for (const [shape, build] of SHORT_SHAPES) {
+      const token = marker();
+      const text = build(key, token);
       yield { input: `${text} ${sentinel()}`, name: `shape ${shape} ${key} ${JSON.stringify(text)}`, secrets: [token] };
     }
 }

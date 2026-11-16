@@ -7,6 +7,18 @@ import { redactCredentials } from '../src/diagnostics';
 /** Ten characters: below the 24-character bare-token rule, so only the shape under test can find it. */
 const SECRET = 'S3cr3tV4l';
 
+describe('a short Authorization value under a credential key (#937)', () => {
+  it('replaces the token after the scheme and keeps the scheme word', () => {
+    expect(redactCredentials('authToken=Bearer abc')).toBe('authToken=Bearer [redacted]');
+    expect(redactCredentials('password: Basic xyz')).toBe('password: Basic [redacted]');
+    expect(redactCredentials('authorization: bearer abc')).toBe('authorization: bearer [redacted]');
+  });
+
+  it('leaves a scheme without a value, and prose, alone', () => {
+    for (const input of ['sent with Bearer abc', 'the Basic plan is fine']) expect(redactCredentials(input), input).toBe(input);
+  });
+});
+
 describe('a structured value under a credential key (#937)', () => {
   it('replaces an array value whole', () => {
     expect(redactCredentials(`{"token":["${SECRET}"]}`)).toBe('{"token":[redacted]}');
