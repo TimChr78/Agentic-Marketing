@@ -40,7 +40,9 @@ pnpm build:demo                                   # the demo as one file → app
 ```
 
 `build:live` is the production build: the Docker image runs it and copies `apps/web/dist` into
-place, so the server serves the admin UI at `/`. When the directory exists the server serves real
+place, so the server serves the admin UI at `/`. It runs only Vite: type errors are caught by
+`pnpm typecheck` (CI's `static` job runs it before the browser jobs, and the Dockerfile typechecks
+the UI before this step). When the directory exists the server serves real
 assets and falls back to `index.html` for extension-less paths; set `WEB_DIST` to serve a different
 build. Without it the server runs API-only.
 
