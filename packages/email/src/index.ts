@@ -3,6 +3,7 @@ export * from './blocks';
 export * from './blockTags';
 export * from './checks';
 export * from './deliverability';
+export * from './fingerprint';
 export * from './gateway';
 export * from './idempotency';
 export * from './links';

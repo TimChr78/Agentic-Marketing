@@ -3,6 +3,7 @@ import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
+import { fingerprintParts } from './fingerprint';
 import { requestEmail, sendRequestHash } from './gateway';
 import { sendIdempotencyKey } from './idempotency';
 import { directSendImpact, directSendLedger } from './sendTouches';
@@ -52,12 +53,15 @@ export const sendEmail = defineCommand({
     requestEmail(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
-      requestHash: sendRequestHash('email', {
-        caller: callerHash(ctx.principal),
-        recipient: input.profileId,
-        template: input.templateId,
-        data: input.data ?? null,
-      }),
+      requestHash: sendRequestHash(
+        'email',
+        fingerprintParts.direct({
+          caller: callerHash(ctx.principal),
+          recipient: input.profileId,
+          template: input.templateId,
+          data: input.data ?? null,
+        }),
+      ),
     }),
 });
 

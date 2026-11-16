@@ -4,6 +4,7 @@ import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
+import { fingerprintParts } from '../fingerprint';
 import { sendRequestHash } from '../gateway';
 import { sendIdempotencyKey } from '../idempotency';
 import { isMarketing } from '../policy';
@@ -43,12 +44,15 @@ export const sendSms = defineCommand({
     requestSms(ctx.tx, ctx.principal.workspaceId, ctx.services.keyProvider, ctx.services.events, {
       ...input,
       agentId: ctx.principal.agent?.id ?? null,
-      requestHash: sendRequestHash('sms', {
-        caller: callerHash(ctx.principal),
-        recipient: input.profileId,
-        template: input.templateId,
-        data: input.data ?? null,
-      }),
+      requestHash: sendRequestHash(
+        'sms',
+        fingerprintParts.direct({
+          caller: callerHash(ctx.principal),
+          recipient: input.profileId,
+          template: input.templateId,
+          data: input.data ?? null,
+        }),
+      ),
     }),
 });
 

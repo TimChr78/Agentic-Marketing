@@ -28,6 +28,7 @@ import {
   type Decision,
   deliveryPolicy,
   type EmailRequest,
+  fingerprintParts,
   requestEmail,
   requestPush,
   requestSms,
@@ -347,12 +348,10 @@ async function suppressForControl(
       reason,
       variant: variant ?? null,
       agentId,
-      requestHash: sendRequestHash(channel, {
-        caller: 'system:broadcast_holdout',
-        recipient: profileId,
-        broadcast: broadcastId,
-        campaign: campaignId,
-      }),
+      requestHash: sendRequestHash(
+        channel,
+        fingerprintParts.broadcastControl({ recipient: profileId, broadcast: broadcastId, campaign: campaignId }),
+      ),
     })
     .onConflictDoNothing()
     .returning({ id: schema.messages.id });
@@ -415,7 +414,7 @@ async function recordSendConflict(
       reason,
       variant: variant ?? null,
       agentId,
-      requestHash: sendRequestHash(channel, { caller: 'system:broadcast', recipient: profileId, broadcast: broadcastId }),
+      requestHash: sendRequestHash(channel, fingerprintParts.broadcast({ recipient: profileId, broadcast: broadcastId })),
     })
     .onConflictDoNothing()
     .returning({ id: schema.messages.id });
@@ -1564,11 +1563,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         subject,
         notBefore,
         agentId: artifact.ownerAgentId,
-        requestHash: sendRequestHash(channel, {
-          caller: 'system:broadcast',
-          recipient: m.profileId,
-          broadcast: broadcastId,
-        }),
+        requestHash: sendRequestHash(channel, fingerprintParts.broadcast({ recipient: m.profileId, broadcast: broadcastId })),
       }).catch(async (err: unknown) => {
         // The key is bound to a different request: a caller who pre-claimed it before the system
         // prefixes were reserved, or a control row and a send that disagree (#945). Throwing would
