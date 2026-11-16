@@ -74,7 +74,7 @@ export const score = defineCommand({
   name: 'ai.score',
   title: 'Score with a decision model',
   description:
-    'Ask a decision provider typed questions about a state and get probabilities and confidence, never text: noul (yes/no probability), choice (label and probabilities) or score (number and confidence). With profileId the person’s AI consent is checked and, unless a state is given, the state is built from non-personal data only (segment ids, event counts, agent-visible non-personal traits). A state with personal data is refused unless the provider is marked allowPersonalData under a no-retention agreement. With store, the first answer is saved as a named score for the person.',
+    'Ask a decision provider typed questions about a state and get probabilities and confidence, never text: noul (yes/no probability), choice (label and probabilities) or score (number and confidence). With profileId the person’s AI consent is checked and, unless a state is given, the state is built from non-personal data only (segment ids, event counts, agent-visible non-personal traits). A state with personal data is refused unless the provider is marked allowPersonalData under a no-retention agreement. With store, the first answer is saved as a named score for the person. Spends the workspace’s LLM budget: agents need a mandate with a spend level.',
   input: z.object({
     providerId: ProviderId.optional().describe('A decision provider; default: the enabled provider used for decisions'),
     questions: decisionQuestions,
@@ -101,7 +101,7 @@ export const score = defineCommand({
   }),
   permission: 'profiles:write',
   effect: 'write',
-  actionClass: 'draft',
+  actionClass: 'spend',
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     if (input.store && !input.profileId) throw new AppError('invalid_input', 'store needs profileId: a score is stored for a person.');

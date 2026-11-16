@@ -35,6 +35,7 @@ describe('usage on a failed model call (#941)', () => {
     });
     expect(usageOfError(error)).toEqual({ inputTokens: 120, outputTokens: 30 });
     expect(usageOfError(new Error('no usage here'))).toBeNull();
+    expect(usageOfError({ lastError: { usage: { inputTokens: 7, outputTokens: 3 } } })).toEqual({ inputTokens: 7, outputTokens: 3 });
   });
 
   it('splits a reserved estimate into input and output', () => {

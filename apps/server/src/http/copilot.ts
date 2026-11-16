@@ -1,6 +1,7 @@
 import {
   AiUnavailable,
   billingReservationTtlMs,
+  estimatedUsage,
   estimateTokens,
   MIN_STEP_TOKENS,
   modelFor,
@@ -9,6 +10,7 @@ import {
   settleReservation,
   stepBudget,
   tokensOfSteps,
+  usageOfError,
 } from '@agentic-marketing/ai';
 import { activeMandate } from '@agentic-marketing/artifacts';
 import { type Auth, principalFromSession } from '@agentic-marketing/auth';
@@ -341,6 +343,8 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
         // Filled by onStepEnd, so a turn that throws after a step still records that step's
         // tokens instead of zero.
         let usage = { inputTokens: 0, outputTokens: 0 };
+        let usageEstimated = false;
+        let providerCalled = false;
         let error: string | null = null;
         // Set when prepareStep refuses another model call; the person is told why the turn ended.
         let budgetStopped = false;
@@ -430,6 +434,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
             },
           });
 
+          providerCalled = true;
           const r = streamText({
             model: model.model,
             system,
@@ -534,6 +539,22 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
             // Streamed to the browser (any member, viewers included) and stored with the
             // conversation and the AI call: never an unexpected exception's text (#885 round 10).
             error = copilotFailureText(err);
+            // A stream can fail after the provider billed but before onStepEnd. Recover what the
+            // error reports; when usage is unknown, settle the reserved estimate instead of zero
+            // (#941 review).
+            const known = usageOfError(err);
+            if (known) {
+              usage.inputTokens += known.inputTokens;
+              usage.outputTokens += known.outputTokens;
+            } else if (providerCalled) {
+              const remaining = Math.max(0, allowance - (usage.inputTokens + usage.outputTokens));
+              if (remaining > 0) {
+                const estimate = estimatedUsage(remaining, Math.min(COPILOT_MAX_OUTPUT_TOKENS, remaining));
+                usage.inputTokens += estimate.inputTokens;
+                usage.outputTokens += estimate.outputTokens;
+                usageEstimated = true;
+              }
+            }
             logger.warn({ err }, 'copilot turn failed');
             emit({ type: 'error', message: `The model call failed: ${error}` });
           }
@@ -579,6 +600,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
             input: { tools: usedTools },
             error,
             ...usage,
+            usageEstimated,
             latencyMs: Date.now() - started,
             principalId: acting ? acting.agent.id : user.userId,
             billedAt: new Date(),

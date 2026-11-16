@@ -2,6 +2,7 @@ import {
   AiUnavailable,
   billingReservationTtlMs,
   estimatedUsage,
+  estimateTokens,
   languageModel,
   modelFor,
   recordAiCall,
@@ -649,11 +650,13 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
   const usage: TurnUsage = { inputTokens: 0, outputTokens: 0 };
   let usageEstimated = false;
   let error: string | null = null;
+  /** The bounded run context, estimated as the failed step's input when its usage is unknown. */
+  let context = '';
   /** Whether the provider may have billed this run: false means no request left the server. */
   let providerCalled = false;
 
   try {
-    const context = await deps.db.withWorkspace(workspaceId, (tx) => loadRunContext(tx, loaded));
+    context = await deps.db.withWorkspace(workspaceId, (tx) => loadRunContext(tx, loaded));
     const turn = await runHostedTurn({
       executor: deps.executor,
       principal,
@@ -692,18 +695,24 @@ async function runOne(deps: HostedAgentDeps, workspaceId: string, agentId: strin
     return disabled ? ('disabled' as const) : ('ok' as const);
   } catch (err) {
     // An SDK error may carry the usage of the step that failed; onStepEnd only saw the steps that
-    // finished. If the provider was called and nothing at all is known, settle the reserved run
-    // allowance as an estimate rather than zero (#941).
+    // finished. When it does not, estimate that one failed step on top of the completed steps
+    // (#941 review): its input (instructions + context) plus the output cap, never past what the
+    // run's reservation still covers.
     const fromError = usageOfError(err);
     if (fromError) {
       usage.inputTokens += fromError.inputTokens;
       usage.outputTokens += fromError.outputTokens;
-    }
-    if (providerCalled && usage.inputTokens + usage.outputTokens === 0) {
-      const estimate = estimatedUsage(loaded.hosted.maxTokensPerRun, MAX_OUTPUT_TOKENS);
-      usage.inputTokens = estimate.inputTokens;
-      usage.outputTokens = estimate.outputTokens;
-      usageEstimated = true;
+    } else if (providerCalled) {
+      const used = usage.inputTokens + usage.outputTokens;
+      const remaining = Math.max(0, loaded.hosted.maxTokensPerRun - used);
+      const perStep = MAX_OUTPUT_TOKENS + estimateTokens({ instructions: loaded.hosted.instructions, context }, 0);
+      const estimateTotal = Math.min(remaining, perStep);
+      if (estimateTotal > 0) {
+        const estimate = estimatedUsage(estimateTotal, Math.min(MAX_OUTPUT_TOKENS, estimateTotal));
+        usage.inputTokens += estimate.inputTokens;
+        usage.outputTokens += estimate.outputTokens;
+        usageEstimated = true;
+      }
     }
     // Same rule as the two setup failures above: an AppError is written for people, everything
     // else is stored as a fixed failure so no driver text or secret reaches the run history.

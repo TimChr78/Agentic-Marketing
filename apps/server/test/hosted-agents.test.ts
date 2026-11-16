@@ -304,18 +304,27 @@ describe('hosted agents (#258)', () => {
     expect(runs.runs[0]!.tokens).toBeLessThanOrEqual(250 + STEP_INPUT);
   }, 60_000);
 
-  it('records the tokens of the steps that ran when a later step fails', async () => {
+  it('records the completed steps and estimates the failed step when its usage is unknown (#941 review)', async () => {
     await onlyDue(stepFailed.agentId);
     const summary = await runAt(DUE());
     expect(summary).toMatchObject({ due: 1, ok: 0, failed: 1 });
     const runs = await stepFailed.api.call('agents.hostedRuns', { agentId: stepFailed.agentId });
-    expect(runs.runs[0]).toMatchObject({ status: 'failed', tokens: STEP_TOKENS });
-    // The usage of the step that did run is in ai_calls and in the month's usage, not lost.
+    // Step 1 used 120 tokens; step 2 was billed and threw without usage, so its per-step estimate
+    // is added rather than dropping the step.
+    expect(runs.runs[0]).toMatchObject({ status: 'failed' });
+    expect(runs.runs[0]!.tokens).toBeGreaterThan(STEP_TOKENS);
+    expect(runs.runs[0]!.tokens).toBeLessThan(20_000);
     const calls = await stepFailed.api.call('ai.calls', { kind: 'hosted' });
     expect(calls.calls).toHaveLength(1);
-    expect(calls.calls[0]).toMatchObject({ status: 'failed', inputTokens: STEP_INPUT, outputTokens: STEP_OUTPUT });
+    expect(calls.calls[0]).toMatchObject({ status: 'failed' });
+    expect(calls.calls[0].inputTokens + calls.calls[0].outputTokens).toBe(runs.runs[0]!.tokens);
+    const estimated = await t.srv.db.admin.query<{ usage_estimated: boolean }>(
+      `SELECT usage_estimated FROM ai_calls WHERE workspace_id = $1 AND kind = 'hosted' ORDER BY created_at DESC LIMIT 1`,
+      [stepFailed.ws],
+    );
+    expect(estimated.rows[0]?.usage_estimated).toBe(true);
     const providers = await stepFailed.api.call('aiProviders.list', {});
-    expect(providers.providers[0]!.usedThisMonth).toBe(STEP_TOKENS);
+    expect(providers.providers[0]!.usedThisMonth).toBe(runs.runs[0]!.tokens);
   }, 60_000);
 
   // #420: the old finally block swallowed a failed ai_calls insert and then released the hold, so

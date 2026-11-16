@@ -22,7 +22,7 @@ export const classify = defineCommand({
   name: 'ai.classify',
   title: 'Classify a text',
   description:
-    'Label a text with one of a published classify prompt’s labels (e.g. the intent of an e-mail reply). Returns a callId at once; the AI worker answers within seconds: read it with ai.classification. With profileId, the person’s AI consent is checked and, if the prompt names a `trait`, the label is stored on their profile.',
+    'Label a text with one of a published classify prompt’s labels (e.g. the intent of an e-mail reply). Returns a callId at once; the AI worker answers within seconds: read it with ai.classification. With profileId, the person’s AI consent is checked and, if the prompt names a `trait`, the label is stored on their profile. Spends the workspace’s LLM budget: agents need a mandate with a spend level.',
   input: z.object({
     artifactId: PromptId,
     text: z.string().min(1).max(8000),
@@ -34,7 +34,7 @@ export const classify = defineCommand({
   output: z.object({ callId: z.string(), status: z.literal('pending') }),
   permission: 'profiles:write',
   effect: 'write',
-  actionClass: 'draft',
+  actionClass: 'spend',
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
     const p = await promptVersion(ctx.tx, input.artifactId);

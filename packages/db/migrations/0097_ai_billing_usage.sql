@@ -17,6 +17,3 @@ COMMENT ON COLUMN ai_calls.usage_estimated IS
   'True when the provider usage was unknown and the reserved estimate was recorded instead (#941).';
 COMMENT ON COLUMN ai_calls.reservation_id IS
   'The budget hold this attempt created, so a retry can settle or clear a crashed attempt''s hold (#941).';
-
-CREATE INDEX IF NOT EXISTS ai_calls_provider_billed
-  ON ai_calls (provider_id, (coalesce(billed_at, created_at)));

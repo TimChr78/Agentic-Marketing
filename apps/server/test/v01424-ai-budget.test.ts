@@ -18,6 +18,7 @@ let holdSignal: (() => void) | null = null;
 let holdRelease: (() => void) | null = null;
 
 const answer = async (r: FakeRequest) => {
+  if (r.user.includes('copilot-fail')) return { status: 500, error: 'the copilot stream failed after the provider was called' };
   if (r.user.includes('invalid-answer')) return { text: 'not the JSON schema the prompt asked for', inputTokens: 120, outputTokens: 30 };
   if (r.user.includes('provider-fail')) return { status: 500, error: 'upstream exploded' };
   if (r.user.includes('hold-gate')) {
@@ -198,5 +199,116 @@ describe('step holds use the billing period (#941)', () => {
     ]);
     expect(held.rows).toHaveLength(0);
     expect((await api.call('ai.calls', { kind: 'test' })).calls.length).toBeGreaterThan(0);
+  }, 60_000);
+});
+
+describe('a crashed attempt keeps its provider and usage is reported by billing time (#941 review)', () => {
+  it('attributes a recovered hold to the provider even when the retry cannot prepare', async () => {
+    const api = t.api(owner);
+    const usedBefore = (await api.call('aiProviders.list', {})).providers.find((p: { id: string }) => p.id === providerId)!.usedThisMonth;
+    const prompt = await api.call('artifacts.create', {
+      type: 'prompt',
+      name: 'Recovered provider',
+      content: decidePrompt([{ name: 'retry-me' }]),
+    });
+    const callId = newId('aic');
+    const reservationId = newId('rsv');
+    // The queue writes no provider id; the crash left the row running with its hold.
+    await t.srv.db.admin.query(
+      `INSERT INTO ai_calls (workspace_id, id, kind, status, lease_until, attempts, prompt_id, prompt_version, input, reservation_id)
+       VALUES ($1, $2, 'test', 'running', now() - interval '1 second', 1, $3, 1, $4::jsonb, $5)`,
+      [ws, callId, prompt.artifactId, JSON.stringify({ runId: newId('run'), index: 0, test: 'retry-me' }), reservationId],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO ai_token_reservations (workspace_id, id, provider_id, tokens, expires_at)
+       VALUES ($1, $2, $3, 500, now() + interval '30 days')`,
+      [ws, reservationId, providerId],
+    );
+    // The retry cannot prepare a model, so only the recovery can attribute the estimate.
+    await t.srv.db.admin.query('UPDATE ai_providers SET enabled = false WHERE workspace_id = $1 AND id = $2', [ws, providerId]);
+    try {
+      const row = await eventually(
+        async () => {
+          const { rows } = await t.srv.db.admin.query<{ status: string; provider_id: string | null; input_tokens: number }>(
+            'SELECT status, provider_id, input_tokens FROM ai_calls WHERE workspace_id = $1 AND id = $2',
+            [ws, callId],
+          );
+          return rows[0];
+        },
+        (r) => r?.status === 'failed',
+        30_000,
+      );
+      expect(row?.provider_id).toBe(providerId);
+      expect(row?.input_tokens).toBe(500);
+      const provider = (await api.call('aiProviders.list', {})).providers.find((p: { id: string }) => p.id === providerId)!;
+      expect(provider.usedThisMonth - usedBefore).toBe(500);
+    } finally {
+      await t.srv.db.admin.query('UPDATE ai_providers SET enabled = true WHERE workspace_id = $1 AND id = $2', [ws, providerId]);
+    }
+  }, 60_000);
+
+  it('estimates a copilot stream that fails after the provider was invoked', async () => {
+    const api = t.api(owner);
+    const copilotProvider = await api.call('aiProviders.create', {
+      name: 'Copilot model',
+      kind: 'openai-compatible',
+      baseUrl: llm.baseUrl,
+      models: { default: 'fake-copilot' },
+      apiKey: 'sk-test-copilot-0123456789',
+      useFor: ['copilot'],
+    });
+    const res = await fetch(`${t.base}/api/copilot`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: owner.cookie, origin: t.base },
+      body: JSON.stringify({ message: 'Please fail the copilot stream copilot-fail' }),
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    const row = await eventually(
+      async () => {
+        const { rows } = await t.srv.db.admin.query<{
+          input_tokens: number;
+          output_tokens: number;
+          usage_estimated: boolean;
+          provider_id: string | null;
+        }>(
+          `SELECT input_tokens, output_tokens, usage_estimated, provider_id FROM ai_calls
+           WHERE workspace_id = $1 AND kind = 'copilot' ORDER BY created_at DESC LIMIT 1`,
+          [ws],
+        );
+        return rows[0];
+      },
+      (r) => !!r && r.input_tokens + r.output_tokens > 0,
+      20_000,
+    );
+    expect(row?.provider_id).toBe(copilotProvider.id);
+    expect(row!.input_tokens + row!.output_tokens).toBeGreaterThan(0);
+    expect(row?.usage_estimated).toBe(true);
+  }, 60_000);
+
+  it('groups and filters ai.usage by billed date, not queue date', async () => {
+    const api = t.api(owner);
+    await t.srv.db.admin.query(
+      `INSERT INTO ai_calls (workspace_id, id, kind, status, model, input_tokens, output_tokens, created_at, billed_at)
+       VALUES
+         ($1, $2, 'test', 'done', 'probe-a', 100, 0, now() - interval '40 days', now()),
+         ($1, $3, 'test', 'done', 'probe-b', 200, 0, now(), now() - interval '40 days'),
+         ($1, $4, 'test', 'done', 'probe-c', 300, 0, date_trunc('month', now()) - interval '1 minute', now())`,
+      [ws, newId('aic'), newId('aic'), newId('aic')],
+    );
+    const today = new Date().toISOString().slice(0, 10);
+    const oldDay = new Date(Date.now() - 40 * 86_400_000).toISOString().slice(0, 10);
+    const recent = await api.call('ai.usage', { days: 7 });
+    const recentProbe = recent.days.filter((d) => d.model?.startsWith('probe-'));
+    expect(recentProbe.map((d) => d.model).sort()).toEqual(['probe-a', 'probe-c']);
+    for (const row of recentProbe) {
+      expect(row.day).toBe(today);
+      expect(row.inputTokens).toBe(row.model === 'probe-a' ? 100 : 300);
+    }
+    const wide = await api.call('ai.usage', { days: 60 });
+    const wideProbe = wide.days.filter((d) => d.model?.startsWith('probe-'));
+    expect(wideProbe.find((d) => d.model === 'probe-a')?.day).toBe(today);
+    expect(wideProbe.find((d) => d.model === 'probe-b')?.day).toBe(oldDay);
+    expect(wideProbe.find((d) => d.model === 'probe-c')?.day).toBe(today);
   }, 60_000);
 });

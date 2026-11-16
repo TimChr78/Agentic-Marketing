@@ -120,7 +120,43 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
   }
 }
 
-async function finishIn(
+type UsageFields = {
+  inputTokens?: number;
+  outputTokens?: number;
+  usageEstimated?: boolean;
+  providerId?: string | null;
+};
+
+/**
+ * Add one attempt's usage to the row without touching its terminal fields. A late attempt whose
+ * lease was taken over still spent tokens; the reservation's atomic delete is what makes this
+ * happen exactly once per attempt (#941 review).
+ */
+async function addUsageOnly(tx: Tx, c: CallRow, out: UsageFields) {
+  await tx
+    .update(schema.aiCalls)
+    .set({
+      inputTokens: sql`${schema.aiCalls.inputTokens} + ${out.inputTokens ?? 0}`,
+      outputTokens: sql`${schema.aiCalls.outputTokens} + ${out.outputTokens ?? 0}`,
+      billedAt: new Date(),
+      usageEstimated: sql`${schema.aiCalls.usageEstimated} OR ${out.usageEstimated === true || c.usageEstimated}`,
+      providerId: sql`coalesce(${schema.aiCalls.providerId}, ${out.providerId ?? c.providerId ?? null})`,
+    })
+    .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
+}
+
+/** The row is still owned by this attempt; a late attempt may add usage but cannot write the outcome. */
+async function ownsAttempt(tx: Tx, c: CallRow): Promise<boolean | null> {
+  const [row] = await tx
+    .select({ attempts: schema.aiCalls.attempts })
+    .from(schema.aiCalls)
+    .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)))
+    .for('update');
+  if (!row) return null;
+  return row.attempts === c.attempts;
+}
+
+export async function finishIn(
   tx: Tx,
   c: CallRow,
   prep: (Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>) | null,
@@ -156,6 +192,14 @@ async function finishIn(
     };
   },
 ) {
+  // Fence by attempt: a retry that took the lease over must keep the terminal outcome, while a
+  // late original still adds the tokens the provider billed (#941 review).
+  const owns = await ownsAttempt(tx, c);
+  if (owns === null) return;
+  if (!owns) {
+    await addUsageOnly(tx, c, out);
+    return;
+  }
   const outcome = {
     seq: c.seq,
     ...(out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
@@ -218,18 +262,18 @@ async function finishIn(
       status: late ? 'fallback' : out.status,
       leaseUntil: null,
       promptVersion: prep?.version ?? null,
-      providerId: prep?.model?.providerId ?? out.providerId ?? null,
+      providerId: prep?.model?.providerId ?? out.providerId ?? c.providerId ?? null,
       model: prep?.model?.modelId ?? out.model ?? null,
       input: { ...input, ...(c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
       output: out.output ?? null,
       rationale: out.rationale ?? null,
       error: late ? 'too_late: the step had timed out and took its fallback' : (out.error ?? null),
-      // A retry of a crashed attempt starts from the estimated usage already on the row, so add the
-      // new attempt's tokens instead of replacing them (#941).
-      inputTokens: c.inputTokens + (out.inputTokens ?? 0),
-      outputTokens: c.outputTokens + (out.outputTokens ?? 0),
+      // Accumulate in SQL rather than from the claim snapshot: a late attempt may already have
+      // added its tokens, and both attempts were billed (#941 review).
+      inputTokens: sql`${schema.aiCalls.inputTokens} + ${out.inputTokens ?? 0}`,
+      outputTokens: sql`${schema.aiCalls.outputTokens} + ${out.outputTokens ?? 0}`,
       billedAt: new Date(),
-      usageEstimated: out.usageEstimated === true || c.usageEstimated,
+      usageEstimated: sql`${schema.aiCalls.usageEstimated} OR ${out.usageEstimated === true || c.usageEstimated}`,
       reservationId: null,
       latencyMs: out.latencyMs ?? null,
       cached: out.cached ?? false,
@@ -254,59 +298,84 @@ async function finish(
  * have billed that attempt, and releasing it would free budget it spent. The estimate becomes the
  * row's base usage; the retry's own tokens are added to it when it settles.
  */
-async function settleStaleReservation(db: Db, c: CallRow): Promise<CallRow> {
+export async function settleStaleReservation(db: Db, c: CallRow): Promise<CallRow> {
   if (!c.reservationId) return c;
-  let held = 0;
-  await db.withWorkspace(c.workspaceId, async (tx) => {
+  return db.withWorkspace(c.workspaceId, async (tx) => {
     const [first] = await tx
       .select({ providerId: schema.aiTokenReservations.providerId })
       .from(schema.aiTokenReservations)
       .where(eq(schema.aiTokenReservations.id, c.reservationId!));
-    if (!first) {
+    if (first) {
+      await lockBudget(tx, first.providerId);
+      const [live] = await tx
+        .select({ tokens: schema.aiTokenReservations.tokens, providerId: schema.aiTokenReservations.providerId })
+        .from(schema.aiTokenReservations)
+        .where(eq(schema.aiTokenReservations.id, c.reservationId!));
+      if (live) {
+        // A crashed attempt may have been billed: keep its hold as estimated usage, attribute it to
+        // the provider, and persist the provider on the row so budget reads see it (#941 review).
+        await tx
+          .update(schema.aiCalls)
+          .set({
+            reservationId: null,
+            providerId: sql`coalesce(${schema.aiCalls.providerId}, ${live.providerId})`,
+            inputTokens: sql`${schema.aiCalls.inputTokens} + ${live.tokens}`,
+            usageEstimated: true,
+            billedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.aiCalls.workspaceId, c.workspaceId),
+              eq(schema.aiCalls.id, c.id),
+              eq(schema.aiCalls.reservationId, c.reservationId!),
+            ),
+          );
+        await tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, c.reservationId!));
+      } else {
+        await tx
+          .update(schema.aiCalls)
+          .set({ reservationId: null })
+          .where(
+            and(
+              eq(schema.aiCalls.workspaceId, c.workspaceId),
+              eq(schema.aiCalls.id, c.id),
+              eq(schema.aiCalls.reservationId, c.reservationId!),
+            ),
+          );
+      }
+    } else {
+      // The original attempt settled first: its usage is already on the row. Reload instead of
+      // returning the stale claim snapshot, which would overwrite that usage (#941 review).
       await tx
         .update(schema.aiCalls)
         .set({ reservationId: null })
-        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
-      return;
+        .where(
+          and(
+            eq(schema.aiCalls.workspaceId, c.workspaceId),
+            eq(schema.aiCalls.id, c.id),
+            eq(schema.aiCalls.reservationId, c.reservationId!),
+          ),
+        );
     }
-    await lockBudget(tx, first.providerId);
-    const [live] = await tx
-      .select({ tokens: schema.aiTokenReservations.tokens })
-      .from(schema.aiTokenReservations)
-      .where(eq(schema.aiTokenReservations.id, c.reservationId!));
-    if (!live) {
-      await tx
-        .update(schema.aiCalls)
-        .set({ reservationId: null })
-        .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
-      return;
-    }
-    held = live.tokens;
-    await tx
-      .update(schema.aiCalls)
-      .set({
-        reservationId: null,
-        inputTokens: sql`${schema.aiCalls.inputTokens} + ${held}`,
-        usageEstimated: true,
-        billedAt: new Date(),
-      })
+    const [fresh] = await tx
+      .select()
+      .from(schema.aiCalls)
       .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
-    await tx.delete(schema.aiTokenReservations).where(eq(schema.aiTokenReservations.id, c.reservationId!));
+    return fresh ?? { ...c, reservationId: null };
   });
-  return { ...c, reservationId: null, inputTokens: c.inputTokens + held, usageEstimated: c.usageEstimated || held > 0 };
 }
 
 /** Reserve for one step with the billing-period hold, not the five-minute default (#941). */
 const reserveForStep = (db: Db, workspaceId: string, providerId: string, tokens: number) =>
   reserveTokens(db, workspaceId, providerId, tokens, billingReservationTtlMs());
 
-/** Tie the hold to its ai_calls row so a retry can settle a crashed attempt's hold (#941). */
-async function rememberReservation(db: Db, c: CallRow, reservationId: string) {
+/** Tie the hold to its ai_calls row, with its provider, so a retry can settle a crashed hold. */
+async function rememberReservation(db: Db, c: CallRow, reservationId: string, providerId: string) {
   try {
     await db.withWorkspace(c.workspaceId, (tx) =>
       tx
         .update(schema.aiCalls)
-        .set({ reservationId, status: 'running' })
+        .set({ reservationId, providerId, status: 'running' })
         .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id))),
     );
   } catch (err) {
@@ -354,7 +423,7 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
     if (err instanceof AiUnavailable) return finish(db, c, prep, { status: 'fallback', error: `${err.reason}: ${err.message}` });
     throw err;
   }
-  await rememberReservation(db, c, reservation);
+  await rememberReservation(db, c, reservation, prep.model.providerId);
   const started = Date.now();
   let out: Parameters<typeof finishIn>[3];
   try {
@@ -424,6 +493,12 @@ export function modelErrorText(err: unknown): string {
 function rowRecorder(db: Db, c: CallRow) {
   const recordIn = async (tx: Tx, values: Partial<CallRow>): Promise<void> => {
     const { inputTokens, outputTokens, usageEstimated, ...rest } = values;
+    const owns = await ownsAttempt(tx, c);
+    if (owns === null) return;
+    if (!owns) {
+      await addUsageOnly(tx, c, { inputTokens, outputTokens, usageEstimated, providerId: rest.providerId });
+      return;
+    }
     await tx
       .update(schema.aiCalls)
       .set({
@@ -432,9 +507,10 @@ function rowRecorder(db: Db, c: CallRow) {
         finishedAt: new Date(),
         billedAt: new Date(),
         reservationId: null,
-        inputTokens: c.inputTokens + (inputTokens ?? 0),
-        outputTokens: c.outputTokens + (outputTokens ?? 0),
-        usageEstimated: usageEstimated === true || c.usageEstimated,
+        // SQL addition, not a value computed from the claim snapshot (#941 review).
+        inputTokens: sql`${schema.aiCalls.inputTokens} + ${inputTokens ?? 0}`,
+        outputTokens: sql`${schema.aiCalls.outputTokens} + ${outputTokens ?? 0}`,
+        usageEstimated: sql`${schema.aiCalls.usageEstimated} OR ${usageEstimated === true || c.usageEstimated}`,
       })
       .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
   };
@@ -470,7 +546,7 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
     if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
     throw err;
   }
-  await rememberReservation(db, c, reservation);
+  await rememberReservation(db, c, reservation, ready.model.providerId);
   const started = Date.now();
   const r = await runTestCase(ready.model, ready.def, ready.test, { reservedTokens: estimate });
   await settleStep(
@@ -522,7 +598,7 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
     if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
     throw err;
   }
-  await rememberReservation(db, c, reservation);
+  await rememberReservation(db, c, reservation, ready.model.providerId);
   const started = Date.now();
   let out: Parameters<typeof recordIn>[1];
   let r: Awaited<ReturnType<typeof runClassify>> | undefined;

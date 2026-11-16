@@ -112,23 +112,29 @@ export async function releaseTokens(db: Db, workspaceId: string, id: string) {
 }
 
 /** The tokens an error already says the provider billed, if it says. */
-export function usageOfError(err: unknown): { inputTokens: number; outputTokens: number } | null {
+export function usageOfError(err: unknown, depth = 0): { inputTokens: number; outputTokens: number } | null {
   const carrier = err as {
     usage?: unknown;
     totalUsage?: unknown;
     response?: { usage?: unknown };
     cause?: unknown;
+    lastError?: unknown;
   };
   const usage = carrier?.usage ?? carrier?.totalUsage ?? carrier?.response?.usage;
-  if (!usage || typeof usage !== 'object') return null;
-  const u = usage as Record<string, unknown>;
-  const input = u.inputTokens ?? u.promptTokens;
-  const output = u.outputTokens ?? u.completionTokens;
-  if (typeof input !== 'number' && typeof output !== 'number') return null;
-  return {
-    inputTokens: typeof input === 'number' && Number.isFinite(input) ? Math.max(0, Math.trunc(input)) : 0,
-    outputTokens: typeof output === 'number' && Number.isFinite(output) ? Math.max(0, Math.trunc(output)) : 0,
-  };
+  if (usage && typeof usage === 'object') {
+    const u = usage as Record<string, unknown>;
+    const input = u.inputTokens ?? u.promptTokens;
+    const output = u.outputTokens ?? u.completionTokens;
+    if (typeof input === 'number' || typeof output === 'number')
+      return {
+        inputTokens: typeof input === 'number' && Number.isFinite(input) ? Math.max(0, Math.trunc(input)) : 0,
+        outputTokens: typeof output === 'number' && Number.isFinite(output) ? Math.max(0, Math.trunc(output)) : 0,
+      };
+  }
+  // An SDK retry wrapper keeps the failed attempt's error, which may carry the usage.
+  const nested = carrier?.lastError ?? carrier?.cause;
+  if (depth < 2 && nested && nested !== err) return usageOfError(nested, depth + 1);
+  return null;
 }
 
 /**
