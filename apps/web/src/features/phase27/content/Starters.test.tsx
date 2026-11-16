@@ -18,6 +18,8 @@ const h = vi.hoisted(() => ({
   held: [] as { which: 'A' | 'B'; resolve: (value: unknown) => void }[],
   checkError: null as Error | null,
   installError: null as Error | null,
+  listError: null as Error | null,
+  getError: null as Error | null,
 }));
 
 vi.mock('../../../app/api', async (importOriginal) => {
@@ -27,6 +29,8 @@ vi.mock('../../../app/api', async (importOriginal) => {
     api: {
       call: vi.fn(async (name: string, input: Record<string, unknown>) => {
         h.calls.push({ name, input });
+        if (name === 'recipes.list' && h.listError) throw h.listError;
+        if (name === 'recipes.get' && h.getError) throw h.getError;
         if (name === 'recipes.list')
           return {
             recipes: h.empty
@@ -161,6 +165,8 @@ beforeEach(() => {
   h.held = [];
   h.checkError = null;
   h.installError = null;
+  h.listError = null;
+  h.getError = null;
 });
 afterEach(cleanup);
 
@@ -460,5 +466,45 @@ describe('Starters gallery (#526)', () => {
     expect(screen.queryByText(/Created 1 drafts/)).toBeNull();
     expect(screen.queryByText('Old parameters draft')).toBeNull();
     expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
+  });
+});
+
+// #966: one `error` state carried three different reads, but its only Retry button reloaded the
+// list. A failed `recipes.get` left the detail panel on "Loading the starter" forever, because
+// nothing but a selection change re-ran `load()` and re-selecting the same tile is a no-op.
+describe('Recipes Retry re-runs the read that failed (#966)', () => {
+  it('reloads the starter detail after a failed detail read, not the list', async () => {
+    h.getError = new Error('The starter could not be read');
+    renderPage();
+
+    // The list loads and selects its first starter; the detail read for it fails.
+    expect(await screen.findByText(/The starter could not be read/)).toBeTruthy();
+    expect(screen.queryByLabelText('Loading the starter')).toBeNull();
+    expect(h.calls.filter((c) => c.name === 'recipes.list')).toHaveLength(1);
+    expect(h.calls.filter((c) => c.name === 'recipes.get')).toHaveLength(1);
+
+    h.getError = null;
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(screen.getByLabelText(/^Newsletter name/)).toHaveProperty('value', 'Northstar Journal'));
+    expect(screen.getByRole('heading', { name: 'Weekly newsletter' })).toBeTruthy();
+    expect(h.calls.filter((c) => c.name === 'recipes.get')).toHaveLength(2);
+    // Retry repeated the detail read; the list was not read again.
+    expect(h.calls.filter((c) => c.name === 'recipes.list')).toHaveLength(1);
+  });
+
+  it('reloads the list after a failed list read', async () => {
+    h.listError = new Error('The starters could not be read');
+    renderPage();
+
+    expect(await screen.findByText('The starters could not be read')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Weekly newsletter/ })).toBeNull();
+
+    h.listError = null;
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByRole('button', { name: /Weekly newsletter/ })).toBeTruthy();
+    expect(h.calls.filter((c) => c.name === 'recipes.list')).toHaveLength(2);
+    await waitFor(() => expect(h.calls.filter((c) => c.name === 'recipes.get')).toHaveLength(1));
   });
 });

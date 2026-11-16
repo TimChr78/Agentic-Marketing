@@ -37,20 +37,29 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Which read the error belongs to, so Retry repeats that read instead of always the list (#966).
+  // `detail` covers `recipes.get` and the initial `recipes.preview`, the two reads a selected
+  // starter needs.
+  const [failedRead, setFailedRead] = useState<'list' | 'detail' | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const canWrite = can('artifacts:write');
   // Never show the previous starter's form while the newly selected one is loading.
   const activeRecipe = recipe?.id === selected ? recipe : null;
+  // A failed detail read is shown in the detail panel, not only above the gallery: the panel must
+  // not sit on "Loading the starter" as if the read were still in flight.
+  const detailLoadFailed = failedRead === 'detail' && !activeRecipe;
 
   const loadList = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setFailedRead(null);
     try {
       const r = await api.call('recipes.list', {});
       setList(r.recipes);
       setSelected((current) => current ?? r.recipes[0]?.id ?? null);
     } catch (e) {
       setError(errText(e));
+      setFailedRead('list');
     } finally {
       setLoading(false);
     }
@@ -66,6 +75,7 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     // the starter the person is now looking at.
     const seq = ++loadSeq.current;
     setError(null);
+    setFailedRead(null);
     setCheckError(null);
     setInstalled(null);
     setRecipe(null);
@@ -80,7 +90,9 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
       if (seq !== loadSeq.current) return;
       setPreview(nextPreview);
     } catch (e) {
-      if (seq === loadSeq.current) setError(errText(e));
+      if (seq !== loadSeq.current) return;
+      setError(errText(e));
+      setFailedRead('detail');
     }
   }, []);
 
@@ -103,6 +115,13 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     setCheckError(null);
     setInstalled(null);
     setError(null);
+    setFailedRead(null);
+  };
+
+  /** Retry repeats the read that failed (#966): the selected starter's detail, or the gallery. */
+  const retry = () => {
+    if (failedRead === 'detail' && selected) void load(selected);
+    else void loadList();
   };
 
   const check = async () => {
@@ -166,8 +185,8 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
           </p>
         </div>
 
-        {error && (
-          <Alert tone="bad" title="That did not work" action={<Button onClick={() => void loadList()}>Retry</Button>}>
+        {error && !detailLoadFailed && (
+          <Alert tone="bad" title="That did not work" action={<Button onClick={retry}>Retry</Button>}>
             {error}
           </Alert>
         )}
@@ -384,6 +403,10 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
                 </Alert>
               )}
             </>
+          ) : detailLoadFailed ? (
+            <Alert tone="bad" title="Could not load the starter" action={<Button onClick={retry}>Retry</Button>}>
+              {error} Try again.
+            </Alert>
           ) : (
             <LoadingBlock geometry="detail" label="Loading the starter" />
           )}
