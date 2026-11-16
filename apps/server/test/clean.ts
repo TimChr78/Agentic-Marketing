@@ -1,8 +1,9 @@
 import { pathToFileURL } from 'node:url';
 import { resetClickHouse } from '@agentic-marketing/events';
 import pg from 'pg';
-import { runId, sanitiseRunId } from '../../../packages/db/test/run';
+import { parseRunDatabaseMarker, runId, sanitiseRunId } from '../../../packages/db/test/run';
 import { testDatabaseUrl } from './harness';
+import { isTemplateDatabase } from './template-db';
 
 // `pnpm test:clean`: drops the databases a crashed test run left behind (#173). A run's global
 // teardown removes its own prefix; this removes leftovers on the TEST_DATABASE_URL Postgres
@@ -30,6 +31,8 @@ export interface DbRow {
   active: number;
   /** When PostgreSQL created the database's directory; null when the server cannot report it. */
   created: Date | null;
+  /** The run-ownership comment (`am-test-run:<run>:<epoch>`), or null. */
+  marker?: string | null;
 }
 
 export interface StaleOptions {
@@ -95,6 +98,7 @@ async function databaseRows(client: pg.Client): Promise<PgRow[]> {
   const sql = (withAge: boolean) => `
     SELECT d.datname AS name,
            d.oid,
+           shobj_description(d.oid, 'pg_database') AS marker,
            (SELECT count(*)::int FROM pg_stat_activity a WHERE a.datname = d.datname) AS active
            ${withAge ? ", (pg_stat_file('base/' || d.oid || '/PG_VERSION')).modification AS created" : ', NULL::timestamptz AS created'}
     FROM pg_database d
@@ -172,6 +176,8 @@ export interface CleanOptions {
   allStale?: boolean;
   /** Limit --all-stale to these runs' namespaces (see StaleOptions.onlyRuns). */
   onlyRuns?: string[];
+  /** Drop every template database, for a stack whose templates have piled up. */
+  templates?: boolean;
   minAgeMs?: number;
   /** Injectable for tests. */
   now?: number;
@@ -219,6 +225,31 @@ export async function cleanTestDatabases(opts: CleanOptions = {}): Promise<Clean
         result.pgDropped.push(name);
       } catch (error) {
         result.skipped.push({ name, reason: `in use again; not dropped (${(error as Error).message})` });
+      }
+    }
+
+    if (opts.templates) {
+      // A template can be cloned by any run, and a clone keeps no connection, so only drop them
+      // when nothing looks like it is running. Templates are kept otherwise (setup never prunes).
+      const active = rows.filter((row) => parseRunDatabaseMarker(row.marker) && row.active > 0);
+      if (active.length > 0) {
+        result.skipped.push({
+          name: 'templates',
+          reason: `a test run is active (${active.map((row) => row.name).join(', ')}); run again when it has finished`,
+        });
+      } else {
+        for (const row of rows.filter((candidate) => isTemplateDatabase(candidate.name))) {
+          if (row.active > 0) {
+            result.skipped.push({ name: row.name, reason: 'has an active connection' });
+            continue;
+          }
+          try {
+            await dropDatabase(client, row.name, false);
+            result.pgDropped.push(row.name);
+          } catch (error) {
+            result.skipped.push({ name: row.name, reason: `in use; not dropped (${(error as Error).message})` });
+          }
+        }
       }
     }
   } finally {
@@ -271,12 +302,14 @@ function report(result: CleanResult) {
 const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : '';
 if (import.meta.url === invokedPath) {
   const args = process.argv.slice(2);
-  const unknown = args.filter((arg) => arg !== '--all-stale');
+  const known = new Set(['--all-stale', '--templates']);
+  const unknown = args.filter((arg) => !known.has(arg));
   if (unknown.length > 0) {
-    console.error(`error: unknown argument '${unknown[0]}' (usage: test:clean [--all-stale])`);
+    console.error(`error: unknown argument '${unknown[0]}' (usage: test:clean [--all-stale] [--templates])`);
     process.exit(2);
   }
   const allStale = args.includes('--all-stale');
+  const templates = args.includes('--templates');
   const minutes = Number(process.env.AM_TEST_CLEAN_STALE_MINUTES ?? 60);
   if (!process.env.AM_TEST_RUN && !process.env.CI) {
     console.warn(
@@ -286,6 +319,7 @@ if (import.meta.url === invokedPath) {
   const result = await cleanTestDatabases({
     run: runId,
     allStale,
+    templates,
     minAgeMs: (Number.isFinite(minutes) && minutes > 0 ? minutes : 60) * 60_000,
   });
   report(result);

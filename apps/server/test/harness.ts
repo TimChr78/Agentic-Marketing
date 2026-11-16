@@ -7,7 +7,7 @@ import { migrateClickHouse, resetClickHouse, resetNatsNamespace, resetNatsPrefix
 import { serve } from '@hono/node-server';
 import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
-import { runId, scopedDbName, testPortOffset } from '../../../packages/db/test/run';
+import { runDatabaseMarker, runId, scopedDbName, testPortOffset } from '../../../packages/db/test/run';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import { prefixOf } from '../src/domains';
@@ -16,10 +16,10 @@ import type { Commands } from '../src/registry';
 import { startScheduler, startWorkers } from '../src/workers';
 import {
   ensureTemplateDatabase,
-  migrationsFingerprint,
-  pruneTemplateDatabases,
+  quoteIdent,
   sweepRunDatabases,
   templateDatabaseName,
+  templateFingerprint,
   templateMarker,
   withTemplateLock,
 } from './template-db';
@@ -167,10 +167,11 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
 export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 1000 + testPortOffset();
 
 /**
- * The migrated template database: named after the migration files, so an unchanged tree reuses it
- * across runs and checkouts, and test-setup.ts shares the name through AM_TEST_TEMPLATE.
+ * The migrated template database: named after a fingerprint of the whole build recipe, so an
+ * unchanged tree reuses it across runs and checkouts, and test-setup.ts shares the name through
+ * AM_TEST_TEMPLATE.
  */
-export const templateDbName = () => process.env.AM_TEST_TEMPLATE ?? templateDatabaseName();
+export const templateDbName = () => process.env.AM_TEST_TEMPLATE ?? templateDatabaseName(templateFingerprint({ role: APP_ROLE }));
 
 // Hot state (rate-limit buckets, sessions, snapshots) is not dropped with the databases. A run-unique
 // prefix keeps one run's buckets out of the next one, which matters now that seeded fixtures reuse
@@ -187,13 +188,15 @@ export function testDatabaseUrl(dbName: string) {
 
 /**
  * Builds the template: Postgres migrations, the app role and better-auth's tables, under the shared
- * maintenance advisory lock (test-setup.ts). The template is keyed on a hash of the migration files,
- * so a run reuses a completed one when nothing changed instead of replaying every migration, and the
- * lock keeps two concurrent runs from building or dropping it at once. The same lock and pass sweep
- * run databases that killed runs left behind and templates beyond the newest few. Returns the name.
+ * maintenance advisory lock (test-setup.ts). The template is keyed on a fingerprint of the whole
+ * recipe (migrations, migrator, auth options, Better Auth version, app role), so a run reuses a
+ * completed one when nothing changed instead of replaying every migration, and the lock keeps two
+ * concurrent runs from building or dropping it at once. The same lock and pass sweep run databases
+ * that killed runs left behind, on the shared test stack only. Templates are never pruned here; see
+ * `pnpm test:clean -- --templates`. Returns the name.
  */
 export async function prepareTemplateDatabase(): Promise<string> {
-  const fingerprint = migrationsFingerprint();
+  const fingerprint = templateFingerprint({ role: APP_ROLE });
   const template = templateDatabaseName(fingerprint);
   const marker = templateMarker(fingerprint);
   const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
@@ -201,7 +204,8 @@ export async function prepareTemplateDatabase(): Promise<string> {
   try {
     await withTemplateLock(maint, async () => {
       const swept = await sweepRunDatabases(maint, { run: runId });
-      if (swept.found) console.log(`[test] swept ${swept.found} run database(s): dropped ${swept.dropped.length} older than 6 hours`);
+      if (!swept.swept) console.log(`[test] run-database sweep skipped: ${swept.reason}`);
+      else if (swept.found) console.log(`[test] swept ${swept.found} run database(s): dropped ${swept.dropped.length} older than 6 hours`);
       const { built } = await ensureTemplateDatabase(maint, {
         name: template,
         marker,
@@ -216,8 +220,6 @@ export async function prepareTemplateDatabase(): Promise<string> {
         },
       });
       console.log(`[test] ${built ? 'built' : 'reused'} template ${template}`);
-      const pruned = await pruneTemplateDatabases(maint);
-      if (pruned.dropped.length) console.log(`[test] dropped ${pruned.dropped.length} older template(s)`);
     });
   } finally {
     await maint.end();
@@ -284,6 +286,10 @@ export async function freshDatabase(name: string): Promise<{ url: URL; migrated:
         await new Promise((r) => setTimeout(r, 100 + Math.random() * 200));
       }
     }
+    // Ownership metadata for the sweeper: only a database carrying this comment is a run database,
+    // so a name alone (am_customer_archive) or a database from before this marker is never dropped.
+    const marker = runDatabaseMarker(runId).replaceAll("'", "''");
+    await maint.query(`COMMENT ON DATABASE ${quoteIdent(dbName)} IS '${marker}'`);
   } finally {
     await maint.end();
   }

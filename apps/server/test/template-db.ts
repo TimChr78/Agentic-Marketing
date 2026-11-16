@@ -1,18 +1,22 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
+import { parseRunDatabaseMarker } from '../../../packages/db/test/run';
 
 // The migrated template database every test file copies, and the cleanup of run databases a killed
-// run left behind. Both are shared by every checkout and delegate on the test stack, so both run
-// under one advisory lock (harness.ts takes it around them).
+// run left behind. The template is shared by every checkout and delegate on the test stack, so it
+// is built under one advisory lock (harness.ts takes it around the build).
 //
-// The template is named after a fingerprint of the migration files: a migration edit produces a new
-// template, and an unchanged tree reuses the one it built last time instead of replaying every
-// migration on each run. `COMMENT ON DATABASE` is the completeness marker, written last, so a build
-// that crashed halfway is not mistaken for a finished one. The newest few templates are kept, so a
-// branch that switches between two heads does not rebuild on every switch.
+// The template is named after a fingerprint of the whole recipe that shapes it: the migration SQL,
+// the migrator and role setup, the auth options that generate Better Auth's tables, the installed
+// Better Auth version and the app role. An unchanged tree reuses the completed template instead of
+// replaying every migration; `COMMENT ON DATABASE` is the completeness marker, written last, so a
+// build that crashed halfway is not mistaken for a finished one. Templates are never pruned
+// automatically (`pnpm test:clean -- --templates` drops them by hand): a run may be cloning any of
+// them, and clones happen outside the lock.
 
 export const TEMPLATE_PREFIX = 'am_tpl_';
 
@@ -21,7 +25,7 @@ export function templateMarker(fingerprint: string): string {
   return `am-test-template:${fingerprint}`;
 }
 
-/** The advisory lock key shared by template builds, template drops and stale-run sweeps. */
+/** The advisory lock key around template builds. */
 export const TEMPLATE_LOCK = 'am_test_template_maintenance';
 
 /**
@@ -37,47 +41,85 @@ export async function withTemplateLock<T>(client: pg.Client, fn: () => Promise<T
   }
 }
 
+export const TEST_STACK_MARKER_DB = 'am_test_stack';
+
 /** How long a run database must be idle before the sweeper drops it. */
 export const STALE_RUN_DATABASE_MS = 6 * 60 * 60 * 1000;
 
-/** How many templates to keep (the newest by creation time; the others are dropped). */
-export const KEEP_TEMPLATES = 3;
+const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
+const MIGRATIONS_DIR = join(REPO_ROOT, 'packages/db/migrations');
 
-const MIGRATIONS_DIR = fileURLToPath(new URL('../../../packages/db/migrations', import.meta.url));
+/** Source files whose behaviour shapes the template: the migrator/role setup and the auth schema. */
+const RECIPE_FILES = ['packages/db/src/migrate.ts', 'packages/auth/src/index.ts'];
+
+/** Whether a database is a template, including the old run-scoped `am_<run>_test_template` names. */
+export function isTemplateDatabase(name: string): boolean {
+  return name.startsWith(TEMPLATE_PREFIX) || name.endsWith('_test_template');
+}
+
+/** The installed Better Auth version: it generates the auth tables `migrateAuth` writes. */
+export function betterAuthVersion(from: string = join(REPO_ROOT, 'packages/auth/package.json')): string {
+  const require = createRequire(from);
+  let dir = dirname(require.resolve('better-auth'));
+  for (;;) {
+    const manifest = join(dir, 'package.json');
+    if (existsSync(manifest)) {
+      const pkg = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string; version?: string };
+      if (pkg.name === 'better-auth' && pkg.version) return pkg.version;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) throw new Error('could not find the installed better-auth package.json');
+    dir = parent;
+  }
+}
+
+export interface TemplateFingerprintOptions {
+  /** The directory of migration SQL files (tests point it at a fixture). */
+  migrationsDir?: string;
+  /** Recipe source files, resolved against the repository root. */
+  files?: string[];
+  /** Version inputs that shape the schema but are no repository file. */
+  versions?: Record<string, string>;
+  /** The migration role the template is built for. */
+  role?: { appRole: string; appRolePassword: string };
+}
 
 /**
- * A short fingerprint of every migration file: sorted file names and their contents. A migration
- * edit, add or removal changes it; any other repository change does not.
+ * A short fingerprint of everything the template build reads: every migration file, the migrator
+ * and role setup, the auth options module, the installed Better Auth version and the app role.
+ * Changing any input builds a new template; changing anything else does not.
  */
-export function migrationsFingerprint(dir: string = MIGRATIONS_DIR): string {
+export function templateFingerprint(options: TemplateFingerprintOptions = {}): string {
+  const migrationsDir = options.migrationsDir ?? MIGRATIONS_DIR;
+  const files = options.files ?? RECIPE_FILES;
+  const versions = options.versions ?? { 'better-auth': betterAuthVersion() };
+  const role = options.role ?? { appRole: '', appRolePassword: '' };
   const hash = createHash('sha256');
-  const files = readdirSync(dir)
-    .filter((name) => name.endsWith('.sql'))
-    .sort();
-  for (const name of files) {
-    hash
-      .update(name)
-      .update('\0')
-      .update(readFileSync(join(dir, name)))
-      .update('\0');
-  }
+  const add = (label: string, value: string) => hash.update(`${label}\0${value}\0`);
+
+  for (const name of readdirSync(migrationsDir)
+    .filter((entry) => entry.endsWith('.sql'))
+    .sort())
+    add(`migration:${name}`, readFileSync(join(migrationsDir, name), 'utf8'));
+  for (const file of [...files].sort()) add(`file:${file}`, readFileSync(resolve(REPO_ROOT, file), 'utf8'));
+  for (const [name, version] of Object.entries(versions).sort(([a], [b]) => a.localeCompare(b))) add(`version:${name}`, version);
+  add('role:appRole', role.appRole);
+  add('role:appRolePassword', role.appRolePassword);
+
   return hash.digest('hex').slice(0, 12);
 }
 
-/** The template database name for a fingerprint (default: the migrations on disk). */
-export function templateDatabaseName(fingerprint: string = migrationsFingerprint()): string {
+/** The template database name for a fingerprint. */
+export function templateDatabaseName(fingerprint: string): string {
   return `${TEMPLATE_PREFIX}${fingerprint}`;
-}
-
-/** Whether a database is a template, old naming (`am_<run>_test_template`) included. */
-export function isTemplateDatabase(name: string): boolean {
-  return name.startsWith(TEMPLATE_PREFIX) || name.endsWith('_test_template');
 }
 
 export const quoteIdent = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
 export interface DatabaseRow {
   name: string;
+  /** The database's `COMMENT`, which is how a run says it owns it, or null. */
+  marker: string | null;
   /** When PostgreSQL created the database's directory; null when the server cannot report it. */
   created: Date | null;
   active: number;
@@ -86,19 +128,17 @@ export interface DatabaseRow {
 interface PgRow {
   name: string;
   oid: number;
+  marker: string | null;
   active: number;
   created: Date | null;
 }
 
-/**
- * Every non-template database with its live connection count and creation time. `pg_stat_file` is
- * what tells us how old a database is; a restricted role may not read it, and then age is unknown
- * and the callers decline to guess.
- */
+/** Every non-template database with its comment, live connection count and creation time. */
 export async function databaseRows(client: pg.Client): Promise<DatabaseRow[]> {
   const sql = (withAge: boolean) => `
     SELECT d.datname AS name,
            d.oid,
+           shobj_description(d.oid, 'pg_database') AS marker,
            (SELECT count(*)::int FROM pg_stat_activity a WHERE a.datname = d.datname) AS active
            ${withAge ? ", (pg_stat_file('base/' || d.oid || '/PG_VERSION')).modification AS created" : ', NULL::timestamptz AS created'}
     FROM pg_database d
@@ -109,7 +149,12 @@ export async function databaseRows(client: pg.Client): Promise<DatabaseRow[]> {
   } catch {
     rows = (await client.query<PgRow>(sql(false))).rows;
   }
-  return rows.map((row) => ({ name: row.name, active: row.active, created: row.created ? new Date(row.created) : null }));
+  return rows.map((row) => ({
+    name: row.name,
+    marker: row.marker,
+    active: row.active,
+    created: row.created ? new Date(row.created) : null,
+  }));
 }
 
 /**
@@ -138,17 +183,10 @@ export async function ensureTemplateDatabase(
   return { built: true };
 }
 
-/**
- * Templates to drop: everything but the newest `keep`, and never one that still has a connection
- * (another run may be cloning it) or whose age is unknown.
- */
-export function templatesToDrop(rows: DatabaseRow[], keep: number = KEEP_TEMPLATES): string[] {
-  const templates = rows.filter((row) => isTemplateDatabase(row.name) && row.created !== null);
-  const newestFirst = [...templates].sort((a, b) => b.created!.getTime() - a.created!.getTime());
-  return newestFirst
-    .slice(keep)
-    .filter((row) => row.active === 0)
-    .map((row) => row.name);
+/** Whether the server is the shared test stack: only `scripts/test-services.sh up` creates the marker. */
+export async function hasTestStackMarker(client: pg.Client, markerDatabase: string = TEST_STACK_MARKER_DB): Promise<boolean> {
+  const { rows } = await client.query(`SELECT 1 FROM pg_database WHERE datname = $1`, [markerDatabase]);
+  return rows.length > 0;
 }
 
 export interface StaleRunOptions {
@@ -164,30 +202,25 @@ export interface StaleRunResult {
   skipped: { name: string; reason: string }[];
 }
 
-/** `am_<run>_<test name>`: the run namespace the harness writes, plus the e2e/backup/doctor names. */
-export const RUN_DATABASE = /^am_([a-z0-9]{1,16})_/;
-
 /**
- * Run databases that are safe to drop: matching the run naming convention, not a template, not the
- * calling run's own, idle, and older than the threshold. Everything else is reported.
+ * Run databases that are safe to drop: owned by a run through its `am-test-run:` comment, not the
+ * calling run's own, idle, and older than the threshold. A database without that comment is never
+ * a candidate, whatever its name; everything declined is reported.
  */
 export function classifyRunDatabases(rows: DatabaseRow[], options: StaleRunOptions): StaleRunResult {
   const minAgeMs = options.minAgeMs ?? STALE_RUN_DATABASE_MS;
   const now = options.now ?? Date.now();
   const hours = Math.round(minAgeMs / 3_600_000);
-  const own = options.run ? `am_${options.run}_` : null;
   const result: StaleRunResult = { found: 0, drop: [], skipped: [] };
   for (const row of rows) {
-    const match = RUN_DATABASE.exec(row.name);
-    if (!match || isTemplateDatabase(row.name)) continue;
+    const marker = parseRunDatabaseMarker(row.marker);
+    if (!marker) continue;
     result.found++;
-    if (own && row.name.startsWith(own)) {
+    if (marker.run === options.run) {
       result.skipped.push({ name: row.name, reason: "this run's own database" });
     } else if (row.active > 0) {
       result.skipped.push({ name: row.name, reason: `${row.active} active connection(s)` });
-    } else if (!row.created) {
-      result.skipped.push({ name: row.name, reason: 'age unknown' });
-    } else if (now - row.created.getTime() < minAgeMs) {
+    } else if (now - marker.created < minAgeMs) {
       result.skipped.push({ name: row.name, reason: `younger than ${hours} hour(s)` });
     } else {
       result.drop.push(row.name);
@@ -201,14 +234,30 @@ export async function dropDatabase(client: pg.Client, name: string): Promise<voi
   await client.query(`DROP DATABASE IF EXISTS ${quoteIdent(name)}`);
 }
 
+export interface SweepResult extends StaleRunResult {
+  /** False when the server is not the shared test stack (fail closed) or could not be checked. */
+  swept: boolean;
+  reason?: string;
+  /** The databases actually dropped (some candidates may fail to drop). */
+  dropped: string[];
+}
+
 /**
- * Drops the run databases of killed runs (see classifyRunDatabases). The caller holds TEMPLATE_LOCK
- * and skips its own run's databases. A database that cannot be dropped is reported, never an error.
+ * Drops the run databases of killed runs (see classifyRunDatabases), but only on the shared test
+ * stack: a Postgres without the marker database is left untouched and nothing is dropped. The caller
+ * holds TEMPLATE_LOCK. A database that cannot be dropped is reported, never an error.
  */
-export async function sweepRunDatabases(
-  client: pg.Client,
-  options: StaleRunOptions,
-): Promise<{ found: number; dropped: string[]; skipped: { name: string; reason: string }[] }> {
+export async function sweepRunDatabases(client: pg.Client, options: StaleRunOptions & { markerDatabase?: string }): Promise<SweepResult> {
+  if (!(await hasTestStackMarker(client, options.markerDatabase))) {
+    return {
+      swept: false,
+      reason: `no ${options.markerDatabase ?? TEST_STACK_MARKER_DB} database: not the shared test stack`,
+      found: 0,
+      drop: [],
+      dropped: [],
+      skipped: [],
+    };
+  }
   const result = classifyRunDatabases(await databaseRows(client), options);
   const dropped: string[] = [];
   const skipped = [...result.skipped];
@@ -220,23 +269,5 @@ export async function sweepRunDatabases(
       skipped.push({ name, reason: (error as Error).message });
     }
   }
-  return { found: result.found, dropped, skipped };
-}
-
-/** Drops all but the newest templates. A drop that fails is reported, never fatal. */
-export async function pruneTemplateDatabases(
-  client: pg.Client,
-  options: { keep?: number } = {},
-): Promise<{ dropped: string[]; skipped: { name: string; reason: string }[] }> {
-  const dropped: string[] = [];
-  const skipped: { name: string; reason: string }[] = [];
-  for (const name of templatesToDrop(await databaseRows(client), options.keep)) {
-    try {
-      await dropDatabase(client, name);
-      dropped.push(name);
-    } catch (error) {
-      skipped.push({ name, reason: (error as Error).message });
-    }
-  }
-  return { dropped, skipped };
+  return { swept: true, found: result.found, drop: result.drop, dropped, skipped };
 }

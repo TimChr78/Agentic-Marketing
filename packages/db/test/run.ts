@@ -63,5 +63,29 @@ export function scopedDbName(name: string, run: string = runId): string {
 /** Backwards-compatible alias used throughout the tests. */
 export const runScoped = (name: string) => scopedDbName(name);
 
+/**
+ * The ownership comment a run-write leaves on a database it creates. The sweeper trusts only this
+ * marker, never a name: a database called `am_customer_archive` has no marker and is not a
+ * candidate, whatever it is called. The epoch is when the run created the database, so a database
+ * whose row PostgreSQL cannot date still has an age.
+ */
+export const RUN_DATABASE_MARKER_PREFIX = 'am-test-run:';
+
+export function runDatabaseMarker(run: string = runId, created: number = Date.now()): string {
+  return `${RUN_DATABASE_MARKER_PREFIX}${run}:${created}`;
+}
+
+/** The run and creation epoch from a marker, or null for any other comment (or none). */
+export function parseRunDatabaseMarker(marker: string | null | undefined): { run: string; created: number } | null {
+  if (!marker?.startsWith(RUN_DATABASE_MARKER_PREFIX)) return null;
+  const rest = marker.slice(RUN_DATABASE_MARKER_PREFIX.length);
+  const separator = rest.lastIndexOf(':');
+  if (separator < 0) return null;
+  const run = rest.slice(0, separator);
+  const created = Number(rest.slice(separator + 1));
+  if (!/^[a-z0-9]{0,16}$/.test(run) || !Number.isFinite(created) || created <= 0) return null;
+  return { run, created };
+}
+
 /** The port offset from TEST_PORT_OFFSET; 0 when unset or not a number. */
 export const testPortOffset = (env: Record<string, string | undefined> = process.env) => Number(env.TEST_PORT_OFFSET ?? '0') || 0;

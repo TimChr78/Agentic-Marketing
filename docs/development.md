@@ -350,7 +350,8 @@ pnpm test        # every Vitest project; needs the shared test stack (scripts/te
                  # eval "$(scripts/test-services.sh env)") or services of your own
 pnpm vitest run --project docs       # one project: docs, packages, web or server
 pnpm test:ci     # what CI runs: also writes reports/junit.xml and a coverage report in reports/coverage
-pnpm test:clean  # drop the current run's leftover test databases (--all-stale for older idle runs)
+pnpm test:clean  # drop the current run's leftover test databases (--all-stale for older idle runs,
+                 # --templates for the template databases when no test run is active)
 node scripts/check-versions.mjs      # every file that names the release version agrees (see Releasing)
 pnpm audit --prod --audit-level=moderate   # accepted advisories are listed in SECURITY.md
 ```
@@ -443,22 +444,30 @@ install are left alone. It is a dry run until `--yes`.
 The `server` project runs its files in parallel, four at a time (`TEST_WORKERS` sets the worker
 count; 1 runs them one by one). Each file gets its own Postgres and ClickHouse database, NATS
 namespace and Valkey prefix, and `apps/server/test/setup.ts` migrates one template database first
-so every file starts from a copy of it. The template is named after a hash of the migration files
-(`am_tpl_<hash12>`, shared through `AM_TEST_TEMPLATE`) and marked complete with `COMMENT ON DATABASE`
-written last: an unchanged tree reuses the completed template instead of replaying every migration,
-only a migration edit builds a new one, and a build that crashed halfway is rebuilt. Builds and
-drops run under one Postgres advisory lock, so two runs (or two checkouts) on the shared stack never
-build or drop the same template at once; the newest three templates are kept so switching between
-branches does not migrate again, and a template that still has a connection is never dropped (another
-run may be cloning it). Ports come from `testPort()` in
+so every file starts from a copy of it. The template is named after a fingerprint of the whole build
+recipe (`am_tpl_<hash12>`, shared through `AM_TEST_TEMPLATE`): every migration file, the migrator and
+role setup, the auth options module, the installed Better Auth version and the app role. It is marked
+complete with `COMMENT ON DATABASE` written last, so an unchanged tree reuses the completed template
+instead of replaying every migration, any change to the recipe builds a new one, and a build that
+crashed halfway is rebuilt. Builds run under one Postgres advisory lock, so two runs (or two checkouts)
+on the shared stack never build the same template at once. Templates are never pruned automatically:
+a run may be cloning any of them, and the clone keeps no connection. They are a handful of databases;
+drop the old ones by hand with `pnpm test:clean -- --templates` when no test run is active (it refuses
+while a run database has a connection). Ports come from `testPort()` in
 `apps/server/test/harness.ts`, which gives each worker its own block; `TEST_PORT_OFFSET` moves
 every block and the seeded e2e server's default port, so a second checkout can run at the same
 time even against another stack.
 
-The same setup pass, under the same lock, drops run databases that killed runs left behind: names
-in the run convention (`am_<run>_...`), no connection, and older than six hours. It never touches a
-template, its own run's databases, a younger one or a name outside the convention, and it prints how
-many it found and dropped.
+The same setup pass, under the same lock, drops run databases that killed runs left behind. Ownership
+is a comment, not a name: every database the harness or a package test creates carries
+`COMMENT ON DATABASE ... IS 'am-test-run:<run>:<epoch>'`. The sweeper only considers databases with
+that comment, skips its own run and any with a connection, and drops the rest after six hours. It
+does nothing unless Postgres is the shared test stack: `scripts/test-services.sh up` creates the
+`am_test_stack` database as the marker, so a stack someone provisioned another way (and CI's service
+containers) is never touched. An ordinary database whose name happens to start with `am_` has no
+comment and is never a candidate. Databases created before this marker are left alone; list them with
+`SELECT datname FROM pg_database WHERE datname LIKE 'am\_%' AND shobj_description(oid, 'pg_database') IS NULL`
+and drop the ones a dead run left by hand.
 
 `AM_TEST_RUN` namespaces a whole run: every database, ClickHouse database, NATS namespace and
 Valkey prefix is written `am_<run>_...`, so two checkouts (or two delegates) can use one stack
