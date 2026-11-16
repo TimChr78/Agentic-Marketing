@@ -88,8 +88,8 @@ const FORM_KEYS = KEYS.filter((key) => key !== 'entryKey' && key !== 'monkey');
 
 /**
  * How a value carrying the secret can be written, given a key, including the #937 value shapes
- * (structured, typographic-quoted, PEM, escaped JSON, URL-encoded, nested). A `=>` pair is not
- * here: its post-pipeline output has lost the arrow, so it is a skipped shape (#937 round 2).
+ * (structured, typographic-quoted, escaped JSON, URL-encoded, nested). `=>` and PEM are not
+ * here: their post-pipeline output has lost the evidence, so they are skipped shapes (#937).
  */
 const FORMS: ((key: string) => string)[] = [
   (key) => `${key}=${SECRET}`,
@@ -110,7 +110,6 @@ const FORMS: ((key: string) => string)[] = [
   (key) => `{"${key}":{"v":"${SECRET}"}}`,
   (key) => `${key}: \u201c${SECRET}\u201d`,
   (key) => `${key}: \u00ab${SECRET}\u00bb`,
-  (key) => `${key}=-----BEGIN RSA PRIVATE KEY-----\n${SECRET}\n-----END RSA PRIVATE KEY-----`,
   (key) => `{\\"${key}\\":\\"${SECRET}\\"}`,
   (key) => `${key}%3D${SECRET}`,
   () => `SIGNINGKEY=AZUREOPENAIKEY='${SECRET}'`,
@@ -380,13 +379,6 @@ describe('the #937 value-shape passes stay linear', () => {
     "token=[redacted]'x'",
     `token=[redacted]${'\'a\'"b"'.repeat(16)}`,
     '{"token":[redacted]"shortpw"]}',
-    // PEM, standalone and marker-headed; a run of markers with no BEGIN (review round 2).
-    '-----BEGIN ',
-    '-----BEGIN RSA PRIVATE KEY-----\n',
-    'password=-----BEGIN RSA PRIVATE KEY-----\n',
-    '[redacted] ',
-    '-----BEGIN PUBLIC KEY-----\n',
-    '-----BEGIN X\n',
     // The passes that were already post-only.
     '{\\"password\\":\\"x\\"',
     'password%3D',
@@ -418,27 +410,6 @@ describe('the #937 value-shape passes stay linear', () => {
       const second = Math.min(measure(large), measure(large));
       if (second > Math.max(first * 10, 50)) slow.push(`${JSON.stringify(shape)} ${first.toFixed(1)}ms → ${second.toFixed(1)}ms`);
     }
-    expect(slow).toEqual([]);
-  }, 120_000);
-
-  it('does not rescan the suffix for every marker in the PEM scan (#937 round 2)', () => {
-    const slow: string[] = [];
-    for (const bytes of [256 * 1024, 512 * 1024, 1024 * 1024]) {
-      const text = `${repeatTo('[redacted] ', bytes)} PRIVATE KEY`;
-      const elapsed = measure(text);
-      if (elapsed >= SLOW_MS) slow.push(`${(bytes / 1024).toFixed(0)}KiB of markers ${elapsed.toFixed(0)}ms`);
-    }
-    expect(slow).toEqual([]);
-  }, 120_000);
-
-  it('skips runs of public and invalid headers without rescanning (#937 round 2)', () => {
-    const slow: string[] = [];
-    for (const header of ['-----BEGIN PUBLIC KEY-----\n', '-----BEGIN X\n', '-----BEGIN -----\n'])
-      for (const bytes of [256 * 1024, 512 * 1024, 1024 * 1024]) {
-        const text = `${repeatTo(header, bytes)} PRIVATE KEY`;
-        const elapsed = measure(text);
-        if (elapsed >= SLOW_MS) slow.push(`${JSON.stringify(header)} ${(bytes / 1024).toFixed(0)}KiB ${elapsed.toFixed(0)}ms`);
-      }
     expect(slow).toEqual([]);
   }, 120_000);
 });

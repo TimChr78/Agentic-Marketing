@@ -1041,127 +1041,17 @@ function redactMarkerGlue(text: string): string {
   return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), gluedMarkerSpan, isShapesCredentialKey, '');
 }
 
-const PEM_BEGIN = '-----BEGIN ';
-const PEM_END = '-----END ';
-const PEM_DASHES = '-----';
-const PEM_HEADER_LIMIT = 64;
-
-/**
- * The end of a `[A-Z ]*PRIVATE KEY-----` header that starts just after `-----BEGIN `/`-----END `,
- * or -1. The name is bounded (64 characters) and only capitals and spaces are read, so a long run
- * of dashes or text cannot make the scan grow.
- */
-function pemKeyHeaderEnd(text: string, afterPrefix: number): number {
-  let index = afterPrefix;
-  const limit = Math.min(text.length, afterPrefix + PEM_HEADER_LIMIT);
-  while (index < limit) {
-    const char = text.charAt(index);
-    if ((char >= 'A' && char <= 'Z') || char === ' ') index += 1;
-    else break;
-  }
-  if (!text.slice(afterPrefix, index).endsWith('PRIVATE KEY')) return -1;
-  if (!text.startsWith(PEM_DASHES, index)) return -1;
-  return index + PEM_DASHES.length;
-}
-
-/** The matching `-----END …-----` for a header that ended at `from`, or -1. */
-function pemFooterEnd(text: string, from: number): number {
-  let cursor = from;
-  for (;;) {
-    const close = text.indexOf(PEM_END, cursor);
-    if (close < 0) return -1;
-    const closeEnd = pemKeyHeaderEnd(text, close + PEM_END.length);
-    if (closeEnd >= 0) return closeEnd;
-    cursor = close + 1;
-  }
-}
-
-/** Whether `index` starts a line (or the text). */
-function isLineStart(text: string, index: number): boolean {
-  if (index === 0) return true;
-  const previous = text.charAt(index - 1);
-  return previous === '\n' || previous === '\r';
-}
-
-/**
- * A standalone PEM private key block, one forward scan over the text (the next `-----BEGIN` is
- * never searched for again after a candidate). The header must start a line and must not be inside
- * a quoted value, so a quoted mention (`note="-----BEGIN PRIVATE KEY-----"`) is not a block. The
- * matching footer is required; an unterminated block that started a line runs to the end of the
- * text.
- */
-function redactPemBlocks(text: string): string {
-  if (!text.includes('PRIVATE KEY')) return text;
-  let out = '';
-  let copied = 0;
-  let index = 0;
-  let quote = '';
-  while (index < text.length) {
-    const char = text.charAt(index);
-    if (quote !== '') {
-      if (char === '\\') {
-        index += 2;
-        continue;
-      }
-      if (char === quote) quote = '';
-      index += 1;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      index += 1;
-      continue;
-    }
-    if (isLineStart(text, index) && text.startsWith(PEM_BEGIN, index)) {
-      const headerEnd = pemKeyHeaderEnd(text, index + PEM_BEGIN.length);
-      if (headerEnd >= 0) {
-        const footer = pemFooterEnd(text, headerEnd);
-        const end = footer < 0 ? text.length : footer;
-        out += `${text.slice(copied, index)}[redacted]`;
-        copied = end;
-        index = end;
-        continue;
-      }
-    }
-    index += 1;
-  }
-  return copied === 0 ? text : out + text.slice(copied);
-}
-
-/**
- * The same block under a credential key: the first rule replaced `-----BEGIN` with the marker, so
- * the value is `[redacted] RSA PRIVATE KEY-----\n…`. The marker is evidence the value was a PEM
- * header, and a matching footer is required, so an ordinary marker followed by prose is untouched.
- */
-function keyedPemValueEnd(text: string, valueStart: number): ValueSpan | null {
-  if (!text.startsWith(MARKER, valueStart)) return null;
-  let cursor = valueStart + MARKER.length;
-  if (text.charAt(cursor) !== ' ') return null;
-  while (text.charAt(cursor) === ' ') cursor += 1;
-  const headerEnd = pemKeyHeaderEnd(text, cursor);
-  if (headerEnd < 0) return null;
-  const footer = pemFooterEnd(text, headerEnd);
-  return footer < 0 ? null : { start: valueStart + MARKER.length, end: footer };
-}
-
-function redactKeyedPem(text: string): string {
-  if (!text.includes('PRIVATE KEY') || !text.includes(PEM_END)) return text;
-  return redactPairValues(text, (value, nameEnd) => separatorEnd(value, nameEnd, true), keyedPemValueEnd, isShapesCredentialKey, '');
-}
-
 /**
  * Every #937 pass, on the released pipeline's output. Each reads the text once, reaches its fixed
- * point in that one call, and only replaces more of what the pipeline left. The typographic-quote
- * and `=>` remainders are deliberately absent: their post-pipeline text has lost the evidence that
- * the original value was quoted (see the pull request and the skipped-shape tests).
+ * point in that one call, and only replaces more of what the pipeline left. The typographic-quote,
+ * `=>` and PEM shapes are deliberately absent: their post-pipeline text has lost the evidence they
+ * need (see the pull request and the skipped-shape tests).
  */
 function redactSettledValueShapes(text: string): string {
   let out = redactShortSchemeValues(text);
   out = redactEscapedJsonPairs(out);
   out = redactUrlEncodedPairs(out);
   out = redactPwdKeys(out);
-  out = redactKeyedPem(out);
-  out = redactPemBlocks(out);
   out = redactMarkerGlue(out);
   return out;
 }

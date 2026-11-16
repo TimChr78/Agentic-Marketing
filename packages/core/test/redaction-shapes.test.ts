@@ -133,28 +133,30 @@ describe('`=>` is skipped (#937 follow-up)', () => {
   });
 });
 
-describe('a PEM private key block (#937)', () => {
+describe('a PEM private key block is skipped (#937 follow-up)', () => {
+  // PEM has needed a fix in every review round, so it leaves this pull request. These assert the
+  // released output exactly; a follow-up will handle PEM with the original-input context.
   const block = (name: string, body: string): string => `-----BEGIN ${name}-----\n${body}\n-----END ${name}-----`;
 
-  it('replaces a line-start block, standalone or under a credential key', () => {
-    expect(idempotent(block('PRIVATE KEY', SECRET))).toBe('[redacted]');
-    expect(idempotent(block('RSA PRIVATE KEY', SECRET))).toBe('[redacted]');
-    expect(idempotent(`see\n${block('OPENSSH PRIVATE KEY', SECRET)}`)).toBe('see\n[redacted]');
-    expect(idempotent(`password=${block('EC PRIVATE KEY', SECRET)}`)).toBe('password=[redacted]');
+  it('leaves a standalone and a keyed block as the released pipeline leaves them', () => {
+    for (const input of [block('PRIVATE KEY', SECRET), block('RSA PRIVATE KEY', SECRET), `password=${block('EC PRIVATE KEY', SECRET)}`])
+      expect(idempotent(input), input).toBe(released(input));
   });
 
-  it('replaces an unterminated line-start block to the end of the text', () => {
-    expect(idempotent(`-----BEGIN PRIVATE KEY-----\n${SECRET}`)).toBe('[redacted]');
+  it('leaves the round-3 PEM review inputs unchanged', () => {
+    const inputs = [
+      // The keyed scan's quadratic input.
+      `${'password=[redacted] RSA PRIVATE KEY-----\n'.repeat(1_024)}-----END PUBLIC KEY-----`,
+      // A footer with a different label must not end an RSA block.
+      `${block('RSA PRIVATE KEY', SECRET)}\n-----END EC PRIVATE KEY-----`,
+      // An apostrophe in prose must not suppress a genuine line-start block.
+      `can't load key\n${block('PRIVATE KEY', SECRET)}`,
+    ];
+    for (const input of inputs) expect(idempotent(input), input.slice(0, 40)).toBe(released(input));
   });
 
-  it('leaves a mid-line header, a quoted mention, public blocks and prose alone', () => {
-    for (const input of [
-      `see ${block('RSA PRIVATE KEY', SECRET)} here`,
-      'note="-----BEGIN PRIVATE KEY-----" status="ok"\nmore ordinary diagnostics',
-      block('CERTIFICATE', SECRET),
-      block('PUBLIC KEY', SECRET),
-      'the header -----BEGIN CERTIFICATE----- is public',
-    ])
+  it('leaves public blocks and prose alone', () => {
+    for (const input of [block('CERTIFICATE', SECRET), block('PUBLIC KEY', SECRET), 'the header -----BEGIN CERTIFICATE----- is public'])
       expect(idempotent(input), input).toBe(released(input));
   });
 });

@@ -390,9 +390,6 @@ const SHAPES: [string, (key: string, value: string) => string][] = [
   ['arrow quoted', (key, value) => `'${key}' => '${value}'`],
   ['arrow double', (key, value) => `:${key} => "${value}"`],
   ['arrow bare', (key, value) => `${key} => ${value}`],
-  ['pem', (_key, value) => `-----BEGIN PRIVATE KEY-----\n${value}\n-----END PRIVATE KEY-----`],
-  ['pem keyed', (key, value) => `${key}=-----BEGIN RSA PRIVATE KEY-----\n${value}\n-----END RSA PRIVATE KEY-----`],
-  ['pem unclosed', (_key, value) => `-----BEGIN PRIVATE KEY-----\n${value}`],
   ['escaped json', (key, value) => `{\\"${key}\\":\\"${value}\\"}`],
   ['url encoded', (_key, value) => `password%3D${value}`],
   ['url encoded quoted', (_key, value) => `token%22%3A%22${value}`],
@@ -461,7 +458,7 @@ function* review(): Generator<Generated> {
       secrets: [token],
     };
   }
-  // Round 2: a mixed arrow/glue chain, the over-redaction inputs, and PEM marker/header runs.
+  // Round 2: a mixed arrow/glue chain and the over-redaction inputs.
   {
     const token = marker();
     yield {
@@ -474,18 +471,6 @@ function* review(): Generator<Generated> {
     yield {
       input: `token=[redacted]${' '.repeat(spaces)}"status":"ok" ${sentinel()}`,
       name: `review marker prose ${spaces}`,
-      secrets: [],
-    };
-  for (const count of [1, 64, 256])
-    yield {
-      input: `${'[redacted] '.repeat(count)} PRIVATE KEY ${sentinel()}`,
-      name: `review marker pem run ${count}`,
-      secrets: [],
-    };
-  for (const header of ['-----BEGIN PUBLIC KEY-----\n', '-----BEGIN X\n', '-----BEGIN -----\n'])
-    yield {
-      input: `${header.repeat(16)} PRIVATE KEY ${sentinel()}`,
-      name: `review invalid pem ${header.trim()}`,
       secrets: [],
     };
 }
@@ -594,6 +579,10 @@ describe('the new redactor never keeps what an earlier release removed (#937)', 
       ':password => "x"',
       'apiSecret => xyz',
       `token => ${'\'a\'"b" '.repeat(16)}'S3cr3tV4l'`,
+      // Round 3 PEM inputs: skipped with PEM, so they must equal the released output.
+      `${'password=[redacted] RSA PRIVATE KEY-----\n'.repeat(1_024)}-----END PUBLIC KEY-----`,
+      '-----BEGIN RSA PRIVATE KEY-----\nS3cr3tV4l\n-----END RSA PRIVATE KEY-----\n-----END EC PRIVATE KEY-----',
+      "can't load key\n-----BEGIN PRIVATE KEY-----\nS3cr3tV4l\n-----END PRIVATE KEY-----",
     ];
     for (const input of unchanged) expect(redactCredentials(input), input).toBe(redact01424(input));
   });
