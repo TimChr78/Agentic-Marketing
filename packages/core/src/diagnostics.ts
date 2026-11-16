@@ -316,7 +316,10 @@ function isUpperCredentialKey(name: string): boolean {
   if (UPPER_SUFFIXES.some((word) => lower.length > word.length && lower.endsWith(word))) return true;
   if (!lower.endsWith('key')) return false;
   const stem = lower.slice(0, -3);
-  for (const qualifier of KEY_QUALIFIERS) if (stem.endsWith(qualifier)) return true;
+  // A provider name this batch added (`AZUREOPENAIKEY`) may also end in an older qualifier
+  // (`openai`); leave it to the additive pass so main cannot swallow its inner pair.
+  for (const qualifier of ADDED_PROVIDER_QUALIFIERS) if (stem.endsWith(qualifier)) return false;
+  for (const qualifier of MAIN_KEY_QUALIFIERS) if (stem.endsWith(qualifier)) return true;
   return false;
 }
 
@@ -497,7 +500,14 @@ function isAddedProviderKey(name: string): boolean {
     .split(/[_.-]+/)
     .filter(Boolean);
   const lastPart = parts[parts.length - 1];
-  if (!lastPart || !/[a-z]/.test(lastPart)) return false;
+  if (!lastPart) return false;
+  if (!/[a-z]/.test(lastPart)) {
+    const lower = lastPart.toLowerCase();
+    if (!lower.endsWith('key')) return false;
+    const stem = lower.slice(0, -3);
+    for (const qualifier of ADDED_PROVIDER_QUALIFIERS) if (stem.endsWith(qualifier)) return true;
+    return false;
+  }
   const words = parts.flatMap((part) => part.split(CAMEL_BOUNDARY)).map((word) => word.toLowerCase());
   const last = words[words.length - 1];
   if (last !== 'key' && last !== 'keys') return false;
@@ -547,13 +557,6 @@ function redactCompoundRuns(text: string, candidateStart: CandidateStart, accept
     const value = PAIR_VALUE.exec(text);
     if (!value) continue;
     const valueEnd = start + value[0].length;
-    // If the value is itself the start of an inner pair (`_secretKey=apiSecret :''x`), leave the
-    // outer key to the next round: redacting only `apiSecret` would remove the inner key and orphan
-    // the text after the inner redaction. Main handles the inner pair completely first.
-    let probe = valueEnd;
-    while (isSpace(text.charAt(probe))) probe += 1;
-    const following = text.charAt(probe);
-    if ((following === ':' || following === '=') && value[0] !== '[redacted]') continue;
     if (value[0] === '[redacted]' || PLAIN_LITERAL.test(value[0])) continue;
     out += `${text.slice(copied, start)}[redacted]`;
     copied = valueEnd;

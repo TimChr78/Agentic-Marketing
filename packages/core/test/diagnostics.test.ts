@@ -304,6 +304,49 @@ describe('the prefixed pass keeps what main redacted (#968 review)', () => {
     expect(underscored).not.toContain(`apiSecret='`);
     expect(underscored).not.toContain('status=OK');
   });
+
+  it('redacts an uppercase provider key only in the additive pass (#968 round 3)', () => {
+    const qualifiers = [
+      'MISTRAL',
+      'OLLAMA',
+      'VLLM',
+      'LITELLM',
+      'OPENROUTER',
+      'LMSTUDIO',
+      'GROQ',
+      'TOGETHER',
+      'DEEPSEEK',
+      'GEMINI',
+      'COHERE',
+      'PERPLEXITY',
+      'FIREWORKS',
+      'HUGGINGFACE',
+      'HF',
+      'REPLICATE',
+      'XAI',
+      'BEDROCK',
+      'VERTEX',
+      'AZUREOPENAI',
+    ];
+    for (const qualifier of qualifiers) {
+      const input = `${qualifier}KEY=apiSecret='probe-secret'`;
+      const out = redactCredentials(input);
+      expect(out, input).not.toContain('probe-secret');
+      expect(out, input).toContain(`${qualifier}KEY=[redacted]`);
+      expect(redactCredentials(out), input).toBe(out);
+    }
+    // The exact review input: main leaves MISTRALKEY alone and redacts the inner value.
+    expect(redactCredentials(`MISTRALKEY=apiSecret='swordfish'`)).toBe('MISTRALKEY=[redacted]');
+  });
+
+  it('defers a value only when the following token is itself a credential key (#968 round 3)', () => {
+    expect(redactCredentials('_secretKey=swordfish : rejected')).toBe('_secretKey=[redacted] : rejected');
+    expect(redactCredentials('mistralKey=swordfish : rejected')).toBe('mistralKey=[redacted] : rejected');
+    // A real inner pair still gets main's complete treatment.
+    const nested = redactCredentials(`_secretKey=apiSecret :''swordfish`);
+    expect(nested).not.toContain('swordfish');
+    expect(redactCredentials(`secretKey="apiSecret='"; status='OK'`)).toBe(`secretKey=[redacted]; status='OK'`);
+  });
 });
 
 describe('URL userinfo credentials (#920)', () => {

@@ -288,6 +288,10 @@ const PREFIXED_KEYS = ['_secretKey', '__authToken', '$$SIGNINGKEY', '.sessionKey
 
 /** A unique marker inside a piece, so the payload's own value is tracked, not only an appended one. */
 function markPiece(piece: string, token: string): string {
+  // The marker must sit in the part main removes. In a URL userinfo that is the password, not the
+  // host (`https://user:Sh0rtPwQa@host`), otherwise main leaves it and the check skips the case
+  // (#968 round 3).
+  if (piece.startsWith('user:Sh0rtPw@')) return piece.replace('Sh0rtPw@', `Sh0rtPw${token}@`);
   return plantValue(piece, token);
 }
 
