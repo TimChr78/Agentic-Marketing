@@ -2,6 +2,20 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.15.2] - 2026-11-17
+
+### Changed
+
+- 0.15.1 was tagged but never published: its release run failed on two wall-clock budgets in the redaction tests, so no image, chart or bundle was built for it. 0.15.2 is the first published release with everything listed under 0.15.1 below, plus test-only changes: the redaction timing checks measure growth instead of a fixed number of seconds (#1033). Coming from 0.15.0, read the 0.15.1 notes as well.
+
+### Upgrading from 0.15.1
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none. 0.15.1 was never published, so an install on 0.15.0 upgrades straight to 0.15.2 and gets migration `0109_journey_processed_events.sql` and the changes listed under 0.15.1.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.15.2.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.15.2 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.15.2` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.15.2). Run `docker compose exec app am doctor`.
+
 ## [0.15.1] - 2026-11-17
 
 ### Changed
