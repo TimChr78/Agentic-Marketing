@@ -34,7 +34,7 @@ checkout, and `scripts/test-services.sh reset` when a stack is broken.
 ## Checks
 
 ```bash
-pnpm lint        # Biome, the e2e selector check and the changelog fragment check
+pnpm lint        # Biome, oxlint (promise rules), the e2e selector check and the changelog fragment check
 pnpm typecheck
 npx vitest run --project server apps/server/test/version.test.ts   # the file you touched
 pnpm test:clean  # drop this run's leftover test databases
