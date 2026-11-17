@@ -4,6 +4,7 @@ import {
   autonomySettings,
   coordinationFor,
   decide,
+  guardrailRefusal,
   IRREVERSIBLE,
   isDeadlock,
   REACH_CLASSES,
@@ -73,10 +74,13 @@ async function checkHeld(
   if (!held) return { person: 'the decision that held it is no longer in the ledger' };
   if (mandate.outsideHours && IRREVERSIBLE.includes(held.actionClass)) return { wait: mandate.outsideHours };
   const [agent] = await tx.select({ guard: schema.agents.guard }).from(schema.agents).where(eq(schema.agents.id, agentId));
-  const guardrailBreach =
+  // Unavailable evidence refuses a held change too: a person decides until the queue drains, but it
+  // is not a breach the guardian records (#1008).
+  const guardrailBreach = guardrailRefusal(
     REACH_CLASSES.includes(held.actionClass) && services.mandateGuardrails
       ? await services.mandateGuardrails(tx, workspaceId, agentId, mandate.view)
-      : null;
+      : null,
+  );
   // Who owns the artifacts now and what other agents have pending on them (#469): a person may have
   // transferred ownership, or another agent's request may have arrived, while this one waited.
   const coordination = await coordinationFor(tx, workspaceId, agentId, held.actionClass, held.impact);

@@ -3,7 +3,7 @@ import { dispatchOutboxOnce } from '@agentic-marketing/audience';
 import { type MessageEvent, parseMessageEventPayload } from '@agentic-marketing/events';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { runGuardianOnce } from '../src/agents/guardian';
-import { GUARDRAIL_PENDING_EVENT_LIMIT, mandateGuardrailBreach } from '../src/agents/guardrails';
+import { GUARDRAIL_PENDING_EVENT_LIMIT, mandateGuardrailCheck } from '../src/agents/guardrails';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // #1008: a safety decision before a send must see the message events the transaction committed, not
@@ -374,6 +374,37 @@ describe('guardrails read unpublished message events (#1008)', () => {
     expect(refused.status).toBe(403);
     expect(refused.body.message).toMatch(/cannot be checked/);
     expect(refused.body.message).toMatch(/am outbox/);
+
+    // Unavailable evidence is not a breach: the guardian must not cap the agent (and must not leave
+    // a cap behind when the queue catches up) for a backlog it simply could not read.
+    await runGuardianOnce(deps());
+    const capped = await s.api.call('agents.get', { id: s.agentId });
+    expect(capped.guard).toBeNull();
+    expect((await s.api.call('agents.guardian', { agentId: s.agentId, open: true })).episodes).toHaveLength(0);
+
+    // The backlog drains (the dispatcher acks what it published, the flood stands for events it
+    // published), and nothing measured breaches: the next send runs.
+    await t.srv.db.admin.query(
+      `UPDATE outbox SET state = 'delivered', delivered_at = now(), claim_token = NULL, lease_until = NULL
+       WHERE workspace_id = $1 AND operation_key LIKE 'flood:%'`,
+      [s.ws],
+    );
+    await releasePublication(s.ws);
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    await eventually(
+      async () =>
+        (
+          await t.srv.db.admin.query<{ n: number }>(
+            `SELECT count(*)::int AS n FROM outbox WHERE workspace_id = $1 AND state IN ('pending', 'delivering')`,
+            [s.ws],
+          )
+        ).rows[0]?.n ?? 0,
+      (n) => n === 0,
+    );
+    const allowed = await agentCall(s.token, 'messages.sendEmail', { profileId: s.profiles[2], templateId: s.templateId });
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.status).toBe('queued');
+    expect((await s.api.call('agents.get', { id: s.agentId })).guard).toBeNull();
   }, 90_000);
 
   it('keeps a decision correct when the dispatcher publishes the event between the snapshot and the read', async () => {
@@ -405,13 +436,16 @@ describe('guardrails read unpublished message events (#1008)', () => {
         return stats;
       },
     };
-    const breach = await t.srv.db.withWorkspace(s.ws, async (tx) => {
+    const check = await t.srv.db.withWorkspace(s.ws, async (tx) => {
       const mandate = await activeMandate(tx, s.agentId);
       if (!mandate) throw new Error('the mandate is not active');
-      return mandateGuardrailBreach({ tx, events: events as typeof t.srv.events, workspaceId: s.ws }, s.agentId, mandate.view);
+      return mandateGuardrailCheck({ tx, events: events as typeof t.srv.events, workspaceId: s.ws }, s.agentId, mandate.view);
     });
     expect(raced).toBe(true);
-    expect(breach).toMatch(/complaint rate of 33\.33%, above its mandate’s guardrail of 1%/);
+    expect(check).toMatchObject({
+      state: 'breach',
+      reason: expect.stringMatching(/complaint rate of 33\.33%, above its mandate’s guardrail of 1%/),
+    });
   }, 90_000);
 
   it('lets the guardian cap the agent on that unpublished evidence instead of waiting for it', async () => {

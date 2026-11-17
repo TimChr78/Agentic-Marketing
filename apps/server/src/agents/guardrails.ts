@@ -1,5 +1,5 @@
 import { runAnalyticsQuery } from '@agentic-marketing/analytics';
-import type { MandateView } from '@agentic-marketing/commands';
+import type { GuardrailCheck, MandateView } from '@agentic-marketing/commands';
 import { pendingMessageEventPayloads, schema, type Tx } from '@agentic-marketing/db';
 import { type EventStore, type MessageEvent, parseMessageEventPayload } from '@agentic-marketing/events';
 import { logger } from '@agentic-marketing/telemetry';
@@ -66,16 +66,16 @@ function queuedNote(snapshot: PendingSnapshot): string {
   return ` The decision also counted ${parts.join('; ')}.`;
 }
 
-export async function mandateGuardrailBreach(
+export async function mandateGuardrailCheck(
   deps: { tx: Tx; events: EventStore; workspaceId: string },
   agentId: string,
   mandate: MandateView,
-): Promise<string | null> {
+): Promise<GuardrailCheck> {
   const g = mandate.guardrails;
   // Rates from the base counts: the metric layer's ratio measures hide small groups for privacy,
   // while this check is an internal decision about the agent's own sends.
   const active = CHECKS.filter(([, , , key]) => g[key] !== undefined);
-  if (!active.length) return null;
+  if (!active.length) return { state: 'clear' };
   const since = new Date(Date.now() - (WINDOW_DAYS[g.window] ?? 7) * 86_400_000);
   // The agent's own sends in the window: the broadcasts it published itself (or through a hold)
   // and its direct sends, each linked to the message it created on the ledger (#265). Journey
@@ -96,7 +96,7 @@ export async function mandateGuardrailBreach(
   const directMessages = [
     ...new Set(rows.map((r) => r.impact.messageId).filter((id): id is string => typeof id === 'string' && id.startsWith('msg_'))),
   ];
-  if (!broadcasts.length && !directMessages.length) return null;
+  if (!broadcasts.length && !directMessages.length) return { state: 'clear' };
 
   // #1008: message events reach ClickHouse after the transaction that recorded them commits, so a
   // bounce, complaint or unsubscribe can be committed and not published. Snapshot the agent's own
@@ -106,7 +106,9 @@ export async function mandateGuardrailBreach(
   // `sent`, a later complaint overwrites an earlier bounce, and a broadcast's denominator is people,
   // not messages (#1008 review).
   const snapshot = await pendingEventsOf(deps.tx, deps.workspaceId, broadcasts, directMessages, since);
-  if (snapshot.truncated) return unboundedReason();
+  // A backlog beyond the snapshot bound is not a breach: nothing was measured. Sends wait for a
+  // person, but the guardian must not cap for it, or the cap would outlive the backlog (#1008).
+  if (snapshot.truncated) return { state: 'unavailable', reason: unboundedReason() };
   if (snapshot.events.length)
     logger.info(
       { agent: agentId, workspace: deps.workspaceId, queued: snapshot.events.length, deadLettered: snapshot.deadLettered },
@@ -115,15 +117,18 @@ export async function mandateGuardrailBreach(
 
   const counts = await publishedCounts(deps, active, broadcasts, directMessages, since, snapshot.events);
   // A minimum sample protects people from a rule that fires on two sends and one bounce.
-  if (counts.sent < g.minSent) return null;
+  if (counts.sent < g.minSent) return { state: 'clear' };
   for (const [measure, , label, key] of active) {
     const limit = g[key];
     if (limit === undefined) continue;
     const rate = (counts.counts.get(measure) ?? 0) / counts.sent;
     if (rate > limit)
-      return `This agent’s sends in the last ${WINDOW_DAYS[g.window] ?? 7} days have a ${label} rate of ${pct(rate)}, above its mandate’s guardrail of ${pct(limit)}.${queuedNote(snapshot)}`;
+      return {
+        state: 'breach',
+        reason: `This agent’s sends in the last ${WINDOW_DAYS[g.window] ?? 7} days have a ${label} rate of ${pct(rate)}, above its mandate’s guardrail of ${pct(limit)}.${queuedNote(snapshot)}`,
+      };
   }
-  return null;
+  return { state: 'clear' };
 }
 
 /**
