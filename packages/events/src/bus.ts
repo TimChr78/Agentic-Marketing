@@ -26,6 +26,8 @@ export interface ConsumerOptions {
   ackWaitMs?: number;
   /** Wait up to this long to fill a batch. */
   maxWaitMs?: number;
+  /** How long one pull waits on the server for messages (default 1 s). */
+  pullExpiresMs?: number;
 }
 
 export interface EventBus {
@@ -163,7 +165,7 @@ async function pauseUnlessAborted(ms: number, signal: AbortSignal): Promise<void
  */
 export async function consumeLoop(
   ensureConsumer: () => Promise<PullConsumer>,
-  o: Pick<ConsumerOptions, 'name' | 'maxBatch' | 'maxWaitMs'>,
+  o: Pick<ConsumerOptions, 'name' | 'maxBatch' | 'maxWaitMs' | 'pullExpiresMs'>,
   decode: (data: Uint8Array) => BusEvent,
   handler: (events: BusEvent[]) => Promise<void>,
   signal: AbortSignal,
@@ -179,7 +181,7 @@ export async function consumeLoop(
     // filling the batch while there is time left.
     try {
       do {
-        const batch = await fetchOrAbort(consumer, { max_messages: maxBatch - msgs.length, expires: 1000 }, signal);
+        const batch = await fetchOrAbort(consumer, { max_messages: maxBatch - msgs.length, expires: o.pullExpiresMs ?? 1000 }, signal);
         if (!batch) break;
         for await (const message of messagesOrAbort(batch, signal)) msgs.push(message);
       } while (msgs.length < maxBatch && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted);
