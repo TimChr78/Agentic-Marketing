@@ -4,6 +4,7 @@ import { type KeyProvider, newDataKey, open, type PreparedKeys, prepareKeys, sea
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { mergedFamily } from './consent';
 import { personCrypto } from './crypto';
+import { withIdentityLock } from './identity';
 
 // Durable erasure (#978 part 2b). The SQL stage and the external stores used to be mixed in one
 // transaction, so a ClickHouse or Valkey wait kept the transaction open and a merge could slip in
@@ -134,11 +135,18 @@ export interface ErasureStageResult {
 
 /**
  * The one SQL stage of an erasure: canonical profile and complete merged family, tombstones,
- * suppression hashes, SQL deletion, the erasure record and its cleanup job. No network I/O. Part 3
- * wraps this stage in the workspace identity lock; today it is one short transaction whose wait
- * for ClickHouse (and the merge race that wait allowed) is gone.
+ * suppression hashes, SQL deletion, the erasure record and its cleanup job. No network I/O.
+ *
+ * The whole stage runs under the workspace identity lock, taken before the canonical profile is
+ * looked up: a merge that committed first is included in the family, and a merge that starts after
+ * this transaction commits sees the profile is gone. The external cleanup is a durable job, so the
+ * lock covers SQL rows only.
  */
 export async function eraseProfileStage(tx: Tx, input: ErasureStageInput): Promise<ErasureStageResult> {
+  return withIdentityLock(tx, input.workspaceId, () => eraseProfileStageLocked(tx, input));
+}
+
+async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promise<ErasureStageResult> {
   const { workspaceId, prepared } = input;
   let id = input.profileId;
   let found = false;

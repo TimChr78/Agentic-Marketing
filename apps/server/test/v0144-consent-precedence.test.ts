@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
+import type { Purposes } from '@agentic-marketing/artifacts';
 import { consentHook, dispatchOutboxOnce } from '@agentic-marketing/audience';
 import type { BusEvent } from '@agentic-marketing/events';
-import { recomputeConsentState } from '@agentic-marketing/profiles';
+import { recordConsentEvidence, withIdentityLock } from '@agentic-marketing/profiles';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { applyDeliveryEvents } from '../../../packages/email/src/deliveryEvents';
 import { eventually, startTestServer, testPort, type User } from './harness';
@@ -465,9 +466,7 @@ describe('an async consent write carries the action time (#928)', () => {
       [ws, messageId, `idem_${messageId}`, profileId],
     );
     const at = new Date(Date.now() - 60_000).toISOString();
-    await t.srv.db.withWorkspace(ws, (tx) =>
-      applyDeliveryEvents(tx, [{ eventId: 'evt-1', type: 'unsubscribed', messageId, at }], 'test', t.srv.keyProvider),
-    );
+    await t.srv.db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, [{ eventId: 'evt-1', type: 'unsubscribed', messageId, at }], 'test'));
     expect(await effective(profileId)).toMatchObject({ status: 'granted', allowed: true });
     expect((await history(profileId)).find((r) => r.status === 'withdrawn')).toMatchObject({ recordedAt: at });
   });
@@ -476,14 +475,26 @@ describe('an async consent write carries the action time (#928)', () => {
     const profileId = await newProfile();
     const at = '2026-10-01T10:00:00.000Z';
     // Both writers saw the same action time: the refusal must win the tie in consent_state, even
-    // though the grant was written second (and so carries the higher id).
+    // though the grant was written first and the withdrawal (which rebuilds the state) second.
     await t.srv.db.admin.query(
       `INSERT INTO consent_records (workspace_id, profile_id, purpose, channel, status, basis, source, recorded_at)
-       VALUES ($1, $2, 'marketing', '', 'withdrawn', 'consent', 'unsubscribe', $3),
-              ($1, $2, 'marketing', '', 'granted', 'consent', 'form', $3)`,
+       VALUES ($1, $2, 'marketing', '', 'granted', 'consent', 'form', $3)`,
       [ws, profileId, at],
     );
-    await t.srv.db.withWorkspace(ws, (tx) => recomputeConsentState(tx, ws, profileId));
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      withIdentityLock(tx, ws, () =>
+        recordConsentEvidence(tx, ws, profileId, PURPOSES.purposes as unknown as Purposes, [
+          {
+            purpose: 'marketing',
+            channel: '',
+            status: 'withdrawn',
+            source: 'unsubscribe',
+            proof: {},
+            recordedAt: new Date(at),
+          },
+        ]),
+      ),
+    );
     expect(await effective(profileId)).toMatchObject({ status: 'withdrawn', allowed: false });
   });
 });
@@ -531,7 +542,6 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
         tx,
         [{ eventId: `evt_${randomBytes(6).toString('hex')}`, type: 'unsubscribed', messageId, at: at.toISOString() }],
         'test',
-        t.srv.keyProvider,
       ),
     );
   };
@@ -618,7 +628,7 @@ describe('a newer same-status signup is consent evidence (#936)', () => {
     const eventId = `evt_${randomBytes(6).toString('hex')}`;
     const redeliver = (at: Date) =>
       t.srv.db.withWorkspace(ws, (tx) =>
-        applyDeliveryEvents(tx, [{ eventId, type: 'unsubscribed', messageId, at: at.toISOString() }], 'test', t.srv.keyProvider),
+        applyDeliveryEvents(tx, [{ eventId, type: 'unsubscribed', messageId, at: at.toISOString() }], 'test'),
       );
     await redeliver(new Date(Date.now() - 3 * 3_600_000));
     // The same event id again with a later action time: the event identity still deduplicates it.

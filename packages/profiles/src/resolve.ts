@@ -2,12 +2,12 @@ import type { Purposes } from '@agentic-marketing/artifacts';
 import { newId } from '@agentic-marketing/core';
 import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
 import { type BusEvent, CONSENT_EVENT } from '@agentic-marketing/events';
-import type { KeyProvider } from '@agentic-marketing/secrets';
+import type { PreparedKeys } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { consentStateOf, currentConsent, recomputeConsentState, recordConsentEvidence } from './consent';
 import { type PersonCrypto, personCrypto } from './crypto';
-import { lockIdentity } from './identity';
+import { withIdentityLock } from './identity';
 
 // Deterministic identity resolution (data-platform.md §3). Each event's identifiers are looked up;
 // unknown ones are attached, and when they point at several profiles those are merged, as long as
@@ -48,7 +48,8 @@ const SYSTEM_SOURCE = 'system';
 const DEFAULT_ERASURE_GRACE_HOURS = 24;
 
 export interface ResolveDeps {
-  kp: KeyProvider;
+  /** Keys unwrapped before the batch transaction; nothing here may reach the key provider. */
+  prepared: PreparedKeys;
   purposes: (tx: Tx) => Promise<Purposes>;
   /**
    * Hours after an erasure in which an event naming one of the erased identifiers is dropped
@@ -65,9 +66,33 @@ export interface ResolvedEvent {
 /**
  * Applies one workspace's events, in order, in the given transaction, and returns which profile
  * each event belongs to. Safe to re-run (at-least-once delivery).
+ *
+ * The whole batch runs under the workspace identity lock, taken before the first event — including
+ * the fast-path `touch`, which used to update profile and identifier rows before taking it. That
+ * inversion let a batch commit a touch on a profile a merge had just folded away.
  */
 export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[], deps: ResolveDeps): Promise<ResolvedEvent[]> {
-  const crypto = personCrypto(tx, workspaceId, deps.kp);
+  return withIdentityLock(tx, workspaceId, () => applyEventsLocked(tx, workspaceId, events, deps));
+}
+
+/**
+ * The profile ids a batch can touch, resolved from SQL only, so a caller can prepare their
+ * per-person keys before the protected transaction. Runs outside the identity lock: reading the
+ * identifiers takes no row lock, and the batch resolves them again under the lock.
+ */
+export async function profileIdsForBatch(tx: Tx, workspaceId: string, events: BusEvent[], crypto: PersonCrypto): Promise<string[]> {
+  const ids = new Set<string>();
+  for (const e of events) {
+    const idents = await identsOf(e, crypto);
+    if (e.type === 'alias' && e.previousId) idents.push(...(await previousIdents(tx, workspaceId, e.previousId)));
+    if (!idents.length) continue;
+    for (const k of await lookup(tx, workspaceId, idents)) ids.add(k.profileId);
+  }
+  return [...ids];
+}
+
+async function applyEventsLocked(tx: Tx, workspaceId: string, events: BusEvent[], deps: ResolveDeps): Promise<ResolvedEvent[]> {
+  const crypto = personCrypto(tx, workspaceId, deps.prepared.provider);
   const resolved: ResolvedEvent[] = [];
   const graceHours = deps.erasureGraceHours ?? DEFAULT_ERASURE_GRACE_HOURS;
   let tombstoned = 0;
@@ -95,9 +120,6 @@ export async function applyEvents(tx: Tx, workspaceId: string, events: BusEvent[
       continue;
     }
 
-    // Anything that creates, attaches or merges is serialised per workspace, so concurrent shard
-    // consumers cannot interleave on the same people (and a broadcast batch can order against it).
-    await lockIdentity(tx, workspaceId);
     const profileId = await resolve(tx, workspaceId, ids, crypto, e);
     await updateProfile(tx, workspaceId, profileId, e, crypto);
     if (e.name === CONSENT_EVENT && Object.keys(e.consent).length) {

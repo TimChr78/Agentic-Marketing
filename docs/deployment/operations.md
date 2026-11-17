@@ -200,6 +200,10 @@ In Docker Compose, a Prometheus container on the same project network reaches th
 | `am_warehouse_exports_due` | gauge | | Enabled warehouse exports that are due or were asked to run. |
 | `am_deliveries_dead_24h` | gauge | | Webhook/action deliveries that ended `dead` in the last 24 hours. |
 | `am_agent_decisions_last_hour` | gauge | `decision` | Agent ledger decisions (`allow`, `hold`, `ask`, `deny`) in the last hour. |
+| `am_identity_lock_acquisitions_total` | counter | | Workspace identity-lock acquisitions, including a transaction that already held it. A workspace's consent, identity, merge and erasure writes take this one advisory lock. |
+| `am_identity_lock_contended_total` | counter | | Acquisitions that had to wait for another transaction's lock. |
+| `am_identity_lock_wait_seconds` | histogram | | Time spent waiting for the workspace identity lock; buckets from 1 ms to 30 s. |
+| `am_identity_lock_hold_seconds` | histogram | | Time a protected transaction held the lock; buckets from 1 ms to 30 s. A rising hold with a rising wait means one workspace's writes are queued. |
 | `am_dependency_up` | gauge | `name` | `1` when Postgres, ClickHouse, NATS or Valkey answered on this scrape, else `0`. |
 
 No label carries a workspace, person, address or command input, and every label has a fixed or registry-bounded set of values, so cardinality cannot grow with traffic. `/metrics` is not counted in its own request metrics.
