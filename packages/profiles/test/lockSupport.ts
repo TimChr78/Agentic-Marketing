@@ -171,3 +171,36 @@ export async function holdConsentPause(conn: ClientLike): Promise<void> {
 export async function releaseConsentPause(conn: ClientLike): Promise<void> {
   await conn.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [CONSENT_PAUSE_KEY]);
 }
+
+/** The advisory key the topic pause trigger waits on. */
+export const TOPIC_PAUSE_KEY = 'test:pause-topic-history';
+
+/**
+ * Installs a BEFORE INSERT trigger on `topic_preference_history` that waits on a test advisory
+ * lock. A test holds that lock to stop a topic write after it resolved the canonical profile and
+ * upserted the choice but before it commits, so a merge or an erasure can be started while the
+ * writer holds the identity lock.
+ */
+export async function installTopicPause(conn: Queryable): Promise<void> {
+  await conn.query(`
+    CREATE OR REPLACE FUNCTION test_pause_topic_history() RETURNS trigger AS $$
+    BEGIN
+      PERFORM pg_advisory_xact_lock(hashtextextended('${TOPIC_PAUSE_KEY}', 0));
+      RETURN NEW;
+    END $$ LANGUAGE plpgsql;
+    DROP TRIGGER IF EXISTS test_pause_topic_history ON topic_preference_history;
+    CREATE TRIGGER test_pause_topic_history BEFORE INSERT ON topic_preference_history
+      FOR EACH ROW EXECUTE FUNCTION test_pause_topic_history();`);
+}
+
+export async function dropTopicPause(conn: Queryable): Promise<void> {
+  await conn.query('DROP TRIGGER IF EXISTS test_pause_topic_history ON topic_preference_history');
+}
+
+export async function holdTopicPause(conn: ClientLike): Promise<void> {
+  await conn.query('SELECT pg_advisory_lock(hashtextextended($1, 0))', [TOPIC_PAUSE_KEY]);
+}
+
+export async function releaseTopicPause(conn: ClientLike): Promise<void> {
+  await conn.query('SELECT pg_advisory_unlock(hashtextextended($1, 0))', [TOPIC_PAUSE_KEY]);
+}

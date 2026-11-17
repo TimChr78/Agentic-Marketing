@@ -177,7 +177,7 @@ export function newConsentEvidence<T extends ConsentInput>(records: T[], existin
  * the rebuild are package-internal.
  */
 export async function recordConsentEvidence(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
-  assertIdentityLock(tx, 'recordConsentEvidence');
+  assertIdentityLock(tx, workspaceId, 'recordConsentEvidence');
   if (!records.length) return 0;
   const family = await mergedFamily(tx, workspaceId, profileId);
   const existing = await tx

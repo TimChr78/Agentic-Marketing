@@ -3,7 +3,7 @@ import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
 import { personCrypto, recordConsentEvidence, withIdentityLock } from '@agentic-marketing/profiles';
-import { type KeyProvider, type PreparedKeys, prepareKeys } from '@agentic-marketing/secrets';
+import { type KeyProvider, type PreparedKeys, prepareKeys, withPreparedKeys } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -142,11 +142,12 @@ export function smsRoutes(deps: Deps) {
         headers: Object.fromEntries(c.req.raw.headers),
         body: await c.req.text(),
       };
-      // The matching key is unwrapped before the write transaction: the STOP/START block holds the
-      // identity lock and must not reach the key provider (#978 part 3).
-      const prepared = kind === 'inbound' ? await prepareKeys(deps.db, target.ws, deps.kp, { purposes: ['matching'] }) : null;
-      try {
-        const result = await deps.db.withWorkspace(target.ws, async (tx) => {
+      // The provider's payload carries no message time, so the request's arrival is the action's
+      // time. It is fixed once, before any retry: a re-prepared transaction must record the same
+      // instant, never the time a retry happened (#928).
+      const receivedAt = kind === 'inbound' ? new Date() : null;
+      const write = (prepared: PreparedKeys | null) =>
+        deps.db.withWorkspace(target.ws, async (tx) => {
           const [provider] = await tx.select().from(schema.smsProviders).where(eq(schema.smsProviders.id, target.id));
           if (!provider) return { status: 404 as const };
           const transport = await smsTransportFor(tx, provider, deps.kp, deps.email.adapterDeps);
@@ -161,9 +162,6 @@ export function smsRoutes(deps: Deps) {
           const inbound = transport.parseInbound(req);
           if (!inbound) return { status: 400 as const };
           const match = classifySmsReply(inbound.body);
-          // The provider's payload carries no message time, so the request's arrival is the action's
-          // time; it is a synchronous write and never the time a later job got to it (#928).
-          const receivedAt = new Date();
           let reply: string | null = null;
           if (match?.intent === 'stop' || match?.intent === 'start') {
             await applySmsOptOut(tx, {
@@ -172,22 +170,30 @@ export function smsRoutes(deps: Deps) {
               keyword: match.keyword,
               intent: match.intent,
               phone: inbound.from,
-              receivedAt,
+              receivedAt: receivedAt!,
               prepared: prepared!,
             });
           } else if (match?.intent === 'help') reply = billingOf(provider).helpText;
           return { status: 200 as const, reply: transport.reply(reply) };
         });
-        if (result.status !== 200) return c.json({ error: result.status === 401 ? 'bad_signature' : 'not_found' }, result.status);
-        if ('events' in result) {
-          // After the transaction committed: a rolled-back escalation leaves no log behind.
-          for (const escalation of result.escalations ?? []) logSuppressionEscalation(escalation);
-          return c.json({ ok: true });
-        }
-        return c.body(result.reply!.body, 200, { 'content-type': result.reply!.contentType });
-      } finally {
-        prepared?.provider.dispose();
+      // The matching key is unwrapped before the write transaction, and the whole prepare-and-write
+      // pair is retried when a key changed in between: the STOP/START block holds the identity lock
+      // and must never reach the key provider (#978 part 3). A `status` callback needs no key, so
+      // it runs once.
+      const result =
+        kind === 'inbound'
+          ? await withPreparedKeys(
+              () => prepareKeys(deps.db, target.ws, deps.kp, { purposes: ['matching'] }),
+              (prepared) => write(prepared),
+            )
+          : await write(null);
+      if (result.status !== 200) return c.json({ error: result.status === 401 ? 'bad_signature' : 'not_found' }, result.status);
+      if ('events' in result) {
+        // After the transaction committed: a rolled-back escalation leaves no log behind.
+        for (const escalation of result.escalations ?? []) logSuppressionEscalation(escalation);
+        return c.json({ ok: true });
       }
+      return c.body(result.reply!.body, 200, { 'content-type': result.reply!.contentType });
     },
   );
 

@@ -3,6 +3,7 @@ import { safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
+import { canonicalProfile } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -657,15 +658,21 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
   if (r) {
     try {
       let trait: string | null = null;
-      if (ready.def.trait && c.profileId)
+      const calledFor = c.profileId;
+      if (ready.def.trait && calledFor)
         trait = await db.withWorkspace(c.workspaceId, async (tx) => {
           // Like a journey's updateProfile step: never into a trait the tracking plan marks personal.
           const plan = await publishedSingleton(tx, 'tracking_plan');
           const def = plan?.traits.find((x) => x.name === ready.def.trait);
           if (def && def.pii !== 'none') return null;
+          // A merge can have moved the call's person since it was queued. Follow `merged_into` in
+          // SQL only, and never write a trait back onto a folded-away profile (`merged_into IS
+          // NULL`); an erased person has no row at all.
+          const person = await canonicalProfile(tx, c.workspaceId, calledFor);
+          if (!person) return null;
           await tx.execute(sql`
             UPDATE profiles SET traits = jsonb_set(traits, ARRAY[${ready.def.trait}], ${JSON.stringify(r!.label)}::jsonb), updated_at = now()
-            WHERE workspace_id = ${c.workspaceId} AND id = ${c.profileId} AND merged_into IS NULL`);
+            WHERE workspace_id = ${c.workspaceId} AND id = ${person.id} AND merged_into IS NULL`);
           return ready.def.trait ?? null;
         });
       out = {

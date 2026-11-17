@@ -505,7 +505,7 @@ async function applyEffect(
   if (def && def.pii !== 'none') return `skipped: ${eff.trait} is personal data`;
   await tx.execute(sql`
     UPDATE profiles SET traits = jsonb_set(traits, ARRAY[${eff.trait}], ${JSON.stringify(eff.value)}::jsonb), updated_at = now()
-    WHERE workspace_id = ${workspaceId} AND id = ${p.profileId}`);
+    WHERE workspace_id = ${workspaceId} AND id = ${p.profileId} AND merged_into IS NULL`);
   return `${eff.trait} = ${JSON.stringify(eff.value)}`;
 }
 

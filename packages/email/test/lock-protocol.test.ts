@@ -1,8 +1,8 @@
 import { DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
-import { newId } from '@agentic-marketing/core';
+import { newId, sha256 } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import type { AdapterDeps, DeliveryEvent } from '@agentic-marketing/email';
-import { applySmsOptOut, emailRoutes, linkSigner } from '@agentic-marketing/email';
+import { applySmsOptOut, emailRoutes, linkSigner, sealSecrets, smsRoutes, twilioSignature } from '@agentic-marketing/email';
 import type { BusEvent, EventStore } from '@agentic-marketing/events';
 import {
   applyEvents,
@@ -17,16 +17,21 @@ import {
   recordTopicPreference,
   topicChoicesOf,
 } from '@agentic-marketing/profiles';
+import type { KeyProvider } from '@agentic-marketing/secrets';
 import { localKeyProvider, prepareKeys, withPreparedKeys } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import {
   barrier,
   dropConsentPause,
+  dropTopicPause,
   holdConsentPause,
+  holdTopicPause,
   identityHolders,
   installConsentPause,
+  installTopicPause,
   releaseConsentPause,
+  releaseTopicPause,
   waitForAdvisoryHolderBlocked,
   waitForIdentityWaiter,
 } from '../../profiles/test/lockSupport';
@@ -52,10 +57,14 @@ beforeAll(async () => {
   kp = localKeyProvider(MASTER_KEY);
   ws = d.workspace;
   await installConsentPause(d.db.admin);
+  await installTopicPause(d.db.admin);
 }, 120_000);
 
 afterAll(async () => {
-  if (d) await dropConsentPause(d.db.admin);
+  if (d) {
+    await dropConsentPause(d.db.admin);
+    await dropTopicPause(d.db.admin);
+  }
   await d?.close();
 });
 
@@ -437,5 +446,175 @@ describe.skipIf(!hasTestDatabase())('delivery, unsubscribe and SMS under the ide
       probe.release();
     }
     await callback;
+  }, 60_000);
+});
+
+describe.skipIf(!hasTestDatabase())('topic links racing a merge and an erasure (#978 part 3 review)', () => {
+  it('a topic write racing a merge lands on the survivor', async () => {
+    const q = newId('prf');
+    const p = newId('prf');
+    await seedProfile(q, { user: `user-${q}` }, new Date(Date.UTC(2026, 1, 1)));
+    await seedProfile(p, { anonymous: `anon-${p}` }, new Date(Date.UTC(2026, 1, 2)));
+    const probe = await d.db.admin.connect();
+    let write: Promise<boolean> | undefined;
+    let mergeBatch: Promise<unknown> | undefined;
+    try {
+      await holdTopicPause(probe);
+      // The write takes the identity lock and stops before its history row commits.
+      write = d.db.withWorkspace(ws, (tx) =>
+        recordTopicPreference(tx, ws, p, 'marketing_email', 'news', 'unsubscribed', 'unsubscribe_link'),
+      );
+      await waitForAdvisoryHolderBlocked(probe, ws);
+      mergeBatch = merge({ anonymous: `anon-${p}` }, { user: `user-${q}` });
+      await waitForIdentityWaiter(probe, ws);
+    } finally {
+      await releaseTopicPause(probe);
+    }
+    await write;
+    await mergeBatch;
+    probe.release();
+    const choices = await d.db.withWorkspace(ws, (tx) => topicChoicesOf(tx, ws, q));
+    expect(choices.map((c) => ({ topic: c.topic, status: c.status }))).toEqual([{ topic: 'news', status: 'unsubscribed' }]);
+  }, 60_000);
+
+  it('a topic write racing an erasure records nothing after it', async () => {
+    const p = newId('prf');
+    await seedProfile(p, { anonymous: `anon-${p}` }, new Date(Date.UTC(2026, 1, 2)));
+    const prepared = await prepareErasure(d.db, ws, kp);
+    const probe = await d.db.admin.connect();
+    let write: Promise<boolean> | undefined;
+    let erased: Promise<unknown> | undefined;
+    try {
+      await holdTopicPause(probe);
+      write = d.db.withWorkspace(ws, (tx) => recordTopicPreference(tx, ws, p, 'marketing_email', 'news', 'subscribed', 'unsubscribe_link'));
+      await waitForAdvisoryHolderBlocked(probe, ws);
+      erased = d.db.withWorkspace(ws, (tx) =>
+        eraseProfileStage(tx, {
+          workspaceId: ws,
+          profileId: p,
+          requestedBy: 'user_test',
+          reason: 'topic link racing erasure',
+          prepared,
+        }),
+      );
+      await waitForIdentityWaiter(probe, ws);
+    } finally {
+      await releaseTopicPause(probe);
+    }
+    await write;
+    await erased;
+    probe.release();
+    disposeErasure(prepared);
+    const choices = await d.db.admin.query('SELECT 1 FROM topic_preferences WHERE workspace_id = $1 AND profile_id = $2', [ws, p]);
+    expect(choices.rowCount).toBe(0);
+    const profile = await d.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [ws, p]);
+    expect(profile.rowCount).toBe(0);
+  }, 60_000);
+});
+
+describe.skipIf(!hasTestDatabase())('SMS inbound re-prepares changed keys (#978 part 3 review)', () => {
+  const AUTH = 'review-twilio-auth-token-123456';
+  const PHONE = '+15550009999';
+
+  it('retries a STOP through the HTTP entry point when the matching key rotated after preparation', async () => {
+    const p = newId('prf');
+    await seedProfile(p, { anonymous: `anon-${p}`, phone: PHONE }, new Date(Date.UTC(2026, 1, 2)));
+    const providerId = newId('smp');
+    await d.db.withWorkspace(ws, async (tx) => {
+      const sealed = await sealSecrets(tx, ws, kp, { authToken: AUTH });
+      await tx.insert(schema.smsProviders).values({
+        workspaceId: ws,
+        id: providerId,
+        name: 'Twilio review',
+        adapter: 'twilio',
+        config: { accountSid: `AC${'a'.repeat(32)}` },
+        ...sealed,
+        sender: 'Signal',
+        useFor: ['marketing'],
+        webhookTokenHash: sha256(`sms-webhook:${providerId}`),
+      });
+    });
+
+    // A key provider that rotates the matching data key on the first unwrap (preparation) and
+    // slows the retry's preparation down, so a re-computed action time would be visible.
+    let rotations = 0;
+    let rotatedAt = 0;
+    const rotating: KeyProvider = {
+      id: kp.id,
+      async wrap(dataKey) {
+        return kp.wrap(dataKey);
+      },
+      async unwrap(wrapped, kekId) {
+        if (rotations === 0) {
+          rotations++;
+          const key = await kp.unwrap(wrapped, kekId);
+          // A real rotation rehashes identifiers with the new matching key; this test simulates
+          // that so the STOP still finds the person after the transaction re-prepares.
+          const nextKey = Buffer.alloc(32, 91);
+          const fresh = await kp.wrap(nextKey);
+          await d.db.admin.query("UPDATE data_keys SET active = false WHERE workspace_id = $1 AND purpose = 'matching' AND active", [ws]);
+          await d.db.admin.query(
+            `INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key, purpose, active)
+             VALUES ($1, $2, $3, $4, 'matching', true)`,
+            [ws, newId('dk'), kp.id, fresh],
+          );
+          const oneKey: KeyProvider = {
+            id: 'one-key',
+            async wrap() {
+              throw new Error('unexpected wrap');
+            },
+            async unwrap() {
+              return nextKey;
+            },
+          };
+          const nextHash = await d.db.withWorkspace(ws, (tx) => personCrypto(tx, ws, oneKey).matchHash('phone', PHONE));
+          await d.db.admin.query("UPDATE identifiers SET value = $1 WHERE workspace_id = $2 AND profile_id = $3 AND type = 'phone'", [
+            nextHash,
+            ws,
+            p,
+          ]);
+          rotatedAt = Date.now();
+          return key;
+        }
+        // Simulate a slow KMS on the retry: the recorded action time must still be the arrival.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return kp.unwrap(wrapped, kekId);
+      },
+    };
+
+    const links = linkSigner('lock-protocol-secret');
+    const app = smsRoutes({
+      db: d.db,
+      kp: rotating,
+      email: { publicUrl: 'https://links.example.com', links, adapterDeps: {} as AdapterDeps, trackClicks: false },
+    });
+    const token = links.sign({ w: ws, sms: providerId });
+    const path = `/hooks/sms/${token}/inbound`;
+    const params = { From: PHONE, Body: 'STOP' };
+    const signature = twilioSignature(AUTH, `https://links.example.com${path}`, params);
+    const response = await app.request(`https://links.example.com${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', 'x-twilio-signature': signature },
+      body: new URLSearchParams(params).toString(),
+    });
+    expect(response.status).toBe(200);
+    expect(rotations).toBe(1);
+
+    const record = await d.db.admin.query<{ recorded_at: Date; status: string }>(
+      `SELECT recorded_at, status FROM consent_records WHERE workspace_id = $1 AND profile_id = $2
+        ORDER BY recorded_at DESC LIMIT 1`,
+      [ws, p],
+    );
+    expect(record.rows[0]?.status).toBe('withdrawn');
+    // The action time was fixed before preparation and kept across the retry: a recomputed time
+    // would have been taken after the 25 ms retry delay.
+    expect(record.rows[0]!.recorded_at.getTime()).toBeLessThanOrEqual(rotatedAt);
+    const stopped = await d.db.admin.query<{ reason: string }>(
+      `SELECT s.reason FROM suppressions s
+        WHERE s.workspace_id = $1 AND s.channel = 'sms'
+          AND s.value_hash = (SELECT value FROM identifiers WHERE workspace_id = $1 AND profile_id = $2 AND type = 'phone')`,
+      [ws, p],
+    );
+    expect(stopped.rows).toEqual([{ reason: 'stop' }]);
   }, 60_000);
 });

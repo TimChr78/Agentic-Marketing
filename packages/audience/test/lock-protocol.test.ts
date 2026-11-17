@@ -3,7 +3,16 @@ import { newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { linkSigner } from '@agentic-marketing/email';
 import type { BusEvent } from '@agentic-marketing/events';
-import { applyEvents, consentStateOf, mergedFamily, personCrypto, profileIdsForBatch } from '@agentic-marketing/profiles';
+import {
+  applyEvents,
+  consentStateOf,
+  disposeErasure,
+  eraseProfileStage,
+  mergedFamily,
+  personCrypto,
+  prepareErasure,
+  profileIdsForBatch,
+} from '@agentic-marketing/profiles';
 import { assertNoProviderCalls, localKeyProvider, prepareKeys, recordingKeyProvider, withPreparedKeys } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
@@ -227,6 +236,117 @@ describe.skipIf(!hasTestDatabase())('form and import consent under the identity 
     expect(state).toMatchObject([{ status: 'withdrawn' }]);
   }, 60_000);
 
+  it('follows a merge that commits between resolution and the hook', async () => {
+    const q = newId('prf');
+    const p = newId('prf');
+    await seedProfile(q, { user: `user-${q}` }, new Date(Date.UTC(2026, 2, 1)));
+    await seedProfile(p, { anonymous: `anon-${p}` }, new Date(Date.UTC(2026, 2, 2)));
+    // The worker resolves the form to P first; the merge then commits before the hook locks. The
+    // pre-lock id is stale, so the hook must canonicalise it (the old bug recorded on P and left Q
+    // unsendable).
+    const resolved = await runBatch([formEvent(`anon-${p}`)]);
+    await merge(`anon-${p}`, `user-${q}`);
+    await hook(ws, resolved);
+
+    expect((await evidence([q, p])).map((r) => r.profile_id)).toEqual([q]);
+    expect(await grantedState(q)).toHaveLength(1);
+  }, 60_000);
+
+  it('drops evidence for a person erased between resolution and the hook', async () => {
+    const p = newId('prf');
+    await seedProfile(p, { anonymous: `anon-${p}` }, new Date(Date.UTC(2026, 2, 2)));
+    const resolved = await runBatch([formEvent(`anon-${p}`)]);
+    const prepared = await prepareErasure(d.db, ws, kp);
+    try {
+      await d.db.withWorkspace(ws, (tx) =>
+        eraseProfileStage(tx, {
+          workspaceId: ws,
+          profileId: p,
+          requestedBy: 'user_test',
+          reason: 'between resolve and hook',
+          prepared,
+        }),
+      );
+    } finally {
+      disposeErasure(prepared);
+    }
+    // The resolved id no longer exists: no evidence, no foreign-key failure that would roll the
+    // whole batch back (and silently drop every other event in it).
+    await expect(hook(ws, resolved)).resolves.toBeUndefined();
+    expect(await evidence([p])).toEqual([]);
+  }, 60_000);
+
+  it('writes the canonical profile into a double opt-in intent after a merge', async () => {
+    const q = newId('prf');
+    const p = newId('prf');
+    await seedProfile(q, { user: `user-${q}` }, new Date(Date.UTC(2026, 2, 1)));
+    await seedProfile(p, { anonymous: `anon-${p}` }, new Date(Date.UTC(2026, 2, 2)));
+    const resolved = await runBatch([formEvent(`anon-${p}`, { double_opt_in: true })]);
+    await merge(`anon-${p}`, `user-${q}`);
+    await hook(ws, resolved);
+
+    const intents = await d.db.admin.query<{ payload: { profileId?: string } }>(
+      "SELECT payload FROM outbox WHERE workspace_id = $1 AND kind = 'doi_send'",
+      [ws],
+    );
+    expect(intents.rows.map((r) => r.payload.profileId)).toEqual([q]);
+  }, 60_000);
+
+  it('rolls a blocked DOI batch back and redelivery writes exactly one intent', async () => {
+    const p = newId('prf');
+    await seedProfile(p, { anonymous: `anon-${p}` }, new Date(Date.UTC(2026, 2, 2)));
+    const doi = formEvent(`anon-${p}`, { double_opt_in: true });
+    const resolved = await runBatch([doi]);
+
+    // A transaction that completes its work but cannot commit (ClickHouse/KMS unavailable at the
+    // boundary): it pauses before committing so another connection can prove nothing is visible.
+    let entered!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let release!: () => void;
+    const mayFinish = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const failingDb = {
+      withWorkspace: (workspaceId: string, fn: (tx: never) => Promise<unknown>, opts?: unknown) =>
+        d.db.withWorkspace(
+          workspaceId,
+          async (tx) => {
+            await fn(tx as never);
+            entered();
+            await mayFinish;
+            throw new Error('commit failed');
+          },
+          opts as never,
+        ),
+    } as unknown as typeof d.db;
+    const failingHook = consentHook({ db: failingDb, links: linkSigner('audience-lock-secret'), linksUrl: 'https://links.example.com' });
+    const attempt = failingHook(ws, [resolved[0]!]);
+    await paused;
+    expect(
+      (
+        await d.db.admin.query("SELECT 1 FROM outbox WHERE workspace_id = $1 AND kind = 'doi_send' AND operation_key = $2", [
+          ws,
+          `doi:${doi.messageId}`,
+        ])
+      ).rowCount,
+    ).toBe(0);
+    expect((await d.db.admin.query('SELECT 1 FROM messages WHERE workspace_id = $1', [ws])).rowCount).toBe(0);
+    release();
+    await expect(attempt).rejects.toThrow('commit failed');
+
+    // Redelivery after the rollback writes the one durable intent; still nothing sent.
+    await hook(ws, resolved);
+    await hook(ws, resolved);
+    const intents = await d.db.admin.query<{ operation_key: string }>(
+      "SELECT operation_key FROM outbox WHERE workspace_id = $1 AND kind = 'doi_send' AND operation_key = $2",
+      [ws, `doi:${doi.messageId}`],
+    );
+    expect(intents.rows).toEqual([{ operation_key: `doi:${doi.messageId}` }]);
+    expect((await d.db.admin.query('SELECT 1 FROM messages WHERE workspace_id = $1', [ws])).rowCount).toBe(0);
+  }, 60_000);
+
   it('prepares the double opt-in send outside the lock and makes no provider call in the hook', async () => {
     const p = newId('prf');
     await seedProfile(p, { anonymous: `anon-${p}` }, new Date(Date.UTC(2026, 2, 2)));
@@ -236,7 +356,10 @@ describe.skipIf(!hasTestDatabase())('form and import consent under the identity 
     // the key provider: the confirmation is sent by the outbox dispatcher after the commit.
     await assertNoProviderCalls(recorder, () => hook(ws, resolved));
     expect(recorder.calls).toHaveLength(0);
-    const outbox = await d.db.admin.query<{ kind: string }>("SELECT kind FROM outbox WHERE workspace_id = $1 AND kind = 'doi_send'", [ws]);
+    const outbox = await d.db.admin.query<{ kind: string }>(
+      "SELECT kind FROM outbox WHERE workspace_id = $1 AND kind = 'doi_send' AND operation_key = $2",
+      [ws, `doi:${resolved[0]!.event.messageId}`],
+    );
     expect(outbox.rowCount).toBe(1);
   }, 60_000);
 });

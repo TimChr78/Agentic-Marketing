@@ -1,7 +1,13 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type Db, enqueueOutbox, type Tx } from '@agentic-marketing/db';
 import { fingerprintParts, type LinkSigner, sendRequestHash } from '@agentic-marketing/email';
-import { type ConsentInput, type ResolvedEvent, recordConsentEvidence, withIdentityLock } from '@agentic-marketing/profiles';
+import {
+  type ConsentInput,
+  canonicalProfile,
+  type ResolvedEvent,
+  recordConsentEvidence,
+  withIdentityLock,
+} from '@agentic-marketing/profiles';
 import { CONFIRMED, DOI_DAYS, type DoiToken, publishedForm, SUBMITTED } from './forms';
 import { IMPORTED } from './import';
 
@@ -118,7 +124,8 @@ async function handle(tx: Tx, ws: string, { event: e, profileId }: ResolvedEvent
     await enqueueOutbox(tx, ws, {
       kind: 'doi_send',
       operationKey: doi.idempotencyKey,
-      payload: doi.payload,
+      // The canonical id resolved under the lock, never the pre-lock one (a merge can move it).
+      payload: { ...doi.payload, profileId },
     });
     return;
   }
@@ -187,7 +194,15 @@ export function consentHook(deps: ConsentHookDeps) {
       // and appends evidence in the same serialised order as a merge. The double opt-in send intent
       // was prepared outside this transaction (#978 part 2), so no provider call runs under it.
       await withIdentityLock(tx, workspaceId, async () => {
-        for (const r of ours) await handle(tx, workspaceId, r, doi.get(`${r.event.sourceId}:${r.event.messageId}`));
+        for (const r of ours) {
+          // The event was resolved in the worker's transaction, before this hook took the lock: a
+          // merge that committed in between moved the person to another id, and an erasure removed
+          // them. Follow `merged_into` in SQL only (no decryption here) and drop an erased person
+          // rather than failing the whole batch on a foreign key.
+          const person = await canonicalProfile(tx, workspaceId, r.profileId);
+          if (!person) continue;
+          await handle(tx, workspaceId, { ...r, profileId: person.id }, doi.get(`${r.event.sourceId}:${r.event.messageId}`));
+        }
       });
     });
   };

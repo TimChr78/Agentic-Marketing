@@ -1,12 +1,15 @@
 import { DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
 import { newId, newUuid } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { type BusEvent, CONSENT_EVENT, type EventBus } from '@agentic-marketing/events';
+import { type BusEvent, CONSENT_EVENT, type EventBus, type EventStore } from '@agentic-marketing/events';
+import type { HotState } from '@agentic-marketing/hotstate';
 import {
   applyEvents,
+  assertIdentityLock,
   consentStateOf,
   disposeErasure,
   eraseProfileStage,
+  identityLockHeld,
   identityLockSnapshot,
   mergedFamily,
   personCrypto,
@@ -14,8 +17,10 @@ import {
   profileIdsForBatch,
   recordConsentEvidence,
   resetIdentityLockMetrics,
+  runErasureCleanupOnce,
   runProfileWorkers,
   withIdentityLock,
+  withIdentityLocks,
 } from '@agentic-marketing/profiles';
 import { assertNoProviderCalls, localKeyProvider, prepareKeys, recordingKeyProvider, withPreparedKeys } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -90,6 +95,16 @@ async function seedProfile(id: string, idents: { anonymous?: string; user?: stri
     if (idents.email) rows.push({ workspaceId: ws, profileId: id, type: 'email' as const, value: idents.email });
     if (rows.length) await tx.insert(schema.identifiers).values(rows);
   });
+}
+
+async function seedMessage(profileId: string) {
+  const id = newId('msg');
+  await d.db.admin.query(
+    `INSERT INTO messages (workspace_id, id, idempotency_key, channel, purpose, profile_id, status)
+     VALUES ($1, $2, $3, 'email', 'marketing_email', $4, 'sent')`,
+    [ws, id, `idem_${id}`, profileId],
+  );
+  return id;
 }
 
 /** One batch through the real profile worker: prepare, then the locked transaction. */
@@ -259,84 +274,147 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
     expect(await consentOf(s)).toEqual([]);
   }, 60_000);
 
-  it('runs an erasure and a merge in both orders without losing or resurrecting the person', async () => {
-    // Erase first: a later merge naming the erased identifiers must not build a new profile.
-    const first = newId('prf');
-    await seedProfile(first, { anonymous: `anon-${first}`, user: `user-${first}` });
+  it('takes every requested workspace lock and asserts per workspace', async () => {
+    const second = `ws-${newUuid()}`;
+    const third = `ws-${newUuid()}`;
+    await d.db.withWorkspace(ws, (tx) =>
+      withIdentityLocks(tx, [ws, second], async () => {
+        const first = await identityHolders(d.db.admin, ws);
+        const other = await identityHolders(d.db.admin, second);
+        // A transaction that holds one workspace's lock is not considered to hold another's: both
+        // keys are really taken (an old bug only locked the first sorted workspace).
+        expect(first.length).toBeGreaterThan(0);
+        expect(other.sort()).toEqual(first.sort());
+        expect(identityLockHeld(tx, ws)).toBe(true);
+        expect(identityLockHeld(tx, second)).toBe(true);
+        expect(() => assertIdentityLock(tx, second, 'test')).not.toThrow();
+        expect(() => assertIdentityLock(tx, third, 'test')).toThrow(/identity lock/);
+        expect(await identityHolders(d.db.admin, third)).toEqual([]);
+      }),
+    );
+  }, 60_000);
+
+  it('makes a merge wait for an erasure that commits first, then erases the family', async () => {
+    const p = newId('prf');
+    const q = newId('prf');
+    await seedProfile(q, { user: `user-${q}` }, { createdAt: new Date(Date.UTC(2026, 0, 1)) });
+    await seedProfile(p, { anonymous: `anon-${p}` }, { createdAt: new Date(Date.UTC(2026, 0, 2)) });
+    const messageId = await seedMessage(p);
     const prepared = await prepareErasure(d.db, ws, kp);
+    const probe = await d.db.admin.connect();
+    let erased: Promise<{ profileIds: string[] }> | undefined;
+    let mergeBatch: Promise<unknown> | undefined;
     try {
-      await d.db.withWorkspace(ws, (tx) =>
+      // The erasure takes the identity lock and stops at its first row delete.
+      await probe.query('BEGIN');
+      await probe.query('SELECT 1 FROM messages WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [ws, messageId]);
+      erased = d.db.withWorkspace(ws, (tx) =>
         eraseProfileStage(tx, {
           workspaceId: ws,
-          profileId: first,
+          profileId: p,
           requestedBy: 'user_test',
-          reason: 'erase first',
+          reason: 'erase racing merge',
           prepared,
         }),
       );
+      await waitForAdvisoryHolderBlocked(probe, ws);
+      mergeBatch = runBatch([event({ anonymousId: `anon-${p}`, userId: `user-${q}` })]);
+      await waitForIdentityWaiter(probe, ws);
+      await probe.query('COMMIT');
     } finally {
-      disposeErasure(prepared);
+      await probe.query('ROLLBACK').catch(() => {});
+      probe.release();
+      try {
+        if (erased) await erased;
+      } finally {
+        disposeErasure(prepared);
+      }
     }
-    await runBatch([event({ anonymousId: `anon-${first}`, userId: `user-${newUuid()}` })]);
-    const resurrected = await d.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [ws, first]);
-    expect(resurrected.rowCount).toBe(0);
+    await mergeBatch;
+    const result = await erased!;
+    expect(result.profileIds).toEqual([p]);
+    const left = await d.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = ANY($2)', [ws, [p, q]]);
+    expect(left.rowCount).toBe(1); // Q survives; the erased person does not
+  }, 60_000);
 
-    // Merge first, then erase the merged-away id: the survivor's whole family goes, no row is left.
-    const survivor = newId('prf');
-    const merged = newId('prf');
-    await seedProfile(survivor, { user: `user-${survivor}` }, { createdAt: new Date(Date.UTC(2026, 0, 1)) });
-    await seedProfile(merged, { anonymous: `anon-${merged}` }, { createdAt: new Date(Date.UTC(2026, 0, 2)) });
-    await runBatch([event({ anonymousId: `anon-${merged}`, userId: `user-${survivor}` })]);
-    const second = await prepareErasure(d.db, ws, kp);
-    let erased: string[] = [];
+  it('erases the survivor family when a merge commits before the erasure starts', async () => {
+    const p = newId('prf');
+    const q = newId('prf');
+    await seedProfile(q, { user: `user-${q}` }, { createdAt: new Date(Date.UTC(2026, 0, 1)) });
+    await seedProfile(p, { anonymous: `anon-${p}` }, { createdAt: new Date(Date.UTC(2026, 0, 2)) });
+    const prepared = await prepareErasure(d.db, ws, kp);
+    const probe = await d.db.admin.connect();
+    let mergeBatch: Promise<unknown> | undefined;
+    let erased: Promise<{ profileIds: string[] }> | undefined;
     try {
-      const result = await d.db.withWorkspace(ws, (tx) =>
+      // The merge takes the identity lock and stops at the survivor's profile row.
+      await probe.query('BEGIN');
+      await probe.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [ws, q]);
+      mergeBatch = runBatch([event({ anonymousId: `anon-${p}`, userId: `user-${q}` })]);
+      await waitForAdvisoryHolderBlocked(probe, ws);
+      erased = d.db.withWorkspace(ws, (tx) =>
         eraseProfileStage(tx, {
           workspaceId: ws,
-          profileId: merged,
+          profileId: p,
           requestedBy: 'user_test',
-          reason: 'erase after merge',
-          prepared: second,
+          reason: 'erase after merge racing',
+          prepared,
         }),
       );
-      erased = result.profileIds;
+      await waitForIdentityWaiter(probe, ws);
+      await probe.query('COMMIT');
     } finally {
-      disposeErasure(second);
+      await probe.query('ROLLBACK').catch(() => {});
+      probe.release();
     }
-    expect(erased.sort()).toEqual([survivor, merged].sort());
-    const left = await d.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = ANY($2)', [ws, erased]);
+    await mergeBatch;
+    const result = await erased!;
+    disposeErasure(prepared);
+    expect(result.profileIds.sort()).toEqual([p, q].sort());
+    const left = await d.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = ANY($2)', [ws, [p, q]]);
     expect(left.rowCount).toBe(0);
   }, 60_000);
 
-  it('lets another identify complete while the erasure external cleanup is still waiting', async () => {
+  it('lets another identify complete while the real erasure cleanup worker waits on ClickHouse', async () => {
     const erased = newId('prf');
     await seedProfile(erased, { anonymous: `anon-${erased}` });
     const prepared = await prepareErasure(d.db, ws, kp);
+    let erasureId = '';
     try {
-      await d.db.withWorkspace(ws, (tx) =>
-        eraseProfileStage(tx, {
-          workspaceId: ws,
-          profileId: erased,
-          requestedBy: 'user_test',
-          reason: 'cleanup wait',
-          prepared,
-        }),
-      );
+      erasureId = (
+        await d.db.withWorkspace(ws, (tx) =>
+          eraseProfileStage(tx, {
+            workspaceId: ws,
+            profileId: erased,
+            requestedBy: 'user_test',
+            reason: 'cleanup worker',
+            prepared,
+          }),
+        )
+      ).erasureId;
     } finally {
       disposeErasure(prepared);
     }
 
-    // The SQL stage committed and released the identity lock; its durable job is still running in
-    // another process (a cleanup that hangs must not block new people from being identified).
-    const cleanup = barrier(1);
-    let finishCleanup!: () => void;
-    const cleanupMayFinish = new Promise<void>((resolve) => {
-      finishCleanup = resolve;
+    let entered!: () => void;
+    const blockedInClickHouse = new Promise<void>((resolve) => {
+      entered = resolve;
     });
-    const job = (async () => {
-      await cleanup();
-      await cleanupMayFinish;
-    })();
+    let release!: () => void;
+    const mayFinish = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const eventStore = {
+      async deleteEventsOf() {
+        entered();
+        await mayFinish;
+      },
+    } as unknown as EventStore;
+    const hot = { async deleteSnapshot() {} } as unknown as HotState;
+    // The real scheduler path: claim the committed job and block inside the ClickHouse delete.
+    const worker = runErasureCleanupOnce({ db: d.db, kp, events: eventStore, hot });
+    await blockedInClickHouse;
+
     const fresh = `anon-${newId('prf')}`;
     await runBatch([event({ anonymousId: fresh })]);
     const created = await d.db.admin.query(
@@ -345,8 +423,15 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
       [ws, fresh],
     );
     expect(created.rowCount).toBe(1);
-    finishCleanup();
-    await job;
+
+    release();
+    const result = await worker;
+    expect(result.completed).toBeGreaterThanOrEqual(1);
+    const job = await d.db.admin.query<{ state: string }>(
+      'SELECT state FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
+      [ws, erasureId],
+    );
+    expect(job.rows[0]?.state).toBe('complete');
   }, 60_000);
 
   it('rolls back and re-prepares when the matching key changes between preparation and the lock', async () => {

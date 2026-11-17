@@ -80,30 +80,46 @@ export function resetIdentityLockMetrics(): void {
 }
 
 /**
- * The transactions that hold the lock, by the transaction object they were given. A marker, not a
+ * The workspace ids each transaction holds, by the transaction object it was given. A marker, not a
  * `pg_locks` query: the check must be cheap and must not itself touch the database on every consent
- * write. `lockIdentity` adds the transaction here when `pg_advisory_xact_lock` has returned.
+ * write. `lockIdentity` adds the workspace when `pg_advisory_xact_lock` has returned.
  */
-const holders = new WeakSet<object>();
-const acquiredAt = new WeakMap<object, number>();
+const holders = new WeakMap<object, Set<string>>();
+const acquiredAt = new WeakMap<object, Map<string, number>>();
 
-/** Whether this transaction already holds the workspace identity lock. */
-export function identityLockHeld(tx: Tx): boolean {
-  return holders.has(tx);
+function heldBy(tx: Tx): Set<string> {
+  let set = holders.get(tx);
+  if (!set) {
+    set = new Set();
+    holders.set(tx, set);
+  }
+  return set;
+}
+
+/** Whether this transaction holds the identity lock for this exact workspace. */
+export function identityLockHeld(tx: Tx, workspaceId: string): boolean {
+  return holders.get(tx)?.has(workspaceId) ?? false;
+}
+
+/** The workspaces this transaction holds the identity lock for, as taken. */
+export function identityLockWorkspaces(tx: Tx): string[] {
+  return [...(holders.get(tx) ?? [])];
 }
 
 /**
- * Refuses a consent write whose transaction does not hold the identity lock. Every writer takes it
- * before it reads the canonical profile or writes evidence; the helpers assert instead of taking it
- * themselves, so a caller cannot accidentally invert the lock order (a row lock first).
+ * Refuses a consent write whose transaction does not hold this workspace's identity lock. Every
+ * writer takes it before it reads the canonical profile or writes evidence; the helpers assert
+ * instead of taking it themselves, so a caller cannot accidentally invert the lock order (a row
+ * lock first). The check is per workspace: a transaction that locked one workspace is not
+ * considered safe for another.
  */
-export function assertIdentityLock(tx: Tx, what: string): void {
-  if (holders.has(tx)) return;
-  throw new Error(`${what} requires the workspace identity lock; take it with withIdentityLock before writing consent.`);
+export function assertIdentityLock(tx: Tx, workspaceId: string, what: string): void {
+  if (identityLockHeld(tx, workspaceId)) return;
+  throw new Error(`${what} requires the identity lock for workspace ${workspaceId}; take it with withIdentityLock before writing consent.`);
 }
 
 async function acquire(tx: Tx, workspaceId: string): Promise<boolean> {
-  if (holders.has(tx)) {
+  if (identityLockHeld(tx, workspaceId)) {
     metrics.reentrant++;
     return false;
   }
@@ -113,22 +129,33 @@ async function acquire(tx: Tx, workspaceId: string): Promise<boolean> {
   metrics.acquisitions++;
   if (waited > 0.001) metrics.contended++;
   observe(metrics.wait, waited);
-  holders.add(tx);
-  acquiredAt.set(tx, performance.now());
+  heldBy(tx).add(workspaceId);
+  let times = acquiredAt.get(tx);
+  if (!times) {
+    times = new Map();
+    acquiredAt.set(tx, times);
+  }
+  times.set(workspaceId, performance.now());
   if (waited >= 0.05) logger.debug({ waitedMs: Math.round(waited * 1_000) }, 'waited for the workspace identity lock');
   return true;
 }
 
-/** Takes the workspace identity lock for the rest of this transaction. Idempotent. */
+/** Takes the identity lock for one workspace for the rest of this transaction. Idempotent. */
 export async function lockIdentity(tx: Tx, workspaceId: string): Promise<void> {
   await acquire(tx, workspaceId);
 }
 
-function releaseMetrics(tx: Tx): void {
-  const since = acquiredAt.get(tx);
-  if (since === undefined) return;
-  acquiredAt.delete(tx);
-  observe(metrics.hold, (performance.now() - since) / 1_000);
+/** Records how long the given workspaces' locks were held by this protected block. */
+function releaseMetrics(tx: Tx, workspaceIds: readonly string[]): void {
+  const times = acquiredAt.get(tx);
+  if (!times) return;
+  for (const id of workspaceIds) {
+    const since = times.get(id);
+    if (since === undefined) continue;
+    times.delete(id);
+    observe(metrics.hold, (performance.now() - since) / 1_000);
+  }
+  if (!times.size) acquiredAt.delete(tx);
 }
 
 /**
@@ -142,20 +169,20 @@ export async function withIdentityLock<T>(tx: Tx, workspaceId: string, fn: () =>
     return await fn();
   } finally {
     // A nested call shares the outer block's hold; only the acquirer records it.
-    if (acquired) releaseMetrics(tx);
+    if (acquired) releaseMetrics(tx, [workspaceId]);
   }
 }
 
-/** Like `withIdentityLock`, for a batch that may name several workspaces. Locks are taken in
- * sorted order so two such batches can never deadlock. */
+/** Like `withIdentityLock`, for a batch that may name several workspaces. Every missing workspace
+ * is locked in sorted order, so two such batches can never deadlock. */
 export async function withIdentityLocks<T>(tx: Tx, workspaceIds: Iterable<string>, fn: () => Promise<T>): Promise<T> {
   const ids = [...new Set(workspaceIds)].sort();
   if (!ids.length) return fn();
-  let acquired = false;
-  for (const id of ids) acquired = (await acquire(tx, id)) || acquired;
+  const acquired: string[] = [];
   try {
+    for (const id of ids) if (await acquire(tx, id)) acquired.push(id);
     return await fn();
   } finally {
-    if (acquired) releaseMetrics(tx);
+    if (acquired.length) releaseMetrics(tx, acquired);
   }
 }
