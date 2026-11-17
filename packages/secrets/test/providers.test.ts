@@ -4,6 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { failFakeServer } from '../../../test-support/index';
 import { localKeyProvider, newDataKey, open, seal } from '../src/keys';
 import { awsKmsKeyProvider, cachedKeyProvider, chainKeyProviders, openbaoKeyProvider } from '../src/providers';
 
@@ -32,27 +33,33 @@ const openB64 = (b64: string) => {
 
 beforeAll(async () => {
   server = createServer(async (req, res) => {
-    let raw = '';
-    for await (const chunk of req) raw += chunk;
-    const body = JSON.parse(raw || '{}');
-    requests.push({ path: req.url ?? '', headers: req.headers, body });
-    if (req.url?.startsWith('/v1/transit/')) {
-      if (req.headers['x-vault-token'] !== validToken) return json(res, 403, { errors: ['permission denied'] });
-      if (req.url === '/v1/transit/encrypt/am')
-        return json(res, 200, { data: { ciphertext: `vault:v1:${sealB64(Buffer.from(body.plaintext, 'base64'))}` } });
-      if (req.url === '/v1/transit/decrypt/am')
-        return json(res, 200, { data: { plaintext: openB64(body.ciphertext.replace('vault:v1:', '')).toString('base64') } });
+    try {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw || '{}');
+      requests.push({ path: req.url ?? '', headers: req.headers, body });
+      if (req.url?.startsWith('/v1/transit/')) {
+        if (req.headers['x-vault-token'] !== validToken) return json(res, 403, { errors: ['permission denied'] });
+        if (req.url === '/v1/transit/encrypt/am')
+          return json(res, 200, { data: { ciphertext: `vault:v1:${sealB64(Buffer.from(body.plaintext, 'base64'))}` } });
+        if (req.url === '/v1/transit/decrypt/am')
+          return json(res, 200, {
+            data: { plaintext: openB64(body.ciphertext.replace('vault:v1:', '')).toString('base64') },
+          });
+      }
+      if (req.url === '/kms/') {
+        const auth = String(req.headers.authorization ?? '');
+        if (!/^AWS4-HMAC-SHA256 Credential=AKIATEST\/\d{8}\/eu-north-1\/kms\/aws4_request/.test(auth))
+          return json(res, 400, { message: 'bad signature' });
+        if (req.headers['x-amz-target'] === 'TrentService.Encrypt')
+          return json(res, 200, { CiphertextBlob: sealB64(Buffer.from(body.Plaintext, 'base64')) });
+        if (req.headers['x-amz-target'] === 'TrentService.Decrypt')
+          return json(res, 200, { Plaintext: openB64(body.CiphertextBlob).toString('base64') });
+      }
+      json(res, 404, {});
+    } catch {
+      failFakeServer(res);
     }
-    if (req.url === '/kms/') {
-      const auth = String(req.headers.authorization ?? '');
-      if (!/^AWS4-HMAC-SHA256 Credential=AKIATEST\/\d{8}\/eu-north-1\/kms\/aws4_request/.test(auth))
-        return json(res, 400, { message: 'bad signature' });
-      if (req.headers['x-amz-target'] === 'TrentService.Encrypt')
-        return json(res, 200, { CiphertextBlob: sealB64(Buffer.from(body.Plaintext, 'base64')) });
-      if (req.headers['x-amz-target'] === 'TrentService.Decrypt')
-        return json(res, 200, { Plaintext: openB64(body.CiphertextBlob).toString('base64') });
-    }
-    json(res, 404, {});
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

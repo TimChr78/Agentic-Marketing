@@ -299,11 +299,20 @@ export async function fakeLlm(handler: (r: FakeRequest) => FakeReply | Promise<F
         res.end('{}');
         return;
       }
-      const apiKey = String(req.headers.authorization ?? '').replace(/^Bearer /, '') || String(req.headers['x-api-key'] ?? '');
-      const body = JSON.parse(raw) as WireRequest;
-      const r = normalise(api, body, apiKey);
-      requests.push(r);
+      // Parsing and normalisation are inside the boundary: malformed input must produce an error
+      // response, not an unhandled rejection with the request still waiting.
+      let body: WireRequest;
       try {
+        body = JSON.parse(raw) as WireRequest;
+      } catch {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: { message: 'invalid JSON' } }));
+        return;
+      }
+      try {
+        const apiKey = String(req.headers.authorization ?? '').replace(/^Bearer /, '') || String(req.headers['x-api-key'] ?? '');
+        const r = normalise(api, body, apiKey);
+        requests.push(r);
         const reply = await handler(r);
         if (body.stream && !('status' in reply)) {
           res.setHeader('content-type', 'text/event-stream');

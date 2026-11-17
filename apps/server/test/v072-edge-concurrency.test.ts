@@ -3,6 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { acquireEdgeSyncLock, syncEdge } from '@agentic-marketing/personalize';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { failFakeServer } from '../../../test-support/index';
 import { startTestServer, testPort, type User } from './harness';
 
 const A = 'a'.repeat(32);
@@ -33,27 +34,31 @@ const configure = (namespaceId: string, extra: Record<string, unknown> = {}) =>
 
 beforeAll(async () => {
   cf = createServer(async (req, res) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
-    const body = JSON.parse(Buffer.concat(chunks).toString() || '[]');
-    const url = new URL(req.url!, 'http://localhost');
-    const match = url.pathname.match(/namespaces\/([^/]+)(\/.*)$/)!;
-    const kv = store(match[1]);
-    const gate = pause;
-    if (gate && match[2] === gate.path) {
-      pause = undefined;
-      gate.entered.resolve();
-      await gate.release.promise;
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const body = JSON.parse(Buffer.concat(chunks).toString() || '[]');
+      const url = new URL(req.url!, 'http://localhost');
+      const match = url.pathname.match(/namespaces\/([^/]+)(\/.*)$/)!;
+      const kv = store(match[1]);
+      const gate = pause;
+      if (gate && match[2] === gate.path) {
+        pause = undefined;
+        gate.entered.resolve();
+        await gate.release.promise;
+      }
+      let result: unknown[] = [];
+      if (match[2] === '/bulk' && req.method === 'PUT') {
+        for (const entry of body) kv.set(entry.key, JSON.parse(entry.value));
+      } else if (match[2] === '/bulk/delete') {
+        for (const key of body) kv.delete(key);
+      } else if (match[2] === '/keys') {
+        result = [...kv.keys()].filter((key) => key.startsWith(url.searchParams.get('prefix') ?? '')).map((name) => ({ name }));
+      }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ success: true, errors: [], result }));
+    } catch {
+      failFakeServer(res, { success: false, errors: [{ code: 500, message: 'fake KV failed' }] });
     }
-    let result: unknown[] = [];
-    if (match[2] === '/bulk' && req.method === 'PUT') {
-      for (const entry of body) kv.set(entry.key, JSON.parse(entry.value));
-    } else if (match[2] === '/bulk/delete') {
-      for (const key of body) kv.delete(key);
-    } else if (match[2] === '/keys') {
-      result = [...kv.keys()].filter((key) => key.startsWith(url.searchParams.get('prefix') ?? '')).map((name) => ({ name }));
-    }
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ success: true, errors: [], result }));
   });
   await new Promise<void>((r) => cf.listen(0, '127.0.0.1', r));
   apiBase = `http://127.0.0.1:${(cf.address() as AddressInfo).port}`;

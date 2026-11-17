@@ -1,3 +1,4 @@
+import type { ServerResponse } from 'node:http';
 import { expect } from 'vitest';
 
 // Shared determinism helpers for the Vitest projects (``apps/server/test`` and ``packages/*/test``).
@@ -152,4 +153,16 @@ export function expectUnordered<T>(actual: readonly T[], expected: readonly T[])
     expect(index, `missing ${stableStringify(item)} in ${stableStringify(actual)}`).toBeGreaterThanOrEqual(0);
     remaining.splice(index, 1);
   }
+}
+
+/**
+ * Answers from a fake server handler that threw. Without it the handler's promise rejects, the
+ * request never gets a response and the test that called the fake waits for one (#1014).
+ */
+export function failFakeServer(res: ServerResponse, body: unknown = { error: 'fake server failed' }): void {
+  if (!res.headersSent) {
+    res.statusCode = 500;
+    res.setHeader('content-type', 'application/json');
+  }
+  res.end(JSON.stringify(body));
 }
