@@ -103,6 +103,24 @@ describe('a policy denial’s reasons (#885)', () => {
     const plain = new AppError('invalid_input', 'The input does not match the command schema.');
     expect(sanitizeAppError(plain)).toBe(plain);
   });
+
+  it('redacts and bounds details before the error leaves the executor (#996)', () => {
+    const details = { problems: [`Unknown parameter: password=${SECRET}`], nested: { list: [`token=${SECRET}`] } };
+    const error = new AppError('invalid_input', 'The parameters are not valid.', details);
+
+    const safe = sanitizeAppError(error);
+
+    expect(safe).not.toBe(error);
+    expect(JSON.stringify(safe.details)).not.toContain(SECRET);
+    expect((safe.details as typeof details).problems[0]).toContain('Unknown parameter: password=');
+    // The original error is untouched: other code may still read it.
+    expect(JSON.stringify(details)).toContain(SECRET);
+  });
+
+  it('returns the same error when its details have nothing to redact', () => {
+    const clean = new AppError('conflict', 'Use a new key.', { reason: 'idempotency_key_reused' });
+    expect(sanitizeAppError(clean)).toBe(clean);
+  });
 });
 
 describe('the independent check verdict in policy reasons (#885 round 7)', () => {

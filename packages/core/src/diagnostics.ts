@@ -1086,6 +1086,142 @@ export function safeErrorText(text: string, max: number): string {
   return redactCredentials(String(text)).split('\n')[0]!.trim().slice(0, max);
 }
 
+/** How much of one detail string survives (#996). */
+export const ERROR_DETAILS_MAX_CHARS = 1000;
+/** How deep `redactErrorDetails` walks before it replaces the rest (#996). */
+export const ERROR_DETAILS_MAX_DEPTH = 8;
+/** How many array items and object properties it keeps in total (#996). */
+export const ERROR_DETAILS_MAX_ELEMENTS = 1000;
+/** What a value cut by the depth or element limit becomes (#996). */
+export const ERROR_DETAILS_TRUNCATED = '[truncated]';
+
+/**
+ * Detail values that are an API contract rather than prose: a client switches on them
+ * (`details.reason`). The bare-token rule eats `idempotency_key_reversed` (24 characters, with
+ * separators allowed), so these exact values are kept. The list is exact, so a free-text value in
+ * the same field still goes through the redactor (#996).
+ */
+const STRUCTURAL_DETAIL_VALUES: ReadonlySet<string> = new Set([
+  'idempotency_key_reused',
+  'idempotency_key_reversed',
+  'idempotency_in_progress',
+]);
+
+/**
+ * The redacted, bounded form of one object key (#996 review). A Zod tree error keeps the caller's
+ * input key as an object key, so a key can carry a credential exactly like a value. Redacting two
+ * different keys can make them equal; the later one gets a deterministic ` #2`, ` #3` in original
+ * key order so no entry is silently dropped. Keys already distinct stay byte-for-byte identical, so
+ * a second pass changes nothing.
+ */
+function safeDetailKey(key: string, used: ReadonlySet<string>): string {
+  const base = redactedText(key, ERROR_DETAILS_MAX_CHARS);
+  let candidate = base;
+  for (let n = 2; used.has(candidate); n += 1) {
+    const suffix = ` #${n}`;
+    candidate = `${redactedText(key, Math.max(1, ERROR_DETAILS_MAX_CHARS - suffix.length))}${suffix}`;
+  }
+  return candidate;
+}
+
+/**
+ * The safe copy of an AppError's `details` (#996): every string redacted and bounded, nested arrays
+ * and objects walked with a depth limit and one **global** element budget, object keys redacted and
+ * bounded with the structure kept so `details.reason` or `details.problems[].path` stay
+ * machine-readable, and non-string primitives untouched. The original value is never mutated, and
+ * an unchanged value is returned as it is (so an error with nothing to redact keeps its identity).
+ * Redaction is idempotent, so a second pass at a serialisation point changes nothing.
+ *
+ * The budget is passed down and charged back up (`used`): every array item, object entry and
+ * truncation marker counts once, wherever it is nested, so the output never exceeds the limit. A
+ * container keeps one slot in hand while it still has a sibling to visit, so its terminal marker
+ * always fits.
+ */
+export function redactErrorDetails(details: unknown): unknown {
+  const seen = new WeakSet<object>();
+  type Emitted = { value: unknown; used: number };
+
+  const walk = (value: unknown, depth: number, budget: number): Emitted => {
+    if (typeof value === 'string') {
+      // The marker and the API's own enum values are not text a redactor could improve.
+      if (value === ERROR_DETAILS_TRUNCATED || STRUCTURAL_DETAIL_VALUES.has(value)) return { value, used: 1 };
+      // Redact while the value is complete; cutting first could leave a token prefix (#885).
+      return { value: redactedText(value, ERROR_DETAILS_MAX_CHARS), used: 1 };
+    }
+    if (value === null || typeof value !== 'object') return { value, used: 1 };
+    if (depth > ERROR_DETAILS_MAX_DEPTH) return { value: ERROR_DETAILS_TRUNCATED, used: 1 };
+    // A value already walked is a cycle (or a shared node): do not walk it twice.
+    if (seen.has(value)) return { value: ERROR_DETAILS_TRUNCATED, used: 1 };
+
+    const entries = Array.isArray(value) ? value : Object.entries(value as Record<string, unknown>);
+    // The container itself takes one slot; anything inside needs at least one more. Without that,
+    // a marker stands in for the whole container.
+    if (entries.length === 0) return { value, used: 1 };
+    if (budget < 2) return { value: ERROR_DETAILS_TRUNCATED, used: 1 };
+    seen.add(value);
+    const next = depth + 1;
+    /** Slots for this container's contents, its terminal marker included. */
+    const content = budget - 1;
+    let usedContent = 0;
+    let truncated = false;
+
+    if (Array.isArray(value)) {
+      const out: unknown[] = [];
+      let changed = false;
+      for (let index = 0; index < value.length; index += 1) {
+        // Keep one slot back while a sibling follows, so a marker for the tail always fits.
+        const allowance = content - usedContent - (index < value.length - 1 ? 1 : 0);
+        if (allowance < 1) {
+          truncated = true;
+          break;
+        }
+        const item: unknown = value[index];
+        const child = walk(item, next, allowance);
+        usedContent += child.used;
+        if (child.value !== item) changed = true;
+        out.push(child.value);
+      }
+      if (truncated && content - usedContent >= 1) {
+        out.push(ERROR_DETAILS_TRUNCATED);
+        usedContent += 1;
+        changed = true;
+      }
+      return { value: changed ? out : value, used: 1 + usedContent };
+    }
+
+    const used = new Set<string>();
+    // Built with Object.fromEntries so a caller key such as `__proto__` stays an own property
+    // instead of changing the prototype.
+    const pairs: [string, unknown][] = [];
+    let changed = false;
+    for (let index = 0; index < entries.length; index += 1) {
+      const allowance = content - usedContent - (index < entries.length - 1 ? 1 : 0);
+      if (allowance < 1) {
+        truncated = true;
+        break;
+      }
+      const [key, item] = entries[index]!;
+      const cleanKey = safeDetailKey(key, used);
+      if (cleanKey !== key) changed = true;
+      used.add(cleanKey);
+      const child = walk(item, next, allowance);
+      usedContent += child.used;
+      if (child.value !== item) changed = true;
+      pairs.push([cleanKey, child.value]);
+    }
+    if (truncated && content - usedContent >= 1) {
+      pairs.push([safeDetailKey(ERROR_DETAILS_TRUNCATED, used), ERROR_DETAILS_TRUNCATED]);
+      usedContent += 1;
+      changed = true;
+    }
+    return { value: changed ? Object.fromEntries(pairs) : value, used: 1 + usedContent };
+  };
+
+  // The root container is not an element of its parent; budget one extra slot for it so its own
+  // contents may use the whole limit.
+  return walk(details, 0, ERROR_DETAILS_MAX_ELEMENTS + 1).value;
+}
+
 const CODE_FIELDS = ['code', 'status', 'type'] as const;
 const TEXT_FIELDS = ['message', 'error_description', 'detail', 'description'] as const;
 /** The keys a provider nests its error object under. */
