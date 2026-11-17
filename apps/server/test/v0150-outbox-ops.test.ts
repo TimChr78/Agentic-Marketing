@@ -59,4 +59,25 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     await expect(requeueFailedOutbox(d.db)).resolves.toEqual({ requeued: 0, skippedPermanent: 1 });
     await expect(requeueFailedOutbox(d.db, { includePermanent: true })).resolves.toEqual({ requeued: 1, skippedPermanent: 0 });
   });
+
+  it('reports erasure cleanup backlog and failures, and an empty queue as ok', async () => {
+    const erasureCheck = async () => (await operationalHealthChecks(d.db)).find((check) => check.id === 'queue.erasureCleanup');
+    expect((await erasureCheck())?.status).toBe('ok');
+
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, attempts, created_at, last_error)
+       VALUES ($1, 'era_ops_pending', '{prf_ops_pending}', 'pending_external', 1, now() - interval '20 minutes', NULL),
+              ($1, 'era_ops_failed', '{prf_ops_failed}', 'failed', 36,
+               now() - interval '2 hours', 'ClickHouse unavailable')`,
+      [d.workspace],
+    );
+    const check = await erasureCheck();
+    expect(check).toMatchObject({ status: 'warn' });
+    expect(check?.message).toContain('1 erasure cleanup job(s) failed after their retries');
+    expect(check?.message).toContain('1 waiting');
+    expect(check?.hint).toContain('ClickHouse');
+
+    await d.db.admin.query("UPDATE erasure_cleanup_jobs SET state = 'complete' WHERE workspace_id = $1", [d.workspace]);
+    expect((await erasureCheck())?.status).toBe('ok');
+  });
 });

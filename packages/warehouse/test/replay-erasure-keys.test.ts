@@ -254,6 +254,38 @@ describe.skipIf(!hasTestDatabase())('restore erasure replay and warehouse keys (
     expect(legacyErasures[0]!.uncovered).toEqual(['events']);
   });
 
+  it('keeps captured keys while an incomplete cleanup job has no sealed selectors', async () => {
+    const ws = await addWorkspace(d);
+    const profile = 'prf_replay_brace000000000000000000';
+    await addExport(d, ws, 'wh_a', true);
+    await seedPerson(d, ws, profile, ['user_id', 'anonymous_id']);
+    await liveErase(d, ws, profile, 'era_replay_brace');
+    expect(await keyValues(d, ws)).toHaveLength(2);
+    // The destination processed the erasure, so nothing downstream pins the keys.
+    await d.db.admin.query(
+      `UPDATE warehouse_exports
+       SET cursors = jsonb_set(coalesce(cursors, '{}'), '{erasures}', to_jsonb((now() + interval '1 minute')::text))
+       WHERE workspace_id = $1 AND id = 'wh_a'`,
+      [ws],
+    );
+    // A restore recreated the cleanup job without selectors; it still needs the captured ids.
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, selectors, selector_key)
+       VALUES ($1, 'era_replay_brace', $2, NULL, NULL)`,
+      [ws, [profile]],
+    );
+    await pruneErasureKeys(appDb, ws);
+    expect(await keyValues(d, ws)).toHaveLength(2);
+
+    // Once local cleanup no longer needs them, the same prune removes them.
+    await d.db.admin.query(
+      "UPDATE erasure_cleanup_jobs SET state = 'complete' WHERE workspace_id = $1 AND erasure_id = 'era_replay_brace'",
+      [ws],
+    );
+    await pruneErasureKeys(appDb, ws);
+    expect(await keyValues(d, ws)).toEqual([]);
+  });
+
   it('preserves unknown legacy coverage after the restored tracking epoch and repeated replay', async () => {
     const ws = await addWorkspace(d);
     await addExport(d, ws, 'wh_a', true);

@@ -353,6 +353,13 @@ export async function pruneErasureKeys(db: Db, ws: string): Promise<void> {
       DELETE FROM warehouse_erasure_keys k
       WHERE k.workspace_id = ${ws}
         AND NOT EXISTS (
+          SELECT 1 FROM erasure_cleanup_jobs j
+          WHERE j.workspace_id = k.workspace_id
+            AND j.state <> 'complete'
+            AND j.selectors IS NULL
+            AND k.profile_id = ANY(j.profile_ids)
+        )
+        AND NOT EXISTS (
           SELECT 1 FROM warehouse_exports w
           WHERE w.workspace_id = ${ws} AND w.enabled
             AND coalesce((w.cursors->>'erasures')::timestamptz, 'epoch'::timestamptz) < k.at

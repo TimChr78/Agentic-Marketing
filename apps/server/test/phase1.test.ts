@@ -274,11 +274,24 @@ describe('profiles, identity and consent', () => {
     const family = [profileId, ...before.mergedFrom];
 
     const res = await api.call('profiles.erase', { profileId, reason: 'Erasure request by e-mail' });
-    expect(res).toMatchObject({ profiles: 2, consentRecords: 6 });
+    expect(res).toMatchObject({ status: 'pending', counts: { profiles: 2, consentRecords: 6 }, erasureId: expect.any(String) });
 
     expect((await api.call('profiles.find', { type: 'email', value: 'ada@example.com' })).profileId).toBeNull();
     expect((await rejects(api.call('profiles.get', { profileId }))).status).toBe(404);
-    expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['dev-a', 'dev-b'], userIds: ['u-42'] })).toEqual([]);
+    expect(
+      await eventually(
+        () => t.srv.events.eventsOf(ws, { anonymousIds: ['dev-a', 'dev-b'], userIds: ['u-42'] }),
+        (rows) => rows.length === 0,
+      ),
+    ).toEqual([]);
+    expect(
+      (
+        await eventually(
+          () => api.call('profiles.erasureStatus', { erasureId: res.erasureId }),
+          (s) => s.status === 'complete',
+        )
+      ).status,
+    ).toBe('complete');
     for (const table of ['profiles', 'profile_keys', 'identifiers', 'consent_state'])
       expect(
         (

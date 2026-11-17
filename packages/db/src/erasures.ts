@@ -32,9 +32,25 @@ export interface ErasureTombstoneRecord {
   erasureId: string;
 }
 
+/**
+ * One erasure's cleanup job, carried through a restore so the restored database cleans the
+ * external stores again. The selectors keep the sealing they already have (a per-erasure service
+ * key wrapped by the KEK), so the replay never needs to read or reseal personal data.
+ */
+export interface ErasureCleanupJobRecord {
+  workspaceId: string;
+  erasureId: string;
+  profileIds: string[];
+  selectors: Buffer | null;
+  selectorKey: Buffer | null;
+  selectorKek: string | null;
+}
+
 export interface ErasureLog {
   erasures: ErasureRecord[];
   tombstones: ErasureTombstoneRecord[];
+  /** Pending cleanup jobs for the erasures above; absent from a database older than 0.15.0. */
+  cleanupJobs?: ErasureCleanupJobRecord[];
 }
 
 export interface ReplayErasuresResult {
@@ -46,6 +62,8 @@ export interface ReplayErasuresResult {
   profiles: number;
   /** Tombstones re-inserted (or refreshed). */
   tombstones: number;
+  /** Pending cleanup jobs recreated for the replayed erasures. */
+  cleanupJobs: number;
   /** Entries for workspaces the restored snapshot no longer has; nothing to erase there. */
   skipped: number;
 }
@@ -158,7 +176,29 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
           erasureId: row.erasure_id,
         }))
       : [];
-    return { erasures, tombstones };
+    const cleanupJobs = (await hasTable(client, 'erasure_cleanup_jobs'))
+      ? (
+          await client.query<{
+            workspace_id: string;
+            erasure_id: string;
+            profile_ids: string[];
+            selectors: Buffer | null;
+            selector_key: Buffer | null;
+            selector_kek: string | null;
+          }>(
+            `SELECT workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek
+             FROM erasure_cleanup_jobs`,
+          )
+        ).rows.map((row) => ({
+          workspaceId: row.workspace_id,
+          erasureId: row.erasure_id,
+          profileIds: row.profile_ids,
+          selectors: row.selectors,
+          selectorKey: row.selector_key,
+          selectorKek: row.selector_kek,
+        }))
+      : [];
+    return { erasures, tombstones, cleanupJobs };
   });
 }
 
@@ -212,7 +252,7 @@ export async function replayErasures(
   log: ErasureLog,
   opts: ReplayErasuresOptions = {},
 ): Promise<ReplayErasuresResult> {
-  const result: ReplayErasuresResult = { workspaces: 0, erasures: 0, profiles: 0, tombstones: 0, skipped: 0 };
+  const result: ReplayErasuresResult = { workspaces: 0, erasures: 0, profiles: 0, tombstones: 0, cleanupJobs: 0, skipped: 0 };
   if (!log.erasures.length && !log.tombstones.length) return result;
 
   return withClient(databaseUrl, async (client) => {
@@ -221,6 +261,12 @@ export async function replayErasures(
     const erasuresHaveKeyCount = erasuresTable && (await hasColumn(client, 'erasures', 'warehouse_key_count'));
     const erasureKeysTable = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
     const tombstonesTable = await hasTable(client, 'erasure_tombstones');
+    const cleanupJobsTable = await hasTable(client, 'erasure_cleanup_jobs');
+    const jobsByErasure = new Map((log.cleanupJobs ?? []).map((job) => [`${job.workspaceId}:${job.erasureId}`, job]));
+    if (log.erasures.length && !cleanupJobsTable)
+      opts.log?.(
+        'warning: the restored database predates erasure_cleanup_jobs; ClickHouse events and hot state are cleaned up by the app only after it migrates, so check the erased people manually',
+      );
     if (log.tombstones.length && !tombstonesTable)
       opts.log?.('warning: the restored database predates erasure_tombstones; only profiles and suppression hashes are replayed');
 
@@ -284,6 +330,26 @@ export async function replayErasures(
                  END WHERE workspace_id = $1 AND id = $2`,
                 [workspaceId, erasure.id, known ?? null],
               );
+            }
+          }
+          // The restored database must clean the external stores again: its ClickHouse snapshot and
+          // Valkey state may predate the erasure. The job starts pending, with the selectors the
+          // live job carried when it still had them (a completed job purged them); the worker can
+          // still delete message and journey events by profile id.
+          if (cleanupJobsTable) {
+            const job = jobsByErasure.get(`${workspaceId}:${erasure.id}`);
+            // Only an erasure that already had a job gets one back. An erasure recorded before
+            // durable cleanup is treated as complete, exactly as profiles.erasureStatus reads it;
+            // its external work happened synchronously at erase time.
+            if (job) {
+              const inserted = await client.query(
+                `INSERT INTO erasure_cleanup_jobs
+                   (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (workspace_id, erasure_id) DO NOTHING`,
+                [workspaceId, erasure.id, erasure.profileIds, job.selectors, job.selectorKey, job.selectorKek],
+              );
+              result.cleanupJobs += inserted.rowCount ?? 0;
             }
           }
           result.erasures += 1;

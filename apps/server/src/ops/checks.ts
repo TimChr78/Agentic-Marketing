@@ -807,6 +807,9 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
         outbox_pending: string;
         outbox_oldest_seconds: string;
         outbox_failed: string;
+        erasure_cleanup_pending: string;
+        erasure_cleanup_oldest_seconds: string;
+        erasure_cleanup_failed: string;
       }
     | undefined;
   try {
@@ -837,7 +840,12 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
            (SELECT count(*) FROM outbox WHERE state IN ('pending', 'delivering')) AS outbox_pending,
            (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM outbox
               WHERE state IN ('pending', 'delivering')) AS outbox_oldest_seconds,
-           (SELECT count(*) FROM outbox WHERE state = 'failed') AS outbox_failed`,
+           (SELECT count(*) FROM outbox WHERE state = 'failed') AS outbox_failed,
+           (SELECT count(*) FROM erasure_cleanup_jobs
+              WHERE state IN ('pending_external', 'running')) AS erasure_cleanup_pending,
+           (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM erasure_cleanup_jobs
+              WHERE state IN ('pending_external', 'running')) AS erasure_cleanup_oldest_seconds,
+           (SELECT count(*) FROM erasure_cleanup_jobs WHERE state = 'failed') AS erasure_cleanup_failed`,
       ),
       'queue health',
     );
@@ -957,6 +965,33 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
               id: 'queue.outbox',
               status: 'ok',
               message: `${outboxPending} outbox row(s) publishing; the oldest has waited ${duration(outboxOldest)}`,
+            },
+  );
+  const erasurePending = Number(row.erasure_cleanup_pending);
+  const erasureOldest = Number(row.erasure_cleanup_oldest_seconds);
+  const erasureFailed = Number(row.erasure_cleanup_failed);
+  const erasureWaiting = erasurePending ? `${erasurePending} waiting, the oldest ${duration(erasureOldest)}` : 'none waiting';
+  checks.push(
+    erasureFailed > 0
+      ? {
+          id: 'queue.erasureCleanup',
+          status: 'warn',
+          message: `${erasureFailed} erasure cleanup job(s) failed after their retries; ${erasureWaiting}`,
+          hint: 'An erasure’s SQL rows are already gone; its ClickHouse events and hot state may remain. Check ClickHouse and Valkey, then restart the scheduler role: a failed job is not retried automatically.',
+        }
+      : erasurePending === 0
+        ? { id: 'queue.erasureCleanup', status: 'ok', message: 'no erasure cleanup is waiting' }
+        : erasureOldest > OUTBOX_LAG_WARN_SECONDS
+          ? {
+              id: 'queue.erasureCleanup',
+              status: 'warn',
+              message: `${erasurePending} erasure cleanup job(s) waiting; the oldest has waited ${duration(erasureOldest)}`,
+              hint: 'The scheduler role deletes erased people’s events from ClickHouse and hot state. Check that ROLE includes scheduler and that its logs show the erasure cleanup worker; a job also waits while an outbox row for the person is undelivered.',
+            }
+          : {
+              id: 'queue.erasureCleanup',
+              status: 'ok',
+              message: `${erasurePending} erasure cleanup job(s) running; the oldest has waited ${duration(erasureOldest)}`,
             },
   );
   return checks;

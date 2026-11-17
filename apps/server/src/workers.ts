@@ -11,7 +11,7 @@ import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runEnrollmentJobs, runSweeper } from '@agentic-marketing/journeys';
 import { refreshSnapshots, runEdgeSync, snapshotHook } from '@agentic-marketing/personalize';
-import { runProfileWorkers } from '@agentic-marketing/profiles';
+import { runErasureCleanup, runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
@@ -86,7 +86,7 @@ export function startScheduler(
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, the transactional outbox, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices, expired idempotency keys',
+    'scheduler role: segment recomputation, broadcasts, the transactional outbox, erasure cleanup, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices, expired idempotency keys',
   );
   return [
     // One pass at start: an abandoned consent choice is short-lived, and nothing in the request
@@ -134,6 +134,9 @@ export function startScheduler(
     // confirmation sends. It runs across tenants, as the owner, and claims with SKIP LOCKED.
     runOutboxDispatcher({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal),
     runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention, erasureGraceHours: srv.erasureGraceHours }, signal),
+    // External erasure cleanup (#978 part 2b): ClickHouse and hot state, after the erasure's SQL
+    // transaction committed. It waits for an in-flight outbox publisher of the erased person.
+    runErasureCleanup({ db: srv.db, kp: srv.keyProvider, events: srv.events, hot: srv.hot }, signal),
     runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
     runAudienceSyncs({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
     runSpendImport({ db: srv.db, events: srv.events, kp: srv.keyProvider, egress: srv.egress }, signal),
