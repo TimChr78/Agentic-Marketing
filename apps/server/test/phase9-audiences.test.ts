@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ATTRIBUTION_LIMITS, googleEmail, metaEmail, metaPhone, recordSpendGaps, SPEND_LIMITS, sha256 } from '@agentic-marketing/ads';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { expectUnordered } from '../../../test-support/index';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // Phase 9 (wave 2), part 2: segments synced to Meta custom audiences and Google Customer Match
@@ -281,10 +282,15 @@ describe('audience sync', () => {
     ids.sync = sync.artifactId;
     await api.call('artifacts.requestPublish', { artifactId: ids.sync, note: 'x' });
     const { results } = await api.call('ads.syncAudience', { artifactId: ids.sync });
-    expect(results).toEqual([
-      expect.objectContaining({ platform: 'meta', status: 'ok', added: 1, members: 1 }),
-      expect.objectContaining({ platform: 'google', status: 'ok', added: 1, members: 1 }),
-    ]);
+    // Platform order is not part of the contract (the stored-platform query is a UNION without a
+    // total order), so compare the per-platform results as a set.
+    expectUnordered(
+      results.map((r) => [r.platform, r.status, r.added, r.members]),
+      [
+        ['meta', 'ok', 1, 1],
+        ['google', 'ok', 1, 1],
+      ],
+    );
     const meta = JSON.parse(at('POST', '/v24.0/99887766/users')[0].body);
     expect(meta.payload).toEqual({ schema: ['EMAIL', 'PHONE'], data: [[metaEmail('ada@example.com'), metaPhone('+4512345678')]] });
     const google = JSON.parse(at('POST', '/v1/audienceMembers:ingest')[0].body);
@@ -315,10 +321,13 @@ describe('audience sync', () => {
     );
     await api.call('profiles.erase', { profileId: dan, reason: 'Erasure request (test)' });
     const { results } = await api.call('ads.syncAudience', { artifactId: ids.sync });
-    expect(results.map((r) => [r.platform, r.removed, r.members])).toEqual([
-      ['meta', 2, 0],
-      ['google', 2, 0],
-    ]);
+    expectUnordered(
+      results.map((r) => [r.platform, r.removed, r.members]),
+      [
+        ['meta', 2, 0],
+        ['google', 2, 0],
+      ],
+    );
     const removed = JSON.parse(at('DELETE', '/v24.0/99887766/users')[0].body).payload.data.flat();
     expect(removed).toEqual(expect.arrayContaining([metaEmail('ada@example.com'), metaEmail('dan@example.com')]));
     expect(at('POST', '/v1/audienceMembers:remove')).toHaveLength(1);
@@ -338,17 +347,23 @@ describe('audience sync', () => {
       15_000,
     );
     const added = await api.call('ads.syncAudience', { artifactId: ids.sync });
-    expect(added.results.map((r) => [r.platform, r.added, r.members])).toEqual([
-      ['meta', 1, 1],
-      ['google', 1, 1],
-    ]);
+    expectUnordered(
+      added.results.map((r) => [r.platform, r.added, r.members]),
+      [
+        ['meta', 1, 1],
+        ['google', 1, 1],
+      ],
+    );
     // The all-channels grant stays; the newer web-only withdrawal decides.
     await api.call('consent.record', { profileId: fay, purpose: 'ad_targeting', channel: 'web', status: 'withdrawn' });
     const { results } = await api.call('ads.syncAudience', { artifactId: ids.sync });
-    expect(results.map((r) => [r.platform, r.removed, r.members])).toEqual([
-      ['meta', 1, 0],
-      ['google', 1, 0],
-    ]);
+    expectUnordered(
+      results.map((r) => [r.platform, r.removed, r.members]),
+      [
+        ['meta', 1, 0],
+        ['google', 1, 0],
+      ],
+    );
   });
   it('always removes consent refusals with removals=false, including people outside the segment (#399)', async () => {
     const api = t.api(owner);
@@ -372,10 +387,13 @@ describe('audience sync', () => {
       },
     });
     await api.call('artifacts.requestPublish', { artifactId: sync.artifactId, note: 'Fixture' });
-    expect((await api.call('ads.syncAudience', { artifactId: sync.artifactId })).results.map((r) => [r.platform, r.members])).toEqual([
-      ['meta', 2],
-      ['google', 2],
-    ]);
+    expectUnordered(
+      (await api.call('ads.syncAudience', { artifactId: sync.artifactId })).results.map((r) => [r.platform, r.members]),
+      [
+        ['meta', 2],
+        ['google', 2],
+      ],
+    );
     await ingest(
       ['anon-retained-refusal', 'anon-retained-leaver'].map((anonymousId) => ({
         type: 'identify',
@@ -393,17 +411,23 @@ describe('audience sync', () => {
     expect((await api.call('segments.members', { artifactId: segment.artifactId })).members).toEqual([]);
     await api.call('consent.record', { profileId: withdraw, purpose: 'ad_targeting', status: 'withdrawn' });
     const first = await api.call('ads.syncAudience', { artifactId: sync.artifactId });
-    expect(first.results.map((r) => [r.platform, r.removed, r.members])).toEqual([
-      ['meta', 1, 1],
-      ['google', 1, 1],
-    ]);
+    expectUnordered(
+      first.results.map((r) => [r.platform, r.removed, r.members]),
+      [
+        ['meta', 1, 1],
+        ['google', 1, 1],
+      ],
+    );
     // The ordinary leaver remains until they too withdraw, even though neither person is in the segment.
     await api.call('consent.record', { profileId: leave, purpose: 'ad_targeting', channel: 'web', status: 'denied' });
     const second = await api.call('ads.syncAudience', { artifactId: sync.artifactId });
-    expect(second.results.map((r) => [r.platform, r.removed, r.members])).toEqual([
-      ['meta', 1, 0],
-      ['google', 1, 0],
-    ]);
+    expectUnordered(
+      second.results.map((r) => [r.platform, r.removed, r.members]),
+      [
+        ['meta', 1, 0],
+        ['google', 1, 0],
+      ],
+    );
   }, 30_000);
 });
 
