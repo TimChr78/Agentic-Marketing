@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { and, eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
+import { mergeComponentCtes } from './mergeComponent';
 
 // Holdout groups (#67): a deterministic share of a scope's entrants is held back from marketing
 // messages while still being measured. Assignment is a pure function of workspace, scope id,
@@ -49,48 +50,26 @@ export function armFor(percent: number, workspaceId: string, scopeId: string, ha
 }
 
 /**
- * Maps each profile id to the person it belongs to today: itself, or the end of the chain of
- * `merged_into` links (#944). Used where a decision must be made once per person even though a row
- * can sit on an id the person was merged away from.
+ * Maps each profile id to the person it belongs to today: the representative of its merge component
+ * (#944, #985). The representative is the end of the `merged_into` chain, or the lowest id on a
+ * corrupted cycle; see {@link mergeComponentCtes} for the one definition the send path, the report
+ * and the campaign identity map share. Used where a decision must be made once per person even
+ * though a row can sit on an id the person was merged away from.
+ *
+ * The ids travel as one array parameter, not one per id: a large campaign's set is far past
+ * PostgreSQL's 65,535-parameter limit, and `holdoutResult` would fail even without a single merge.
  */
 export async function canonicalPeople(tx: Tx, workspaceId: string, profileIds: readonly string[]): Promise<Map<string, string>> {
   const canonical = new Map<string, string>();
   const ids = [...new Set(profileIds)];
   if (!ids.length) return canonical;
-  /** id → merged_into, for every id the walk reached (null or missing means "no survivor"). */
-  const survivorOf = new Map<string, string | null>();
-  const seen = new Set(ids);
-  let frontier = ids;
-  while (frontier.length) {
-    // One array parameter, not one per id: a large campaign's frontier is far past PostgreSQL's
-    // 65,535-parameter limit, and `holdoutResult` would fail even without a single merge (#944).
-    const rows = await tx
-      .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), sql`${schema.profiles.id} = ANY(${sql.param(frontier)}::text[])`));
-    const next: string[] = [];
-    for (const row of rows) {
-      survivorOf.set(row.id, row.mergedInto);
-      if (row.mergedInto && !seen.has(row.mergedInto)) {
-        seen.add(row.mergedInto);
-        next.push(row.mergedInto);
-      }
-    }
-    frontier = next;
-  }
-  const rootOf = (id: string): string => {
-    let current = id;
-    const visited = new Set([id]);
-    // A merge chain is short and acyclic; the bound only guards against a corrupted chain.
-    for (let hop = 0; hop < 20; hop++) {
-      const next = survivorOf.get(current);
-      if (!next || visited.has(next)) return current;
-      visited.add(next);
-      current = next;
-    }
-    return current;
-  };
-  for (const id of ids) canonical.set(id, rootOf(id));
+  const res = await tx.execute<{ origin: string; representative: string }>(sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
+      seeds: sql`SELECT DISTINCT seed.id FROM unnest(${sql.param(ids)}::text[]) AS seed(id)`,
+    })}
+    SELECT origin, representative FROM merge_representative`);
+  for (const row of res.rows) canonical.set(row.origin, row.representative);
+  for (const id of ids) if (!canonical.has(id)) canonical.set(id, id);
   return canonical;
 }
 
@@ -105,8 +84,9 @@ interface StoredArm {
  * under a profile that was merged into them. A merge moves assignments to the survivor (migration
  * 0041), but a run that selected a stale alias after a merge wrote its row on the alias — that row
  * is still this person's arm, and the earliest one wins when two disagree, so an arm is never
- * replaced by a later one. The walk starts at the person the id belongs to today, so an id that was
- * merged away finds the arm stored on its survivor too.
+ * replaced by a later one. The walk reads the whole merge component of the id's representative
+ * (#985), the same component the report groups assignments by, so a long chain or a cycle cannot
+ * hide an arm from one path and show it to the other.
  */
 async function oldestArm(
   tx: Tx,
@@ -115,24 +95,30 @@ async function oldestArm(
   hashVersion: string,
   profileId: string,
 ): Promise<{ person: string; arm: StoredArm | null }> {
-  const person = (await canonicalPeople(tx, workspaceId, [profileId])).get(profileId) ?? profileId;
-  const res = await tx.execute<{ profile_id: string; arm: HoldoutArm; assigned_at: Date }>(sql`
-    WITH RECURSIVE person(id) AS (
-      SELECT p.id FROM profiles p WHERE p.workspace_id = ${workspaceId} AND p.id = ${person}
-      UNION
-      SELECT p.id FROM profiles p JOIN person ON p.merged_into = person.id WHERE p.workspace_id = ${workspaceId}
-    )
-    SELECT a.profile_id, a.arm, a.assigned_at
-    FROM holdout_assignments a
-    JOIN person ON person.id = a.profile_id
-    WHERE a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type} AND a.scope_id = ${scope.id}
-      AND a.hash_version = ${hashVersion}
+  const res = await tx.execute<{ person: string; profile_id: string | null; arm: HoldoutArm | null; assigned_at: Date | null }>(sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
+      seeds: sql`SELECT ${profileId}::text AS id`,
+      componentOf: sql`SELECT representative AS rep FROM merge_representative WHERE origin = ${profileId}`,
+    })},
+    person AS (SELECT representative AS id FROM merge_representative WHERE origin = ${profileId})
+    SELECT person.id AS person, a.profile_id, a.arm, a.assigned_at
+    FROM person
+    LEFT JOIN merge_component mc ON TRUE
+    LEFT JOIN holdout_assignments a
+      ON a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type} AND a.scope_id = ${scope.id}
+     AND a.hash_version = ${hashVersion} AND a.profile_id = mc.profile_id
     -- The shared order (also used by holdoutWinners and campaigns.holdoutResult): earliest decision
     -- to the microsecond, then the lower profile id in code-unit order.
     ORDER BY a.assigned_at, a.profile_id COLLATE "C"
     LIMIT 1`);
-  const row = res.rows[0];
-  return { person, arm: row ? { profileId: row.profile_id, arm: row.arm, assignedAt: new Date(row.assigned_at) } : null };
+  const row = res.rows[0]!;
+  return {
+    person: row.person,
+    arm:
+      row.profile_id !== null && row.arm !== null && row.assigned_at !== null
+        ? { profileId: row.profile_id, arm: row.arm, assignedAt: new Date(row.assigned_at) }
+        : null,
+  };
 }
 
 /** One person's winning assignment, as a report reads it. */
@@ -164,11 +150,12 @@ export interface HoldoutWinnerSet {
 
 /**
  * Chooses each person's winning assignment in PostgreSQL (#972). Each assignment's profile is
- * resolved to the person it belongs to today over `profiles.merged_into` (the same bounded, cycle-safe
- * walk as `canonicalPeople`), then `DISTINCT ON (person)` takes the earliest `assigned_at` and, on a
- * tie, the lower profile id — the order `oldestArm` uses for the send and `assignHoldout` reads:
- * `assigned_at, profile_id COLLATE "C"`. Keep the two in step; `holdout-winners.test.ts` asserts the
- * SQL winner and the send path pick the same arm for ties and sub-millisecond differences.
+ * resolved to the representative of its merge component (#985, `mergeComponentCtes`), the same
+ * representative `oldestArm` and `canonicalPeople` resolve, then `DISTINCT ON (person)` takes the
+ * earliest `assigned_at` and, on a tie, the lower profile id — the order `oldestArm` uses for the
+ * send and `assignHoldout` reads: `assigned_at, profile_id COLLATE "C"`. Keep the two in step;
+ * `merge-component-parity.test.ts` asserts the SQL winner and the send path agree on long chains and
+ * cycles, and `holdout-winners.test.ts` on ties and sub-millisecond differences.
  *
  * The requested window is applied to the winners, never to their input: an alias row inside the
  * window must not decide an arm whose earliest assignment is outside it (#944). The winners land in
@@ -196,28 +183,16 @@ export async function holdoutWinners(
       FROM holdout_assignments a
       WHERE a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type}
         AND a.scope_id = ${scope.id} AND a.hash_version = ${hashVersion}
-    ), resolved(profile_id, person_id, path, depth) AS (
-      SELECT DISTINCT s.profile_id, s.profile_id, ARRAY[s.profile_id], 0
+    ), ${mergeComponentCtes(workspaceId, {
+      seeds: sql`SELECT DISTINCT s.profile_id FROM scoped s`,
+    })},
+    winner AS (
+      SELECT DISTINCT ON (mr.representative COLLATE "C")
+        mr.representative AS person_id, s.arm, s.assigned_at, s.profile_id
       FROM scoped s
-      UNION ALL
-      SELECT r.profile_id, p.merged_into, array_append(r.path, p.merged_into), r.depth + 1
-      FROM resolved r
-      JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = r.person_id
-      -- Bounded like canonicalPeople's 20 hops, and the path stops a corrupted cycle.
-      WHERE p.merged_into IS NOT NULL AND r.depth < 20 AND NOT (p.merged_into = ANY(r.path))
-    ), person_of AS (
-      SELECT DISTINCT ON (profile_id) profile_id, person_id
-      FROM resolved
-      ORDER BY profile_id, depth DESC
-    ), winner AS (
-      SELECT DISTINCT ON (person_id COLLATE "C") person_id, arm, assigned_at, profile_id
-      FROM (
-        SELECT po.person_id, s.arm, s.assigned_at, s.profile_id
-        FROM scoped s
-        JOIN person_of po ON po.profile_id = s.profile_id
-      ) resolved_assignments
+      JOIN merge_representative mr ON mr.origin = s.profile_id
       -- The send's order (oldestArm): earliest to the microsecond, then the lower profile id.
-      ORDER BY person_id COLLATE "C", assigned_at, profile_id COLLATE "C"
+      ORDER BY mr.representative COLLATE "C", s.assigned_at, s.profile_id COLLATE "C"
     )
     INSERT INTO ${temp} (person, arm, assigned_at)
     SELECT person_id, arm, assigned_at FROM winner`);

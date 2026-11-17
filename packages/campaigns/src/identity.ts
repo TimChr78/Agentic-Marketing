@@ -1,5 +1,6 @@
+import { mergeComponentCtes } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { and, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 // One identity resolution for campaign conversions (#590).
 //
@@ -91,47 +92,6 @@ export const IDENTITY_FIELD_BYTES = 120 * 1024;
 
 export const emptyIdentityMap = (): IdentityMap => ({ pairs: [], overLimit: false, limit: IDENTITY_MAP_LIMIT });
 
-/** Follows a merge chain to its survivor. A cycle, which a merge must never create, stops safely. */
-export function survivorOf(id: string, mergedInto: ReadonlyMap<string, string>): string {
-  let current = id;
-  const seen = new Set<string>();
-  while (mergedInto.has(current)) {
-    if (seen.has(current)) break;
-    seen.add(current);
-    current = mergedInto.get(current)!;
-  }
-  return current;
-}
-
-/**
- * The connected merge component around `ids`: every profile merged into or out of the same chain.
- * A recipient stored as A needs its survivor B, and a recipient stored as B needs the historical
- * A, because an event may still carry either id. Exported for its test.
- */
-export function mergeComponent(ids: Iterable<string>, mergedInto: ReadonlyMap<string, string>): Set<string> {
-  const adjacent = new Map<string, Set<string>>();
-  const link = (from: string, to: string) => {
-    const neighbours = adjacent.get(from) ?? new Set<string>();
-    neighbours.add(to);
-    adjacent.set(from, neighbours);
-  };
-  for (const [source, survivor] of mergedInto) {
-    link(source, survivor);
-    link(survivor, source);
-  }
-  const component = new Set(ids);
-  const queue = [...component];
-  while (queue.length) {
-    const id = queue.pop()!;
-    for (const neighbour of adjacent.get(id) ?? []) {
-      if (component.has(neighbour)) continue;
-      component.add(neighbour);
-      queue.push(neighbour);
-    }
-  }
-  return component;
-}
-
 /**
  * Deduplicates the pairs by kind and key and applies the transport bound. Exported for its test.
  * `maxBytes` is injectable so the bound can be exercised without allocating 32 MiB of keys.
@@ -173,58 +133,96 @@ const PROFILE_ID_CHUNK = 10_000;
  * Every key whose identity differs from the stored event profile id, or, when `profileIds` is
  * set, every merge and identifier in those profiles' merge components. The workspace always comes
  * from the caller's transaction.
+ *
+ * Both reads are bounded (#986): the merge component is expanded from the campaign's people only
+ * (never the workspace's whole merge list) and stops one row past the map's bound, and the
+ * identifier read stops as soon as the pairs pass it. An over-bound load returns the existing
+ * over-limit result, so a surface reports the shared note instead of holding a partial map.
+ * `limit` is injectable so the over-bound path can be exercised without 300,000 rows.
  */
-export async function loadIdentityMap(tx: Tx, workspaceId: string, opts: { profileIds?: readonly string[] } = {}): Promise<IdentityMap> {
+export async function loadIdentityMap(
+  tx: Tx,
+  workspaceId: string,
+  opts: { profileIds?: readonly string[]; limit?: number } = {},
+): Promise<IdentityMap> {
+  const limit = opts.limit ?? IDENTITY_MAP_LIMIT;
   const scope = opts.profileIds ? [...new Set(opts.profileIds)] : undefined;
   if (scope && !scope.length) return emptyIdentityMap();
+  if (scope && scope.length > limit) return overLimitIdentityMap(limit);
 
-  const merged = await tx
-    .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
-    .from(schema.profiles)
-    .where(and(eq(schema.profiles.workspaceId, workspaceId), isNotNull(schema.profiles.mergedInto)));
-  const mergedInto = new Map(merged.flatMap((m) => (m.mergedInto ? [[m.id, m.mergedInto] as const] : [])));
+  // Without a scope the merged profiles are the seeds; that read is bounded as well, so an
+  // unscoped caller cannot load the workspace's merge list before checking the bound.
+  let seeds = scope;
+  if (!seeds) {
+    const merged = await tx
+      .select({ id: schema.profiles.id })
+      .from(schema.profiles)
+      .where(and(eq(schema.profiles.workspaceId, workspaceId), sql`${schema.profiles.mergedInto} IS NOT NULL`))
+      .limit(limit + 1);
+    if (merged.length > limit) return overLimitIdentityMap(limit);
+    seeds = merged.map((row) => row.id);
+  }
+  if (!seeds.length) return emptyIdentityMap();
 
-  // Scoped callers measure a bounded set of people: keep the whole merge chain around them, in
-  // both directions, so a recipient stored under either the historical or the surviving id resolves.
-  const inScope = scope ? mergeComponent(scope, mergedInto) : undefined;
+  // One representative per seed, the same walk the holdout send and report use (#985).
+  const representatives = await tx.execute<{ representative: string }>(sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
+      seeds: sql`SELECT DISTINCT unnest(${sql.param(seeds)}::text[]) AS id`,
+    })}
+    SELECT DISTINCT representative FROM merge_representative`);
+  const reps = representatives.rows.map((row) => row.representative);
+  if (reps.length > limit) return overLimitIdentityMap(limit);
+  if (!reps.length) return emptyIdentityMap();
+
+  // The whole component around those representatives, one row per connected profile. Every
+  // component member contributes at least one pair once merged, so one row past the pair bound is
+  // enough to skip resolution; the LIMIT also stops the walk at that row.
+  const component = await tx.execute<{ representative: string; profile_id: string; merged_into: string | null }>(sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
+      componentOf: sql`SELECT DISTINCT unnest(${sql.param(reps)}::text[]) AS rep`,
+    })}
+    SELECT mc.representative, mc.profile_id, p.merged_into
+    FROM merge_component mc
+    LEFT JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = mc.profile_id
+    LIMIT ${limit + 1}`);
+  if (component.rows.length > limit) return overLimitIdentityMap(limit);
+
   const pairs: IdentityPair[] = [];
-  const affected = new Set<string>();
-  for (const source of mergedInto.keys()) {
-    const survivor = survivorOf(source, mergedInto);
-    if (inScope && !(inScope.has(source) || inScope.has(survivor))) continue;
-    pairs.push({ key: source, profileId: survivor, kind: 'profile' });
-    affected.add(source);
-    affected.add(survivor);
+  const personOf = new Map<string, string>();
+  for (const row of component.rows) {
+    personOf.set(row.profile_id, row.representative);
+    // A merged-away profile resolves to its person; an unmerged one already is their own profile.
+    if (row.merged_into !== null) pairs.push({ key: row.profile_id, profileId: row.representative, kind: 'profile' });
   }
 
-  // Merging re-points identifiers to the survivor, so the current owner is the place to look.
-  const owners = inScope ? [...inScope] : [...affected];
-  const identifiers: {
-    type: string;
-    value: string;
-    profileId: string;
-  }[] = [];
+  // Merging re-points identifiers to the survivor, so every component member is an owner to look
+  // at. Stop as soon as the identifier pairs pass the bound instead of reading them all first.
+  const owners = [...personOf.keys()];
+  let counted = pairs.length;
   for (let i = 0; i < owners.length; i += PROFILE_ID_CHUNK) {
-    identifiers.push(
-      ...(await tx
-        .select({ type: schema.identifiers.type, value: schema.identifiers.value, profileId: schema.identifiers.profileId })
-        .from(schema.identifiers)
-        .where(
-          and(
-            eq(schema.identifiers.workspaceId, workspaceId),
-            inArray(schema.identifiers.type, ['anonymous_id', 'user_id']),
-            inArray(schema.identifiers.profileId, owners.slice(i, i + PROFILE_ID_CHUNK)),
-          ),
-        )),
-    );
+    const remaining = limit - counted + 1;
+    if (remaining <= 0) return overLimitIdentityMap(limit);
+    const identifiers = await tx
+      .select({ type: schema.identifiers.type, value: schema.identifiers.value, profileId: schema.identifiers.profileId })
+      .from(schema.identifiers)
+      .where(
+        and(
+          eq(schema.identifiers.workspaceId, workspaceId),
+          inArray(schema.identifiers.type, ['anonymous_id', 'user_id']),
+          inArray(schema.identifiers.profileId, owners.slice(i, i + PROFILE_ID_CHUNK)),
+        ),
+      )
+      .limit(remaining);
+    counted += identifiers.length;
+    if (counted > limit) return overLimitIdentityMap(limit);
+    for (const identifier of identifiers)
+      pairs.push({
+        key: identifier.value,
+        profileId: personOf.get(identifier.profileId) ?? identifier.profileId,
+        // The query only selects the two identifier kinds the event store can resolve an event by.
+        kind: identifier.type as IdentityKind,
+      });
   }
-  for (const identifier of identifiers)
-    pairs.push({
-      key: identifier.value,
-      profileId: survivorOf(identifier.profileId, mergedInto),
-      // The query only selects the two identifier kinds the event store can resolve an event by.
-      kind: identifier.type as IdentityKind,
-    });
 
-  return identityMapOf(pairs);
+  return identityMapOf(pairs, limit);
 }

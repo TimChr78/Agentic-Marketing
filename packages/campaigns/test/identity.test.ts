@@ -6,40 +6,12 @@ import {
   type IdentityPair,
   identityMapOf,
   MAX_CAMPAIGN_RECIPIENTS,
-  mergeComponent,
   overLimitIdentityMap,
-  survivorOf,
 } from '../src/identity';
 
 const pair = (key: string, profileId: string, kind: IdentityPair['kind'] = 'anonymous_id'): IdentityPair => ({ key, profileId, kind });
 
 describe('identity map', () => {
-  it('follows a merge chain to its final survivor and stops on a cycle', () => {
-    const mergedInto = new Map([
-      ['prf_a', 'prf_b'],
-      ['prf_b', 'prf_c'],
-    ]);
-    expect(survivorOf('prf_a', mergedInto)).toBe('prf_c');
-    expect(survivorOf('prf_c', mergedInto)).toBe('prf_c');
-    const cycle = new Map([
-      ['prf_a', 'prf_b'],
-      ['prf_b', 'prf_a'],
-    ]);
-    expect(['prf_a', 'prf_b']).toContain(survivorOf('prf_a', cycle));
-  });
-
-  it('expands a scoped id to both ends of its merge component (#590)', () => {
-    // prf_a merged into prf_b, prf_b into prf_c. A recipient stored as any of them must resolve
-    // to all three, because the send and the event can carry different historical ids.
-    const mergedInto = new Map([
-      ['prf_a', 'prf_b'],
-      ['prf_b', 'prf_c'],
-    ]);
-    expect([...mergeComponent(['prf_a'], mergedInto)].sort()).toEqual(['prf_a', 'prf_b', 'prf_c']);
-    expect([...mergeComponent(['prf_c'], mergedInto)].sort()).toEqual(['prf_a', 'prf_b', 'prf_c']);
-    expect([...mergeComponent(['prf_other'], mergedInto)]).toEqual(['prf_other']);
-  });
-
   it('deduplicates by kind and key and drops keys that already are their own profile', () => {
     const map = identityMapOf([
       pair('anon_1', 'prf_a'),

@@ -8,6 +8,7 @@ export * from './hostedPages';
 export * from './impact';
 export * from './learnings';
 export * from './mandates';
+export * from './mergeComponent';
 export * from './recipes';
 export * from './renewals';
 export * from './topics';
