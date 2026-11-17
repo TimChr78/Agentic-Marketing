@@ -170,23 +170,33 @@ Keep the app and public traffic stopped. These checks read the restored database
 the server (they need Postgres, ClickHouse, NATS and Valkey, which are up):
 
 ```bash
-docker compose run --rm --no-deps app am doctor
+docker compose run --rm --no-deps app am doctor --json > doctor-before-cutover.json
 docker compose exec postgres psql -U am -d am -c 'select count(*) from schema_migrations'
 ```
 
-`am doctor` should report `PostgreSQL 18.7 is supported`, schema up to date and no failures; add a
-few row counts for the things you care about (profiles, messages, a recent event). This is the last
-point at which rollback to the retained 16 volume is lossless.
+`am doctor` has no flag that skips its network or listener checks. Check these rows in the JSON:
+`postgres.version` (18 is supported), `migrations` (up to date), `postgres.app-role` (cannot bypass
+RLS), `clickhouse`, `nats`, `valkey`, and the data counts you care about (profiles, messages, a
+recent event). `dns.*` and `egress.*` are external provider checks.
 
-When the checks pass, do the single cutover, which starts the writers and the public listener:
+**Expected failures before cutover:** on an install with verified brand domains, the
+`brand-domains.<host>` rows probe `/healthz` on the public listener and fail while the app is
+stopped. `am doctor` therefore exits 1 because of those rows; that is not a reason to hold the
+cutover. `am smoke` also needs the listener and cannot run yet. Re-run both after the cutover and
+they must pass.
+
+When the database rows and counts pass, do the single cutover, which starts the writers and the
+public listener:
 
 ```bash
 docker compose up -d
+docker compose exec app am doctor
 docker compose exec app am smoke --public-url https://links.example.com
 ```
 
-Sign in, open a profile and a segment, and check that a recent event is present. Keep the old
-`pgdata` volume, `pgdata16.tar.gz` and the backup until you are satisfied.
+Sign in, open a profile and a segment, and check that a recent event is present. The brand-domain
+rows and `am smoke` must pass now. Keep the old `pgdata` volume, `pgdata16.tar.gz` and the backup
+until you are satisfied.
 
 After the cutover and these checks, remove only the old 16 volume; the override keeps the install
 on `pgdata18`:
@@ -203,7 +213,7 @@ part of the deployment from now on; there is nothing to rename.
 ### Before the final cutover (lossless)
 
 The old data is still in `pgdata`, untouched, and no writer has used the 18 database yet. This is
-the only lossless rollback point.
+the only lossless rollback point, and the only time reusing `pgdata` is correct.
 
 1. `docker compose down`.
 2. In `.env`, set `AM_VERSION` to the **previous release** and
@@ -214,20 +224,77 @@ the only lossless rollback point.
    starts with its data. No restore is needed.
 
 **Do not point a 0.15.x image at the 18 database.** Its client tools are 16 and cannot dump an 18
-server; rolling back means the retained 16 volume, not the 18 one.
+server. `pgdata16.tar.gz` is a copy from this pre-cutover state; after the cutover it is as stale as
+`pgdata`.
 
-**After the cutover in step 6, the retained 16 volume is no longer current.** Every write and
-erasure accepted by 18 after that point exists only in `pgdata18`; starting the old version on
-`pgdata` then loses them. Use the path below only when you accept that, and restore from the
-backup (or the physical copy) rather than expecting the 16 volume to have the latest data.
+### After the final cutover (drain, fresh 16 storage, 0.16 clients)
 
-### After the cutover, or after the 16 volume is removed
+After the cutover, `pgdata` lacks every write and erasure accepted by 18. Do not select it. Drain
+again, take a final backup of the 18 database, restore it into a **fresh** 16 volume, verify
+read-only, then start the previous release. Backup and restore run with the **0.16 image**: 0.15's
+16 `pg_dump` cannot read 18, and 0.15's 16 `pg_restore` cannot cleanly restore an 18 archive (the
+17+ `transaction_timeout` statement). The 0.16 image has 18 clients, and its `am restore` accepts
+that one diagnostic on a 16 target. Only after the restore does `AM_VERSION` go back to the
+previous release.
 
-Start the previous release on a fresh 16 volume (`AM_VERSION=<previous>`,
-`POSTGRES_IMAGE=postgres:16-alpine@sha256:<previous digest>`, no `pgdata18` override) and restore
-the verified pre-upgrade backup. That backup was made by the 0.15.x image with its 16 client, so
-it restores into 16 with the matching tools. If you took `pgdata16.tar.gz`, create an empty volume,
-extract the archive into it, and start the previous release against it instead.
+1. Drain every writer: `docker compose stop app` (and every other app/role container). Keep the 18
+   database, ClickHouse, NATS and Valkey up; traffic stays isolated for the rest of the procedure.
+2. Take and verify the final rollback backup with the 0.16 image (`AM_VERSION` is still 0.16.0):
+   ```bash
+   docker compose run --rm --no-deps app am backup
+   # add --clickhouse when the event history matters
+   docker compose run --rm --no-deps app am backup --verify
+   docker compose run --rm --no-deps app am backup --list   # note am-manual-0.16.0-<stamp>
+   ```
+3. Select **fresh** 16 storage. In `compose.override.yaml`, replace the `pgdata18` block with:
+   ```yaml
+   services:
+     postgres-check:
+       volumes:
+         - pgdata16new:/var/lib/postgresql/data:ro
+     postgres:
+       volumes:
+         - pgdata16new:/var/lib/postgresql/data
+   volumes:
+     pgdata16new:
+   ```
+   In `.env`, set `POSTGRES_IMAGE=postgres:16-alpine@sha256:<previous digest>` and keep
+   `AM_VERSION=0.16.0` for the restore. Start only the database:
+   ```bash
+   docker compose up -d postgres
+   ```
+   The guard sees the empty `pgdata16new` and the 16 image and initialises it; the old `pgdata` is
+   not selected.
+4. Restore with the 0.16 image — its 18 `pg_restore` writes into the 16 server, and `am restore`
+   accepts the single `SET transaction_timeout` diagnostic:
+   ```bash
+   docker compose run --rm --no-deps app am restore /backups/am-manual-0.16.0-<stamp> --yes
+   # add --clickhouse when the backup has it
+   ```
+   It logs one warning about that setting and completes. `--no-deps` keeps the workers down, so
+   nothing consumes NATS or writes ClickHouse while Postgres is replaced.
+5. Verify read-only with the 0.16 image while the app is down:
+   ```bash
+   docker compose run --rm --no-deps app am doctor --json > doctor-rollback.json
+   docker compose exec postgres psql -U am -d am -c 'select count(*) from schema_migrations'
+   ```
+   Required rows: `postgres.version` (16 is reported as supported but deprecated), `migrations`,
+   `postgres.app-role`, `clickhouse`, `nats`, `valkey`, plus the data counts from the rollback point.
+   The `brand-domains.<host>` rows are expected to fail until the previous app is running.
+6. Cut over to the previous release. Set `AM_VERSION=<previous>` in `.env` (keep `POSTGRES_IMAGE`
+   on 16), then:
+   ```bash
+   docker compose up -d
+   docker compose exec app am doctor
+   docker compose exec app am smoke --public-url https://links.example.com
+   ```
+   This is the first point the previous release's workers start. The restored schema head is one
+   0.15.x knows (0.16.0 adds no migrations); if a later release does, roll back with the
+   pre-upgrade backup instead of a live downgrade. The brand-domain rows and `am smoke` must pass
+   now.
+7. Keep `pgdata18` and the rollback backup until the 16 install is verified. Then remove `pgdata18`
+   and the original stale `pgdata` when you no longer need the pre-cutover state. `pgdata16new` is
+   the install's volume; keep it and its override.
 
 ## Data checksums
 
@@ -295,17 +362,28 @@ same decision as Compose, done with the operator's tooling:
    (`helm upgrade`) **with the roles still at zero**. The hook migrates the empty 18 database
    before any role exists; no worker starts, so nothing consumes NATS or writes ClickHouse.
 5. Restore with a one-off pod or Job from the 0.16 image (`am restore <backup> --yes`, no server
-   process), then verify read-only with a one-off `am doctor` pod while the roles stay at zero.
-   `postgres.version` must report 18 and there must be no failures. This is the last lossless
-   rollback point.
+   process), then verify read-only with a one-off `am doctor --json` pod while the roles stay at
+   zero. Required rows: `postgres.version` (18), `migrations`, `postgres.app-role`, `clickhouse`,
+   `nats`, `valkey`, and the data counts. `am doctor` has no listener-skip flag: verified brand
+   domains make the `brand-domains.<host>` `/healthz` rows fail until the roles are up, and
+   `am smoke` cannot run yet. Re-run both after the cutover and they must pass. This is the last
+   lossless rollback point.
 6. Final cutover: scale the roles back up (`helm upgrade` with the normal replica counts), then run
-   `am smoke` against the public URL. This is the first point writers accept traffic on 18.
-7. Rollback: **before** the cutover, point `DATABASE_URL` back at the old cluster, set the image tag
-   to the previous release, and scale the roles up. After the cutover, the old cluster no longer
-   has the writes and erasures accepted by 18; restore the pre-upgrade backup into a fresh 16
-   cluster and use the previous image, accepting the loss of post-cutover data. A 0.15.x pod cannot
-   read an 18 database (its client tools are 16), so do not roll back by pointing the old image at
-   the new cluster.
+   `am doctor` (brand rows must pass now) and `am smoke` against the public URL. This is the first
+   point writers accept traffic on 18.
+7. Rollback:
+   - **Before the cutover** (roles still at zero), the old cluster is current: point `DATABASE_URL`
+     back at it, set the image tag to the previous release, and scale the roles up. No restore.
+   - **After the cutover**, the old cluster lacks the writes and erasures accepted by 18, and a
+     0.15.x pod cannot read 18 (its clients are 16). Drain the roles to zero again, take and verify a
+     final 18 backup with a Job using the **0.16 image** (18 clients), and provision a **fresh** 16
+     cluster — do not reuse the old one. Point `DATABASE_URL` at the fresh 16 cluster, keep
+     `image.tag=0.16.0` for the restore Job, and run `am restore` with the 0.16 image: its 18
+     `pg_restore` writes into 16 and accepts the single `transaction_timeout` warning. (The chart's
+     migration hook may migrate the empty 16 cluster first; the restore replaces it.) Verify
+     read-only with a 0.16 `am doctor` Job while the roles stay at zero (brand rows expected to
+     fail), then set `image.tag` to the previous release, scale up, and run `am doctor`/`am smoke`
+     again. Keep the old 18 cluster and the backup until the 16 install is verified.
 
 `POSTGRES_IMAGE` and `postgres-check` are Compose-only. On Kubernetes the guard is the operator's
 major-version upgrade, and `am doctor`'s version check catches a `DATABASE_URL` that still points
