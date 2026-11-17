@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
-import { expectLinear } from '../../../test-support/linear';
+import { expectLinear, expectLinearRatio } from '../../../test-support/linear';
 import { redactCredentials } from '../src/diagnostics';
 
 // #898/#902/#920: the credential redaction has properties a table of examples cannot show: no planted secret survives whatever form the value takes, a
@@ -428,7 +428,6 @@ describe('the #937 value-shape passes stay linear', () => {
 
 describe('the #989 original-span shapes stay linear', () => {
   const MB = 1024 * 1024;
-  const repeatTo = (unit: string, bytes: number): string => unit.repeat(Math.ceil(bytes / unit.length));
   const measure = (text: string): number => {
     const started = performance.now();
     redactCredentials(text);
@@ -457,15 +456,21 @@ describe('the #989 original-span shapes stay linear', () => {
     ['scheme behind a key', 'token: Digest abc '],
   ];
 
-  it('finishes every repeated shape in a few seconds at most', () => {
+  it('grows linearly on every repeated shape, with no wall-clock budget', () => {
+    // 4x the units (128 KB to 512 KB) must not cost 8x the time. An absolute millisecond limit would
+    // depend on the runner, which is what failed a grid shape on CI (#994).
     const slow: string[] = [];
     for (const [name, unit] of SHAPES) {
-      const input = repeatTo(unit, MB);
-      const elapsed = measure(input);
-      if (elapsed >= SLOW_MS) slow.push(`${name} ${elapsed.toFixed(0)}ms`);
+      const base = Math.max(2, Math.ceil(MB / 8 / unit.length));
+      try {
+        expectLinearRatio((n) => unit.repeat(n), redactCredentials, base);
+      } catch (error) {
+        slow.push(`${name}: ${(error as Error).message}`);
+      }
     }
-    expect(slow).toEqual([]);
-  }, 180_000);
+    expect(slow.slice(0, 10)).toEqual([]);
+    expect(slow).toHaveLength(0);
+  }, 300_000);
 
   it('grows roughly linearly: 4× the input takes less than 10× the time', () => {
     const slow: string[] = [];
@@ -482,16 +487,16 @@ describe('the #989 original-span shapes stay linear', () => {
   }, 180_000);
 
   it('does not rescan the text for every PEM header without a footer', () => {
-    // The round-3 review input at a size where a quadratic rescans per header cannot hide.
-    expectLinear((n) => `${'password=[redacted] RSA PRIVATE KEY-----\n'.repeat(n)}-----END PUBLIC KEY-----`, redactCredentials, 1_500);
-    expectLinear((n) => '-----BEGIN PRIVATE KEY-----\n'.repeat(n), redactCredentials, 1_500);
+    // The round-3 review input at a size where a quadratic rescan per header cannot hide.
+    expectLinearRatio((n) => `${'password=[redacted] RSA PRIVATE KEY-----\n'.repeat(n)}-----END PUBLIC KEY-----`, redactCredentials, 1_500);
+    expectLinearRatio((n) => '-----BEGIN PRIVATE KEY-----\n'.repeat(n), redactCredentials, 1_500);
   }, 120_000);
 
   it('does not rescan the line for every typographic quote or arrow', () => {
-    expectLinear((n) => `token: \u201c${'a b '.repeat(n)}\u201d`, redactCredentials, 1_500);
-    expectLinear((n) => `${'token => '.repeat(n)}x`, redactCredentials, 1_500);
-    expectLinear((n) => `token ${'='.repeat(n)}> value`, redactCredentials, 1_500);
-    expectLinear((n) => `${'token => ,'.repeat(n)}`, redactCredentials, 1_500);
+    expectLinearRatio((n) => `token: \u201c${'a b '.repeat(n)}\u201d`, redactCredentials, 1_500);
+    expectLinearRatio((n) => `${'token => '.repeat(n)}x`, redactCredentials, 1_500);
+    expectLinearRatio((n) => `token ${'='.repeat(n)}> value`, redactCredentials, 1_500);
+    expectLinearRatio((n) => `${'token => ,'.repeat(n)}`, redactCredentials, 1_500);
   }, 120_000);
 
   it('does not rescan the prefix for blocks the release already removed', () => {
@@ -499,8 +504,8 @@ describe('the #989 original-span shapes stay linear', () => {
     // already replaced, so every mapped region is empty. The search cursor must advance past them
     // anyway; rescanning the retained prefix for each one was quadratic (9.4 s at n=16,000).
     const unit = '\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
-    expectLinear((n) => `ordinary `.repeat(n) + 'password="' + unit.repeat(n) + '"', redactCredentials, 1_000);
-    expectLinear((n) => `ordinary `.repeat(n) + 'password="' + unit.repeat(n) + '"', redactCredentials, 2_000);
+    expectLinearRatio((n) => `ordinary `.repeat(n) + 'password="' + unit.repeat(n) + '"', redactCredentials, 1_000);
+    expectLinearRatio((n) => `ordinary `.repeat(n) + 'password="' + unit.repeat(n) + '"', redactCredentials, 2_000);
   }, 120_000);
 });
 

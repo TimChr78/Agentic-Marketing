@@ -23,7 +23,11 @@ function bestOfThree(run: (input: string) => unknown, input: string): number {
  * Absolute millisecond limits are flaky on shared CI runners: the same linear code can take
  * 7 ms locally and 128 ms there. The ratio is machine-independent.
  */
-export function expectLinear(build: (n: number) => string, run: (input: string) => unknown, base = 25_000): void {
+function measureGrowth(
+  build: (n: number) => string,
+  run: (input: string) => unknown,
+  base: number,
+): { tSmall: number; tLarge: number; ratio: number } {
   const small = build(base);
   const large = build(base * 4);
   // A super-linear path gives a ratio near 16 on every attempt; a busy shared runner inflates one
@@ -38,12 +42,26 @@ export function expectLinear(build: (n: number) => string, run: (input: string) 
     if (!best || ratio < best.ratio) best = { tSmall, tLarge, ratio };
     if (tLarge < NOISE_FLOOR_MS || ratio < 8) break;
   }
-  const { tSmall, tLarge, ratio } = best!;
-  const detail = `n=${base}: ${tSmall.toFixed(2)} ms, 4n=${base * 4}: ${tLarge.toFixed(2)} ms (ratio ${ratio.toFixed(1)})`;
+  return best!;
+}
 
-  // Below a few milliseconds the ratio measures timer noise and warm-up, not growth: a run that
-  // takes 0.4 ms at n and 4.5 ms at 4n failed here on a CI runner. Work that finishes this fast at
-  // 4n is not the slow path the check exists to catch, so only the ceiling applies.
+/**
+ * The growth check on its own: 4x the input must not cost 8x the time. No wall-clock ceiling, because
+ * an absolute millisecond limit depends on the runner's speed (#994) -- a linear pass can take three
+ * seconds on a loaded CI box and still be linear.
+ */
+export function expectLinearRatio(build: (n: number) => string, run: (input: string) => unknown, base = 25_000): void {
+  const { tSmall, tLarge, ratio } = measureGrowth(build, run, base);
+  const detail = `n=${base}: ${tSmall.toFixed(2)} ms, 4n=${base * 4}: ${tLarge.toFixed(2)} ms (ratio ${ratio.toFixed(1)})`;
+  // Below a few milliseconds the ratio measures timer noise and warm-up, not growth; a run that
+  // finishes this fast at 4n is not the slow path the check exists to catch.
+  if (tLarge >= NOISE_FLOOR_MS) expect(ratio, `expected linear scaling, got ${detail}`).toBeLessThan(8);
+}
+
+export function expectLinear(build: (n: number) => string, run: (input: string) => unknown, base = 25_000): void {
+  const { tSmall, tLarge, ratio } = measureGrowth(build, run, base);
+  const detail = `n=${base}: ${tSmall.toFixed(2)} ms, 4n=${base * 4}: ${tLarge.toFixed(2)} ms (ratio ${ratio.toFixed(1)})`;
+  // The ratio check, plus a generous "did it finish at all" backstop for a catastrophic path.
   if (tLarge >= NOISE_FLOOR_MS) expect(ratio, `expected linear scaling, got ${detail}`).toBeLessThan(8);
   expect(tLarge, `expected 4n under 2,000 ms, got ${detail}`).toBeLessThan(2_000);
 }

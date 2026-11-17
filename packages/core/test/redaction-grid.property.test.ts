@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { expectLinear } from '../../../test-support/linear';
+import { expectLinearRatio } from '../../../test-support/linear';
 import { redactCredentials, redactionFallbacks, releasedRedaction } from '../src/diagnostics';
 import { redactCredentials as redact01425 } from './redaction-01425-reference';
 
@@ -286,7 +286,9 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
   // time; a super-linear pass shows as a ratio near sixteen.
   const linearFailure = (name: string, unit: string, base: number): string | null => {
     try {
-      expectLinear((n) => unit.repeat(n), redactCredentials, base);
+      // Ratio only: 4x the units must not cost 8x the time. No wall-clock ceiling, which would fail a
+      // linear pass on a slow runner (#994).
+      expectLinearRatio((n) => unit.repeat(n), redactCredentials, base);
       return null;
     } catch (error) {
       return `${name}: ${(error as Error).message}`;
@@ -299,11 +301,9 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
     for (const [index, combo] of [...pemGrid()].entries()) if (index % 400 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...schemeGrid()].entries()) if (index % 600 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...schemeChainGrid()].entries()) if (index % 1_200 === 0) units.push([combo.name, combo.input]);
-    // One text carrying every sampled shape, so the ratio is measured on their mix in one run. The
-    // base keeps 4x the units well under the helper's 2,000 ms backstop on a loaded runner, which is
-    // a "did it finish" bound rather than a speed one.
+    // One text carrying every sampled shape, so the ratio is measured on their mix in one run.
     const unit = units.map(([, input]) => `${input}\n`).join('');
-    expect(linearFailure('grid sample', unit, 50)).toBeNull();
+    expect(linearFailure('grid sample', unit, 200)).toBeNull();
   }, 300_000);
 
   it('grows linearly on the shape that once exceeded a wall-clock budget on CI', () => {
