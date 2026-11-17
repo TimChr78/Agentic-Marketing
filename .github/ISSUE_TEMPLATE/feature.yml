@@ -1,0 +1,65 @@
+name: Feature request
+description: A capability you need that the platform does not have yet.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a question about how something works, open a `question` issue or read the
+        [documentation](https://github.com/TimChr78/Agentic-Marketing/tree/main/docs) first.
+        A security problem goes to
+        [SECURITY.md](https://github.com/TimChr78/Agentic-Marketing/blob/main/SECURITY.md), never
+        into a public issue.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The job, the audience and where the platform gets in the way. Concrete beats general.
+      placeholder: I want to ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What should happen?
+      description: >
+        The behaviour you would expect, from the side of a person using the admin UI, a command, or
+        an agent over REST or MCP. A sketch of the command input or output helps.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Existing commands, recipes, segments, journeys or an external tool, and why they are not enough.
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: The part of the product this belongs to, as best you can tell.
+      options:
+        - Admin UI
+        - Analytics and reporting
+        - Channels (e-mail, SMS, push)
+        - Data, segments and profiles
+        - Journeys and campaigns
+        - Agents, approvals and mandates
+        - Personalization and experiences
+        - Integrations and webhooks
+        - Operations, installation and upgrades
+        - Documentation
+        - Something else
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I searched the existing issues and the roadmap for this request.
+          required: true
+        - label: This is not a security vulnerability, which goes to SECURITY.md instead.
+          required: true
