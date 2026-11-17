@@ -2,4 +2,4 @@
 section: Fixed
 issues: [1028]
 ---
-- A worker stops promptly when its event-bus connection is reconnecting instead of waiting for a pull request that cannot complete, so a restart or shutdown is not held up by a consumer whose server is not there yet (#1028).
+- A worker stops promptly when its event-bus connection is reconnecting: it ends the batch it is waiting on instead of holding the shutdown for a pull that cannot complete, and the messages it had not acked are redelivered. A back-off after a failed pull is cut short by the same signal (#1028).

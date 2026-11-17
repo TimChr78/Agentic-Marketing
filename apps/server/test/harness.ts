@@ -554,9 +554,11 @@ export async function startTestServer(
 }
 
 /**
- * What a stuck database pool is waiting for: how many clients each pool holds, and what PostgreSQL
- * says its non-idle backends are doing. Read on the maintenance connection, which is not one of the
- * pools, with its own short timeouts so the report cannot hang the close it is explaining (#1028).
+ * What a stuck database pool is waiting for: how many clients each pool holds, and which of its
+ * backends are not idle, what each waits on, for how long and under which application name. Never
+ * the statement itself: its first characters can carry a password, a token or personal data, and
+ * this report lands in a teardown failure and the CI log (#1028 review). Read on its own connection,
+ * which is not one of the pools, with short timeouts so the report cannot hang the close it explains.
  */
 export async function databaseReport(pgUrl: URL, db: { admin: pg.Pool; app: pg.Pool }): Promise<string> {
   const busy = (pool: pg.Pool) => `${pool.totalCount - pool.idleCount}/${pool.totalCount}`;
@@ -569,17 +571,19 @@ export async function databaseReport(pgUrl: URL, db: { admin: pg.Pool; app: pg.P
   });
   try {
     await client.connect();
-    const { rows } = await client.query<{ state: string; wait: string; seconds: number; query: string }>(
+    const { rows } = await client.query<{ state: string; wait: string; seconds: number; application: string }>(
       `SELECT state,
               coalesce(wait_event_type || ':' || wait_event, '') AS wait,
               round(extract(epoch FROM now() - state_change))::int AS seconds,
-              left(replace(query, E'\n', ' '), 80) AS query
+              coalesce(application_name, '') AS application
        FROM pg_stat_activity
        WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'
        ORDER BY state_change
        LIMIT 5`,
     );
-    const backends = rows.map((r) => `${r.state} ${r.wait} for ${r.seconds}s: ${r.query}`).join('; ');
+    const backends = rows
+      .map((r) => `${r.state}${r.wait ? ` ${r.wait}` : ''} for ${r.seconds}s${r.application ? ` (${r.application})` : ''}`)
+      .join('; ');
     return backends ? `${pools}; ${backends}` : pools;
   } catch {
     return pools;

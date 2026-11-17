@@ -61,6 +61,7 @@ describe('a bounded test-server close (#1028)', () => {
   });
 
   it('reports a step it never reached once the budget is spent', async () => {
+    // Whichever millisecond the budget runs out in, the later step is reported, not waited for.
     await expect(
       closeBounded(
         [
@@ -69,18 +70,39 @@ describe('a bounded test-server close (#1028)', () => {
         ],
         { budgetMs: 50, stageMs: 60 },
       ),
-    ).rejects.toThrow(/postgres \(did not start: the budget was spent\)/);
+    ).rejects.toThrow(/postgres \((no close after \d+ms|did not start: the budget was spent)\)/);
   });
 
-  it('names the backend a stuck database pool is waiting for', async () => {
+  it('reports every step as not started when it has no budget at all', async () => {
+    await expect(
+      closeBounded(
+        [
+          { name: 'workers', close: () => {} },
+          { name: 'postgres', close: () => {} },
+        ],
+        { budgetMs: 0 },
+      ),
+    ).rejects.toThrow(/workers \(did not start: the budget was spent\), postgres \(did not start: the budget was spent\)/);
+  });
+
+  it('names the backend a stuck pool waits for without any of its SQL', async () => {
     const url = testDatabaseUrl('postgres');
-    const pool = new pg.Pool({ connectionString: url.toString(), max: 2 });
+    const pool = new pg.Pool({ connectionString: url.toString(), max: 2, application_name: 'am-close-report-test' });
     const held = await pool.connect();
-    const sleeping = held.query('SELECT pg_sleep(1)').catch(() => {});
+    // An unlucky statement: a literal password near the start would survive an 80-character cut.
+    const sleeping = held
+      .query("SELECT pg_sleep(1), 'password=hunter2-not-for-logs' AS secret, 'ada@example.com' AS person")
+      .catch(() => {});
     try {
       const report = await databaseReport(url, { admin: pool, app: pool });
+      // The backend is still identifiable: state, what it waits on and its application name.
       expect(report).toMatch(/admin 1\/1 busy/);
-      expect(report).toMatch(/active .*pg_sleep/);
+      expect(report).toMatch(/active /);
+      expect(report).toContain('am-close-report-test');
+      // But nothing of the statement, near the start or anywhere else (#1028 review).
+      expect(report).not.toContain('hunter2');
+      expect(report).not.toContain('ada@example.com');
+      expect(report).not.toContain('SELECT');
     } finally {
       await sleeping;
       held.release();

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classifyFetchError, consumeLoop, type FetchedMessage, MAX_FETCH_FAILURES, type PullConsumer } from '../src/bus';
+import { classifyFetchError, consumeLoop, type FetchedMessage, MAX_FETCH_FAILURES, type MessageBatch, type PullConsumer } from '../src/bus';
 import type { BusEvent } from '../src/schema';
 
 // The consume loop keeps a worker alive through transient pull errors, recreates a missing
@@ -28,6 +28,37 @@ function scripted(steps: (Error | FetchedMessage[])[], onEmpty: () => void) {
     },
   };
   return consumer;
+}
+
+/**
+ * A fetched batch that yields nothing until it is stopped, the way the pinned client's iterator
+ * waits for a pull that a reconnect never answers. `stop()` releases the pending `next()` and ends
+ * the iteration, which is what the real queued iterator does.
+ */
+function quietBatch() {
+  let release: () => void = () => {};
+  const stoppedIteration = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const state = { stopped: 0 };
+  const iterable: MessageBatch = {
+    [Symbol.asyncIterator]: () => ({
+      next: async () => {
+        await stoppedIteration;
+        return { done: true as const, value: undefined };
+      },
+    }),
+    stop: () => {
+      state.stopped += 1;
+      release();
+    },
+  };
+  return {
+    iterable,
+    get stopped() {
+      return state.stopped;
+    },
+  };
 }
 
 describe('classifyFetchError (#307)', () => {
@@ -96,7 +127,7 @@ describe('consumeLoop (#307)', () => {
 
   it('stops while a pull is still waiting for a connection that is reconnecting', async () => {
     // A fetch that never settles is what a reconnect leaves behind; the abort must not wait for it.
-    const consumer: PullConsumer = { fetch: () => new Promise<AsyncIterable<FetchedMessage>>(() => {}) };
+    const consumer: PullConsumer = { fetch: () => new Promise<MessageBatch>(() => {}) };
     const stop = new AbortController();
     const started = Date.now();
     const loop = consumeLoop(
@@ -108,6 +139,52 @@ describe('consumeLoop (#307)', () => {
       { retryMs: 1 },
     );
     // Let the loop reach its fetch, then close the way a shutdown does.
+    await new Promise((r) => setTimeout(r, 20));
+    stop.abort();
+    await expect(loop).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('stops a fetched batch that is still waiting for messages, and leaves them unacked', async () => {
+    // The pinned client's fetch() returns its iterator immediately and waits inside it; on a
+    // reconnect that wait is not bounded, so only stopping the batch ends it (#1028 review).
+    const batch = quietBatch();
+    const consumer: PullConsumer = { fetch: async () => batch.iterable };
+    const stop = new AbortController();
+    const started = Date.now();
+    const loop = consumeLoop(
+      async () => consumer,
+      { ...opts, maxWaitMs: 60_000 },
+      decode,
+      async () => {
+        throw new Error('an aborted batch must not reach the handler');
+      },
+      stop.signal,
+      { retryMs: 1 },
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    stop.abort();
+    await expect(loop).resolves.toBeUndefined();
+    expect(batch.stopped).toBeGreaterThan(0);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('stops while it is backing off after a failed pull', async () => {
+    const consumer: PullConsumer = {
+      fetch: async () => {
+        throw new Error('heartbeats missed');
+      },
+    };
+    const stop = new AbortController();
+    const started = Date.now();
+    const loop = consumeLoop(
+      async () => consumer,
+      opts,
+      decode,
+      async () => {},
+      stop.signal,
+      { retryMs: 60_000 },
+    );
     await new Promise((r) => setTimeout(r, 20));
     stop.abort();
     await expect(loop).resolves.toBeUndefined();

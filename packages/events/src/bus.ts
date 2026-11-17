@@ -62,9 +62,21 @@ export function classifyFetchError(err: unknown): FetchFailure {
   return 'transient';
 }
 
+/**
+ * One pull's messages. The pinned client returns its iterator immediately and waits for messages
+ * inside it, so a shutdown ends the wait by stopping the batch, not by racing the fetch: `stop`
+ * and `close` are what its queued iterator provides (#1028 review).
+ */
+export interface MessageBatch extends AsyncIterable<FetchedMessage> {
+  /** Ends the iteration; the pinned JetStream client's `ConsumerMessages` provides it. */
+  stop?: (err?: Error) => void;
+  /** Some iterators only expose an async close. */
+  close?: () => Promise<unknown> | unknown;
+}
+
 /** The parts of a JetStream consumer the loop uses, so it can be tested with a fake. */
 export interface PullConsumer {
-  fetch(opts: { max_messages: number; expires: number }): Promise<AsyncIterable<FetchedMessage>>;
+  fetch(opts: { max_messages: number; expires: number }): Promise<MessageBatch>;
 }
 export interface FetchedMessage {
   data: Uint8Array;
@@ -81,7 +93,7 @@ async function fetchOrAbort(
   consumer: PullConsumer,
   opts: { max_messages: number; expires: number },
   signal: AbortSignal,
-): Promise<AsyncIterable<FetchedMessage> | null> {
+): Promise<MessageBatch | null> {
   if (signal.aborted) return null;
   let onAbort: (() => void) | undefined;
   const aborted = new Promise<null>((resolve) => {
@@ -93,6 +105,54 @@ async function fetchOrAbort(
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
+}
+
+/**
+ * Ends a batch that is mid-iteration. Its unacked messages are redelivered by JetStream after the
+ * ack wait, which is the same at-least-once contract as a crash (#1028 review).
+ */
+function stopBatch(batch: MessageBatch): void {
+  try {
+    if (batch.stop) batch.stop();
+    else if (batch.close) void Promise.resolve(batch.close()).catch(() => {});
+  } catch {
+    // An iterator that is already closed has nothing left to stop.
+  }
+}
+
+/**
+ * The messages of one fetched batch, until it ends or `signal` aborts. The wait for messages lives
+ * inside the iterator, not in `fetch()`, so stopping the batch is what releases it: a consumer on a
+ * connection that is reconnecting would otherwise keep a shutdown waiting (#1028 review).
+ */
+async function* messagesOrAbort(batch: MessageBatch, signal: AbortSignal): AsyncGenerator<FetchedMessage> {
+  if (signal.aborted) {
+    stopBatch(batch);
+    return;
+  }
+  const onAbort = () => stopBatch(batch);
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    for await (const message of batch) yield message;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/** A pause before the next pull, cut short by an abort, so a back-off never holds a shutdown. */
+async function pauseUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -121,7 +181,7 @@ export async function consumeLoop(
       do {
         const batch = await fetchOrAbort(consumer, { max_messages: maxBatch - msgs.length, expires: 1000 }, signal);
         if (!batch) break;
-        for await (const m of batch) msgs.push(m);
+        for await (const message of messagesOrAbort(batch, signal)) msgs.push(message);
       } while (msgs.length < maxBatch && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted);
       failures = 0;
     } catch (err) {
@@ -135,10 +195,12 @@ export async function consumeLoop(
       if (kind === 'missing_consumer') consumer = await ensureConsumer().catch(() => consumer);
       // What was fetched before the error is still handled; anything not acked is re-delivered.
       if (!msgs.length) {
-        await new Promise((r) => setTimeout(r, Math.min((opts.retryMs ?? FETCH_RETRY_MS) * failures, FETCH_RETRY_MAX_MS)));
+        await pauseUnlessAborted(Math.min((opts.retryMs ?? FETCH_RETRY_MS) * failures, FETCH_RETRY_MAX_MS), signal);
         continue;
       }
     }
+    // A shutdown does not start new work: whatever was pulled but not acked is re-delivered.
+    if (signal.aborted) return;
     if (!msgs.length) continue;
     try {
       await handler(msgs.map((m) => decode(m.data)));
