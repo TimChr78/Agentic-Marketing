@@ -219,6 +219,11 @@ async function eraseFamily(client: pg.Client, workspaceId: string, profileIds: s
   // keys and consent state cascade from profiles; messages have no foreign key, so they go first.
   if (!profileIds.length) return 0;
   const params = [workspaceId, profileIds];
+  // Profile rows before the participant rows deleted below, the shared order
+  // (packages/profiles/src/identity.ts, #1011 review): a score finalisation or a journey step takes
+  // the same profile lock first, so neither can hold a participant row this deletion wants while
+  // waiting for a profile row it holds.
+  await client.query('SELECT id FROM profiles WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR NO KEY UPDATE', params);
   // Keep the e-mail and phone suppression hashes so the person is never contacted again. Their
   // identifiers are still in the restored snapshot at this point.
   await client.query(

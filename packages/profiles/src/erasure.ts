@@ -4,7 +4,7 @@ import { type KeyProvider, newDataKey, open, type PreparedKeys, prepareKeys, sea
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { mergedFamily } from './consent';
 import { personCrypto } from './crypto';
-import { withIdentityLock } from './identity';
+import { lockProfileRows, withIdentityLock } from './identity';
 
 // Durable erasure (#978 part 2b). The SQL stage and the external stores used to be mixed in one
 // transaction, so a ClickHouse or Valkey wait kept the transaction open and a merge could slip in
@@ -79,6 +79,10 @@ export async function removeProfiles(
   identifiers: (typeof schema.identifiers.$inferSelect)[],
   opts: { suppress: boolean },
 ) {
+  // Profile rows before the participant rows this deletes, the shared order (identity.ts). A score
+  // finalisation (#1011 review) or a journey step takes the same profile lock first, so neither can
+  // hold a participant row this deletion wants while waiting for a profile row it holds.
+  await lockProfileRows(tx, workspaceId, family);
   const anonymousIds = identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value);
   const userIds = identifiers.filter((i) => i.type === 'user_id').map((i) => i.value);
   if (anonymousIds.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.anonymousId, anonymousIds));

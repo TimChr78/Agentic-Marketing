@@ -3,7 +3,7 @@ import { safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
-import { canonicalProfile } from '@agentic-marketing/profiles';
+import { canonicalProfile, lockProfileRows } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -219,28 +219,25 @@ export async function finishIn(
     const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
     input.trigger = typeof name === 'string' ? { name } : null;
   }
-  // A decision step locks and verifies the still-waiting participant first, then the profile,
-  // before writing anything (#351, #359 interplay). A step that finds the participant gone or
-  // not waiting, or the profile erased, is late and commits no score, so an erased person's
-  // scores cannot come back.
+  // A decision step verifies the still-waiting participant and the profile it belongs to before
+  // writing anything (#351, #359 interplay). A step that finds the participant gone or not waiting,
+  // or the profile erased, is late and commits no score, so an erased person's scores cannot come
+  // back.
   //
-  // Lock order: participant -> profile -> profile_scores. The journey runtime already claims
-  // participants (FOR UPDATE) and then updates profiles in the same transaction, so this order
-  // avoids a deadlock with it. removeProfiles deletes the person's participants before deleting the profile row; its
-  // existing foreign key cascades the score deletion.
+  // Lock order: profile -> participant -> profile_scores, the shared row order (see
+  // `packages/profiles/src/identity.ts`): an SDK batch that merges this person locks the profile
+  // rows before it moves the participant rows, and the journey sweep locks the profile row before
+  // it claims the participant row. Locking the participant first deadlocked with a merge (#1011
+  // review). `removeProfiles` deletes the person's participants before the profile row and takes the
+  // same profile lock first, and the profile row's foreign key cascades the score deletion.
   let waiting = true;
   if (c.kind === 'score') {
+    const lockedProfile = c.profileId ? await lockProfileRows(tx, c.workspaceId, [c.profileId]) : [];
     const lockedParticipant = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants
         WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'
         FOR UPDATE`);
-    waiting = lockedParticipant.rows.length > 0;
-    if (waiting && c.profileId) {
-      const lockedProfile = await tx.execute<{ id: string }>(
-        sql`SELECT id FROM profiles WHERE workspace_id = ${c.workspaceId} AND id = ${c.profileId} FOR UPDATE`,
-      );
-      if (!lockedProfile.rows.length) waiting = false;
-    }
+    waiting = lockedParticipant.rows.length > 0 && (!c.profileId || lockedProfile.length > 0);
     // The score and the wakeup commit together: a worker cannot claim the participant and read a
     // missing (or previous) value, and a failed score write leaves the step waiting to retry.
     if (waiting && out.storeScore) await insertProfileScore(tx, c.workspaceId, out.storeScore);

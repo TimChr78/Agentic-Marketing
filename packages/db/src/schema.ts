@@ -919,6 +919,21 @@ export const journeyParticipants = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
 );
 
+/**
+ * The events the journey hook has already applied (#1011). One row per event that enrolled someone,
+ * written in the same transaction as the enrolment, so a redelivered event cannot enrol a person
+ * twice after the participant left the journey, nor wake a wait its own delivery created.
+ */
+export const journeyProcessedEvents = pgTable(
+  'journey_processed_events',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    eventId: text('event_id').notNull(),
+    processedAt: ts('processed_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.eventId] })],
+);
+
 /** Why event-triggered entries were suppressed (#93); shown in journeys.stats. */
 export const journeyEntrySkips = pgTable(
   'journey_entry_skips',

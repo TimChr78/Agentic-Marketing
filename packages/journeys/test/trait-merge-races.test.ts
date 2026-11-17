@@ -218,8 +218,11 @@ describe.skipIf(!hasTestDatabase())('journey trait writes around a merge (#1011)
     const { p, q, anon, user } = await pair();
     const journeyId = await publishedJourney('Trait During Merge', 'plan', 'gold');
     const id = await dueParticipant(journeyId, p);
+    // One connection lifetime and one finally: the pause lock is released, the merge settled and the
+    // client given back whatever the test does (#1011 review).
     const probe = await d.db.admin.connect();
     let merge: Promise<unknown> | undefined;
+    let mergeError: unknown;
     try {
       await installIdentifierPause(probe);
       await holdPause(probe, IDENTIFIER_PAUSE_KEY);
@@ -232,23 +235,20 @@ describe.skipIf(!hasTestDatabase())('journey trait writes around a merge (#1011)
       // makes it defer this participant to its next run instead of losing the write.
       await sweep(d.db, deps());
       expect(await participant(id)).toMatchObject({ status: 'ready' });
-
-      await releasePause(probe, IDENTIFIER_PAUSE_KEY);
     } finally {
       await releasePause(probe, IDENTIFIER_PAUSE_KEY).catch(() => {});
       await dropIdentifierPause(probe).catch(() => {});
-    }
-    try {
-      await merge;
-      expect(await mergedInto(p)).toBe(q);
-
-      await sweep(d.db, deps());
-
-      expect(await participant(id)).toMatchObject({ status: 'completed', profile_id: q });
-      expect(await traitsOf(q)).toMatchObject({ plan: 'gold' });
-    } finally {
+      const settled = await Promise.allSettled([merge]);
+      mergeError = settled[0]?.status === 'rejected' ? settled[0].reason : undefined;
       probe.release();
     }
+    expect(mergeError).toBeUndefined();
+    expect(await mergedInto(p)).toBe(q);
+
+    await sweep(d.db, deps());
+
+    expect(await participant(id)).toMatchObject({ status: 'completed', profile_id: q });
+    expect(await traitsOf(q)).toMatchObject({ plan: 'gold' });
   }, 120_000);
 
   it('an enrollment that races a merge enters on the survivor', async () => {
@@ -260,6 +260,7 @@ describe.skipIf(!hasTestDatabase())('journey trait writes around a merge (#1011)
     const probe = await d.db.admin.connect();
     let merge: Promise<unknown> | undefined;
     let entered: Promise<void> | undefined;
+    let failure: unknown;
     try {
       await installMergeCommitPause(probe);
       await holdPause(probe, MERGE_COMMIT_PAUSE_KEY);
@@ -271,17 +272,16 @@ describe.skipIf(!hasTestDatabase())('journey trait writes around a merge (#1011)
       // lock and then enroll on the survivor, never on the id the merge folds away.
       entered = journeyHook(d.db, deps())(ws, resolved);
       await Promise.race([entered.then(() => 'done'), waitForIdentityWaiter(probe, ws).then(() => 'queued')]);
-
-      await releasePause(probe, MERGE_COMMIT_PAUSE_KEY);
     } finally {
       await releasePause(probe, MERGE_COMMIT_PAUSE_KEY).catch(() => {});
       await dropMergeCommitPause(probe).catch(() => {});
+      const settled = await Promise.allSettled([merge, entered]);
+      failure = settled.find((r) => r.status === 'rejected')?.reason;
+      probe.release();
     }
-    await merge;
-    await entered;
+    expect(failure).toBeUndefined();
 
     expect(await participantsOf(journeyId)).toEqual([{ profile_id: q, status: 'ready' }]);
-    probe.release();
   }, 120_000);
 
   it('a journey sweep and a merge in one SDK batch do not deadlock', async () => {
@@ -300,6 +300,7 @@ describe.skipIf(!hasTestDatabase())('journey trait writes around a merge (#1011)
     expect(holders).toEqual([]);
     let merge: Promise<unknown> | undefined;
     let swept: Promise<number> | undefined;
+    let failure: unknown;
     try {
       await installIdentifierPause(probe);
       await holdPause(probe, IDENTIFIER_PAUSE_KEY);
@@ -319,23 +320,20 @@ describe.skipIf(!hasTestDatabase())('journey trait writes around a merge (#1011)
         },
       );
       await waitFor('the sweep to finish or block', async () => settled || (await blockedBy(probe, batchPid)).length > 0);
-
-      await releasePause(probe, IDENTIFIER_PAUSE_KEY);
     } finally {
       await releasePause(probe, IDENTIFIER_PAUSE_KEY).catch(() => {});
       await dropIdentifierPause(probe).catch(() => {});
-    }
-    // Both must finish: a deadlock would reject one of them with 40P01.
-    try {
-      await Promise.all([merge, swept]);
-      expect(await participant(id)).toMatchObject({ status: 'ready', profile_id: q });
-
-      await sweep(d.db, deps());
-
-      expect(await participant(id)).toMatchObject({ status: 'completed', profile_id: q });
-      expect(await traitsOf(q)).toMatchObject({ plan: 'gold' });
-    } finally {
+      const settled = await Promise.allSettled([merge, swept]);
+      failure = settled.find((r) => r.status === 'rejected')?.reason;
       probe.release();
     }
+    // Both must finish: a deadlock would reject one of them with 40P01.
+    expect(failure).toBeUndefined();
+    expect(await participant(id)).toMatchObject({ status: 'ready', profile_id: q });
+
+    await sweep(d.db, deps());
+
+    expect(await participant(id)).toMatchObject({ status: 'completed', profile_id: q });
+    expect(await traitsOf(q)).toMatchObject({ plan: 'gold' });
   }, 120_000);
 });
