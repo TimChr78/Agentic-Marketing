@@ -1283,6 +1283,8 @@ export const broadcastRuns = pgTable(
     status: text('status').$type<BroadcastStatus>().notNull(),
     sendAt: ts('send_at').notNull(),
     leaseUntil: ts('lease_until'),
+    /** Consecutive publication deferrals; the next wait doubles from 2 s to a 60 s cap. */
+    deferCount: integer('defer_count').notNull().default(0),
     cursor: text('cursor').notNull().default(''),
     recipients: integer('recipients').notNull().default(0),
     queued: integer('queued').notNull().default(0),

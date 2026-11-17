@@ -47,6 +47,8 @@ CREATE INDEX IF NOT EXISTS outbox_delivered ON outbox (delivered_at) WHERE state
 -- The publication barrier asks whether events for one broadcast/journey are still undelivered.
 CREATE INDEX IF NOT EXISTS outbox_undelivered_subject ON outbox (subject_ref)
   WHERE state IN ('pending', 'delivering');
+-- A decision proceeds when only failed rows remain; this finds them without a delivered-row scan.
+CREATE INDEX IF NOT EXISTS outbox_failed_subject ON outbox (subject_ref) WHERE state = 'failed';
 
 ALTER TABLE outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outbox FORCE ROW LEVEL SECURITY;

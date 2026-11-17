@@ -1,5 +1,5 @@
 import { newId } from '@agentic-marketing/core';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Db, Tx } from './pool';
 import * as schema from './schema';
 
@@ -219,14 +219,26 @@ export async function outboxPublicationBarrier(
   workspaceId: string,
   subjectRef: string,
 ): Promise<{ outstanding: number; failed: number }> {
-  const [row] = await tx
-    .select({
-      outstanding: sql<number>`count(*) FILTER (WHERE ${schema.outbox.state} IN ('pending', 'delivering'))::int`,
-      failed: sql<number>`count(*) FILTER (WHERE ${schema.outbox.state} = 'failed')::int`,
-    })
+  // Two separately indexed queries: each predicate is in WHERE, so the partial indexes
+  // outbox_undelivered_subject and outbox_failed_subject are usable. An aggregate with FILTER
+  // cannot use them and would scan every delivered row of the workspace on each retry.
+  const outstanding = await tx
+    .select({ one: sql<number>`1` })
     .from(schema.outbox)
-    .where(and(eq(schema.outbox.workspaceId, workspaceId), eq(schema.outbox.subjectRef, subjectRef)));
-  return { outstanding: Number(row?.outstanding ?? 0), failed: Number(row?.failed ?? 0) };
+    .where(
+      and(
+        eq(schema.outbox.workspaceId, workspaceId),
+        eq(schema.outbox.subjectRef, subjectRef),
+        inArray(schema.outbox.state, ['pending', 'delivering']),
+      ),
+    )
+    .limit(1);
+  const failed = await tx
+    .select({ one: sql<number>`1` })
+    .from(schema.outbox)
+    .where(and(eq(schema.outbox.workspaceId, workspaceId), eq(schema.outbox.subjectRef, subjectRef), eq(schema.outbox.state, 'failed')))
+    .limit(1);
+  return { outstanding: outstanding.length, failed: failed.length };
 }
 
 /** Removes delivered rows older than the retention window. Failed rows stay for inspection. */

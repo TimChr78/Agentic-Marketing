@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   ackOutbox,
@@ -212,6 +213,30 @@ describe.skipIf(!hasTestDatabase())('transactional outbox (#978 part 2)', () => 
     expect(await row('old')).toBeNull();
     expect(await row('fresh')).not.toBeNull();
     expect(await row('failed-row')).not.toBeNull();
+  });
+
+  it('uses the partial indexes for the publication barrier', async () => {
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, subject_ref)
+       VALUES ($1, 'obx_idx_pending', 'test', '{}', 'idx-pending', 'pending', 'idx-subject'),
+              ($1, 'obx_idx_failed', 'test', '{}', 'idx-failed', 'failed', 'idx-subject')`,
+      [d.workspace],
+    );
+    const plans = await d.db.withWorkspace(d.workspace, async (tx) => {
+      await tx.execute(sql`SET LOCAL enable_seqscan = off`);
+      const outstanding = await tx.execute<{ 'QUERY PLAN': string }>(
+        sql`EXPLAIN SELECT 1 FROM outbox
+            WHERE workspace_id = ${d.workspace} AND subject_ref = 'idx-subject'
+              AND state IN ('pending', 'delivering') LIMIT 1`,
+      );
+      const failed = await tx.execute<{ 'QUERY PLAN': string }>(
+        sql`EXPLAIN SELECT 1 FROM outbox
+            WHERE workspace_id = ${d.workspace} AND subject_ref = 'idx-subject' AND state = 'failed' LIMIT 1`,
+      );
+      return [...outstanding.rows, ...failed.rows].map((r) => r['QUERY PLAN']).join('\n');
+    });
+    expect(plans).toContain('outbox_undelivered_subject');
+    expect(plans).toContain('outbox_failed_subject');
   });
 
   it('bounds and flattens the stored error text', () => {
