@@ -12,7 +12,10 @@ issues: [1001]
 - **Breaking / manual steps for existing installs:** a PostgreSQL 16 data volume cannot be opened
   by 18. The shipped Compose file stops at the `postgres-check` service with the upgrade path
   instead of starting an empty database, and `POSTGRES_IMAGE` keeps an install on 16 until it is
-  migrated. Take and verify an `am backup`, then restore it into a fresh 18 volume; see
+  migrated. Stop every writer, take and verify a final `am backup` with the current image (a backup
+  taken while traffic still arrived loses the writes after it and can bring back an erased
+  profile), then restore into a **new** 18 volume while retaining the old 16 volume until the
+  checks pass; set `AM_VERSION` explicitly in both directions. See
   [docs/deployment/postgres-18.md](docs/deployment/postgres-18.md). `pg_upgrade` is the advanced
   alternative and needs matching data-checksum settings (18 enables checksums for a new cluster by
   default).
