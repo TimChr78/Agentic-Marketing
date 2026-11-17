@@ -4,6 +4,7 @@ import { AppError, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
+import { dropErasedProfileRows } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
@@ -457,7 +458,10 @@ export async function runEnrollmentJobsOnce(deps: EnrollmentDeps): Promise<Enrol
       total.skipped += result.summary.skipped;
       total.failed += result.summary.failed;
       total.done += result.summary.done;
-      if (deps.events && result.holdout.length) await deps.events.insertJourneyEvents(result.holdout).catch(() => {});
+      if (deps.events && result.holdout.length) {
+        const kept = await dropErasedProfileRows(deps.db, workspaceId, result.holdout);
+        if (kept.length) await deps.events.insertJourneyEvents(kept).catch(() => {});
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const permanent = isPermanentEnrollmentError(err);

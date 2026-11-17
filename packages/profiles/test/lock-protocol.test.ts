@@ -412,7 +412,8 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
     } as unknown as EventStore;
     const hot = { async deleteSnapshot() {} } as unknown as HotState;
     // The real scheduler path: claim the committed job and block inside the ClickHouse delete.
-    const worker = runErasureCleanupOnce({ db: d.db, kp, events: eventStore, hot });
+    // The interval is zero here so the test can drive the distinct final pass immediately.
+    const worker = runErasureCleanupOnce({ db: d.db, kp, events: eventStore, hot }, { finalSweepMs: 0 });
     await blockedInClickHouse;
 
     const fresh = `anon-${newId('prf')}`;
@@ -425,7 +426,14 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
     expect(created.rowCount).toBe(1);
 
     release();
-    const result = await worker;
+    const first = await worker;
+    expect(first.claimed).toBeGreaterThanOrEqual(1);
+    // The first successful sweep is the checkpoint; the distinct final pass completes the job.
+    await d.db.admin.query('UPDATE erasure_cleanup_jobs SET next_attempt_at = now() WHERE workspace_id = $1 AND erasure_id = $2', [
+      ws,
+      erasureId,
+    ]);
+    const result = await runErasureCleanupOnce({ db: d.db, kp, events: eventStore, hot }, { finalSweepMs: 0 });
     expect(result.completed).toBeGreaterThanOrEqual(1);
     const job = await d.db.admin.query<{ state: string }>(
       'SELECT state FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',

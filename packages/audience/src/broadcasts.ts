@@ -41,6 +41,7 @@ import {
   validateSubject,
 } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
+import { dropErasedProfileRows } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, asc, count, desc, eq, gt, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
@@ -1790,8 +1791,10 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
   });
   // ClickHouse is outside the transaction, as for journeys: an assignment that committed still
   // measures from the table, and a lost event only affects the timeline.
-  if (out.holdout.length)
-    await deps.events.insertJourneyEvents(out.holdout).catch((err) => logger.warn({ err }, 'holdout events not stored'));
+  if (out.holdout.length) {
+    const kept = await dropErasedProfileRows(deps.db, ws, out.holdout);
+    if (kept.length) await deps.events.insertJourneyEvents(kept).catch((err) => logger.warn({ err }, 'holdout events not stored'));
+  }
   return out.more;
 }
 

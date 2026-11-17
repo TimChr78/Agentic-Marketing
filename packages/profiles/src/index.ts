@@ -33,6 +33,7 @@ export {
   topicSummary,
 } from './consent';
 export * from './crypto';
+export * from './erasedEvents';
 export * from './erasure';
 export * from './erasureCleanup';
 export * from './identity';
