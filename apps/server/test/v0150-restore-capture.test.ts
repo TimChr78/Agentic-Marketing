@@ -83,8 +83,8 @@ describe.skipIf(!hasTestDatabase())('restore capture binding and recovery (#1009
     const target = await restoreTargetIdentity(d.url.toString());
 
     const env = envFor(d);
-    const noPassword = { ...env, APP_DB_PASSWORD: undefined };
-    await expect(restoreBackup({ dir, env: noPassword, skipKeyCheck: true, log: () => {} })).rejects.toThrow(/APP_DB_PASSWORD/);
+    const missingAppDbSecret = { ...env, APP_DB_PASSWORD: undefined };
+    await expect(restoreBackup({ dir, env: missingAppDbSecret, skipKeyCheck: true, log: () => {} })).rejects.toThrow(/APP_DB_PASSWORD/);
     const saved = await readCapture(capture);
     expect(saved.version).toBe(2);
     expect(saved.binding.target).toBe(target);
