@@ -12,7 +12,7 @@ import {
   sanitiseOutboxError,
 } from '@agentic-marketing/db';
 import { type EmailRequest, requestEmail } from '@agentic-marketing/email';
-import type { EventStore } from '@agentic-marketing/events';
+import { type EventStore, messageEventPayloadSchema } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { z } from 'zod';
@@ -43,39 +43,9 @@ export interface OutboxDispatchResult {
 /** A row this version can never deliver: failing it immediately beats eight identical attempts. */
 class PermanentOutboxError extends Error {}
 
-const MESSAGE_EVENT_TYPES = [
-  'queued',
-  'sent',
-  'suppressed',
-  'failed',
-  'delivered',
-  'bounced',
-  'deferred',
-  'complained',
-  'opened',
-  'clicked',
-  'unsubscribed',
-] as const;
-
-/** Complete shape of one ClickHouse message event; a partial object would fail inside ClickHouse. */
-const messageEventSchema = z.object({
-  workspaceId: z.string().min(1),
-  messageId: z.string().min(1),
-  eventId: z.string().min(1),
-  type: z.enum(MESSAGE_EVENT_TYPES),
-  at: z.string().min(1),
-  profileId: z.string(),
-  channel: z.string().min(1),
-  purpose: z.string(),
-  provider: z.string(),
-  templateId: z.string(),
-  templateVersion: z.number().int().nonnegative(),
-  journeyId: z.string(),
-  variant: z.string().optional(),
-  reason: z.string(),
-  url: z.string(),
-});
-const messageEventPayload = z.object({ events: z.array(messageEventSchema).min(1) });
+// The payload schema lives with the event shape (packages/events/src/pending.ts): the dispatcher
+// and a reader that needs the queued events before publication parse the same batch.
+const messageEventPayload = messageEventPayloadSchema;
 
 /**
  * A confirmation send intent. `idempotencyKey` is required (and checked against the row's

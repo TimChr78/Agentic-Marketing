@@ -3,7 +3,7 @@ import { campaignIdentityMap, identityUnresolvedNote } from '@agentic-marketing/
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore } from '@agentic-marketing/events';
+import type { EventStore, MessageEvent } from '@agentic-marketing/events';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -78,6 +78,12 @@ export type QueryInput = z.infer<typeof queryInput> & {
  */
 export interface InternalQueryOptions {
   raw?: boolean;
+  /**
+   * Message events a decision knows are committed but not published yet (#1008). They are read by
+   * the same query as published rows, and the result is never cached: it describes this caller's
+   * snapshot, not a stable answer for everyone.
+   */
+  pendingMessageEvents?: readonly MessageEvent[];
 }
 
 export const analyticsColumn = z.object({
@@ -629,6 +635,7 @@ async function execute(
   dimensions: DimensionId[],
   filters: NormalizedFilters,
   raw = false,
+  pendingMessageEvents?: readonly MessageEvent[],
 ) {
   const source = measures[0].source;
   if (source === 'segment_memberships') return segmentQuery(deps, input, filters);
@@ -687,6 +694,7 @@ async function execute(
         conversionNames: conversion.names,
         campaignMap: queryMap?.map,
         journeyVersion: input.journeyVersion,
+        pendingMessageEvents,
       });
 
   const started = Date.now();
@@ -795,16 +803,18 @@ async function execute(
 export async function runAnalyticsQuery(deps: Deps, input: QueryInput, options: InternalQueryOptions = {}): Promise<AnalyticsResult> {
   const { measures, dimensions, filters } = validate(input);
   // A raw result must never sit in the shared cache: a public query that normalises to the same key
-  // would otherwise be served unsuppressed rows (#917 review round 6).
+  // would otherwise be served unsuppressed rows (#917 review round 6). Neither may a result that
+  // carries a caller's pending-event snapshot (#1008).
   const raw = options.raw === true;
-  const key = raw ? null : cacheKey(deps.workspaceId, input, filters);
+  const pendingMessageEvents = options.pendingMessageEvents ?? [];
+  const key = raw || pendingMessageEvents.length ? null : cacheKey(deps.workspaceId, input, filters);
   const now = Date.now();
   const hit = key === null ? undefined : cache.get(key);
   if (hit && hit.expires > now) {
     logger.debug({ workspaceId: deps.workspaceId, measures: input.measures }, 'analytics query cache hit');
     return clone(hit.value);
   }
-  const value = await execute(deps, input, measures, dimensions, filters, raw);
+  const value = await execute(deps, input, measures, dimensions, filters, raw, pendingMessageEvents);
   if (key !== null) {
     cache.set(key, { expires: now + CACHE_TTL_MS, value });
     // Keep the map small in a long-running process; the TTL is the point, not an unbounded store.

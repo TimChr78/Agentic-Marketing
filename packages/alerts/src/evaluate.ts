@@ -1,6 +1,14 @@
 import { type AnalyticsResult, runAnalyticsQuery } from '@agentic-marketing/analytics';
 import { newId } from '@agentic-marketing/core';
-import { type AlertChannel, type AlertNotification, schema, type Tx } from '@agentic-marketing/db';
+import {
+  type AlertChannel,
+  type AlertNotification,
+  type OutboxPublicationLag,
+  outboxLagMs,
+  outboxPublicationLag,
+  schema,
+  type Tx,
+} from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import type { AlertDeps } from './deps';
@@ -401,8 +409,41 @@ export async function reconcileQueuedAlertEvents(deps: AlertDeps): Promise<numbe
   return reconciled;
 }
 
+/**
+ * How far publication of the message events the rules read is behind (#1008). Message events reach
+ * ClickHouse after the transaction that recorded them commits, through the outbox. A rule that
+ * stays quiet while those events are missing is not evidence of health, so every sweep reports
+ * this beside its decisions.
+ */
+export interface AlertPublicationLag {
+  /** Message events committed but not published yet, summed over the workspaces evaluated. */
+  outstanding: number;
+  /** Message events dead-lettered (they need `am outbox`), summed over the workspaces evaluated. */
+  failed: number;
+  /** Age of the oldest unpublished message event across the workspaces evaluated, or null. */
+  oldestPendingAgeMs: number | null;
+}
+
+export interface AlertEvaluationResult {
+  /** Workspaces with at least one enabled rule that this sweep visited. */
+  workspaces: number;
+  publication: AlertPublicationLag;
+}
+
+/**
+ * One workspace's publication lag, for a sweep or a listing. It counts `message_event` rows only:
+ * those carry the bounces, complaints and unsubscribes the metric layer reads, while a stuck DOI
+ * confirmation says nothing about a deliverability measurement.
+ */
+export async function alertPublicationLag(deps: AlertDeps, workspaceId: string, now = new Date()): Promise<AlertPublicationLag> {
+  const lag: OutboxPublicationLag = await deps.db.withWorkspace(workspaceId, (tx) =>
+    outboxPublicationLag(tx, workspaceId, { kind: 'message_event' }),
+  );
+  return { outstanding: lag.outstanding, failed: lag.failed, oldestPendingAgeMs: outboxLagMs(lag, now) };
+}
+
 /** One sweep over every workspace. The scheduler calls this; tests call it with a fixed clock. */
-export async function evaluateAlerts(deps: AlertDeps, opts: EvaluateOptions = {}) {
+export async function evaluateAlerts(deps: AlertDeps, opts: EvaluateOptions = {}): Promise<AlertEvaluationResult> {
   const now = opts.now ?? new Date();
   // Independent of `enabled` on purpose: a rule switched off mid-flight still has deliveries to
   // reconcile (the outbox delivers them regardless).
@@ -410,13 +451,31 @@ export async function evaluateAlerts(deps: AlertDeps, opts: EvaluateOptions = {}
   const { rows } = await deps.db.admin.query<{ workspace_id: string }>(
     'SELECT DISTINCT workspace_id FROM alert_rules WHERE enabled = true',
   );
+  const publication: AlertPublicationLag = { outstanding: 0, failed: 0, oldestPendingAgeMs: null };
   for (const { workspace_id: workspaceId } of rows) {
+    // Read before the rules: it describes the data they are about to measure. A failure here must
+    // not stop the rules themselves from being evaluated.
+    try {
+      const lag = await alertPublicationLag(deps, workspaceId, now);
+      publication.outstanding += lag.outstanding;
+      publication.failed += lag.failed;
+      if (lag.oldestPendingAgeMs !== null)
+        publication.oldestPendingAgeMs = Math.max(publication.oldestPendingAgeMs ?? 0, lag.oldestPendingAgeMs);
+      if (lag.outstanding || lag.failed)
+        logger.warn(
+          { workspace: workspaceId, ...lag },
+          'alert evaluation read message events that are not published yet; a quiet result may be incomplete',
+        );
+    } catch (err) {
+      logger.warn({ err, workspaceId }, 'alert publication lag could not be read');
+    }
     try {
       await evaluateWorkspace(deps, workspaceId, now, opts);
     } catch (err) {
       logger.error({ err, workspaceId }, 'alert workspace evaluation failed');
     }
   }
+  return { workspaces: rows.length, publication };
 }
 
 export interface AlertEvaluatorOptions {
