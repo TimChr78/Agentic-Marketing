@@ -300,9 +300,30 @@ export const idempotencyKeys = pgTable(
     command: text('command').notNull(),
     inputHash: text('input_hash').notNull(),
     response: jsonb('response').notNull(),
+    /** When the action behind this response was undone; a replay then answers 409 (#950). */
+    reversedAt: ts('reversed_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
-  (t) => [primaryKey({ columns: [t.workspaceId, t.key] })],
+  (t) => [
+    primaryKey({ columns: [t.workspaceId, t.key] }),
+    // The retention cleanup's `created_at < cutoff ORDER BY created_at` batches (#976); the
+    // primary key still answers the per-key replay lookup.
+    index('idempotency_keys_created_at').on(t.createdAt, t.workspaceId, t.key),
+  ],
+);
+
+/**
+ * The agent ledger rows a stored idempotent response describes (#950). A command can write several
+ * (config.import publishes each artifact separately); undoing any of them reverses the key.
+ */
+export const idempotencyKeyActions = pgTable(
+  'idempotency_key_actions',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    key: text('key').notNull(),
+    agentActionId: bigint('agent_action_id', { mode: 'number' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.key, t.agentActionId] })],
 );
 
 export const dataKeys = pgTable(

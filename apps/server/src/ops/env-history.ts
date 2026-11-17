@@ -101,6 +101,9 @@ export const ENV_SINCE: Record<string, string> = {
 
   // 0.14.18 (issue #870): the admin port's host address, loopback by default
   AM_BIND: '0.14.18',
+
+  // 0.14.27 (issue #976): how long an idempotency key replays (default 30 days)
+  RETENTION_IDEMPOTENCY_DAYS: '0.14.27',
 };
 
 /**

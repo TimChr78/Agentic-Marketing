@@ -1,5 +1,6 @@
 import type { MandateView, PolicyOutcome } from '@agentic-marketing/commands';
 import { describe, expect, it } from 'vitest';
+import { expectLinear } from '../../../test-support/linear';
 import { checkPrompt, checkSubjectJson, MAX_SUBJECT_CHARS, parseVerdict } from '../src/independentCheck';
 
 // The independent check (#231) reads a strict JSON verdict from the model's text, and (#261)
@@ -45,10 +46,19 @@ describe('the independent check verdict', () => {
     }
   });
 
-  it('stays fast on long runs of whitespace (no regex over model output)', () => {
-    const started = Date.now();
+  it('stays linear on long runs of whitespace (no regex over model output)', () => {
     expect(() => parseVerdict(`\`\`\`${' '.repeat(200_000)}x`)).toThrow();
-    expect(Date.now() - started).toBeLessThan(1000);
+    // Growth, not a millisecond budget: a backtracking regex is quadratic, linear code stays near 4×.
+    expectLinear(
+      (n) => `\`\`\`${' '.repeat(n)}x`,
+      (text) => {
+        try {
+          parseVerdict(text);
+        } catch {
+          // The verdict is invalid by design; only the time it takes to reject it matters here.
+        }
+      },
+    );
   });
 });
 

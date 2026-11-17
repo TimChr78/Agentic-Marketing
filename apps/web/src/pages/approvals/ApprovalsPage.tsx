@@ -405,6 +405,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-muted">
                     <Tag>{typeLabel(a.artifactType)}</Tag>
+                    {a.archived && <StatusPill tone="bad">Archived</StatusPill>}
                     <RequesterView r={a.requester} />
                     <span>{timeAgo(a.createdAt)}</span>
                   </div>
@@ -474,9 +475,10 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
                       {a.artifactName}
                     </Link>
                     <BundleNote a={a} />
-                    <div className="mt-0.5 flex items-center gap-1.5 text-[12px] text-muted">
+                    <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[12px] text-muted">
                       {typeLabel(a.artifactType)} · v{a.version} ·{' '}
                       {a.artifactPublishedVersion ? `changes live v${a.artifactPublishedVersion}` : 'new'}
+                      {a.archived && <StatusPill tone="bad">Archived</StatusPill>}
                     </div>
                   </Td>
                   <Td>

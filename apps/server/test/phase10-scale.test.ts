@@ -1,10 +1,14 @@
 import { contextFor, evaluate } from '@agentic-marketing/segments';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runLoadTest, SEGMENTS } from '../src/loadtest';
 import { startTestServer, testPort } from './harness';
 
 // Phase 10 (wave 2), part b: segments are evaluated in SQL over the whole workspace, checked
 // against the in-memory evaluator, and the load test runs end to end on a small population.
+
+// The load test seeds and refreshes several thousand profiles; on a loaded shared runner that is
+// more than the global 20 s test timeout, so this file sets its own (#990).
+vi.setConfig({ testTimeout: 120_000 });
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 

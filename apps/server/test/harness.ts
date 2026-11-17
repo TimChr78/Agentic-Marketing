@@ -7,13 +7,22 @@ import { migrateClickHouse, resetClickHouse, resetNatsNamespace, resetNatsPrefix
 import { serve } from '@hono/node-server';
 import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
-import { runId, scopedDbName, testPortOffset } from '../../../packages/db/test/run';
+import { runDatabaseMarker, runId, scopedDbName, testPortOffset } from '../../../packages/db/test/run';
 import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import { prefixOf } from '../src/domains';
 import { publicOnly } from '../src/http/public-only';
 import type { Commands } from '../src/registry';
 import { startScheduler, startWorkers } from '../src/workers';
+import {
+  ensureTemplateDatabase,
+  quoteIdent,
+  sweepRunDatabases,
+  templateDatabaseName,
+  templateFingerprint,
+  templateMarker,
+  withTemplateLock,
+} from './template-db';
 
 // A complete server (Postgres, ClickHouse, NATS, api + ingest + worker roles) on fresh databases.
 
@@ -152,13 +161,23 @@ export async function connectAgent(BASE: string, u: User, permissions: string[],
 
 /**
  * A test file's port, moved into its worker's own block: test files run in parallel workers, and
- * the numbers in the files repeat. Worker n adds (n - 1) * 1000; the files use 2500–3499.
- * TEST_PORT_OFFSET moves every block, so two checkouts can run their suites at once.
+ * the numbers in the files repeat. Worker n adds (n - 1) * 5 000.
+ *
+ * The stride must be larger than the spread of the base numbers (currently 2 500–4 700). It used to
+ * be 1 000, so bases that differed by 1 000 landed on the same port in neighbouring workers:
+ * experience-rollout (3 600) and password-reset (2 600 + 1 000) both listened on 3 600 in CI, and
+ * one failed with EADDRINUSE inside its beforeAll hook (#990 follow-up). Files in one worker run
+ * one at a time, so a repeated base there is safe. TEST_PORT_OFFSET still moves every block, so two
+ * checkouts can run at once.
  */
-export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 1000 + testPortOffset();
+export const testPort = (port: number) => port + (Number(process.env.VITEST_POOL_ID ?? '1') - 1) * 5_000 + testPortOffset();
 
-/** The migrated database that test-setup.ts prepares once per run; run-scoped like every test database. */
-export const TEMPLATE_DB = scopedDbName('am_test_template');
+/**
+ * The migrated template database: named after a fingerprint of the whole build recipe, so an
+ * unchanged tree reuses it across runs and checkouts, and test-setup.ts shares the name through
+ * AM_TEST_TEMPLATE.
+ */
+export const templateDbName = () => process.env.AM_TEST_TEMPLATE ?? templateDatabaseName(templateFingerprint({ role: APP_ROLE }));
 
 // Hot state (rate-limit buckets, sessions, snapshots) is not dropped with the databases. A run-unique
 // prefix keeps one run's buckets out of the next one, which matters now that seeded fixtures reuse
@@ -174,25 +193,44 @@ export function testDatabaseUrl(dbName: string) {
 }
 
 /**
- * Builds the template: Postgres migrations, the app role and better-auth's tables, once per run
- * (test-setup.ts). Each file's database is then a copy, instead of running every migration again.
+ * Builds the template: Postgres migrations, the app role and better-auth's tables, under the shared
+ * maintenance advisory lock (test-setup.ts). The template is keyed on a fingerprint of the whole
+ * recipe (migrations, migrator, auth options, Better Auth version, app role), so a run reuses a
+ * completed one when nothing changed instead of replaying every migration, and the lock keeps two
+ * concurrent runs from building or dropping it at once. The same lock and pass sweep run databases
+ * that killed runs left behind, on the shared test stack only. Templates are never pruned here; see
+ * `pnpm test:clean -- --templates`. Returns the name.
  */
-export async function prepareTemplateDatabase() {
+export async function prepareTemplateDatabase(): Promise<string> {
+  const fingerprint = templateFingerprint({ role: APP_ROLE });
+  const template = templateDatabaseName(fingerprint);
+  const marker = templateMarker(fingerprint);
   const maint = new pg.Client({ connectionString: testDatabaseUrl('postgres').toString() });
   await maint.connect();
   try {
-    await maint.query(`DROP DATABASE IF EXISTS ${TEMPLATE_DB} WITH (FORCE)`);
-    await maint.query(`CREATE DATABASE ${TEMPLATE_DB}`);
+    await withTemplateLock(maint, async () => {
+      const swept = await sweepRunDatabases(maint, { run: runId });
+      if (!swept.swept) console.log(`[test] run-database sweep skipped: ${swept.reason}`);
+      else if (swept.found) console.log(`[test] swept ${swept.found} run database(s): dropped ${swept.dropped.length} older than 6 hours`);
+      const { built } = await ensureTemplateDatabase(maint, {
+        name: template,
+        marker,
+        build: async (name) => {
+          const db = createDb({ adminUrl: testDatabaseUrl(name).toString(), appUrl: testDatabaseUrl(name).toString() });
+          try {
+            await migrate(db.admin, APP_ROLE);
+            await migrateAuth({ baseUrl: 'http://localhost', secret: 'test-secret-test-secret-test-secret-123', db });
+          } finally {
+            await db.close();
+          }
+        },
+      });
+      console.log(`[test] ${built ? 'built' : 'reused'} template ${template}`);
+    });
   } finally {
     await maint.end();
   }
-  const db = createDb({ adminUrl: testDatabaseUrl(TEMPLATE_DB).toString(), appUrl: testDatabaseUrl(TEMPLATE_DB).toString() });
-  try {
-    await migrate(db.admin, APP_ROLE);
-    await migrateAuth({ baseUrl: 'http://localhost', secret: 'test-secret-test-secret-test-secret-123', db });
-  } finally {
-    await db.close();
-  }
+  return template;
 }
 
 /**
@@ -254,6 +292,10 @@ export async function freshDatabase(name: string): Promise<{ url: URL; migrated:
         await new Promise((r) => setTimeout(r, 100 + Math.random() * 200));
       }
     }
+    // Ownership metadata for the sweeper: only a database carrying this comment is a run database,
+    // so a name alone (am_customer_archive) or a database from before this marker is never dropped.
+    const marker = runDatabaseMarker(runId).replaceAll("'", "''");
+    await maint.query(`COMMENT ON DATABASE ${quoteIdent(dbName)} IS '${marker}'`);
   } finally {
     await maint.end();
   }
@@ -332,6 +374,8 @@ export async function startTestServer(
       hostedAgentTickMs: 86_400_000,
       // Content source tests fetch on demand and drive the sweep with a fixed clock.
       contentTickMs: 86_400_000,
+      // Idempotency retention is driven by its own test; keep the periodic loop out of the way.
+      idempotencyCleanupTickMs: 86_400_000,
       // Bulk enrollment tests drive the job directly with runEnrollmentJobsOnce.
       enrollmentTickMs: 86_400_000,
       guardianTickMs: 86_400_000,

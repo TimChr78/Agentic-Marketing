@@ -1,11 +1,11 @@
 import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
 import { runAiWorker } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
-import { runActiveMandateRepair } from '@agentic-marketing/artifacts';
+import { runActiveMandateRepair, runArchivedApprovalSweep } from '@agentic-marketing/artifacts';
 import { consentHook, runBroadcasts, runOutboxDispatcher, runRetention } from '@agentic-marketing/audience';
 import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
-import { type Db, runSentAtBackfill } from '@agentic-marketing/db';
+import { type Db, runIdempotencyKeyCleanup, runSentAtBackfill } from '@agentic-marketing/db';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
@@ -82,10 +82,11 @@ export function startScheduler(
     contentTickMs?: number;
     enrollmentTickMs?: number;
     rolloutTickMs?: number;
+    idempotencyCleanupTickMs?: number;
   } = {},
 ): Promise<void>[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, the transactional outbox, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices',
+    'scheduler role: segment recomputation, broadcasts, the transactional outbox, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices, expired idempotency keys',
   );
   return [
     // One pass at start: an abandoned consent choice is short-lived, and nothing in the request
@@ -97,11 +98,25 @@ export function startScheduler(
       log: (message) => logger.info(message),
       onError: (err) => logger.error({ err }, 'sent_at backfill failed'),
     }),
+    // The idempotency-key retention pass (#976): one pass at start, then periodically. It runs as
+    // the owner in bounded batches with SKIP LOCKED, so several schedulers can share the work.
+    runIdempotencyKeyCleanup({ db: srv.db }, signal, {
+      retentionDays: srv.idempotencyRetentionDays,
+      tickMs: opts.idempotencyCleanupTickMs,
+      log: (message) => logger.info(message),
+      onError: (err) => logger.error({ err }, 'idempotency key cleanup failed'),
+    }),
     // One pass at start: the single-active-mandate repair (#911) keeps the mandate the runtime
     // uses and archives legacy duplicates; it needs the runtime's schema check, so it is code.
     runActiveMandateRepair({ db: srv.db }, signal, {
       log: (message) => logger.info(message),
       onError: (err) => logger.error({ err }, 'single active mandate repair failed'),
+    }),
+    // One pass at start, then every few hours: a request that names an archived artifact can never
+    // publish, so it is closed as rejected instead of sitting in the queue (#957).
+    runArchivedApprovalSweep({ db: srv.db }, signal, {
+      log: (message) => logger.info(message),
+      onError: (err) => logger.error({ err }, 'archived approval sweep failed'),
     }),
     runSegmentScheduler(
       {

@@ -276,7 +276,9 @@ describe('response bounds', () => {
         /exceeds 1024 bytes/,
       );
     } finally {
-      expect(Date.now() - started).toBeLessThan(2_000);
+      // Still well inside the 5 s request timeout: this only distinguishes "aborted at the byte limit" from
+      // "drained the whole body" (#990 timing sweep).
+      expect(Date.now() - started).toBeLessThan(4_000);
       srv.close();
     }
   });
@@ -302,7 +304,9 @@ describe('response bounds', () => {
     try {
       await expect(safeRequest(`http://127.0.0.1:${port}/`, { timeoutMs: 400 }, local)).rejects.toThrow(/timed out after 400 ms/);
     } finally {
-      expect(Date.now() - started).toBeLessThan(1_500);
+      // Still well inside the 5 s request timeout: this only distinguishes "aborted at the deadline" from
+      // "never stopped" (#990 timing sweep).
+      expect(Date.now() - started).toBeLessThan(4_000);
       stopped = true;
       for (const t of timer) clearInterval(t);
       srv.close();
@@ -337,7 +341,9 @@ describe('response bounds', () => {
         /exceeds 1024 bytes/,
       );
     } finally {
-      expect(Date.now() - started).toBeLessThan(2_000);
+      // Still well inside the 5 s request timeout: this only distinguishes "aborted at the byte limit" from
+      // "drained the whole body" (#990 timing sweep).
+      expect(Date.now() - started).toBeLessThan(4_000);
       srv.close();
     }
   });
@@ -352,7 +358,9 @@ describe('response bounds', () => {
     try {
       await expect(egressHttp2(local)(`http://127.0.0.1:${port}/`, { timeoutMs: 400 })).rejects.toThrow(/timed out after 400 ms/);
     } finally {
-      expect(Date.now() - started).toBeLessThan(1_500);
+      // Still well inside the 5 s request timeout: this only distinguishes "aborted at the deadline" from
+      // "never stopped" (#990 timing sweep).
+      expect(Date.now() - started).toBeLessThan(4_000);
       srv.close();
     }
   });

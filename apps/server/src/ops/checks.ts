@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 import { appRoleReach, createDb, type Db, normalizeHost } from '@agentic-marketing/db';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
-import { endpointFailure, splitUrlCredentials } from '@agentic-marketing/telemetry';
+import { endpointFailure, endpointOrigin, splitUrlCredentials } from '@agentic-marketing/telemetry';
 import { type Config, ENV_KEYS, loadConfig, REQUIRED_ENV_KEYS } from '../config';
 import { keyProviderFor } from '../keys';
 import { VERSION } from '../version';
@@ -760,14 +760,18 @@ export async function checkNats(config: Config): Promise<Check> {
 
 export async function checkValkey(config: Config): Promise<Check> {
   const hot = valkeyHotState({ url: config.valkey.url, prefix: config.valkey.prefix });
+  // The URL's scheme/host/port, never its userinfo or query (#951): a redis-scheme URL has the
+  // WHATWG origin "null", which is not the same thing as an invalid URL, and the host that refused
+  // the connection is the part an operator needs.
+  const at = endpointOrigin(config.valkey.url);
   try {
     const pong = await withTimeout(hot.ping(), 'Valkey PING');
     return pong
-      ? { id: 'valkey', status: 'ok', message: 'Valkey answered PING' }
+      ? { id: 'valkey', status: 'ok', message: `Valkey answered PING at ${at}` }
       : {
           id: 'valkey',
           status: 'fail',
-          message: 'Valkey did not answer PING',
+          message: `Valkey did not answer PING at ${at}`,
           hint: 'Check VALKEY_URL, the password in it, and that the Valkey container is running.',
         };
   } catch (err) {

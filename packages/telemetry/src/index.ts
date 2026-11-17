@@ -13,18 +13,25 @@ export const logger = pino({
 let sdk: NodeSDK | undefined;
 
 /**
- * The scheme, host and port of a URL, for logs (#808). An OTLP endpoint may carry credentials in
- * the userinfo or a token in the query string; neither may reach the logs. Anything that is not a
- * URL is reported as such instead of echoed.
+ * The scheme, host and port of a URL, for logs (#808) and `am doctor` (#951). An endpoint may carry
+ * credentials in the userinfo or a token in the query string; neither may reach the logs. Anything
+ * that is not a URL, or has no host, is reported as such instead of echoed.
+ *
+ * A non-special scheme (`redis:`, `valkey:`, `rediss:`, `nats:`, …) has the WHATWG origin "null"
+ * even though the parser knows its host and port, so a valid `VALKEY_URL` was reported as invalid
+ * and the host that refused the connection was lost (#951). Those are rendered as
+ * `scheme://host[:port]`; "null" stays the answer only when there is no host.
  */
 export function endpointOrigin(endpoint: string): string {
+  let url: URL;
   try {
-    // Something like `otel.example:4318` parses as a scheme with no host, whose origin is "null".
-    const origin = new URL(endpoint).origin;
-    return origin === 'null' ? '(invalid URL)' : origin;
+    url = new URL(endpoint);
   } catch {
     return '(invalid URL)';
   }
+  // Something like `otel.example:4318` parses as a scheme with no host, whose origin is "null".
+  if (url.origin === 'null') return url.host ? `${url.protocol}//${url.host}` : '(invalid URL)';
+  return url.origin;
 }
 
 /**
@@ -65,14 +72,34 @@ export function splitUrlCredentials(endpoint: string): { url: string; headers: R
 
 /**
  * A failure from a client built from a configured URL, safe to log, return or record on a span.
- * Only the endpoint's origin and the cause's code (or the error's name) are kept: no message, so
- * userinfo, a query token or a thrown URL cannot reach a log line or `span.recordException`.
+ * Only the endpoint's scheme/host/port and a nested error code (or the error's name) are kept: no
+ * message, so userinfo, a query token or a thrown URL cannot reach a log line or
+ * `span.recordException`.
+ *
+ * The code is not always on `err.cause`: Undici wraps its cause one level down, and a Redis client
+ * reports a failed connection as an `AggregateError` whose members carry the code (or as a longer
+ * `cause` chain), so every nested error is searched, bounded (#951).
  */
 export function endpointFailure(err: unknown, endpoint: string): string {
-  const cause = (err as { cause?: { code?: unknown } } | undefined)?.cause;
-  const code = typeof cause?.code === 'string' ? cause.code : undefined;
+  const code = failureCode(err);
   const name = err instanceof Error ? err.name : 'Error';
   return `${endpointOrigin(endpoint)} (${code ?? name})`;
+}
+
+/** A cause chain longer than this is a cycle or a wrapper stack, not a diagnosis. */
+const MAX_CAUSE_DEPTH = 8;
+
+/** The first `code` found on an error, its `cause` chain and any `AggregateError` members. */
+function failureCode(err: unknown, depth = 0): string | undefined {
+  if (depth > MAX_CAUSE_DEPTH || !err || typeof err !== 'object') return undefined;
+  const node = err as { code?: unknown; cause?: unknown; errors?: unknown };
+  if (typeof node.code === 'string' && node.code.trim()) return node.code.trim();
+  const members = Array.isArray(node.errors) ? node.errors : [];
+  for (const nested of [node.cause, ...members]) {
+    const code = failureCode(nested, depth + 1);
+    if (code) return code;
+  }
+  return undefined;
 }
 
 /**

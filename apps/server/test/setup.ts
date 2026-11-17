@@ -1,5 +1,5 @@
 import { buildTestCli, cleanupTestCli, ensureTestRunId } from '../../../test-support/cli';
-import { dropRunDatabases, prepareTemplateDatabase, TEMPLATE_DB } from './harness';
+import { dropRunDatabases, prepareTemplateDatabase } from './harness';
 
 // Vitest global setup for the server project: migrate one template database, then every test
 // file's database is a copy of it (startTestServer); bundle the CLI once so the CLI tests spawn a
@@ -11,8 +11,7 @@ import { dropRunDatabases, prepareTemplateDatabase, TEMPLATE_DB } from './harnes
 // teardown beside a default setup.
 export async function setup() {
   ensureTestRunId();
-  await prepareTemplateDatabase();
-  process.env.AM_TEST_TEMPLATE = TEMPLATE_DB;
+  process.env.AM_TEST_TEMPLATE = await prepareTemplateDatabase();
   process.env.AM_TEST_CLI = await buildTestCli();
 }
 
