@@ -1,6 +1,7 @@
 # ADR-0004: Journey runtime on Postgres — participants table as a batched queue
 
 - Status: Accepted (revised after spike 3)
+- Status note (2026-11): the shipped core has no Graphile Worker; background jobs are the `scheduler` role's loops and outbox rows drained by the worker. Graphile Worker appears only in `spikes/journey-runtime`.
 - Date: 2026-10-21
 
 ## Context
