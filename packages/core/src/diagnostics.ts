@@ -1795,8 +1795,8 @@ function originalShapeRegions(original: string): Region[] {
       collectPairRegions(original, arrowSeparatorEnd, keyedPemValueSpan, isShapesCredentialKey, regions);
     }
   }
-  // The gate above already proved one of the shapes is present; each collector still pre-checks
-  // its own trigger, so a text with only one of them costs one pass per trigger, not per shape.
+  // The gate above proved at least one shape is present; every collector then walks the text for
+  // its own candidates, so a text carrying several shapes pays one walk per shape.
   collectPairRegions(original, separatorEndPair, typographicValueSpan, isShapesCredentialKey, regions);
   // An authorization value whose scheme the released pass does not know (`token: Digest abc`).
   collectPairRegions(original, separatorEndPair, keyedSchemeValueSpan, isShapesCredentialKey, regions);

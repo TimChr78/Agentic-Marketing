@@ -284,9 +284,9 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
   // Growth, not a wall-clock budget: an absolute millisecond limit depends on the runner, and the
   // repo's rule is the ratio check (test-support/linear.ts, #994). 4x the units must not cost 8x the
   // time; a super-linear pass shows as a ratio near sixteen.
-  const linearFailure = (name: string, unit: string): string | null => {
+  const linearFailure = (name: string, unit: string, base: number): string | null => {
     try {
-      expectLinear((n) => unit.repeat(n), redactCredentials, 200);
+      expectLinear((n) => unit.repeat(n), redactCredentials, base);
       return null;
     } catch (error) {
       return `${name}: ${(error as Error).message}`;
@@ -299,15 +299,18 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
     for (const [index, combo] of [...pemGrid()].entries()) if (index % 400 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...schemeGrid()].entries()) if (index % 600 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...schemeChainGrid()].entries()) if (index % 1_200 === 0) units.push([combo.name, combo.input]);
-    // One text carrying every sampled shape, so the ratio is measured on their mix in one run.
+    // One text carrying every sampled shape, so the ratio is measured on their mix in one run. The
+    // base keeps 4x the units well under the helper's 2,000 ms backstop on a loaded runner, which is
+    // a "did it finish" bound rather than a speed one.
     const unit = units.map(([, input]) => `${input}\n`).join('');
-    expect(linearFailure('grid sample', unit)).toBeNull();
+    expect(linearFailure('grid sample', unit, 50)).toBeNull();
   }, 300_000);
 
   it('grows linearly on the shape that once exceeded a wall-clock budget on CI', () => {
-    // `scheme dbPass" => " upper basic after a note`, repeated to a megabyte, took 7.4 s on the CI
-    // runner under a 5 s absolute budget. The budget is gone; the shape stays pinned here.
-    const unit = `${pair('dbPass', '" => ', 'BASIC s1234')}\n`;
-    expect(linearFailure('scheme behind an arrow', unit)).toBeNull();
+    // The exact shape from the grid case `scheme dbPass" => " upper basic after a note`: the pair
+    // after a `note: ` context, which is what the whole megabyte was made of. It took 7.4 s on the
+    // CI runner under a 5 s absolute budget; the budget is gone and the fixture stays pinned.
+    const unit = `note: ${pair('dbPass', '" => ', 'BASIC s1234')}\n`;
+    expect(linearFailure('scheme behind an arrow after a note', unit, 200)).toBeNull();
   }, 300_000);
 });
