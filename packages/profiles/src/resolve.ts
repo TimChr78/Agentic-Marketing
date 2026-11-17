@@ -7,7 +7,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { consentStateOf, currentConsent, recomputeConsentState, recordConsentEvidence } from './consent';
 import { type PersonCrypto, personCrypto } from './crypto';
-import { withIdentityLock } from './identity';
+import { lockProfileRows, withIdentityLock } from './identity';
 
 // Deterministic identity resolution (data-platform.md §3). Each event's identifiers are looked up;
 // unknown ones are attached, and when they point at several profiles those are merged, as long as
@@ -270,8 +270,16 @@ async function resolve(tx: Tx, workspaceId: string, ids: Ident[], crypto: Person
 /**
  * Folds `from` into `into`: identifiers, journeys, holdouts, topic choices, static/snapshot list
  * memberships, message history, traits and personal data move; purpose consent is recomputed.
+ *
+ * Both profile rows are locked before anything is read, so the trait and personal-data snapshots
+ * written at the end are current: a journey's trait step that commits while the merge runs either
+ * lands before this read or waits for the lock and lands on the survivor (#1011).
  */
 async function merge(tx: Tx, workspaceId: string, from: string, into: string, crypto: PersonCrypto, reason: string) {
+  // Profile rows first, in ascending id order (identity.ts): the trait snapshot read below is then
+  // the current one, because a trait writer either committed before this lock or waits on it, and it
+  // is the same order the journey sweep claims rows in, so the two cannot cycle (#1011).
+  await lockProfileRows(tx, workspaceId, [from, into]);
   const [src] = await tx
     .select()
     .from(schema.profiles)

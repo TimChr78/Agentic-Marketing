@@ -18,6 +18,15 @@ import { sql } from 'drizzle-orm';
  * also takes a broadcast run row or a send key (`lockSendKey`), and no send takes it at all, so the
  * two orders cannot cross. No network I/O may run while it is held: callers prepare their keys
  * (`prepareKeys`) before the transaction and use the memory-only provider inside it.
+ *
+ * Below it, the row order is profile rows, then journey participant rows, and profile rows are taken
+ * in ascending id order (`lockProfileRows`). Every path that writes both follows it: an SDK batch
+ * locks the profile rows it merges (inside `merge`), and the journey sweep — the one writer that
+ * cannot take the workspace identity lock, because its wait-until conditions may reach ClickHouse —
+ * locks a participant's profile before it claims the participant row, with SKIP LOCKED so it never
+ * waits on a row a batch holds. A transaction that waits for a participant row only after it holds
+ * its profile rows cannot form the cycle in #1011 (batch: profile → participant; sweep: profile,
+ * never waiting, → participant).
  */
 
 /** Latency buckets in seconds, shared by the wait and hold histograms. */
@@ -185,4 +194,27 @@ export async function withIdentityLocks<T>(tx: Tx, workspaceIds: Iterable<string
   } finally {
     if (acquired.length) releaseMetrics(tx, acquired);
   }
+}
+
+/**
+ * Locks profile rows for the rest of the transaction, in ascending id order, and returns the ids that
+ * were locked. This is the row half of the order documented above: profile rows (ascending) before
+ * participant rows. A caller that must not wait for anyone — the journey sweep, which holds claimed
+ * participant rows — passes `skipLocked` and treats a missing id as "someone else is writing this
+ * person right now, try again next sweep".
+ */
+export async function lockProfileRows(
+  tx: Tx,
+  workspaceId: string,
+  profileIds: Iterable<string>,
+  opts: { skipLocked?: boolean } = {},
+): Promise<string[]> {
+  const ids = [...new Set(profileIds)].sort();
+  if (!ids.length) return [];
+  const res = await tx.execute<{ id: string }>(sql`
+    SELECT id FROM profiles
+    WHERE workspace_id = ${workspaceId} AND id = ANY(${sql.param(ids)}::text[])
+    ORDER BY id
+    ${opts.skipLocked ? sql.raw('FOR NO KEY UPDATE SKIP LOCKED') : sql.raw('FOR NO KEY UPDATE')}`);
+  return res.rows.map((r) => r.id);
 }
