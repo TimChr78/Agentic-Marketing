@@ -163,6 +163,36 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     }
   });
 
+  it('removes the journey event markers of the family, whose event ids can name the person', async () => {
+    const survivor = 'prf_0000000000000000000000000000a201';
+    const merged = 'prf_0000000000000000000000000000a202';
+    await seedPerson(survivor, { mergedFrom: [merged] });
+    // Event ids are caller-supplied and can carry an address, so they are personal data too; a
+    // marker can sit on the merged-away id from before the merge.
+    await d.db.admin.query(
+      `INSERT INTO journey_processed_events (workspace_id, profile_id, event_id) VALUES
+         ($1, $2, 'customer@example.test:purchase-1'),
+         ($1, $3, 'customer@example.test:purchase-2')`,
+      [d.workspace, survivor, merged],
+    );
+    const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+    try {
+      await d.db.withWorkspace(d.workspace, (tx) =>
+        eraseProfileStage(tx, {
+          workspaceId: d.workspace,
+          profileId: merged,
+          requestedBy: 'user_test',
+          reason: 'marker erasure test',
+          prepared,
+        }),
+      );
+    } finally {
+      disposeErasure(prepared);
+    }
+    const left = await d.db.admin.query('SELECT event_id FROM journey_processed_events WHERE workspace_id = $1', [d.workspace]);
+    expect(left.rowCount).toBe(0);
+  });
+
   it('rolls the whole SQL stage back: no profile, erasure, tombstone or job survives', async () => {
     const profile = 'prf_0000000000000000000000000000b001';
     await seedPerson(profile);

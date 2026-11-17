@@ -1,4 +1,4 @@
-import type { Db } from '@agentic-marketing/db';
+import { type Db, JOURNEY_EVENT_RETENTION_DAYS } from '@agentic-marketing/db';
 import type { EventStore, StoredEvent } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { PLATFORM_EVENT, PLATFORM_EVENTS } from '@agentic-marketing/ingest';
@@ -14,6 +14,8 @@ import { logger } from '@agentic-marketing/telemetry';
 // - Finished hosted-agent runs after `hostedAgentRunDays` (default 90): the run history and failure
 //   queue are recent-window reads, so old rows are not kept (#488).
 // - Unknown input-key evidence after 30 days: recent behaviour is what a strict-mode rollout needs.
+// - The journey hook's per-event markers after the event replay window (30 days, the longest JetStream
+//   keeps an event): older markers can no longer suppress a redelivery (#1011 review).
 
 export interface RetentionDeps {
   db: Db;
@@ -34,6 +36,8 @@ const TOMBSTONE_EXTRA_DAYS = 7;
 
 /** How many events one candidate is inspected for; a longer history is activity and is kept. */
 const EVENT_WINDOW = 100;
+/** Markers deleted per round, so a large backlog is pruned over several scheduler ticks. */
+const MARKER_DELETE_BATCH = 5000;
 /**
  * Candidates examined per round. A cursor carries the position across rounds, so a large set of
  * kept profiles cannot starve an eligible signup behind them (P2-2).
@@ -183,6 +187,7 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
   erasureTombstones: number;
   profileScores: number;
   hostedAgentRuns: number;
+  journeyEventMarkers: number;
 }> {
   // A form signup is one e-mail and one anonymous id (the client's `am.uid` when the form sent
   // one, otherwise the form's own `form:<uuid>`), with no user id and no other identifier. The
@@ -245,6 +250,16 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
   const hostedAgentRuns = await deps.db.admin.query(`DELETE FROM hosted_agent_runs WHERE started_at < now() - make_interval(days => $1)`, [
     deps.hostedAgentRunDays ?? 90,
   ]);
+  // The journey hook's per-event markers only suppress a redelivery, which the event stream can only
+  // do inside its own retention window. Bounded per round so a backlog does not hold one transaction.
+  const journeyEventMarkers = await deps.db.admin.query(
+    `DELETE FROM journey_processed_events WHERE (workspace_id, event_id) IN (
+       SELECT workspace_id, event_id FROM journey_processed_events
+       WHERE processed_at < now() - make_interval(days => $1)
+       ORDER BY processed_at LIMIT ${MARKER_DELETE_BATCH}
+     )`,
+    [JOURNEY_EVENT_RETENTION_DAYS],
+  );
   if (unconfirmedSignups)
     logger.info({ unconfirmedSignups, profiles: 0 }, 'retention kept unconfirmed signups; destructive pruning is paused (#978 part 2)');
   if (
@@ -253,7 +268,8 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
     profileScores.rowCount ||
     inputWarnings.rowCount ||
     erasureTombstones.rowCount ||
-    hostedAgentRuns.rowCount
+    hostedAgentRuns.rowCount ||
+    journeyEventMarkers.rowCount
   )
     logger.info(
       {
@@ -263,6 +279,7 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
         inputWarnings: inputWarnings.rowCount,
         erasureTombstones: erasureTombstones.rowCount,
         hostedAgentRuns: hostedAgentRuns.rowCount,
+        journeyEventMarkers: journeyEventMarkers.rowCount,
       },
       'retention removed old data',
     );
@@ -275,6 +292,7 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
     inputWarnings: inputWarnings.rowCount ?? 0,
     erasureTombstones: erasureTombstones.rowCount ?? 0,
     hostedAgentRuns: hostedAgentRuns.rowCount ?? 0,
+    journeyEventMarkers: journeyEventMarkers.rowCount ?? 0,
   };
 }
 

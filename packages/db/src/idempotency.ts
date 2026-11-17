@@ -22,6 +22,13 @@ import type pg from 'pg';
 
 /** How long a key replays. The command layer and the cleanup read the same default. */
 export const IDEMPOTENCY_RETENTION_DAYS = 30;
+
+/**
+ * How long the journey hook keeps its per-event markers (#1011): only while the event stream can
+ * still deliver the event again. JetStream keeps an event for at most 30 days (`NATS_RETENTION_HOURS`
+ * caps at 24 * 30), so an older marker suppresses nothing, and the retention round prunes it.
+ */
+export const JOURNEY_EVENT_RETENTION_DAYS = 30;
 /** Rows deleted per statement: bounded locks on a table every keyed write touches. */
 export const IDEMPOTENCY_CLEANUP_BATCH_SIZE = 5_000;
 /** The most batches one scheduler tick runs, so a large backlog never monopolises a tick. */
