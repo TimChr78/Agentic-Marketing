@@ -279,8 +279,9 @@ async function representativesOf(ctx: EvalContext, ids: string[]): Promise<Map<s
 /**
  * A message condition (#441): what happened to the messages the platform sent, counted from the
  * event store's message log. Opens and clicks live there, not in the customer event stream, so this
- * is how "opened in the last 30 days" is asked. Opens and clicks reach no bus event, so membership
- * moves when a segment is recomputed; a journey's wait-until still checks one person at once.
+ * is how "opened in the last 30 days" is asked. Opens and clicks reach no bus event of their own, so
+ * a rule that holds only this leaf moves on the next recompute (or a refresh of that person); a
+ * journey's wait-until checks it for one person at once.
  */
 async function messageSet(c: Extract<SegmentCondition, { message: string }>, ctx: EvalContext): Promise<Set<string>> {
   await assertPurpose(c.purpose, ctx);

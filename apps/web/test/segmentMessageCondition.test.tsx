@@ -14,6 +14,7 @@ import { ToastProvider } from '../src/ui';
 const ws = '11111111-1111-4111-8111-111111111111';
 const SEG = `seg_${'a'.repeat(32)}`;
 const BCT = `bct_${'b'.repeat(32)}`;
+const JRN = `jrn_${'c'.repeat(32)}`;
 
 const h = vi.hoisted(() => ({ changed: [] as unknown[] }));
 
@@ -22,7 +23,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
   return {
     ...actual,
     api: {
-      call: vi.fn(async (name: string) => {
+      call: vi.fn(async (name: string, input: Record<string, unknown> = {}) => {
         if (name === 'purposes.list')
           return {
             source: 'published',
@@ -31,12 +32,15 @@ vi.mock('../src/app/api', async (importOriginal) => {
               { key: 'onboarding', name: 'Service messages' },
             ],
           };
-        if (name === 'artifacts.list')
-          return {
-            artifacts: [{ id: BCT, type: 'broadcast', name: 'Weekly Signal #40', publishedVersion: 2 }],
-            total: 1,
-            nextCursor: null,
-          };
+        if (name === 'artifacts.list') {
+          const artifacts =
+            input.type === 'journey'
+              ? [{ id: JRN, type: 'journey', name: 'Welcome series', publishedVersion: 3 }]
+              : input.type === 'broadcast'
+                ? [{ id: BCT, type: 'broadcast', name: 'Weekly Signal #40', publishedVersion: 2 }]
+                : [];
+          return { artifacts, total: artifacts.length, nextCursor: null };
+        }
         throw new Error(`unexpected command ${name}`);
       }),
     },
@@ -114,9 +118,11 @@ describe('the segment builder’s message engagement condition', () => {
       target: { value: 'marketing_email' },
     });
     fireEvent.change(screen.getByRole('combobox', { name: 'Sent from, condition 1' }), { target: { value: 'broadcast' } });
+    // Choosing a kind of send is not a send yet: no empty id reaches the condition, which would
+    // fail id validation and read as "any send" anyway (it is falsy).
     expect(lastCondition()).toEqual({
       all: [
-        { message: 'clicked', within: 'P7D', channel: 'email', purpose: 'marketing_email', broadcast: '' },
+        { message: 'clicked', within: 'P7D', channel: 'email', purpose: 'marketing_email' },
         { trait: 'city', op: 'eq', value: 'Aarhus' },
       ],
     });
@@ -127,6 +133,34 @@ describe('the segment builder’s message engagement condition', () => {
     expect((lastCondition() as { all: [{ count?: { gte?: number } }] }).all[0].count).toEqual({ gte: 2 });
     fireEvent.change(count, { target: { value: '' } });
     expect((lastCondition() as { all: [{ count?: unknown }] }).all[0].count).toBeUndefined();
+  });
+
+  it('picks an actual broadcast, then an actual journey, and clears the send again', async () => {
+    renderEditor({ all: [{ message: 'opened' }, { trait: 'city', op: 'eq', value: 'Aarhus' }] });
+    const row = () => (lastCondition() as { all: [Record<string, unknown>] }).all[0];
+
+    // The kind alone keeps the picker on screen and says what is missing.
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sent from, condition 1' }), { target: { value: 'broadcast' } });
+    expect(row()).toEqual({ message: 'opened' });
+    const broadcast = await screen.findByRole('combobox', { name: 'Broadcast, condition 1' });
+    expect(broadcast.getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByText('Choose a broadcast.')).toBeTruthy();
+
+    fireEvent.change(broadcast, { target: { value: BCT } });
+    expect(row()).toEqual({ message: 'opened', broadcast: BCT });
+
+    // A journey replaces the broadcast: both are one `sentBy` value in the message log.
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sent from, condition 1' }), { target: { value: 'journey' } });
+    expect(row()).toEqual({ message: 'opened' });
+    const journey = await screen.findByRole('combobox', { name: 'Journey, condition 1' });
+    expect(screen.getByText('Choose a journey.')).toBeTruthy();
+    fireEvent.change(journey, { target: { value: JRN } });
+    expect(row()).toEqual({ message: 'opened', journey: JRN });
+
+    // Any send removes the last chosen one; the picker goes away and nothing is left behind.
+    fireEvent.change(screen.getByRole('combobox', { name: 'Sent from, condition 1' }), { target: { value: 'any' } });
+    expect(row()).toEqual({ message: 'opened' });
+    expect(screen.queryByRole('combobox', { name: 'Journey, condition 1' })).toBeNull();
   });
 
   it('offers the condition as a kind of row', async () => {

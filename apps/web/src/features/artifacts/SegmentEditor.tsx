@@ -67,6 +67,8 @@ type Condition =
   | SegmentRefCondition;
 type Mode = 'all' | 'any';
 type Kind = 'trait' | 'event' | 'message' | 'consent' | 'segment' | 'not' | 'group';
+/** Where the counted messages came from: any send, or one broadcast or journey. */
+type SendSource = 'any' | 'broadcast' | 'journey';
 
 interface PurposeOption {
   key: string;
@@ -600,7 +602,31 @@ function MessageRow({
       onChange(next);
     } else set({ count: { ...c.count, gte: Math.max(0, Math.floor(Number(raw) || 0)) } });
   };
-  const source = c.broadcast ? 'broadcast' : c.journey ? 'journey' : 'any';
+  // The selected send comes from the condition's own property, so a saved `broadcast` (or a cleared
+  // one) is always shown as it is. A kind picked before any id exists lives here only: an empty id
+  // would fail the DSL's id validation and read as "any send" anyway (empty is falsy).
+  const savedSource: SendSource = 'broadcast' in c ? 'broadcast' : 'journey' in c ? 'journey' : 'any';
+  const [pendingSource, setPendingSource] = useState<Exclude<SendSource, 'any'> | null>(null);
+  const source: SendSource = savedSource === 'any' ? (pendingSource ?? 'any') : savedSource;
+  const sendId = savedSource === 'any' ? '' : (c[savedSource] ?? '');
+  const chooseSource = (kind: SendSource) => {
+    const next: MessageCondition = { ...c };
+    delete next.broadcast;
+    delete next.journey;
+    setPendingSource(kind === 'any' ? null : kind);
+    onChange(next);
+  };
+  const chooseSend = (id: string) => {
+    const next: MessageCondition = { ...c };
+    delete next.broadcast;
+    delete next.journey;
+    if (id) {
+      if (source === 'broadcast') next.broadcast = id;
+      else if (source === 'journey') next.journey = id;
+    }
+    setPendingSource(id || source === 'any' ? null : source);
+    onChange(next);
+  };
   const missingPurpose = c.purpose && !purposes.purposes.some((p) => p.key === c.purpose);
 
   return (
@@ -687,24 +713,14 @@ function MessageRow({
             value={source}
             disabled={readOnly}
             aria-label={`Sent from, condition ${index}`}
-            onChange={(e) =>
-              set({ broadcast: undefined, journey: undefined, ...(e.target.value === 'any' ? {} : { [e.target.value]: '' }) })
-            }
+            onChange={(e) => chooseSource(e.target.value as SendSource)}
           >
             <option value="any">Any send</option>
             <option value="broadcast">From a broadcast</option>
             <option value="journey">From a journey</option>
           </Select>
         </Field>
-        {source !== 'any' && (
-          <SendSourcePicker
-            type={source as 'broadcast' | 'journey'}
-            value={c[source] ?? ''}
-            onChange={(id) => set({ [source]: id } as Partial<MessageCondition>)}
-            disabled={readOnly}
-            index={index}
-          />
-        )}
+        {source !== 'any' && <SendSourcePicker type={source} value={sendId} onChange={chooseSend} disabled={readOnly} index={index} />}
       </div>
       <p className="text-[12px] text-muted">
         Opens are counted only where the provider or the workspace tracks them, and a mailbox that pre-fetches the pixel can open a message
@@ -722,7 +738,7 @@ function SendSourcePicker({
   disabled,
   index,
 }: {
-  type: 'broadcast' | 'journey';
+  type: Exclude<SendSource, 'any'>;
   value: string;
   onChange: (id: string) => void;
   disabled?: boolean;
@@ -733,7 +749,7 @@ function SendSourcePicker({
   const known = !value || items.some((a) => a.id === value);
   const label = type === 'broadcast' ? `Broadcast, condition ${index}` : `Journey, condition ${index}`;
   return (
-    <Field label={label} hideLabel>
+    <Field label={label} hideLabel error={value ? undefined : `Choose a ${type}.`}>
       <Select value={value} disabled={disabled || list.loading} aria-label={label} onChange={(e) => onChange(e.target.value)}>
         <option value="">{list.loading ? `Loading ${type}s…` : list.error ? `Couldn't load: ${list.error}` : `Choose a ${type}…`}</option>
         {!known && value && <option value={value}>{value} (not found)</option>}

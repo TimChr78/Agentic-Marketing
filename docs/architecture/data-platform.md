@@ -116,10 +116,13 @@ what happened to a message it sent, read from ClickHouse `message_events` (#441)
   `packages/email` adapters such as Brevo add their own). No mailbox or proxy marker is stored, so a
   privacy-conscious mailbox that pre-fetches the pixel counts as an open. Treat opens as a hint and
   clicks as a signal, and prefer `clicked` for offers that must not overstate engagement.
-- **Refreshes, not the event stream:** opens and clicks are message events, not customer events, so
-  a message condition changes membership when the segment is recomputed (the scheduler's regular
-  pass or `segments.refresh`), not on the event that streams a segment update. A journey's
-  wait-until still checks it for one person immediately.
+- **When it moves people:** opens and clicks are message events, not customer events, so a message
+  leaf never triggers a streaming evaluation on its own. A rule that also holds a streamable leaf (a
+  trait, an event, consent or a segment reference) is evaluated when that leaf's input changes, and
+  its message leaves are evaluated then too; `refreshPeople` (a consent write or a preference-centre
+  link) likewise re-evaluates every rule for the affected people, message leaves included. Otherwise
+  membership moves on the next recompute — the scheduler's regular pass or `segments.refresh` — and
+  a journey's wait-until checks one person at once.
 
 Two evaluation modes from the same definition:
 
