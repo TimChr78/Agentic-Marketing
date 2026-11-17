@@ -452,6 +452,9 @@ describe('the #989 original-span shapes stay linear', () => {
     ['arrows back to back', 'token =>=>=> '],
     // A field attached to the caller's own marker: the skip is decided per marker.
     ['attached fields', 'token=[redacted]"status":"ok" '],
+    // Authorization values, behind an arrow and behind a key (#989 review round 4).
+    ['scheme behind an arrow', "token => Bearer 'abc' "],
+    ['scheme behind a key', 'token: Digest abc '],
   ];
 
   it('finishes every repeated shape in a few seconds at most', () => {

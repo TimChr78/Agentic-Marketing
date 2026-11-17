@@ -568,6 +568,22 @@ function* originalShapes(): Generator<Generated> {
       secrets: [arrowed],
     };
   }
+  // The review's round-4 inputs: an authorization value behind an arrow or a key, whose token is
+  // shorter than the six characters the released scheme rule needs (#989 review).
+  for (const [name, build] of [
+    ['arrow bearer short', (secret: string) => `token => Bearer ${secret}`],
+    ['arrow bearer no space', (secret: string) => `token=>Bearer ${secret}`],
+    ['arrow basic', (secret: string) => `token=>Basic ${secret}`],
+    ['arrow digest', (secret: string) => `apiSecret => Digest ${secret}`],
+    ['keyed digest', (secret: string) => `token: Digest ${secret}`],
+    ['keyed scheme chain', (secret: string) => `token: Bearer Bearer ${secret}`],
+  ] as const) {
+    markerIndex += 1;
+    // Two characters: far below the released scheme rule, and unique inside this case.
+    const secret = `p${markerIndex}`;
+    yield { input: `${build(secret)} ${sentinel()}`, name: `shape ${name}`, secrets: [secret] };
+  }
+
   // The review's round-2 inputs: an arrow whose value starts a typographic pair, a shape after a
   // long-key pair, and a marker right before a block (#989 review).
   {

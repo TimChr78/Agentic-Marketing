@@ -213,31 +213,36 @@ export function releasedRedactionWithOrigins(text: string): SpannedText {
   return redactReleasedPipeline(text);
 }
 
-/** Whether the text holds anything one of the #989 shapes can be read from. */
-const TYPOGRAPHIC_START = /[\u201c\u2018\u00ab\u201e\u2039]/;
-function hasOriginalShape(text: string): boolean {
-  return text.includes('PRIVATE KEY') || text.includes('=>') || TYPOGRAPHIC_START.test(text);
-}
+/**
+ * Whether the text can hold one of the #989 shapes at all: one cheap scan, and the only work a
+ * message that names no shape pays. A scheme word only counts when a value can follow it.
+ */
+const TYPOGRAPHIC_START = '[\u201c\u2018\u00ab\u201e\u2039]';
+const AUTH_SCHEME_WORDS =
+  'bearer|basic|digest|token|negotiate|ntlm|hoba|mutual|oauth|hawk|apikey|aws4-hmac-sha256|scram-sha-1|scram-sha-256|vapid';
+const MAY_HOLD_SHAPE = new RegExp(`PRIVATE KEY|=>|${TYPOGRAPHIC_START}|(?:${AUTH_SCHEME_WORDS})\\s`, 'i');
 
 /**
  * Removes token-shaped values from free text: an exception's message, a provider's answer, a log
  * line that is about to become an AppError.
  *
- * The release's own function produces the output first. Only a text that can hold a #989 shape is
- * run through the instrumented pipeline as well, and then the two base outputs must agree byte for
- * byte: a lost character, or an origin that stopped being monotone, means the span bookkeeping is
- * not trustworthy, and the release's output is returned with nothing added. Nothing new ever runs
- * before the release, and nothing here can remove less than it.
+ * The release's own function produces the output first. The shapes are read from the original text
+ * (a linear scan, and nothing else for a message without one); only when a shape is actually there
+ * is the instrumented pipeline run as well, and then the two base outputs must agree byte for byte:
+ * a lost character, or an origin that stopped being monotone, means the span bookkeeping is not
+ * trustworthy, and the release's output is returned with nothing added. Nothing new ever runs before
+ * the release, and nothing here can remove less than it.
  */
 export function redactCredentials(text: string): string {
   const released = releasedRedaction01425(text);
-  if (!hasOriginalShape(text)) return released;
+  const regions = originalShapeRegions(text);
+  if (regions.length === 0) return released;
   const spans = redactReleasedPipeline(text);
   if (!spans.sound || spans.text !== released) {
     redactionFallbacks.count += 1;
     return released;
   }
-  const shaped = redactOriginalValueShapes(text, spans);
+  const shaped = applyRegions(spans, regions);
   if (shaped === spans.text) return shaped;
   // The replacement can leave the marker beside text the released passes had no reason to touch
   // (`token => 'x'y`). The release's own pass on the result reaches the fixed point, so a second
@@ -1538,12 +1543,89 @@ function arrowSeparatorEnd(text: string, nameEnd: number): number {
   return index;
 }
 
+/** A scheme name is a bounded word; anything longer is a token, not a scheme. */
+const AUTH_SCHEME_LIMIT = 24;
+
+/**
+ * Authorization schemes whose value is one token. `bearer` and `basic` keep their released shape
+ * after a key -- the short-scheme pass of 0.14.25 redacts the token and keeps the word -- while every
+ * other scheme is only visible through the original text (#989 review).
+ */
+const AUTH_SCHEMES: ReadonlySet<string> = new Set([
+  'digest',
+  'token',
+  'negotiate',
+  'ntlm',
+  'hoba',
+  'mutual',
+  'oauth',
+  'hawk',
+  'apikey',
+  'aws4-hmac-sha256',
+  'scram-sha-1',
+  'scram-sha-256',
+  'vapid',
+]);
+/** Behind an arrow the scheme word is part of the value: the released rule may have eaten it. */
+const ARROW_SCHEMES: ReadonlySet<string> = new Set([...AUTH_SCHEMES, 'bearer', 'basic']);
+
+/** The end of the scheme word at `start` (letters, digits and `-`, bounded), or `start`. */
+function schemeWordEnd(text: string, start: number): number {
+  const limit = Math.min(text.length, start + AUTH_SCHEME_LIMIT);
+  let index = start;
+  while (index < limit) {
+    const code = text.charCodeAt(index);
+    const word = (code >= 97 && code <= 122) || (code >= 65 && code <= 90) || (code >= 48 && code <= 57) || code === 45;
+    if (!word) break;
+    index += 1;
+  }
+  return index;
+}
+
+/**
+ * The end of an authorization value at `start` (`Bearer abc`), or -1. The released rules keep a
+ * scheme word and redact the token behind it, but a value behind an arrow stops at the space after
+ * the scheme -- and `token=>Bearer abc` even loses the word to the rule -- so the token would stay.
+ * Reads repeated scheme words (bounded) and the single token behind them; every character it reads
+ * belongs to the value it covers, so it stays linear (#989 review).
+ */
+function schemeValueEnd(text: string, start: number, schemes: ReadonlySet<string>, least = 1): number {
+  let index = start;
+  let found = 0;
+  for (;;) {
+    const wordEnd = schemeWordEnd(text, index);
+    if (wordEnd === index || !schemes.has(text.slice(index, wordEnd).toLowerCase())) break;
+    if (!isSpace(text.charAt(wordEnd))) break;
+    let next = wordEnd;
+    while (isSpace(text.charAt(next))) next += 1;
+    if (next >= text.length) break;
+    found += 1;
+    index = next;
+  }
+  if (found < least) return -1;
+  return pairValueEnd(text, index);
+}
+
+/**
+ * A value behind a credential key that starts with a scheme the released pass leaves in part: any
+ * scheme other than `bearer`/`basic` (`token: Digest abc`), or a chain of them, which the released
+ * scheme rule mangles by taking the second word as the token (`token: Bearer Bearer abc` leaves
+ * `abc`). A single `bearer`/`basic` word keeps the released shape.
+ */
+function keyedSchemeValueSpan(text: string, valueStart: number): ValueSpan | null {
+  const other = schemeValueEnd(text, valueStart, AUTH_SCHEMES);
+  if (other >= 0) return { start: valueStart, end: other };
+  const chain = schemeValueEnd(text, valueStart, ARROW_SCHEMES, 2);
+  return chain < 0 ? null : { start: valueStart, end: chain };
+}
+
 /**
  * The span an `=>` pair replaces: from the `>` through the end of its value. The released rule reads
  * the `>` as the value (`'password' =[redacted] 'x'`), so starting at the arrow also replaces the
- * marker it left; the value itself is the quoted string or the bare run after the arrow, and every
- * quoted fragment the run runs into (a nested pair's `key="v"`, a chain `'a'"b"`) is part of it, so
- * nothing of the value is left glued to the marker.
+ * marker it left; the value itself is the quoted string, an authorization value (`Bearer abc`:
+ * scheme word and token together) or the bare run after the arrow, and every quoted fragment it runs
+ * into (a nested pair's `key="v"`, a chain `'a'"b"`) is part of it, so nothing is left glued to the
+ * marker.
  */
 function arrowValueSpan(text: string, valueStart: number): ValueSpan | null {
   let arrow = valueStart - 1;
@@ -1555,9 +1637,13 @@ function arrowValueSpan(text: string, valueStart: number): ValueSpan | null {
   return { start: arrow, end };
 }
 
-/** Where the value after `=>` ends: a bare run, every quoted fragment it reaches, and their joins. */
+/**
+ * Where the value after `=>` ends: an authorization value, a bare run, every quoted fragment it
+ * reaches, and their joins.
+ */
 function arrowValueEnd(text: string, valueStart: number): number {
-  let end = pairValueEnd(text, valueStart);
+  const scheme = schemeValueEnd(text, valueStart, ARROW_SCHEMES);
+  let end = scheme >= 0 ? scheme : pairValueEnd(text, valueStart);
   if (end < 0) return -1;
   for (;;) {
     const next = text.charAt(end);
@@ -1676,12 +1762,13 @@ const separatorEndPair = (text: string, nameEnd: number): number => separatorEnd
 
 /**
  * The value shapes of #989, decided from the original text: PEM private-key blocks (standalone or
- * under a credential key), typographic-quoted values and values after `=>`. Their spans are mapped
- * into the released output, whose text they then replace -- the released pipeline always runs first
- * and byte-identically, and this can only take away more of the same values.
+ * under a credential key), typographic-quoted values, values after `=>` and authorization values the
+ * released pass leaves in part. Their spans are merged and later mapped into the released output,
+ * whose text they replace -- the released pipeline always runs first and byte-identically, and this
+ * can only take away more of the same values.
  */
-function redactOriginalValueShapes(original: string, released: SpannedText): string {
-  if (!released.sound) return released.text;
+function originalShapeRegions(original: string): Region[] {
+  if (!MAY_HOLD_SHAPE.test(original)) return [];
   const regions: Region[] = [];
   pemRegions(original, regions);
   if (original.includes('PRIVATE KEY')) {
@@ -1691,14 +1778,15 @@ function redactOriginalValueShapes(original: string, released: SpannedText): str
       collectPairRegions(original, arrowSeparatorEnd, keyedPemValueSpan, isShapesCredentialKey, regions);
     }
   }
-  if (TYPOGRAPHIC_START.test(original)) {
-    collectPairRegions(original, separatorEndPair, typographicValueSpan, isShapesCredentialKey, regions);
-  }
+  // The gate above already proved one of the shapes is present; each collector still pre-checks
+  // its own trigger, so a text with only one of them costs one pass per trigger, not per shape.
+  collectPairRegions(original, separatorEndPair, typographicValueSpan, isShapesCredentialKey, regions);
+  // An authorization value whose scheme the released pass does not know (`token: Digest abc`).
+  collectPairRegions(original, separatorEndPair, keyedSchemeValueSpan, isShapesCredentialKey, regions);
   if (original.includes('=>')) {
     collectPairRegions(original, arrowSeparatorEnd, arrowValueSpan, isShapesCredentialKey, regions);
   }
-  if (regions.length === 0) return released.text;
-  return applyRegions(released, mergeRegions(regions));
+  return regions.length === 0 ? regions : mergeRegions(regions);
 }
 
 /**

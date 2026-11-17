@@ -119,6 +119,45 @@ describe('a typographic-quoted value (#989)', () => {
   });
 });
 
+describe('an authorization value behind a key or an arrow (#989 round 4)', () => {
+  // `pairValueEnd` stops at the space after a scheme word, so an arrow's value was only the scheme
+  // and the token behind it stayed -- and `token=>Bearer abc` even loses the word to the released
+  // rule. The region now covers the scheme word(s) and the token.
+  it('replaces the token after an arrow, with and without spaces around it', () => {
+    expect(idempotent('token => Bearer abc')).toBe('token =[redacted]');
+    expect(idempotent('token=>Bearer abcdef')).toBe('token=[redacted]');
+    expect(idempotent('token=>Basic S3cr3tV4l')).toBe('token=[redacted]');
+    expect(idempotent('apiSecret=>Token abc')).toBe('apiSecret=[redacted]');
+    expect(idempotent('apiSecret => Digest abcdef')).toBe('apiSecret =[redacted]');
+  });
+
+  it('is case-insensitive and takes repeated scheme words', () => {
+    expect(idempotent('token => bearer abc')).toBe('token =[redacted]');
+    expect(idempotent('token=>BASIC abc')).toBe('token=[redacted]');
+    expect(idempotent('token => Bearer Bearer abc')).toBe('token =[redacted]');
+  });
+
+  it('takes a quoted and a tokenless value as before', () => {
+    expect(idempotent(`token => 'Bearer ${SECRET}'`)).toBe('token =[redacted]');
+    expect(idempotent(`token => "Bearer ${SECRET}"`)).toBe('token =[redacted]');
+    expect(idempotent('token => Bearer')).toBe('token =[redacted]');
+    expect(idempotent('token => Bearer ')).toBe('token =[redacted] ');
+  });
+
+  it('replaces a scheme value the released pass below six characters leaves behind', () => {
+    // `bearer`/`basic` keep their released shape after a key; the other schemes have no pass there.
+    expect(idempotent('token: Digest abc')).toBe('token: [redacted]');
+    expect(idempotent('password: Token abc')).toBe('password: [redacted]');
+    expect(idempotent('authToken=Bearer abc')).toBe('authToken=Bearer [redacted]');
+    expect(idempotent('token: Bearer abc')).toBe('token: Bearer [redacted]');
+  });
+
+  it('leaves prose and an ordinary key alone', () => {
+    for (const input of ['note: Digest abc', 'the Basic plan is fine', 'sent with Bearer abc'])
+      expect(idempotent(input), input).toBe(input);
+  });
+});
+
 describe('a `=>` separator (#989)', () => {
   // The released rule reads the `>` as the value (`'password' =[redacted] 'x'`); the arrow is read
   // from the original text, so the value after it goes too.

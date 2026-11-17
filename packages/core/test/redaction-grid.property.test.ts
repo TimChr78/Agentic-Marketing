@@ -139,7 +139,6 @@ function* pemGrid(): Generator<Combo> {
 
 /** The same block under a credential key: the separator is what the released rule could see. */
 const PEM_KEYS = ['password', 'token', 'authToken'];
-
 function* keyedPemGrid(): Generator<Combo> {
   for (const key of PEM_KEYS)
     for (const [preambleName, preamble] of PEM_PREAMBLES)
@@ -154,21 +153,62 @@ function* keyedPemGrid(): Generator<Combo> {
         }
 }
 
+/**
+ * An authorization value behind an arrow or a key (#989 review round 4). The token is five
+ * characters, under the six the released scheme rule needs, so only the shape pass can take it --
+ * which is exactly where the review's expanded grid found its 240 survivors.
+ */
+const SCHEME_VALUES: [string, (planted: string) => string][] = [
+  ['bearer', (planted) => `Bearer ${planted}`],
+  ['basic', (planted) => `Basic ${planted}`],
+  ['digest', (planted) => `Digest ${planted}`],
+  ['token', (planted) => `Token ${planted}`],
+  ['lower bearer', (planted) => `bearer ${planted}`],
+  ['upper basic', (planted) => `BASIC ${planted}`],
+  ['two schemes', (planted) => `Bearer Bearer ${planted}`],
+  ['quoted single', (planted) => `'Bearer ${planted}'`],
+  ['quoted double', (planted) => `"Bearer ${planted}"`],
+  ['no token', () => 'Bearer'],
+  ['trailing space', () => 'Bearer '],
+  ['with a tail', (planted) => `Bearer ${planted} tail`],
+];
+/** With and without spaces around the arrow, and the separators a key uses. */
+const SCHEME_SEPARATORS = ['=> ', '=>', ' => ', '" => ', ': ', '=', ' = '];
+
+function* schemeGrid(): Generator<Combo> {
+  let ordinal = 0;
+  for (const key of KEYS)
+    for (const separator of SCHEME_SEPARATORS)
+      for (const [shape, render] of SCHEME_VALUES)
+        for (const [context, place] of CONTEXTS) {
+          ordinal += 1;
+          const hasToken = shape !== 'no token' && shape !== 'trailing space';
+          // Five characters: below the released scheme rule's six, and unique per case.
+          const secret = hasToken ? `s${1_000 + ordinal}` : '';
+          yield {
+            name: `scheme ${key}${JSON.stringify(separator)} ${shape} ${context}`,
+            input: place(pair(key, separator, render(secret))),
+            secret,
+          };
+        }
+}
+
 describe('the credential shapes on a grid (#989 round 2)', () => {
-  it('covers 7,776 key/separator/value/context combinations, 2,000 PEM ones and 240 keyed ones', () => {
+  it('covers 7,776 key/separator/value/context combinations, 2,000 PEM, 240 keyed and 6,048 scheme ones', () => {
     expect([...grid()]).toHaveLength(7_776);
     expect([...pemGrid()]).toHaveLength(2_000);
     expect([...keyedPemGrid()]).toHaveLength(240);
+    expect([...schemeGrid()]).toHaveLength(6_048);
   });
 
   it('never leaves a planted value', () => {
     const survivors: string[] = [];
     let total = 0;
-    for (const { name, input, secret } of [...grid(), ...pemGrid(), ...keyedPemGrid()]) {
+    for (const { name, input, secret } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid()]) {
       total += 1;
-      if (redactCredentials(input).includes(secret)) survivors.push(`${secret} kept in ${name}`);
+      if (secret !== '' && redactCredentials(input).includes(secret)) survivors.push(`${secret} kept in ${name}`);
     }
-    expect(total).toBe(10_016);
+    expect(total).toBe(16_064);
     expect(survivors.slice(0, 10)).toEqual([]);
     expect(survivors).toHaveLength(0);
     // The base pipeline never had to be distrusted for any of them (#989 review).
@@ -177,7 +217,7 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
 
   it('is idempotent on every combination', () => {
     const unstable: string[] = [];
-    for (const { name, input } of [...grid(), ...pemGrid(), ...keyedPemGrid()]) {
+    for (const { name, input } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid()]) {
       const once = redactCredentials(input);
       if (redactCredentials(once) !== once) unstable.push(name);
     }
@@ -187,7 +227,7 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
 
   it('keeps the instrumented pipeline byte-identical to 0.14.25 on every combination', () => {
     const differences: string[] = [];
-    for (const { name, input } of [...grid(), ...pemGrid(), ...keyedPemGrid()]) {
+    for (const { name, input } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid()]) {
       const expected = redact01425(input);
       if (releasedRedaction(input) !== expected) differences.push(name);
     }
@@ -206,6 +246,7 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
     const units: [string, string][] = [];
     for (const [index, combo] of [...grid()].entries()) if (index % 1_000 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...pemGrid()].entries()) if (index % 400 === 0) units.push([combo.name, combo.input]);
+    for (const [index, combo] of [...schemeGrid()].entries()) if (index % 600 === 0) units.push([combo.name, combo.input]);
     for (const [name, input] of units) {
       const unit = `${input}\n`;
       const text = unit.repeat(Math.ceil(MB / unit.length));
