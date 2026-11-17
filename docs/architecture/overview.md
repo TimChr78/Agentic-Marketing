@@ -39,7 +39,7 @@ The platform is **one codebase and one container image**. A `ROLE` env var (or s
 
 ```mermaid
 flowchart LR
-  subgraph edge["Public edge (Caddy / ingress)"]
+  subgraph edge["Public edge (proxy / tunnel / ingress)"]
     direction TB
   end
   sdk[JS SDK] -->|track| ingest

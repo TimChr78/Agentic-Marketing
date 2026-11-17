@@ -6,12 +6,12 @@
 
 ```mermaid
 flowchart LR
-  caddy[Caddy<br/>TLS] --> app["app (ROLE=all)"]
+  proxy[Proxy or tunnel<br/>TLS] --> app["app (ROLE=all)"]
   app --> pg[(Postgres)]
   app --> ch[(ClickHouse)]
   app --> nats[[NATS]]
   app --> vk[(Valkey)]
-  app --> fs[(local volume / S3)]
+  app --> fs[(backups volume)]
 ```
 
 - 6 containers, one VM with 4 vCPU / 16 GB RAM handles ~100k–1M profiles and hundreds of events/s.
@@ -39,7 +39,7 @@ flowchart LR
 
 ### Homelab / local (owner's first install)
 
-- Same single-node compose file; Caddy can use local certificates (or skip TLS on a trusted LAN).
+- Same single-node compose file; TLS stays with the proxy or tunnel in front of it (or is skipped on a trusted LAN).
 - **Public reachability:** a live website's SDK, provider webhooks and remote MCP clients need to reach `ingest` (which also serves `/v1/decide`) and `/mcp`. Expose only those paths through a tunnel (e.g. Cloudflare Tunnel or Tailscale Funnel) rather than opening ports; keep the admin UI LAN/VPN-only.
 - Outbound email via the configured SMTP relay; Mailpit for test sends.
 
