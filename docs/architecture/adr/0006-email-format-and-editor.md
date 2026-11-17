@@ -1,6 +1,7 @@
 # ADR-0006: MJML + Liquid as canonical email format, GrapesJS editor
 
 - Status: Accepted (confirmed by spike 2)
+- Status note (2026-11): the editor ships with a plain textarea code view (no Monaco); the MJML + GrapesJS decision stands.
 - Date: 2026-10-21
 
 ## Context

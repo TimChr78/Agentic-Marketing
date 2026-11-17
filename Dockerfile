@@ -1,13 +1,17 @@
 # One image for every role (ADR-0002). Select roles with ROLE=api,worker,scheduler (default: all).
 # The base image is pinned by digest (the multi-arch index: linux/amd64 and linux/arm64), so a
 # rebuild of one commit gives the same runtime; bump it deliberately (Dependabot proposes them).
-# node:22-slim
-FROM node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee AS base
-ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH NODE_ENV=production COREPACK_HOME=/corepack
+# node:26-slim
+FROM node:26-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc AS base
+ENV PNPM_HOME=/pnpm PATH=/pnpm:$PATH NODE_ENV=production
 WORKDIR /app
 # pnpm (the version pinned in package.json) is part of the image, so a container never downloads it.
+# Node 26 no longer bundles corepack, so pnpm is installed from npm at the `packageManager` version.
 COPY package.json ./
-RUN corepack enable && corepack install && chmod -R a+rX /corepack
+RUN PNPM_VERSION="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")" \
+ && npm install -g --ignore-scripts "pnpm@$PNPM_VERSION" \
+ && npm cache clean --force \
+ && pnpm --version
 
 FROM base AS deps
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json .npmrc ./

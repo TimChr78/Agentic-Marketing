@@ -11,7 +11,8 @@ The data platform is the foundation: everything else (segments, journeys, person
 | Journey participants, timers, job queue | PostgreSQL | Transactional "update state + enqueue next step" |
 | Raw & enriched events, message deliveries, engagement, AI decision logs | ClickHouse | Append-heavy, analytical queries, compression, TTL-based retention |
 | Session state, real-time counters, profile snapshots for decide, rate limits | Valkey | Sub-millisecond reads on the hot path; rebuildable from PG/CH |
-| Images, attachments, exports | S3-compatible object storage (or local filesystem driver) | Blobs |
+| Images, attachments | PostgreSQL (`asset_blobs`) | A small install needs no object store; the app reads the bytes by id and serves them |
+| Warehouse exports | S3-compatible object storage (or a Postgres destination) | Gzipped NDJSON for BigQuery, Snowflake and others |
 
 Rule: **Postgres and ClickHouse are sources of truth; Valkey is always rebuildable.**
 

@@ -9,7 +9,7 @@ the build.
 
 ## Run it
 
-Requirements: Node 22+ and pnpm 10. From the repo root:
+Requirements: Node 26 LTS and pnpm 10. From the repo root:
 
 ```bash
 pnpm install

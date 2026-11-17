@@ -37,7 +37,7 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 
 ## 3. Encryption & keys
 
-- **In transit:** TLS everywhere (Caddy auto-TLS for self-host); internal connections TLS-capable.
+- **In transit:** TLS everywhere, terminated by the operator's proxy or tunnel in front of the app (see [compose.md](../deployment/compose.md) and [kubernetes.md](../deployment/kubernetes.md)); internal connections TLS-capable.
 - **At rest:** rely on disk/volume encryption for the base layer, plus **application-level field encryption** for PII:
   - Envelope encryption: a **KEK** from a pluggable key provider (env/file for small installs, AWS KMS, GCP KMS, OpenBao/HashiCorp Vault transit) wraps **DEKs**.
   - **Per-profile DEK** for PII fields in Postgres and ClickHouse (`properties` PII fields). Erasure = delete the DEK → data in events and **backups** becomes unreadable (crypto-shredding).
@@ -69,8 +69,8 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 | Abuse of public write keys | Origin allow-list, rate limits, schema validation, payload size limits, bot filtering |
 | Abuse of public signup forms | Origin allow-list, a per-form and per-client token bucket in Valkey shared by every replica (an unreachable store refuses with `rate_limit_unavailable` rather than allowing an unbounded local fallback), a honeypot, optional Turnstile, body limits |
 | Account enumeration and mail flooding via password reset | One neutral answer for every request, per-IP and per-address token buckets in Valkey, a cooldown per address, single-use tokens that expire, audit entries that never carry the token |
-| XSS in editors/experiences | CSP, sanitization of experience HTML (DOMPurify), editors in sandboxed iframes where possible |
-| Supply chain | Lockfile, Renovate, `pnpm audit`/OSV scanning, SBOM (Syft), signed images (cosign), minimal base images |
+| XSS in editors/experiences | CSP, sanitization of experience HTML in the browser SDK (`packages/sdk-js/src/personalize.ts`), a bounded htmlparser2 allow-list for hosted archive bodies and uploaded SVGs, editors in sandboxed iframes where possible |
+| Supply chain | Lockfile, Dependabot, dependency review, `pnpm audit`/OSV scanning, SBOM and build-provenance attestations on the release image and files, minimal base images |
 | Custom code steps (later) | Not in v1. If added: isolated runtime (separate sandboxed process / WASM) with no network by default |
 | Secrets leakage | Never returned by APIs, redacted in logs/traces, secret scanning in CI |
 

@@ -75,7 +75,7 @@ flowchart LR
     CH[(ClickHouse<br/>events · analytics)]
     NATS[[NATS JetStream<br/>event bus]]
     VK[(Valkey<br/>hot state · cache)]
-    S3[(S3-compatible<br/>assets)]
+    S3[(S3-compatible<br/>warehouse export)]
   end
 
   subgraph Channels

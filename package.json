@@ -5,7 +5,7 @@
   "license": "MIT",
   "packageManager": "pnpm@10.28.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=26"
   },
   "scripts": {
     "dev": "pnpm --filter @agentic-marketing/server dev",
@@ -51,7 +51,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "4.14.0",
-    "@babel/parser": "7.29.12",
+    "@babel/parser": "8.1.2",
     "@biomejs/biome": "2.6.7",
     "@playwright/test": "1.65.0",
     "@types/node": "^26.6.6",

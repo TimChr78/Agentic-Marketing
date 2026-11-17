@@ -47,7 +47,7 @@ IMAGES=(
 if command -v node >/dev/null 2>&1; then
   pass "node is present ($(node --version))"
 else
-  fail "node is not on PATH (needs Node 22+)"
+  fail "node is not on PATH (needs Node 26 LTS)"
 fi
 
 if command -v docker >/dev/null 2>&1; then
@@ -62,13 +62,13 @@ fi
 
 if command -v pnpm >/dev/null 2>&1 && pnpm --version >/dev/null 2>&1; then
   pass "pnpm is on PATH ($(pnpm --version))"
-elif corepack pnpm --version >/dev/null 2>&1; then
+elif command -v corepack >/dev/null 2>&1 && corepack pnpm --version >/dev/null 2>&1; then
   fail "pnpm is not on PATH, though corepack can run it ($(corepack pnpm --version))"
   note 'create the shim: corepack enable --install-directory "$HOME/.local/bin" pnpm'
   note 'then: export PATH="$HOME/.local/bin:$PATH"'
 else
-  fail "pnpm is missing and 'corepack pnpm' does not work either"
-  note 'install Node 22+ (which ships corepack), then run: corepack enable'
+  fail "pnpm is missing"
+  note 'Node 26 no longer ships corepack; install the pnpm version in package.json: npm install -g --ignore-scripts pnpm@'"$(node -p 'require("./package.json").packageManager.split("@")[1]' 2>/dev/null || echo 10)"
 fi
 
 # --- disk headroom ---------------------------------------------------------------------------
