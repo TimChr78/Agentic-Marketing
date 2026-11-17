@@ -20,7 +20,7 @@ import {
   zonedInstant,
   zonedParts,
 } from '@agentic-marketing/core';
-import { type Db, schema, type Tx } from '@agentic-marketing/db';
+import { type Db, outboxPublicationBarrier, schema, type Tx } from '@agentic-marketing/db';
 import {
   checkPushRecipient,
   checkRecipient,
@@ -28,6 +28,7 @@ import {
   type Decision,
   deliveryPolicy,
   type EmailRequest,
+  enqueueMessageEvents,
   fingerprintParts,
   requestEmail,
   requestPush,
@@ -59,6 +60,17 @@ const LEASE_MS = 120_000;
 // When some canary messages are only waiting for the delivery worker (nothing defers them), the
 // check looks again shortly instead of judging a partial canary (#285).
 const CANARY_RETRY_MS = 60_000;
+/** A publication barrier retries quickly: the dispatcher usually publishes within a second. */
+const PUBLICATION_RETRY_MS = 2_000;
+
+/**
+ * The wait before a decision whose events are still unpublished is retried. Consecutive deferrals
+ * double from 2 s to a 60 s cap, so a dispatcher outage does not make every tick re-select the same
+ * stalled runs ahead of unrelated broadcasts.
+ */
+export function broadcastDeferMs(deferCount: number): number {
+  return Math.min(60_000, PUBLICATION_RETRY_MS * 2 ** Math.min(Math.max(0, deferCount - 1), 5));
+}
 // A variant needs this many sends before its rate means anything; below it the test has no winner.
 const MIN_VARIANT_SENDS = 20;
 
@@ -150,7 +162,7 @@ const validZone = (tz: unknown): tz is string => {
 
 /** The request shape all three channels share; subject tests only reach the e-mail path. */
 type BroadcastRequest = EmailRequest;
-type RequestFor = (tx: Tx, ws: string, kp: KeyProvider, events: EventStore, req: BroadcastRequest) => Promise<Decision>;
+type RequestFor = (tx: Tx, ws: string, kp: KeyProvider, req: BroadcastRequest) => Promise<Decision>;
 
 async function published(tx: Tx, id: string, type: 'email_template' | 'sms_template' | 'push_template' | 'segment') {
   const [a] = await tx
@@ -349,7 +361,6 @@ async function handledPeople(
  */
 async function suppressForControl(
   tx: Tx,
-  deps: BroadcastDeps,
   ws: string,
   broadcastId: string,
   def: BroadcastDefinition,
@@ -390,7 +401,8 @@ async function suppressForControl(
     .returning({ id: schema.messages.id });
   if (!m) return;
   // Same shape as the gateway's decision event, so reports see one suppressed message per person.
-  await deps.events.insertMessageEvents([
+  // It is published after the run transaction commits by the outbox dispatcher (#978 part 2).
+  await enqueueMessageEvents(tx, ws, [
     {
       workspaceId: ws,
       messageId: m.id,
@@ -419,7 +431,6 @@ async function suppressForControl(
  */
 async function recordSendConflict(
   tx: Tx,
-  deps: BroadcastDeps,
   ws: string,
   broadcastId: string,
   def: BroadcastDefinition,
@@ -452,7 +463,7 @@ async function recordSendConflict(
     .onConflictDoNothing()
     .returning({ id: schema.messages.id });
   if (!m) return;
-  await deps.events.insertMessageEvents([
+  await enqueueMessageEvents(tx, ws, [
     {
       workspaceId: ws,
       messageId: m.id,
@@ -658,7 +669,7 @@ async function variantResults(
   const rows = await tx
     .select({ id: schema.messages.id, variant: schema.messages.variant, status: schema.messages.status })
     .from(schema.messages)
-    .where(and(eq(schema.messages.journeyId, broadcastId), isNotNull(schema.messages.variant)));
+    .where(and(eq(schema.messages.journeyId, broadcastId), eq(schema.messages.test, false), isNotNull(schema.messages.variant)));
   const delivered = new Map<string, Set<string>>();
   const opened = new Map<string, Set<string>>();
   const clicked = new Map<string, Set<string>>();
@@ -744,7 +755,7 @@ async function canaryMessagesOf(
       notBefore: schema.messages.notBefore,
     })
     .from(schema.messages)
-    .where(eq(schema.messages.journeyId, broadcastId));
+    .where(and(eq(schema.messages.journeyId, broadcastId), eq(schema.messages.test, false)));
   return rows.flatMap((r) =>
     r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent) && !intentionallyNotSent(r)
       ? [{ id: r.id, status: r.status, notBefore: r.notBefore }]
@@ -1396,6 +1407,33 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
             .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
           return { more: false, holdout: holdoutEvents };
         }
+        // The decision reads ClickHouse, whose events are published through the outbox after the
+        // transaction that records them commits (#978 part 2). Decide only once this broadcast's
+        // publication is complete; a failed row must not block the send forever, so it proceeds
+        // with a warning (queue.outbox in `am doctor` reports the failure).
+        const publication = await outboxPublicationBarrier(tx, ws, broadcastId);
+        if (publication.outstanding > 0) {
+          const deferCount = run.deferCount + 1;
+          const postponed = new Date(now.getTime() + broadcastDeferMs(deferCount));
+          await tx
+            .update(schema.broadcastStages)
+            .set({ stage: 'canary_waiting', checkAt: postponed })
+            .where(eq(schema.broadcastStages.broadcastId, broadcastId));
+          await tx
+            .update(schema.broadcastRuns)
+            .set({ status: 'running', leaseUntil: postponed, deferCount })
+            .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+          logger.info(
+            { broadcast: broadcastId, outstanding: publication.outstanding, deferCount, retryMs: broadcastDeferMs(deferCount) },
+            'canary check deferred until its message events are published',
+          );
+          return { more: false, holdout: holdoutEvents };
+        }
+        if (publication.failed > 0)
+          logger.warn(
+            { broadcast: broadcastId, failed: publication.failed },
+            'canary check proceeding with failed outbox events; `am doctor` reports them as queue.outbox',
+          );
         const stats = canaryIds.length
           ? await deps.events.messageStats(ws, { since: run.createdAt, journeyId: broadcastId, messageIds: canaryIds })
           : {};
@@ -1438,7 +1476,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
             .where(eq(schema.broadcastStages.broadcastId, broadcastId));
           await tx
             .update(schema.broadcastRuns)
-            .set({ status: 'stopped', finishedAt: now, leaseUntil: null })
+            .set({ status: 'stopped', finishedAt: now, leaseUntil: null, deferCount: 0 })
             .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
           return { more: false, holdout: holdoutEvents };
         }
@@ -1451,7 +1489,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
             .where(eq(schema.broadcastStages.broadcastId, broadcastId));
           await tx
             .update(schema.broadcastRuns)
-            .set({ status: 'stopped', finishedAt: now, leaseUntil: null })
+            .set({ status: 'stopped', finishedAt: now, leaseUntil: null, deferCount: 0 })
             .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
           return { more: false, holdout: holdoutEvents };
         }
@@ -1460,7 +1498,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           .set({ stage: 'sending_rest', checkedAt: now, checkSkipped: skippedForSize, ...counts, ...rates })
           .where(eq(schema.broadcastStages.broadcastId, broadcastId));
         // The rest starts from the top and the audience is rebuilt now.
-        await tx.update(schema.broadcastRuns).set({ cursor: '' }).where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+        await tx.update(schema.broadcastRuns).set({ cursor: '', deferCount: 0 }).where(eq(schema.broadcastRuns.broadcastId, broadcastId));
         stage = { ...stage, stage: 'sending_rest', checkedAt: now, checkSkipped: skippedForSize, ...counts, ...rates };
         cursor = '';
       }
@@ -1470,6 +1508,28 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
 
     // The sample has run: judge it and let the rest of the audience follow in this same pass.
     if (test?.state === 'deciding' && (!test.decideAt || test.decideAt.getTime() <= now.getTime())) {
+      // The winner is read from ClickHouse events, published after commit by the outbox (#978
+      // part 2). Defer until this broadcast's publication is complete; a failed row proceeds with
+      // a warning instead of blocking the send forever.
+      const publication = await outboxPublicationBarrier(tx, ws, broadcastId);
+      if (publication.outstanding > 0) {
+        const deferCount = run.deferCount + 1;
+        const postponed = new Date(now.getTime() + broadcastDeferMs(deferCount));
+        await tx
+          .update(schema.broadcastRuns)
+          .set({ status: 'running', leaseUntil: postponed, deferCount })
+          .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+        logger.info(
+          { broadcast: broadcastId, outstanding: publication.outstanding, deferCount, retryMs: broadcastDeferMs(deferCount) },
+          'subject-test decision deferred until its message events are published',
+        );
+        return { more: false, holdout: holdoutEvents };
+      }
+      if (publication.failed > 0)
+        logger.warn(
+          { broadcast: broadcastId, failed: publication.failed },
+          'subject-test decision proceeding with failed outbox events; `am doctor` reports them as queue.outbox',
+        );
       const variants = await variantResults(tx, deps.events, ws, broadcastId, test.subjects);
       const picked = pickWinner(test.metric, variants);
       await tx
@@ -1478,7 +1538,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         .where(eq(schema.broadcastTests.broadcastId, broadcastId));
       // The rest starts from the top, and the audience is rebuilt now; do both in this
       // transaction so a crash cannot leave the winner marked sent but the rest unsent.
-      await tx.update(schema.broadcastRuns).set({ cursor: '' }).where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+      await tx.update(schema.broadcastRuns).set({ cursor: '', deferCount: 0 }).where(eq(schema.broadcastRuns.broadcastId, broadcastId));
       test = { ...test, state: 'winner_sent', winner: picked.winner, reason: picked.reason, decidedAt: now };
       cursor = '';
     }
@@ -1571,7 +1631,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
       if (campaign && controlTemplate && holdout?.assignment.arm === 'control') {
         // Under the canonical id, so a later batch that reaches the person by another alias finds
         // this decision through their own id as well as through the merge chain.
-        await suppressForControl(tx, deps, ws, broadcastId, def, controlTemplate, person, variant, campaign.id, artifact.ownerAgentId);
+        await suppressForControl(tx, ws, broadcastId, def, controlTemplate, person, variant, campaign.id, artifact.ownerAgentId);
         recorded.add(person);
         skipped++;
         continue;
@@ -1599,7 +1659,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         : def.template.startsWith('psh_')
           ? ('push' as const)
           : ('email' as const);
-      const d = await requestFor(def.template)(tx, ws, deps.kp, deps.events, {
+      const d = await requestFor(def.template)(tx, ws, deps.kp, {
         profileId: m.profileId,
         templateId: def.template,
         topic: def.topic,
@@ -1626,7 +1686,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
           { err, broadcast: broadcastId, profile: m.profileId },
           'broadcast member blocked by an idempotency key conflict; recorded as failed and the run continues',
         );
-        await recordSendConflict(tx, deps, ws, broadcastId, def, person, variant, artifact.ownerAgentId);
+        await recordSendConflict(tx, ws, broadcastId, def, person, variant, artifact.ownerAgentId);
         return null;
       });
       // One decision per person: every path below wrote (or found) that person's row for this run.
@@ -1734,17 +1794,31 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
 /** One scheduler tick: schedule new broadcasts, then work through the due ones. */
 export async function runBroadcastsOnce(deps: BroadcastDeps) {
   await schedule(deps.db);
-  const { rows } = await deps.db.admin.query<{ workspace_id: string; broadcast_id: string }>(
-    `SELECT workspace_id, broadcast_id FROM broadcast_runs
-     WHERE send_at <= now() AND (status = 'scheduled' OR (status = 'running' AND (lease_until IS NULL OR lease_until < now()))) LIMIT 20`,
-  );
-  for (const r of rows) {
+  for (const r of await dueBroadcastRuns(deps.db)) {
     try {
-      while (await sendBatch(deps.db, r.workspace_id, r.broadcast_id, deps));
+      while (await sendBatch(deps.db, r.workspaceId, r.broadcastId, deps));
     } catch (err) {
-      logger.error({ err, broadcast: r.broadcast_id }, 'broadcast batch failed; it resumes on the next tick');
+      logger.error({ err, broadcast: r.broadcastId }, 'broadcast batch failed; it resumes on the next tick');
     }
   }
+}
+
+/**
+ * The due runs, oldest next-eligibility first. A run deferred for outbox publication gets a future
+ * `lease_until`, so it goes to the back of the queue instead of being selected again every tick and
+ * starving unrelated broadcasts; a never-run run falls back to its send time. Ties break by send
+ * time and id so the order is deterministic.
+ */
+export async function dueBroadcastRuns(db: Db, limit = 20): Promise<{ workspaceId: string; broadcastId: string }[]> {
+  const { rows } = await db.admin.query<{ workspace_id: string; broadcast_id: string }>(
+    `SELECT workspace_id, broadcast_id FROM broadcast_runs
+     WHERE send_at <= now()
+       AND (status = 'scheduled' OR (status = 'running' AND (lease_until IS NULL OR lease_until < now())))
+     ORDER BY COALESCE(lease_until, send_at) ASC, send_at ASC, broadcast_id ASC
+     LIMIT $1`,
+    [limit],
+  );
+  return rows.map((r) => ({ workspaceId: r.workspace_id, broadcastId: r.broadcast_id }));
 }
 
 export async function runBroadcasts(deps: BroadcastDeps, signal: AbortSignal, tickMs = 5000) {

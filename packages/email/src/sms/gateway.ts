@@ -8,7 +8,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
 import type { Decision, EmailServices } from '../gateway';
 import { idempotencyKeyReused, legacySameSend, lockSendKey, topicSuppression } from '../gateway';
-import { decisionEvent, defer, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
+import { decisionEvent, defer, enqueueMessageEvents, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
 import { checkPolicy, isMarketing } from '../policy';
 import { failureText } from '../render';
 import { billingOf, smsTransportFor, smsWebhookPath } from './providers';
@@ -92,7 +92,7 @@ async function publishedSmsTemplate(tx: Tx, templateId: string, version?: number
 }
 
 /** Records an SMS request and decides it, like requestEmail. */
-export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, events: EventStore, req: SmsRequest): Promise<Decision> {
+export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, req: SmsRequest): Promise<Decision> {
   const key = req.idempotencyKey ?? newUuid();
   if (req.idempotencyKey) await lockSendKey(tx, workspaceId, key);
   const [existing] = await tx.select().from(schema.messages).where(eq(schema.messages.idempotencyKey, key));
@@ -138,7 +138,7 @@ export async function requestSms(tx: Tx, workspaceId: string, kp: KeyProvider, e
       data: req.data ?? {},
     })
     .returning();
-  await events.insertMessageEvents([decisionEvent(m, status, reason ?? '')]);
+  await enqueueMessageEvents(tx, workspaceId, [decisionEvent(m, status, reason ?? '')]);
   return { messageId: m.id, status, reason, duplicate: false };
 }
 

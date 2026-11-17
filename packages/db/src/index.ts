@@ -4,6 +4,7 @@ export * from './domains';
 export * from './erasures';
 export * from './idempotency';
 export * from './migrate';
+export * from './outbox';
 export * from './pool';
 export type {
   AgentCredentialKind,
@@ -41,6 +42,7 @@ export type {
   LearningScope,
   LearningStatus,
   MessageStatus,
+  OutboxState,
   ParticipantStatus,
   PolicyDecision,
   Role,

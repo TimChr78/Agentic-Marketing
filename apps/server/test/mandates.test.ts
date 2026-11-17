@@ -1,4 +1,5 @@
 import { clearAnalyticsCache } from '@agentic-marketing/analytics';
+import { dispatchOutboxOnce } from '@agentic-marketing/audience';
 import { getAgent } from '@agentic-marketing/auth';
 import { agentPolicy, agentPrincipal } from '@agentic-marketing/commands';
 import { newId } from '@agentic-marketing/core';
@@ -644,6 +645,7 @@ describe('audit fixes (#260, #262, #263, #267, #268)', () => {
     });
     const id = await a.draft();
     expect((await a.as('artifacts.requestPublish', { artifactId: id, note: 'report me' })).body.status).toBe('published');
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 200 });
     const report = await eventually(
       () => t.api(owner).call('agents.report', { agentId: a.id }),
       (r) => (r.outcomes?.broadcasts?.sent ?? 0) >= 3,

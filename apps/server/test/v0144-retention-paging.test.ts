@@ -7,7 +7,8 @@ import { startTestServer, testPort, type User } from './harness';
 // P2-2 from Sol's review: 500+ kept candidates must not starve an eligible signup behind them.
 // A fresh server and database keep the physical candidate order deterministic for the old
 // unordered LIMIT 500, so this test fails on patch/0.14.4 rather than accidentally seeing the
-// eligible profile inside the first page.
+// eligible profile inside the first page. Pruning is paused since #978 part 2: the scan still
+// reaches and reports the signup, but keeps it.
 
 const PORT = testPort(4333);
 const KEPT = 600;
@@ -97,18 +98,20 @@ describe('retention paging (#627 review)', () => {
     await seedProfile(anon, 'behind-kept@example.com', new Date(Date.now() - 50 * 86_400_000), eligible);
     await t.srv.events.insert([storedEvent(anon, 'Form Submitted')]);
 
-    let removed = 0;
+    let found = 0;
     let rounds = 0;
-    while (removed === 0 && rounds < 10) {
-      removed += (await runRetentionOnce({ db: t.srv.db, events: t.srv.events, hot: t.srv.hot, unconfirmedDays: 30, logDays: 180 }))
-        .profiles;
+    while (found === 0 && rounds < 10) {
+      found += (await runRetentionOnce({ db: t.srv.db, events: t.srv.events, hot: t.srv.hot, unconfirmedDays: 30, logDays: 180 }))
+        .unconfirmedSignups;
       rounds++;
     }
-    expect(removed).toBe(1);
+    // The cursor reached the eligible signup behind the kept pages and reported it; with pruning
+    // paused it is not deleted.
+    expect(found).toBe(1);
     expect(rounds).toBeLessThanOrEqual(5);
-    expect(await exists(eligible)).toBe(false);
+    expect(await exists(eligible)).toBe(true);
     expect(
       (await t.srv.db.admin.query<{ n: number }>('SELECT count(*)::int AS n FROM profiles WHERE workspace_id = $1', [ws])).rows[0].n,
-    ).toBe(KEPT);
+    ).toBe(KEPT + 1);
   }, 120_000);
 });

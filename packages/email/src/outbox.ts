@@ -1,8 +1,29 @@
-import { schema, type Tx } from '@agentic-marketing/db';
+import { hashValue } from '@agentic-marketing/core';
+import { enqueueOutbox, schema, type Tx } from '@agentic-marketing/db';
 import type { MessageEvent } from '@agentic-marketing/events';
 import { eq } from 'drizzle-orm';
 
 // Shared by the e-mail and SMS delivery paths.
+
+/**
+ * Writes message events to the transactional outbox in the caller's transaction (#978 part 2), so
+ * a decision is durable before its transaction commits and ClickHouse never runs under a lock. The
+ * dispatcher publishes them. The operation key is the set of event identities: a redelivery of the
+ * same action adds no second row, and ClickHouse collapses a duplicate on (message, type, event id).
+ */
+export async function enqueueMessageEvents(tx: Tx, workspaceId: string, events: MessageEvent[]): Promise<void> {
+  if (!events.length) return;
+  const identities = events.map((e) => `${e.messageId}:${e.type}:${e.eventId}`).sort();
+  // The broadcast or journey these events belong to. A decision that reads ClickHouse (canary,
+  // subject test) waits while this subject still has an undelivered row.
+  const subjects = [...new Set(events.map((e) => e.journeyId).filter((id): id is string => !!id))];
+  await enqueueOutbox(tx, workspaceId, {
+    kind: 'message_event',
+    operationKey: `message-event:${hashValue({ events: identities })}`,
+    ...(subjects.length === 1 ? { subjectRef: subjects[0] } : {}),
+    payload: { events },
+  });
+}
 
 export const MAX_ATTEMPTS = 4;
 

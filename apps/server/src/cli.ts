@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { migrateAuth } from '@agentic-marketing/auth';
 import { newUuid } from '@agentic-marketing/core';
-import { migrate } from '@agentic-marketing/db';
+import { migrate, requeueFailedOutbox } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
 import { rewrapDataKeys } from '@agentic-marketing/secrets';
 import { createServer } from './app';
@@ -36,6 +36,7 @@ Commands:
   bootstrap       create the first user and workspace
   reset-password  set a new password for a user
   rotate-keys     re-wrap stored secrets after changing the key provider
+  outbox          requeue outbox rows that failed after their retries
   loadtest        load synthetic data into a throwaway workspace
   version         print the version and commit
 
@@ -57,6 +58,12 @@ The password comes from AM_RESET_PASSWORD, a hidden terminal prompt, or stdin.`,
 
 Re-wraps every stored data key with the current key provider or MASTER_KEY.
 Set the new key first and keep the old one in MASTER_KEY_PREVIOUS.`,
+  outbox: `usage: am outbox [--kind KIND] [--permanent]
+
+Requeues transactional-outbox rows that failed after their retries: all of them, or only
+KIND (message_event, doi_send). Each row goes back to pending with a fresh attempt budget;
+the scheduler role publishes it. Permanent failures (a payload the dispatcher cannot parse)
+are skipped; --permanent requeues them too.`,
   loadtest: `usage: am loadtest [--profiles N] [--keep]
 
 Creates synthetic profiles in a throwaway workspace (default: 100000).
@@ -204,6 +211,18 @@ async function admin(command: string, rest: string[]) {
         console.log(`every data key now uses ${config.keys.provider}; you can remove MASTER_KEY and MASTER_KEY_PREVIOUS`);
       else if (config.previousMasterKeys.length)
         console.log('every data key now uses the current master key; you can remove MASTER_KEY_PREVIOUS');
+    } else if (command === 'outbox') {
+      const { values } = parseArgs({ args: rest, options: { kind: { type: 'string' }, permanent: { type: 'boolean' } } });
+      const kind = values.kind?.trim();
+      const result = await requeueFailedOutbox(db, {
+        ...(kind ? { kind } : {}),
+        includePermanent: values.permanent ?? false,
+      });
+      console.log(
+        `${result.requeued} outbox row(s) requeued${kind ? ` for kind ${kind}` : ''}${
+          result.skippedPermanent ? `; ${result.skippedPermanent} permanent failure(s) skipped (use --permanent to requeue them)` : ''
+        }`,
+      );
     } else if (command === 'loadtest') {
       const { values } = parseArgs({ args: rest, options: { profiles: { type: 'string', default: '100000' }, keep: { type: 'boolean' } } });
       const report = await runLoadTest({ db, events }, { profiles: Number(values.profiles), keep: values.keep, log: console.log });

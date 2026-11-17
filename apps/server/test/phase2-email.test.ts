@@ -1,3 +1,4 @@
+import { dispatchOutboxOnce } from '@agentic-marketing/audience';
 import { SMTPServer } from 'smtp-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
@@ -8,6 +9,8 @@ import { eventually, rejects, startTestServer, testPort, type User } from './har
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let ws: string;
+/** Decision and delivery events are outbox rows now (#978 part 2); publish them before reading ClickHouse. */
+const flushOutbox = () => dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 100 });
 const inbox: { to: string[]; data: string }[] = [];
 const smtp = new SMTPServer({
   authOptional: true,
@@ -161,6 +164,7 @@ describe('e-mail end to end', () => {
     expect(raw).toContain(`${t.base}/c/`);
     expect(raw).not.toContain('href="https://shop.example.com/tents');
 
+    await flushOutbox();
     const { messages } = await eventually(
       () => api.call('messages.list', { profileId: ada }),
       (r) => r.messages[0]?.status === 'sent' && r.messages[0].events.length === 2,
@@ -181,6 +185,7 @@ describe('e-mail end to end', () => {
     expect(res.status).toBe(302);
     expect(res.headers.get('location')).toBe('https://shop.example.com/tents?x=1&y=2');
     expect((await fetch(`${click}x`, { redirect: 'manual' })).status).toBe(404);
+    await flushOutbox();
     await eventually(
       () => t.api(owner).call('messages.list', { profileId: ada }),
       (r) => r.messages[0].events.some((e) => e.type === 'clicked'),
@@ -202,15 +207,17 @@ describe('e-mail end to end', () => {
     expect((await fetch(`${t.base}${webhookPath}x`, { method: 'POST', body: JSON.stringify(bounce) })).status).toBe(404);
     const res = await fetch(`${t.base}${webhookPath}`, { method: 'POST', body: JSON.stringify(bounce) });
     expect(await res.json()).toEqual({ ok: true, events: 1 });
+    await flushOutbox();
     const after = await eventually(
       () => api.call('messages.list', { profileId: ada }),
-      (r) => r.messages[0].status === 'bounced',
+      (r) => r.messages[0].status === 'bounced' && r.messages[0].events.some((e) => e.type === 'bounced'),
     );
     expect(after.messages[0].events.map((e) => e.type)).toContain('bounced');
     expect(await api.call('messages.sendEmail', { profileId: ada, templateId })).toMatchObject({
       status: 'suppressed',
       reason: expect.stringContaining('suppression list (hard_bounce)'),
     });
+    await flushOutbox();
     const stats = await eventually(
       () => api.call('messages.stats', { templateId }),
       (s) => (s.counts.suppressed ?? 0) >= 2,

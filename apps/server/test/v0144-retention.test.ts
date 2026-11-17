@@ -4,8 +4,9 @@ import type { BusEvent } from '@agentic-marketing/events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
-// Sol's review of #627: retention must delete only on positive evidence, re-check consent and
-// identifiers atomically, and page through kept candidates so they cannot starve an eligible one.
+// Sol's review of #627: retention must find unconfirmed signups only on positive evidence, and
+// page through kept candidates so they cannot starve an eligible one. Since #978 part 2 the
+// destructive pruning is paused: the scan still reports what it finds, but deletes nothing.
 
 const PORT = testPort(4332);
 
@@ -78,7 +79,7 @@ describe('retention positive evidence (#627 review)', () => {
     expect(await profileExists(id)).toBe(true);
   });
 
-  it('keeps an empty history, then deletes it once the form submission is visible and nothing else is', async () => {
+  it('keeps an empty history, then reports it once the form submission is visible and nothing else is', async () => {
     const anon = 'form:empty-history';
     const id = await seedProfile(anon, 'empty-history@example.com', new Date(Date.now() - 60 * 86_400_000));
 
@@ -86,8 +87,10 @@ describe('retention positive evidence (#627 review)', () => {
     expect(await profileExists(id)).toBe(true);
 
     await t.srv.events.insert([storedEvent(anon, 'Form Submitted')]);
-    expect((await runRetentionOnce(retentionDeps())).profiles).toBe(1);
-    expect(await profileExists(id)).toBe(false);
+    const reported = await runRetentionOnce(retentionDeps());
+    // Found by the scan and reported, but kept: pruning is paused (#978 part 2).
+    expect(reported).toMatchObject({ profiles: 0, unconfirmedSignups: 1 });
+    expect(await profileExists(id)).toBe(true);
   });
 
   it('keeps a profile whose consent is written after selection and before deletion', async () => {
@@ -143,25 +146,31 @@ describe('retention positive evidence (#627 review)', () => {
     expect(await profileExists(id)).toBe(true);
   });
 
-  it('keeps the person when the event store cannot be re-read under the lock (#766)', async () => {
+  it('keeps the person when the event store cannot be read', async () => {
     const anon = 'form:unreadable-recheck';
     const id = await seedProfile(anon, 'unreadable-recheck@example.com', new Date(Date.now() - 60 * 86_400_000));
     await t.srv.events.insert([storedEvent(anon, 'Form Submitted')]);
 
-    // The round's history read proves the person is a lone form signup, but the fresh read under
-    // the delete lock fails. An unreadable store proves nothing, so the person must stay.
+    // A readable history finds the lone form signup (and, with pruning paused, keeps it). Other
+    // eligible signups from earlier cases in this file stay in the workspace too, so only the
+    // unreadable read is asserted exactly.
+    expect((await runRetentionOnce(retentionDeps())).unconfirmedSignups).toBeGreaterThanOrEqual(1);
+    expect(await profileExists(id)).toBe(true);
+
+    // An unreadable store proves nothing, so the scan reports nothing. Deletion is paused, so the
+    // scan's own read is the only read; there is no separate re-check to attempt any more.
     let reads = 0;
     const events = {
       ...t.srv.events,
-      async eventsOfAnonymousIds(...args: Parameters<typeof t.srv.events.eventsOfAnonymousIds>) {
+      async eventsOfAnonymousIds(): Promise<never> {
         reads++;
-        if (reads > 1) throw new Error('injected event-store failure');
-        return t.srv.events.eventsOfAnonymousIds(...args);
+        throw new Error('injected event-store failure');
       },
     } as typeof t.srv.events;
 
-    expect((await runRetentionOnce({ ...retentionDeps(), events })).profiles).toBe(0);
-    expect(reads).toBeGreaterThan(1); // the re-check was attempted
+    const result = await runRetentionOnce({ ...retentionDeps(), events });
+    expect(result).toMatchObject({ profiles: 0, unconfirmedSignups: 0 });
+    expect(reads).toBe(1);
     expect(await profileExists(id)).toBe(true);
 
     // Leave no eligible signup behind for the next case in this file.

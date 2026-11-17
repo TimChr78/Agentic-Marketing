@@ -142,7 +142,7 @@ describe('e-mail events on profiles', () => {
 });
 
 describe('retention', () => {
-  it('removes signups that were never confirmed, and keeps everyone else', async () => {
+  it('scans signups that were never confirmed and keeps them while the pruning is paused (#978 part 2)', async () => {
     const api = t.api(owner);
     const confirm = await api.call('artifacts.create', {
       type: 'email_template',
@@ -186,10 +186,12 @@ describe('retention', () => {
     );
 
     const deps = { db: t.srv.db, events: t.srv.events, hot: t.srv.hot, unconfirmedDays: 30, logDays: 180 };
-    expect((await runRetentionOnce(deps)).profiles).toBe(0); // too recent
+    expect((await runRetentionOnce(deps)).unconfirmedSignups).toBe(0); // too recent
     await t.srv.db.admin.query(`UPDATE profiles SET first_seen = now() - interval '31 days'`);
-    expect((await runRetentionOnce(deps)).profiles).toBe(1);
-    expect((await api.call('profiles.find', { type: 'email', value: 'never@example.com' })).profileId).toBeNull();
+    const paused = await runRetentionOnce(deps);
+    // The scan still finds the signup and reports it, but destructive pruning is paused.
+    expect(paused).toMatchObject({ profiles: 0, unconfirmedSignups: 1 });
+    expect((await api.call('profiles.find', { type: 'email', value: 'never@example.com' })).profileId).toBe(profileId);
     expect((await api.call('profiles.get', { profileId: ada })).consent.length).toBeGreaterThan(0);
     // Not suppressed: they may sign up again.
     expect(profileId).toBeTruthy();

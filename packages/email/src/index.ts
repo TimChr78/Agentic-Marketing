@@ -8,6 +8,7 @@ export * from './gateway';
 export * from './idempotency';
 export * from './links';
 export * from './messages';
+export * from './outbox';
 export * from './policy';
 export * from './providers';
 export { type PushRegistration, pushAdapters, pushOutbox } from './push/adapters';

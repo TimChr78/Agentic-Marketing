@@ -22,6 +22,7 @@ import type { DeliveryEvent, WebhookVerification } from './adapters';
 import { applyDeliveryEvents, logSuppressionEscalation, type Msg, messageEvent, withdraw } from './deliveryEvents';
 import type { EmailServices } from './gateway';
 import type { ClickLink, TopicLink, UnsubscribeLink } from './links';
+import { enqueueMessageEvents } from './outbox';
 import { transportFor, webhookTokenHash } from './providers';
 import { smsRoutes } from './sms/routes';
 
@@ -106,6 +107,9 @@ export function emailRoutes(deps: EmailRouteDeps) {
           return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
         }
         const applied = await applyDeliveryEvents(tx, parsed, provider.adapter, deps.kp);
+        // The events the delivery recorded are published by the outbox dispatcher after commit
+        // (#978 part 2): ClickHouse is never written inside the transaction that changes consent.
+        await enqueueMessageEvents(tx, ws, applied.events);
         return {
           status: 200 as const,
           events: applied.events,
@@ -118,7 +122,6 @@ export function emailRoutes(deps: EmailRouteDeps) {
     });
     // After the transaction committed: a rolled-back escalation leaves no log behind.
     for (const escalation of result.escalations) logSuppressionEscalation(escalation);
-    await deps.events.insertMessageEvents(result.events);
     for (const e of result.events)
       if ((e.type === 'unsubscribed' || e.type === 'complained') && e.profileId)
         await consentChanged(ws, [e.profileId], `unsubscribe:${e.messageId}`);
@@ -170,9 +173,11 @@ export function emailRoutes(deps: EmailRouteDeps) {
       // A one-click unsubscribe is a synchronous write: the link POST is the person's action.
       const at = new Date();
       await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, deps.kp, at);
-      return messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() }, '');
+      const event = messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() }, '');
+      // The unsubscribe event is published after commit by the outbox dispatcher (#978 part 2).
+      await enqueueMessageEvents(tx, link.w, [event]);
+      return event;
     });
-    await deps.events.insertMessageEvents([recorded]);
     if (recorded.profileId) await consentChanged(link.w, [recorded.profileId], `unsubscribe:${link.m}`);
     return link;
   };

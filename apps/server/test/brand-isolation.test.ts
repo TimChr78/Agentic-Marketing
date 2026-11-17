@@ -1,4 +1,5 @@
 import { DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
+import { dispatchOutboxOnce } from '@agentic-marketing/audience';
 import { SMTPServer } from 'smtp-server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
@@ -296,6 +297,8 @@ describe('per-brand data semantics (#189)', () => {
       () => apiB().call('messages.list', { profileId: bounceB }),
       (r) => r.messages[0]?.status === 'sent',
     );
+    // Decision events are outbox rows now (#978 part 2); publish them before analytics reads.
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 200 });
     const a = await apiA().call('analytics.query', {
       measures: ['email.sent'],
       from: FROM,

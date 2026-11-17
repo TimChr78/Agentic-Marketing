@@ -540,6 +540,35 @@ export const erasureTombstones = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.identHash] })],
 );
 
+export type OutboxState = 'pending' | 'delivering' | 'delivered' | 'failed';
+/**
+ * Post-commit work a tenant transaction implies (#978 part 2): a network call is enqueued in the
+ * transaction that decides it, then a dispatcher performs it outside any transaction. At-least-once,
+ * with a stable `operation_key` so a redelivery enqueues nothing new.
+ */
+export const outbox = pgTable(
+  'outbox',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    id: text('id').notNull(),
+    kind: text('kind').notNull(),
+    payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
+    operationKey: text('operation_key').notNull(),
+    subjectRef: text('subject_ref'),
+    state: text('state').$type<OutboxState>().notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),
+    leaseUntil: ts('lease_until'),
+    claimToken: text('claim_token'),
+    failureKind: text('failure_kind').$type<'permanent' | 'exhausted'>(),
+    lastError: text('last_error'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    deliveredAt: ts('delivered_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('outbox_operation_key').on(t.workspaceId, t.operationKey)],
+);
+
 export const emailProviders = pgTable(
   'email_providers',
   {
@@ -1254,6 +1283,8 @@ export const broadcastRuns = pgTable(
     status: text('status').$type<BroadcastStatus>().notNull(),
     sendAt: ts('send_at').notNull(),
     leaseUntil: ts('lease_until'),
+    /** Consecutive publication deferrals; the next wait doubles from 2 s to a 60 s cap. */
+    deferCount: integer('defer_count').notNull().default(0),
     cursor: text('cursor').notNull().default(''),
     recipients: integer('recipients').notNull().default(0),
     queued: integer('queued').notNull().default(0),

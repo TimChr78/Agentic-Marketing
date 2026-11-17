@@ -1,5 +1,5 @@
-import { subjectAssignment } from '@agentic-marketing/audience';
-import { outbox } from '@agentic-marketing/email';
+import { dispatchOutboxOnce, subjectAssignment } from '@agentic-marketing/audience';
+import { enqueueMessageEvents, outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { eventually, startTestServer, testPort, type User } from './harness';
@@ -82,6 +82,25 @@ const decideNow = async (artifactId: string) => {
   await t.srv.db.admin.query(
     `UPDATE broadcast_runs SET lease_until = now() - interval '1 minute' WHERE workspace_id = $1 AND broadcast_id = $2`,
     [ws, artifactId],
+  );
+};
+
+/** Publish this broadcast's queued events before a forced decision reads ClickHouse. */
+const flushOutbox = async (artifactId: string) => {
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await eventually(
+    async () =>
+      Number(
+        (
+          await t.srv.db.admin.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM outbox
+              WHERE workspace_id = $1 AND subject_ref = $2 AND state IN ('pending', 'delivering')`,
+            [ws, artifactId],
+          )
+        ).rows[0]?.n ?? 0,
+      ),
+    (n) => n === 0,
+    10_000,
   );
 };
 
@@ -278,11 +297,83 @@ describe('subject A/B test', () => {
     expect(mailTo(withdrawnEmail)).toHaveLength(0);
 
     // messages.stats can narrow to a variant.
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
     const stats = await eventually(
       () => api().call('messages.stats', { days: 1, templateId: template, variant: 'B' }),
       (s) => (s.counts.clicked ?? 0) >= b.length,
     );
     expect(stats.counts.clicked).toBe(b.length);
+  }, 60_000);
+
+  it('defers the winner while the sample clicks are still in the outbox, then picks from published events', async () => {
+    const id = await broadcast({
+      template,
+      segment,
+      subjectTest: { subjects: ['Deferred A', 'Deferred B'], samplePercent: 50, decideAfter: 'PT4H' },
+    });
+    await eventually(
+      () => status(id),
+      (s) => s.test?.state === 'deciding' && s.test.variants.reduce((n, v) => n + v.sent, 0) >= 1,
+      20_000,
+    );
+    const sample = (await messagesOf(id)).filter((m) => m.variant !== null);
+    await eventually(
+      () => status(id),
+      (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sample.length,
+      20_000,
+    );
+    const a = sample.filter((m) => m.variant === 'A');
+    const b = sample.filter((m) => m.variant === 'B');
+    const expected = Math.min(a.length, b.length) >= 20 ? 'B' : 'A';
+    // The clicks are committed through the outbox, so ClickHouse has not seen them yet.
+    const clicked = expected === 'B' ? b : a;
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      enqueueMessageEvents(
+        tx,
+        ws,
+        clicked.map((m, i) => click(m, id, i)),
+      ),
+    );
+    // Hold the rows out of the dispatcher's claim window, so the deferral is observed rather than
+    // raced.
+    await t.srv.db.admin.query(
+      `UPDATE outbox SET next_attempt_at = now() + interval '1 hour'
+        WHERE workspace_id = $1 AND subject_ref = $2 AND state = 'pending'`,
+      [ws, id],
+    );
+
+    await decideNow(id);
+    // Deferred: the run parks on a future lease and no winner is recorded.
+    await eventually(
+      async () => {
+        const { rows } = await t.srv.db.admin.query<{ lease_until: Date | null }>(
+          'SELECT lease_until FROM broadcast_runs WHERE workspace_id = $1 AND broadcast_id = $2',
+          [ws, id],
+        );
+        return rows[0]?.lease_until && rows[0].lease_until.getTime() > Date.now();
+      },
+      Boolean,
+      20_000,
+    );
+    const waiting = await status(id);
+    expect(waiting.test?.state).toBe('deciding');
+    expect(waiting.test?.winner).toBeNull();
+
+    await t.srv.db.admin.query(
+      `UPDATE outbox SET next_attempt_at = now() - interval '1 second'
+        WHERE workspace_id = $1 AND subject_ref = $2`,
+      [ws, id],
+    );
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+    await flushOutbox(id);
+    await decideNow(id);
+    const decided = await eventually(
+      () => status(id),
+      (s) => s.test?.state === 'winner_sent',
+      20_000,
+    );
+    expect(decided.test?.winner).toBe(expected);
+    if (expected === 'B') expect(decided.test?.reason).toContain('B won on click');
   }, 60_000);
 
   it('picks A on a tie and records that there was no clear winner', async () => {
@@ -305,6 +396,7 @@ describe('subject A/B test', () => {
     const a = sample.filter((m) => m.variant === 'A').slice(0, 5);
     const b = sample.filter((m) => m.variant === 'B').slice(0, 5);
     await t.srv.events.insertMessageEvents([...a.map((m, i) => click(m, id, i)), ...b.map((m, i) => click(m, id, 100 + i))]);
+    await flushOutbox(id);
     await decideNow(id);
 
     const done = await eventually(
@@ -339,6 +431,7 @@ describe('subject A/B test', () => {
     );
     const b = sample.filter((m) => m.variant === 'B');
     await t.srv.events.insertMessageEvents(b.map((m, i) => click(m, id, i)));
+    await flushOutbox(id);
     await decideNow(id);
 
     const done = await eventually(

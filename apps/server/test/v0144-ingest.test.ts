@@ -181,10 +181,13 @@ describe('retention of unconfirmed form signups (#627)', () => {
     );
   }, 60_000);
 
-  it('removes the unconfirmed signup that used a client anonymousId', async () => {
+  it('reports the unconfirmed signup that used a client anonymousId without deleting it', async () => {
+    const before = await profileOf(plainWs, unconfirmed.email);
+    expect(before.profileId).toBeTruthy();
     const result = await runRetentionOnce({ db: t.srv.db, events: t.srv.events, hot: t.srv.hot, unconfirmedDays: 30, logDays: 180 });
-    expect(result.profiles).toBe(1);
-    expect((await profileOf(plainWs, unconfirmed.email)).profileId).toBeNull();
+    // Found by the scan and reported; destructive pruning is paused (#978 part 2).
+    expect(result).toMatchObject({ profiles: 0, unconfirmedSignups: 1 });
+    expect((await profileOf(plainWs, unconfirmed.email)).profileId).toBe(before.profileId);
   });
 
   it('keeps the confirmed subscriber', async () => {

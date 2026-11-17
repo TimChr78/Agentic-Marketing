@@ -133,6 +133,8 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0099_messages_journey_recipient.sql': '0.14.24',
   '0103_idempotency_reversal.sql': '0.14.26',
   '0104_idempotency_keys_created_at.sql': '0.14.27',
+  '0106_transactional_outbox.sql': '0.15.0',
+  '0107_broadcast_defer_count.sql': '0.15.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
