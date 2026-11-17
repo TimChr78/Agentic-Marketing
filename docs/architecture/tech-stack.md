@@ -9,7 +9,7 @@ Selection criteria, in priority order: **(1) maintainable by one person, (2) per
 | Area | Choice | License | Alternatives considered | Why |
 |---|---|---|---|---|
 | Language | **TypeScript** (strict) | — | Go (hot path), Python | One language for server, UI, SDK, MCP, schemas; best MCP & AI SDK ecosystem. Hot path can be ported to Go later behind the same contracts if ever needed |
-| Runtime | **Node.js 24 LTS** | MIT | Bun, Deno | Most mature for long-running servers; Bun remains an option for tooling |
+| Runtime | **Node.js 26 LTS** | MIT | Bun, Deno | Most mature for long-running servers; Bun remains an option for tooling |
 | Monorepo | **pnpm workspaces + Turborepo** | MIT | Nx | Simple, fast, low config |
 | HTTP framework | **Hono** + `@hono/zod-openapi` | MIT | Fastify, NestJS | Small, fast, zod → OpenAPI built in, also runs on edge runtimes (future edge `decide`) |
 | Schemas & validation | **Zod 4** | MIT | TypeBox, Valibot | One source for runtime validation, JSON Schema (MCP), OpenAPI, forms |

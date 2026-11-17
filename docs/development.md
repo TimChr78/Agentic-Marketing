@@ -78,7 +78,7 @@ Adding a capability = one `defineCommand(...)` in a package + adding it to `apps
 
 ## Run locally
 
-Requirements: Node 22+, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS), NATS with JetStream (`nats-server -js`) and Valkey (or Redis), local or Docker. `CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` default to localhost.
+Requirements: Node 26 LTS, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS), NATS with JetStream (`nats-server -js`) and Valkey (or Redis), local or Docker. `CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` default to localhost. Node 26 no longer ships corepack, so install pnpm once with `npm install -g pnpm@10`.
 
 ```bash
 pnpm install

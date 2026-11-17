@@ -180,6 +180,8 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 
 ## Development
 
+Requires Node.js 26 LTS and pnpm 10. Node 26 no longer ships corepack, so install pnpm with `npm install -g pnpm@10`.
+
 ```bash
 pnpm install
 pnpm lint && pnpm typecheck && pnpm test   # tests need Postgres, ClickHouse, NATS and Valkey
