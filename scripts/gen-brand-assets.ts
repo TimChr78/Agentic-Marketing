@@ -12,8 +12,8 @@ const { Resvg } = require('@resvg/resvg-js') as { Resvg: typeof import('@resvg/r
 // Generates the product assets in apps/web/public (#195) from the single geometry source in
 // packages/core/src/brand.ts. Run after changing the mark:
 //
-//   corepack pnpm install
-//   corepack pnpm exec tsx scripts/gen-brand-assets.ts
+//   pnpm install
+//   pnpm exec tsx scripts/gen-brand-assets.ts
 //
 // The output is committed: the Docker image only copies the built web directory, so the server
 // and README cannot generate assets at runtime. See docs/design/brand-assets.md.

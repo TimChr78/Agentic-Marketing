@@ -73,7 +73,7 @@ jobs:
       - name: Install pnpm
         run: |
           version="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")"
-          npm install -g "pnpm@$version"
+          npm install -g --ignore-scripts "pnpm@$version"
       # Spikes (with large benchmark dependencies) are not part of CI.
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       - run: pnpm lint
@@ -160,7 +160,7 @@ jobs:
       - name: Install pnpm
         run: |
           version="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")"
-          npm install -g "pnpm@$version"
+          npm install -g --ignore-scripts "pnpm@$version"
       # Ubuntu's postgresql-client can be older than the postgres:16 service above. Backups need a
       # matching pg_dump/pg_restore, so install 16 from PGDG (the runner's codename is in VERSION_CODENAME).
       - name: Install PostgreSQL 16 client tools
@@ -243,7 +243,7 @@ jobs:
       - name: Install pnpm
         run: |
           version="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")"
-          npm install -g "pnpm@$version"
+          npm install -g --ignore-scripts "pnpm@$version"
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       # Playwright's Chromium, cached per Playwright version; the system packages it needs are
       # installed on every run (they are not in the cache).
@@ -323,7 +323,7 @@ jobs:
       - name: Install pnpm
         run: |
           version="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")"
-          npm install -g "pnpm@$version"
+          npm install -g --ignore-scripts "pnpm@$version"
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       # The baselines are recorded in the official Playwright image, so CI compares in the same image:
       # the runner's own fonts and Chromium render text a few pixels differently on every route.
@@ -397,7 +397,7 @@ jobs:
       - name: Install pnpm
         run: |
           version="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")"
-          npm install -g "pnpm@$version"
+          npm install -g --ignore-scripts "pnpm@$version"
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       - id: playwright
         run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"

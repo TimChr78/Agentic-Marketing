@@ -67,7 +67,7 @@ branch instead of a phase branch.
   a test pass only because the seed happened to be fresh.
 - Before reporting, run the **full** functional suite (`scripts/e2e-docker.sh functional`), not only
   the specs you added. A green new spec beside a broken existing one is not a green task.
-- Run `corepack pnpm lint`, not Biome alone: the root lint also runs the e2e selector check and the
+- Run `pnpm lint`, not Biome alone: the root lint also runs the e2e selector check and the
   changelog fragment check. Run the typecheck too.
 - **Server tests: only the files for the code the task touches. Never the full server suite.** CI
   runs every server test file on its own ClickHouse for each PR; a full local run on the shared

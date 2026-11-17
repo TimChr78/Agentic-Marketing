@@ -68,7 +68,7 @@ elif command -v corepack >/dev/null 2>&1 && corepack pnpm --version >/dev/null 2
   note 'then: export PATH="$HOME/.local/bin:$PATH"'
 else
   fail "pnpm is missing"
-  note 'Node 26 no longer ships corepack; install pnpm with npm: npm install -g pnpm@10'
+  note 'Node 26 no longer ships corepack; install the pnpm version in package.json: npm install -g --ignore-scripts pnpm@'"$(node -p 'require("./package.json").packageManager.split("@")[1]' 2>/dev/null || echo 10)"
 fi
 
 # --- disk headroom ---------------------------------------------------------------------------

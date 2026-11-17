@@ -9,7 +9,7 @@ WORKDIR /app
 # Node 26 no longer bundles corepack, so pnpm is installed from npm at the `packageManager` version.
 COPY package.json ./
 RUN PNPM_VERSION="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")" \
- && npm install -g "pnpm@$PNPM_VERSION" \
+ && npm install -g --ignore-scripts "pnpm@$PNPM_VERSION" \
  && npm cache clean --force \
  && pnpm --version
 
