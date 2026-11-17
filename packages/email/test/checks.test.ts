@@ -389,4 +389,27 @@ describe('the unsubscribe CSS warning after the #872 review', () => {
     expect(warning(r.findings)?.message).toContain('`transform`');
     expect(r.summary.blocking).toBe(0);
   });
+
+  // Review round 2 (B): this is the Liquid/MJML shape that made the warning scan quadratic, since
+  // every unrelated rule used to walk every matching anchor.
+  it('stays linear when a rendered template grows unrelated rules and anchors together', async () => {
+    const build = (n: number) =>
+      template({
+        mjml: mjml(
+          `<mj-text>{% for i in (1..${n}) %}<a href="{{ unsubscribe_url }}">Unsubscribe</a>{% endfor %}</mj-text>`,
+          `<mj-style>{% for i in (1..${n}) %}.unrelated{{ i }}{display:none}{% endfor %}</mj-style>`,
+        ),
+      });
+    const run = async (n: number) => {
+      const started = performance.now();
+      const result = await checkEmailTemplate(build(n), opts());
+      return { ms: performance.now() - started, result };
+    };
+    await run(200);
+    const small = await run(1_000);
+    const large = await run(8_000);
+    expect(large.result.findings.filter((f) => f.category === 'compliance' && f.message.includes("can't evaluate"))).toEqual([]);
+    // Rendering dominates, so allow generous overhead; a quadratic scan makes the ratio far larger.
+    expect(large.ms).toBeLessThan(small.ms * 8 + 500);
+  });
 });

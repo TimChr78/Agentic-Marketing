@@ -994,6 +994,13 @@ describe('CSS the unsubscribe-link check cannot evaluate is a warning (#872)', (
     expect(unsubscribeCssConstructs(html, '/unsubscribe')).toContain('escaped selector');
   });
 
+  // Review round 2 (C): decoding the escape first shows the subject is `img`, which cannot be the
+  // link or an ancestor, so the rule is unrelated even though the raw selector has an escape.
+  it('does not warn about an escaped selector whose decoded subject cannot reach the link', () => {
+    const html = `<style>.pro\\6d o img{display:none}</style><a href="/unsubscribe">Unsubscribe</a>`;
+    expect(unsubscribeCssConstructs(html, '/unsubscribe')).toEqual([]);
+  });
+
   // Review of #872 (B2): a CSS comment before the first declaration hid the unsupported value.
   it('strips comments from an inline style before reading its declarations', () => {
     const html = `<a href="/unsubscribe" style="/* comment */transform:translateX(-9999px)">Unsubscribe</a>`;
@@ -1015,6 +1022,20 @@ describe('CSS the unsubscribe-link check cannot evaluate is a warning (#872)', (
       (n) => `<style>.footer{transform:translateX(-1em)}</style>${`<a href="${URL}" class="footer">Unsubscribe</a>`.repeat(n)}`,
       (html) => unsubscribeCssConstructs(html, URL),
       2_000,
+    );
+  });
+
+  // Review round 2 (B): every selector used to scan every matching anchor. Unrelated rules and
+  // anchors growing together is the shape that made the scan quadratic.
+  it('stays linear when unrelated rules and matching anchors grow together', () => {
+    expectLinear(
+      (n) => {
+        const rules = Array.from({ length: n }, (_, i) => `.unrelated${i}{display:none}`).join('');
+        const anchors = `<a href="${URL}">Unsubscribe</a>`.repeat(n);
+        return `<html><head><style>${rules}</style></head><body>${anchors}</body></html>`;
+      },
+      (html) => unsubscribeCssConstructs(html, URL),
+      1_000,
     );
   });
 

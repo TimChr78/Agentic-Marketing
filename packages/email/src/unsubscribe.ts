@@ -1053,14 +1053,32 @@ export function unsubscribeCssConstructs(html: string, url: string): string[] {
   if (!wanted) return [];
   const elements = unsubscribeLinkElements(html, wanted);
   if (elements.length === 0) return [];
+  const index = elementIndex(elements);
   const constructs = new Set<string>();
   const css = styleText(html, () => false);
-  if (css !== null) collectCssConstructs(css, elements, constructs);
+  if (css !== null) collectCssConstructs(css, index, constructs);
   for (const el of elements) {
     const style = el.attribs.style;
     if (style !== undefined) inspectDeclarations(parseDeclarations(stripCssComments(style)), constructs);
   }
   return [...constructs].slice(0, MAX_CSS_CONSTRUCTS);
+}
+
+/** The tags, ids and classes of every element a rule may have to reach, for constant-time tests. */
+interface ElementIndex {
+  tags: Set<string>;
+  ids: Set<string>;
+  classes: Set<string>;
+}
+
+function elementIndex(elements: ElementInfo[]): ElementIndex {
+  const index: ElementIndex = { tags: new Set(), ids: new Set(), classes: new Set() };
+  for (const el of elements) {
+    index.tags.add(el.name);
+    if (el.id !== null) index.ids.add(el.id);
+    for (const name of el.classes) index.classes.add(name);
+  }
+  return index;
 }
 
 /** The author-facing warning for constructs `unsubscribeCssConstructs` found. */
@@ -1110,7 +1128,7 @@ function unsubscribeLinkElements(html: string, wanted: string): ElementInfo[] {
  * such as `@import` is not a rule we can attribute to one element, and imported font styles are
  * ordinary in e-mail, so it is left to the stated external-stylesheet limit rather than warned on.
  */
-function collectCssConstructs(css: string, path: ElementInfo[], out: Set<string>): void {
+function collectCssConstructs(css: string, index: ElementIndex, out: Set<string>): void {
   const text = stripCssComments(css);
   const atRules: string[] = [];
   const compoundCount = new Map<string, number>();
@@ -1132,7 +1150,7 @@ function collectCssConstructs(css: string, path: ElementInfo[], out: Set<string>
       const relevant = [...declarations].filter(([name]) => CSS_VISIBILITY_PROPERTIES.has(name));
       if (relevant.length > 0) {
         const selectors = splitTopLevel(prelude, ',');
-        const reaches = selectors.map((selector) => selectorReaches(selector, path));
+        const reaches = selectors.map((selector) => selectorReaches(selector, index));
         if (reaches.some(Boolean)) {
           // An at-rule or a selector the check cannot parse only matters when the rule could hide
           // the link. MJML's own responsive CSS sets `max-width:100%` inside @media on a column
@@ -1259,24 +1277,82 @@ function selectorCompounds(selector: string): string[] {
 
 /**
  * Whether a rule's selector could select the link or one of its ancestors. A selector the check
- * models is matched exactly. Otherwise the subject decides: a `.unrelated .promo` rule cannot reach
- * the link, while `a:hover` (subject `a`) can. When the subject names nothing at all (`:hover`,
- * `*`, `[data-x]`), it could match, so it counts.
+ * models is matched against the element index. Otherwise the subject decides: a
+ * `.unrelated .promo` rule cannot reach the link, while `a:hover` (subject `a`) can. When the
+ * subject names nothing at all (`:hover`, `*`, `[data-x]`), it could match, so it counts.
+ *
+ * CSS escapes are decoded first (`.foot\65 r` is `.footer`), because the selector's real subject
+ * decides whether it can reach. Only a selector whose escapes cannot be decoded falls back to
+ * "could reach".
  */
-function selectorReaches(selector: string, path: ElementInfo[]): boolean {
-  // A CSS escape can spell any tag, class or id (`.foot\65 r` is `.footer`). The warning scan does
-  // not decode escapes, so an escaped selector could reach the link and must be reported.
-  if (selector.includes('\\')) return true;
-  const simple = parseSimpleSelector(selector);
-  if (simple !== null) return path.some((el) => selectorMatches(simple, el));
-  const compounds = selectorCompounds(selector);
+function selectorReaches(selector: string, index: ElementIndex): boolean {
+  const decoded = decodeCssEscapes(selector);
+  if (decoded === null) return true;
+  const simple = parseSimpleSelector(decoded);
+  if (simple !== null) return simpleMatchesIndex(simple, index);
+  const compounds = selectorCompounds(decoded);
   const subject = compounds[compounds.length - 1];
   if (subject === undefined) return true;
   const { tag, id, classes } = compoundTokens(subject);
   if (tag === null && id === null && classes.length === 0) return true;
-  return path.some(
-    (el) => (tag === null || tag === el.name) && (id === null || id === el.id) && classes.every((name) => el.classes.has(name)),
-  );
+  return compoundMatchesIndex(tag, id, classes, index);
+}
+
+/** Whether a parsed simple selector names only tags, ids and classes the link path contains. */
+function simpleMatchesIndex(selector: HideSelector, index: ElementIndex): boolean {
+  return compoundMatchesIndex(selector.tag, selector.id, selector.classes, index);
+}
+
+/** The index test for a tag/id/class compound; null fields are unconstrained. */
+function compoundMatchesIndex(tag: string | null, id: string | null, classes: string[], index: ElementIndex): boolean {
+  if (tag !== null && !index.tags.has(tag)) return false;
+  if (id !== null && !index.ids.has(id)) return false;
+  return classes.every((name) => index.classes.has(name));
+}
+
+/**
+ * Decode CSS escapes in a selector, or null when one is malformed. A hex escape takes up to six
+ * digits and one optional whitespace terminator; `\` before another character quotes it; an escaped
+ * newline is a continuation. Hand-written so the scan is linear and no regex sees attacker input.
+ */
+function decodeCssEscapes(value: string): string | null {
+  if (!value.includes('\\')) return value;
+  let out = '';
+  let i = 0;
+  while (i < value.length) {
+    const ch = value[i]!;
+    if (ch !== '\\') {
+      out += ch;
+      i++;
+      continue;
+    }
+    i++;
+    if (i >= value.length) return null;
+    const next = value[i]!;
+    if (next === '\n' || next === '\f' || next === '\r') {
+      i++;
+      if (next === '\r' && value[i] === '\n') i++;
+      continue;
+    }
+    let hex = '';
+    while (hex.length < 6 && i < value.length && isHexDigit(value[i]!)) {
+      hex += value[i]!;
+      i++;
+    }
+    if (hex.length === 0) {
+      out += next;
+      i++;
+      continue;
+    }
+    if (i < value.length && isSpace(value[i]!)) i++;
+    const code = Number.parseInt(hex, 16);
+    out += code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? '\uFFFD' : String.fromCodePoint(code);
+  }
+  return out;
+}
+
+function isHexDigit(ch: string): boolean {
+  return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
 }
 
 /** A compound selector's tag, id and classes, ignoring attributes and pseudo-classes. */
@@ -1358,21 +1434,24 @@ function hasTopLevelCombinator(selector: string): boolean {
 
 /** Names the selector features the check does not model; a simple selector adds nothing. */
 function addSelectorConstructs(selector: string, out: Set<string>): void {
+  const decoded = decodeCssEscapes(selector);
+  const subject = decoded ?? selector;
   let named = false;
   if (selector.includes('\\')) {
     out.add('escaped selector');
     named = true;
   }
-  if (parseSimpleSelector(selector) !== null) return;
-  if (hasTopLevelCombinator(selector)) {
+  if (decoded !== null && parseSimpleSelector(decoded) !== null) return;
+  if (decoded === null) return;
+  if (hasTopLevelCombinator(subject)) {
     out.add('combinator');
     named = true;
   }
-  if (selector.includes('[')) {
+  if (subject.includes('[')) {
     out.add('attribute selector');
     named = true;
   }
-  if (selector.includes(':')) {
+  if (subject.includes(':')) {
     out.add('pseudo-class');
     named = true;
   }
