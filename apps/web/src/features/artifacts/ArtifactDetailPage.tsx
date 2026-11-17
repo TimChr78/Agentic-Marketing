@@ -578,15 +578,18 @@ export function ArtifactDetailPage({
           {saveError}
         </Alert>
       )}
-      {editorProblems.length > 0 && (
-        <Alert tone="warn" title="Finish this before saving or publishing" className="mb-4">
-          <ul className="list-disc pl-4">
-            {editorProblems.map((problem) => (
-              <li key={problem}>{problem}</li>
-            ))}
-          </ul>
-        </Alert>
-      )}
+      {/* A live region, so a screen reader hears that saving and publishing are now unavailable. */}
+      <div role="status">
+        {editorProblems.length > 0 && (
+          <Alert tone="warn" title="Finish this before saving or publishing" className="mb-4">
+            <ul className="list-disc pl-4">
+              {editorProblems.map((problem) => (
+                <li key={problem}>{problem}</li>
+              ))}
+            </ul>
+          </Alert>
+        )}
+      </div>
       {warnings.length > 0 && !dirty && (
         <Alert tone="warn" title="Fill these in before publishing" className="mb-4">
           <ul className="list-disc pl-4">
