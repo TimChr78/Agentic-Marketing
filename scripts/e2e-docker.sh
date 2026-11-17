@@ -82,7 +82,7 @@ die() {
 # not start one.
 command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
 command -v node >/dev/null 2>&1 || die "node is not on PATH"
-command -v pnpm >/dev/null 2>&1 || die "pnpm is not on PATH (try: corepack enable, or add ~/.local/bin)"
+command -v pnpm >/dev/null 2>&1 || die "pnpm is not on PATH (install the version in package.json: npm install -g --ignore-scripts pnpm@<packageManager version>)"
 command -v curl >/dev/null 2>&1 || die "curl is not on PATH"
 if ! command -v setsid >/dev/null 2>&1; then
   die "setsid is required to give the seeded server its own process group (install util-linux; the browser suite targets Linux, not macOS)"

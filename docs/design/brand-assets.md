@@ -46,8 +46,8 @@ title and description, and an operator can rewrite them at the proxy when they n
 ## Regenerating
 
 ```bash
-corepack pnpm install
-corepack pnpm exec tsx scripts/gen-brand-assets.ts
+pnpm install
+pnpm exec tsx scripts/gen-brand-assets.ts
 ```
 
 The script uses `@resvg/resvg-js` (already used by the asset library) to rasterise the SVGs and writes

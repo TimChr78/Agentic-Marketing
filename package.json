@@ -5,7 +5,7 @@
   "license": "MIT",
   "packageManager": "pnpm@10.28.0",
   "engines": {
-    "node": ">=22"
+    "node": ">=26"
   },
   "scripts": {
     "dev": "pnpm --filter @agentic-marketing/server dev",

@@ -112,7 +112,7 @@ async function build(runId: string): Promise<string> {
     bundle: true,
     platform: 'node',
     format: 'esm',
-    target: 'node22',
+    target: 'node26',
     external: ['pg-native', '@resvg/resvg-js'],
     // Bundled CommonJS (pg) calls require() for Node built-ins; in an ES module that needs a
     // module-local require. The banner's `import.meta.url` is the artifact, which is correct for

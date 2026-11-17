@@ -11,7 +11,7 @@ This table describes what the repository ships today. Roadmap items are marked *
 | Area | Choice | License | Alternatives considered | Why |
 |---|---|---|---|---|
 | Language | **TypeScript** (strict) | — | Go (hot path), Python | One language for server, UI, SDK, MCP, schemas; best MCP & AI SDK ecosystem. Hot path can be ported to Go later behind the same contracts if ever needed |
-| Runtime | **Node.js 22** (moving to 24 LTS in 0.15.0) | MIT | Bun, Deno | Most mature for long-running servers; the image is `node:22-slim` ([Dockerfile](../../Dockerfile)) and CI pins `node-version: 22` ([ci.yml](../../.github/workflows/ci.yml)). Bun remains an option for tooling |
+| Runtime | **Node.js 26 LTS** | MIT | Bun, Deno | Most mature for long-running servers; the image is `node:26-slim` ([Dockerfile](../../Dockerfile)) and CI pins `node-version: 26` ([ci.yml](../../.github/workflows/ci.yml)). Bun remains an option for tooling |
 | Monorepo | **pnpm workspaces** (no task runner) | MIT | Nx, Turborepo | Simple, fast, low config: one workspace file and pnpm scripts ([pnpm-workspace.yaml](../../pnpm-workspace.yaml)); there is no `turbo.json` |
 | HTTP framework | **Hono** + `@hono/zod-openapi` | MIT | Fastify, NestJS | Small, fast, zod → OpenAPI built in, also runs on edge runtimes (future edge `decide`) |
 | Schemas & validation | **Zod 4** | MIT | TypeBox, Valibot | One source for runtime validation, JSON Schema (MCP), OpenAPI, forms |
