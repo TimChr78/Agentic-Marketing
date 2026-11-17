@@ -152,6 +152,24 @@ describe('an authorization value behind a key or an arrow (#989 round 4)', () =>
     expect(idempotent('token: Bearer abc')).toBe('token: Bearer [redacted]');
   });
 
+  it('takes a mixed scheme chain as one value', () => {
+    // The restricted reader accepted `Digest` and read `Bearer` as its token, so the chain stopped
+    // one word early (#989 round 5).
+    expect(idempotent('token: Digest Bearer abc')).toBe('token: [redacted]');
+    expect(idempotent('token: Digest Basic abc')).toBe('token: [redacted]');
+    expect(idempotent('Proxy-Authorization: Digest Bearer abc')).toBe('Proxy-Authorization: [redacted]');
+    expect(idempotent('token: Bearer Digest abc')).toBe('token: [redacted]');
+    expect(idempotent('token: Digest Bearer Bearer abc')).toBe('token: [redacted]');
+    expect(idempotent('token => Digest Bearer abc')).toBe('token =[redacted]');
+  });
+
+  it('reads a scheme word in prose as a scheme, as agreed', () => {
+    // Accepted ambiguity (#989 round 5): after a credential key, a scheme word and the word behind
+    // it are a credential far more often than a sentence. 0.14.25 kept `expired`; it now goes with
+    // the value, and this expectation is the record of that choice.
+    expect(idempotent('token: Token expired at noon')).toBe('token: [redacted] at noon');
+  });
+
   it('leaves prose and an ordinary key alone', () => {
     for (const input of ['note: Digest abc', 'the Basic plan is fine', 'sent with Bearer abc'])
       expect(idempotent(input), input).toBe(input);

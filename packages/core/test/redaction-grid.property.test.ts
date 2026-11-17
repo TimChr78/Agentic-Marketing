@@ -193,22 +193,68 @@ function* schemeGrid(): Generator<Combo> {
         }
 }
 
+/**
+ * A keyed authorization value with a chain of one to three scheme words (#989 round 5). The release
+ * takes the second word of a mixed chain as the token, and the restricted reader used to stop one
+ * word early, so `token: Digest Bearer abc` kept `abc`.
+ */
+const SCHEME_CHAIN_WORDS = ['Bearer', 'Basic', 'Digest', 'Token', 'Negotiate'];
+const SCHEME_CHAIN_KEYS = [
+  'Authorization',
+  'Proxy-Authorization',
+  'token',
+  'authToken',
+  'password',
+  'apiSecret',
+  'X-Auth-Token',
+  'client_secret',
+];
+const SCHEME_CHAIN_SEPARATORS = [': ', '=', ' => '];
+const SCHEME_TOKENS: [string, (planted: string) => string][] = [
+  ['short', (planted) => planted],
+  ['single quoted', (planted) => `'${planted}'`],
+  ['double quoted', (planted) => `"${planted}"`],
+];
+
+function* schemeChainGrid(): Generator<Combo> {
+  let ordinal = 0;
+  for (const key of SCHEME_CHAIN_KEYS)
+    for (const separator of SCHEME_CHAIN_SEPARATORS)
+      for (const first of SCHEME_CHAIN_WORDS)
+        for (const second of ['', ...SCHEME_CHAIN_WORDS])
+          for (const third of ['', ...SCHEME_CHAIN_WORDS])
+            for (const [tokenName, token] of SCHEME_TOKENS) {
+              // A chain has no gaps: a third word needs a second.
+              if (second === '' && third !== '') continue;
+              ordinal += 1;
+              // Five characters, unique per case, below the released scheme rule's six.
+              const secret = `c${1_000 + ordinal}`;
+              const chain = [first, second, third].filter(Boolean).join(' ');
+              yield {
+                name: `chain ${key}${JSON.stringify(separator)} ${chain} ${tokenName}`,
+                input: pair(key, separator, `${chain} ${token(secret)}`),
+                secret,
+              };
+            }
+}
+
 describe('the credential shapes on a grid (#989 round 2)', () => {
-  it('covers 7,776 key/separator/value/context combinations, 2,000 PEM, 240 keyed and 6,048 scheme ones', () => {
+  it('covers 7,776 pairs, 2,000 PEM, 240 keyed PEM, 6,048 schemes and 11,160 chains', () => {
     expect([...grid()]).toHaveLength(7_776);
     expect([...pemGrid()]).toHaveLength(2_000);
     expect([...keyedPemGrid()]).toHaveLength(240);
     expect([...schemeGrid()]).toHaveLength(6_048);
+    expect([...schemeChainGrid()]).toHaveLength(11_160);
   });
 
   it('never leaves a planted value', () => {
     const survivors: string[] = [];
     let total = 0;
-    for (const { name, input, secret } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid()]) {
+    for (const { name, input, secret } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid(), ...schemeChainGrid()]) {
       total += 1;
       if (secret !== '' && redactCredentials(input).includes(secret)) survivors.push(`${secret} kept in ${name}`);
     }
-    expect(total).toBe(16_064);
+    expect(total).toBe(27_224);
     expect(survivors.slice(0, 10)).toEqual([]);
     expect(survivors).toHaveLength(0);
     // The base pipeline never had to be distrusted for any of them (#989 review).
@@ -217,7 +263,7 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
 
   it('is idempotent on every combination', () => {
     const unstable: string[] = [];
-    for (const { name, input } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid()]) {
+    for (const { name, input } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid(), ...schemeChainGrid()]) {
       const once = redactCredentials(input);
       if (redactCredentials(once) !== once) unstable.push(name);
     }
@@ -227,7 +273,7 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
 
   it('keeps the instrumented pipeline byte-identical to 0.14.25 on every combination', () => {
     const differences: string[] = [];
-    for (const { name, input } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid()]) {
+    for (const { name, input } of [...grid(), ...pemGrid(), ...keyedPemGrid(), ...schemeGrid(), ...schemeChainGrid()]) {
       const expected = redact01425(input);
       if (releasedRedaction(input) !== expected) differences.push(name);
     }
@@ -247,6 +293,7 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
     for (const [index, combo] of [...grid()].entries()) if (index % 1_000 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...pemGrid()].entries()) if (index % 400 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...schemeGrid()].entries()) if (index % 600 === 0) units.push([combo.name, combo.input]);
+    for (const [index, combo] of [...schemeChainGrid()].entries()) if (index % 1_200 === 0) units.push([combo.name, combo.input]);
     for (const [name, input] of units) {
       const unit = `${input}\n`;
       const text = unit.repeat(Math.ceil(MB / unit.length));

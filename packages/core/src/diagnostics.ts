@@ -1608,15 +1608,24 @@ function schemeValueEnd(text: string, start: number, schemes: ReadonlySet<string
 
 /**
  * A value behind a credential key that starts with a scheme the released pass leaves in part: any
- * scheme other than `bearer`/`basic` (`token: Digest abc`), or a chain of them, which the released
- * scheme rule mangles by taking the second word as the token (`token: Bearer Bearer abc` leaves
- * `abc`). A single `bearer`/`basic` word keeps the released shape.
+ * scheme other than `bearer`/`basic` (`token: Digest abc`), or a chain of two or more scheme words,
+ * which the released scheme rule mangles by taking the second word as the token
+ * (`token: Digest Bearer abc` and `token: Bearer Bearer abc` both leave `abc`).
+ *
+ * The chain reader has to run first: the restricted one accepts `Digest` and then reads the word
+ * behind it as the token, so a mixed chain would stop at `Bearer` (round-5 review). A single
+ * `bearer`/`basic` word keeps the released shape.
+ *
+ * An authorization value is read by its first scheme word, so a message that uses one of these words
+ * as ordinary prose after a credential key loses the next word too (`token: Token expired at noon`
+ * becomes `token: [redacted] at noon`); the release kept `expired`. That is accepted: after
+ * `token:` a scheme word and a token are a credential far more often than a sentence.
  */
 function keyedSchemeValueSpan(text: string, valueStart: number): ValueSpan | null {
-  const other = schemeValueEnd(text, valueStart, AUTH_SCHEMES);
-  if (other >= 0) return { start: valueStart, end: other };
   const chain = schemeValueEnd(text, valueStart, ARROW_SCHEMES, 2);
-  return chain < 0 ? null : { start: valueStart, end: chain };
+  if (chain >= 0) return { start: valueStart, end: chain };
+  const other = schemeValueEnd(text, valueStart, AUTH_SCHEMES);
+  return other < 0 ? null : { start: valueStart, end: other };
 }
 
 /**

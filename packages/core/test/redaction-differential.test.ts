@@ -584,6 +584,20 @@ function* originalShapes(): Generator<Generated> {
     yield { input: `${build(secret)} ${sentinel()}`, name: `shape ${name}`, secrets: [secret] };
   }
 
+  // The review's round-5 inputs: a mixed scheme chain behind a key and an arrow, and a scheme word
+  // used as prose, which is read as a scheme (#989 review).
+  for (const [name, build] of [
+    ['mixed chain digest bearer', (secret: string) => `token: Digest Bearer ${secret}`],
+    ['mixed chain digest basic', (secret: string) => `token: Digest Basic ${secret}`],
+    ['mixed chain proxy authorization', (secret: string) => `Proxy-Authorization: Digest Bearer ${secret}`],
+    ['mixed chain arrow', (secret: string) => `token => Digest Bearer ${secret}`],
+    ['scheme word in prose', (secret: string) => `token: Token expired${secret} at noon`],
+  ] as const) {
+    markerIndex += 1;
+    const secret = `p${markerIndex}`;
+    yield { input: `${build(secret)} ${sentinel()}`, name: `shape ${name}`, secrets: [secret] };
+  }
+
   // The review's round-2 inputs: an arrow whose value starts a typographic pair, a shape after a
   // long-key pair, and a marker right before a block (#989 review).
   {
