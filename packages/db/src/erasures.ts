@@ -253,6 +253,9 @@ async function eraseFamily(client: pg.Client, workspaceId: string, profileIds: s
       params,
     );
   await client.query('DELETE FROM journey_participants WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
+  // The journey hook's per-event markers name the person too (an event id can carry an address), and
+  // a restored snapshot brings them back with the person (#1011 review).
+  await client.query('DELETE FROM journey_processed_events WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM segment_memberships WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM consent_records WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM profile_merges WHERE workspace_id = $1 AND (from_id = ANY($2) OR into_id = ANY($2))', params);

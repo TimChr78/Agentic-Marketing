@@ -35,6 +35,16 @@ export interface JourneyDeps {
 
 const graphs = new Map<string, Graph>();
 
+/** How many due candidates one sweep may examine, per unit of its batch. */
+const SCAN_LIMIT_FACTOR = 10;
+/**
+ * Where each workspace's last bounded scan stopped, so the next sweep continues past a run of
+ * people another transaction is writing instead of re-examining them (and never walks a whole
+ * workspace backlog in one round). A scan that reached the end of the due set, or filled its batch,
+ * clears its entry and starts from the oldest again.
+ */
+const scanCursors = new Map<string, { dueAt: Date; id: string }>();
+
 /** The compiled graph of a journey version (versions are immutable, so it is cached forever). */
 async function graphOf(tx: Tx, journeyId: string, version: number): Promise<Graph> {
   const key = `${journeyId}@${version}`;
@@ -83,8 +93,8 @@ export async function enterJourneys(
   tx: Tx,
   workspaceId: string,
   resolved: ResolvedEvent[],
-): Promise<{ entered: number; holdout: JourneyEvent[]; enrolledEvents: string[] }> {
-  if (!resolved.length) return { entered: 0, holdout: [], enrolledEvents: [] };
+): Promise<{ entered: number; holdout: JourneyEvent[]; enrolled: { eventId: string; profileId: string }[] }> {
+  if (!resolved.length) return { entered: 0, holdout: [], enrolled: [] };
   // Follow a merge that committed after the batch. SQL only: nothing personal is decrypted here.
   const canonical = await canonicalPeople(
     tx,
@@ -99,9 +109,10 @@ export async function enterJourneys(
     if (c.content.controlGroup) for (const m of c.content.members) campaignOf.set(m.artifactId, c);
   let entered = 0;
   const holdout: JourneyEvent[] = [];
-  // The events whose processing inserted a participant. They get a durable processed marker, so a
-  // redelivery cannot enrol the same event twice (#1011 review).
-  const enrolledEvents = new Set<string>();
+  // The events whose processing inserted a participant, with the person they enrolled. They get a
+  // durable processed marker, so a redelivery cannot enrol the same event twice (#1011 review), and
+  // the marker names the person so an erasure removes it (an event id can carry an address).
+  const enrolled = new Map<string, string>();
   for (const { event: e, profileId: resolvedId } of resolved) {
     const profileId = canonical.get(resolvedId) ?? resolvedId;
     for (const j of journeys) {
@@ -176,7 +187,7 @@ export async function enterJourneys(
         continue;
       }
       entered += res.length;
-      enrolledEvents.add(e.messageId);
+      enrolled.set(e.messageId, profileId);
       if (assigned?.created)
         holdout.push({
           workspaceId,
@@ -194,7 +205,7 @@ export async function enterJourneys(
         });
     }
   }
-  return { entered, holdout, enrolledEvents: [...enrolledEvents] };
+  return { entered, holdout, enrolled: [...enrolled].map(([eventId, profileId]) => ({ eventId, profileId })) };
 }
 
 /**
@@ -238,12 +249,12 @@ async function freshEvents(tx: Tx, workspaceId: string, resolved: ResolvedEvent[
 }
 
 /** Records the events whose enrolment committed, in that same transaction. */
-async function markProcessed(tx: Tx, workspaceId: string, eventIds: string[]): Promise<void> {
-  if (!eventIds.length) return;
+async function markProcessed(tx: Tx, workspaceId: string, enrolled: { eventId: string; profileId: string }[]): Promise<void> {
+  if (!enrolled.length) return;
   await tx.execute(sql`
-    INSERT INTO journey_processed_events (workspace_id, event_id)
+    INSERT INTO journey_processed_events (workspace_id, event_id, profile_id)
     VALUES ${sql.join(
-      eventIds.map((id) => sql`(${workspaceId}, ${id})`),
+      enrolled.map((e) => sql`(${workspaceId}, ${e.eventId}, ${e.profileId})`),
       sql`, `,
     )}
     ON CONFLICT DO NOTHING`);
@@ -314,7 +325,7 @@ export function journeyHook(db: Db, deps: JourneyDeps) {
         const entered = await enterJourneys(tx, workspaceId, fresh);
         holdout = entered.holdout;
         await wakeWaiters(tx, workspaceId, fresh);
-        await markProcessed(tx, workspaceId, entered.enrolledEvents);
+        await markProcessed(tx, workspaceId, entered.enrolled);
       }),
     );
     // Wait-until conditions may reach ClickHouse, so this recheck runs in its own transaction,
@@ -630,27 +641,46 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
       // not spend the batch, and due time — not the profile id — decides who moves first (#1011
       // review).
       const claimable: string[] = [];
-      let after: { dueAt: Date; id: string } | undefined;
-      while (claimable.length < batch) {
-        const want = batch - claimable.length;
+      const scanLimit = Math.max(1, batch * SCAN_LIMIT_FACTOR);
+      let after = scanCursors.get(ws);
+      let scanned = 0;
+      let reachedEnd = false;
+      while (claimable.length < batch && scanned < scanLimit) {
+        const want = Math.min(batch - claimable.length, scanLimit - scanned);
         const page = await tx.execute<{ id: string; profile_id: string; due_at: Date }>(sql`
           SELECT id, profile_id, due_at FROM journey_participants
           WHERE status IN ('ready', 'waiting') AND due_at <= ${now()}
             ${after ? sql`AND (due_at, id) > (${after.dueAt}::timestamptz, ${after.id}::bigint)` : sql``}
           ORDER BY due_at, id LIMIT ${want}`);
-        if (!page.rows.length) break;
+        if (!page.rows.length) {
+          reachedEnd = true;
+          break;
+        }
         const last = page.rows[page.rows.length - 1]!;
         after = { dueAt: last.due_at, id: last.id };
+        scanned += page.rows.length;
         const canonical = await canonicalPeople(
           tx,
           ws,
           page.rows.map((r) => r.profile_id),
         );
         const roots = [...new Set(page.rows.map((r) => canonical.get(r.profile_id) ?? r.profile_id))];
+        // The lock carries `merged_into IS NULL`, so a merge that committed after the lookup above
+        // leaves nothing locked for that person: the candidate is deferred to the next sweep instead
+        // of claiming a participant row whose survivor this transaction does not hold.
         const locked = new Set(await lockProfileRows(tx, ws, roots, { skipLocked: true }));
-        for (const row of page.rows) if (locked.has(canonical.get(row.profile_id) ?? row.profile_id)) claimable.push(row.id);
-        if (page.rows.length < want) break;
+        for (const row of page.rows) {
+          const root = canonical.get(row.profile_id) ?? row.profile_id;
+          if (locked.has(root)) claimable.push(row.id);
+        }
+        if (page.rows.length < want) {
+          reachedEnd = true;
+          break;
+        }
       }
+      if (reachedEnd || claimable.length >= batch) scanCursors.delete(ws);
+      else if (after) scanCursors.set(ws, after);
+      if (scanCursors.size > 10_000) scanCursors.clear();
       if (!claimable.length) return 0;
       const due = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants

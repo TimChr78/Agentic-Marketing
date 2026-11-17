@@ -232,7 +232,9 @@ export async function finishIn(
   // same profile lock first, and the profile row's foreign key cascades the score deletion.
   let waiting = true;
   if (c.kind === 'score') {
-    const lockedProfile = c.profileId ? await lockProfileRows(tx, c.workspaceId, [c.profileId]) : [];
+    // The call keeps its own profile id even when a merge has folded it away (the score is stored
+    // under it), so lock that row whether or not it is the person today — before the participant.
+    const lockedProfile = c.profileId ? await lockProfileRows(tx, c.workspaceId, [c.profileId], { includeMerged: true }) : [];
     const lockedParticipant = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants
         WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'

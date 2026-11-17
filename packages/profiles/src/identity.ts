@@ -197,23 +197,34 @@ export async function withIdentityLocks<T>(tx: Tx, workspaceIds: Iterable<string
 }
 
 /**
- * Locks profile rows for the rest of the transaction, in ascending id order, and returns the ids that
- * were locked. This is the row half of the order documented above: profile rows (ascending) before
- * participant rows. A caller that must not wait for anyone — the journey sweep, which holds claimed
- * participant rows — passes `skipLocked` and treats a missing id as "someone else is writing this
- * person right now, try again next sweep".
+ * Locks the person's profile rows for the rest of the transaction, in ascending id order, and returns
+ * the ids that were locked. This is the row half of the order documented above: profile rows
+ * (ascending) before participant rows. A caller that must not wait for anyone — the journey sweep,
+ * which holds claimed participant rows — passes `skipLocked` and treats a missing id as "someone else
+ * is writing this person right now, try again next sweep".
+ *
+ * Only rows that are the person *today* are locked (`merged_into IS NULL`): a caller working from a
+ * lookup that a merge has since overtaken would otherwise hold a folded-away row while writing the
+ * survivor it did not lock (#1011 review). The condition is part of the locking statement, so
+ * PostgreSQL rechecks it on the locked row version and a merge that commits between the caller's
+ * lookup and this call leaves nothing to lock.
+ *
+ * `includeMerged` locks the given rows whether or not they are still the person today. An erasure
+ * needs every family row (it deletes them) and a score finalisation keeps its call's exact profile id;
+ * both must take every row they may later write before they touch a participant row.
  */
 export async function lockProfileRows(
   tx: Tx,
   workspaceId: string,
   profileIds: Iterable<string>,
-  opts: { skipLocked?: boolean } = {},
+  opts: { skipLocked?: boolean; includeMerged?: boolean } = {},
 ): Promise<string[]> {
   const ids = [...new Set(profileIds)].sort();
   if (!ids.length) return [];
   const res = await tx.execute<{ id: string }>(sql`
     SELECT id FROM profiles
     WHERE workspace_id = ${workspaceId} AND id = ANY(${sql.param(ids)}::text[])
+      ${opts.includeMerged ? sql`` : sql`AND merged_into IS NULL`}
     ORDER BY id
     ${opts.skipLocked ? sql.raw('FOR NO KEY UPDATE SKIP LOCKED') : sql.raw('FOR NO KEY UPDATE')}`);
   return res.rows.map((r) => r.id);

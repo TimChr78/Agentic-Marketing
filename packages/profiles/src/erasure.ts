@@ -82,7 +82,7 @@ export async function removeProfiles(
   // Profile rows before the participant rows this deletes, the shared order (identity.ts). A score
   // finalisation (#1011 review) or a journey step takes the same profile lock first, so neither can
   // hold a participant row this deletion wants while waiting for a profile row it holds.
-  await lockProfileRows(tx, workspaceId, family);
+  await lockProfileRows(tx, workspaceId, family, { includeMerged: true });
   const anonymousIds = identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value);
   const userIds = identifiers.filter((i) => i.type === 'user_id').map((i) => i.value);
   if (anonymousIds.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.anonymousId, anonymousIds));
@@ -90,6 +90,9 @@ export async function removeProfiles(
   await tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
   // Out of every journey: no later step runs, and the participant's context (the trigger event) goes too.
   await tx.delete(schema.journeyParticipants).where(inArray(schema.journeyParticipants.profileId, family));
+  // The journey hook's per-event markers are the person's too: an event id is caller-supplied and can
+  // name them, and a marker sitting on a merged-away id comes with the family (#1011 review).
+  await tx.delete(schema.journeyProcessedEvents).where(inArray(schema.journeyProcessedEvents.profileId, family));
   // Out of every segment's materialised membership; static list rows cascade with the profile below.
   await tx.delete(schema.segmentMemberships).where(inArray(schema.segmentMemberships.profileId, family));
   const suppress = opts.suppress ? identifiers.filter((i) => i.type === 'email' || i.type === 'phone') : [];

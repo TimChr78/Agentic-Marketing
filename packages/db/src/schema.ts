@@ -929,6 +929,8 @@ export const journeyProcessedEvents = pgTable(
   {
     workspaceId: uuid('workspace_id').notNull(),
     eventId: text('event_id').notNull(),
+    /** The person the event enrolled; an erasure removes their markers (the id may name them). */
+    profileId: text('profile_id').notNull(),
     processedAt: ts('processed_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.eventId] })],

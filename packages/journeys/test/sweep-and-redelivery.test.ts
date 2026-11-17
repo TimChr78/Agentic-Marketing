@@ -1,8 +1,8 @@
-import { DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
+import { canonicalPeople, DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
 import { newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import type { BusEvent, EventStore } from '@agentic-marketing/events';
-import { applyEvents, personCrypto, profileIdsForBatch, type ResolvedEvent } from '@agentic-marketing/profiles';
+import { applyEvents, lockProfileRows, personCrypto, profileIdsForBatch, type ResolvedEvent } from '@agentic-marketing/profiles';
 import { localKeyProvider, prepareKeys, withPreparedKeys } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
@@ -12,7 +12,9 @@ import { journeyHook, sweep } from '../src/runtime';
 //   - a batch of one must not be defeated by the first candidate's locked profile row, and due time
 //     decides which person moves first (not the profile id);
 //   - an event that is delivered again must not enrol the same participant twice after it left the
-//     journey, and must not satisfy a wait it created itself.
+//     journey, and must not satisfy a wait it created itself;
+//   - a person a merge folded away between the sweep's lookup and its profile lock is deferred, never
+//     locked and claimed (which would write the survivor without holding it).
 
 const MASTER_KEY = Buffer.alloc(32, 45).toString('base64');
 
@@ -150,6 +152,14 @@ const participant = async (id: number) => {
   return rows[0];
 };
 
+const mergedInto = async (profileId: string): Promise<string | null> => {
+  const { rows } = await d.db.admin.query<{ merged_into: string | null }>(
+    'SELECT merged_into FROM profiles WHERE workspace_id = $1 AND id = $2',
+    [ws, profileId],
+  );
+  return rows[0]?.merged_into ?? null;
+};
+
 const participantsOf = async (journeyId: string) => {
   const { rows } = await d.db.admin.query<{ status: string; matched: boolean; node: string }>(
     'SELECT status, matched, node FROM journey_participants WHERE workspace_id = $1 AND journey_id = $2 ORDER BY id',
@@ -241,5 +251,49 @@ describe.skipIf(!hasTestDatabase())('a journey event is applied once (#1011 revi
     await sweep(d.db, deps());
 
     expect(await participantsOf(journeyId)).toHaveLength(1);
+  }, 120_000);
+
+  it('records the person and the caller-supplied event id on the marker', async () => {
+    const person = newId('prf');
+    await seedProfile(person, { anonymous: `anon-${person}` });
+    await signupJourney('Signup Marker');
+    // An event id is caller-supplied and can name the person: it must not outlive them (see the
+    // erasure tests), and it must name who the event enrolled.
+    const messageId = 'customer@example.test:purchase-1';
+    const resolved = await runBatch([event({ anonymousId: `anon-${person}`, name: 'Signup Marker', messageId })]);
+
+    await journeyHook(d.db, deps())(ws, resolved);
+
+    const { rows } = await d.db.admin.query<{ profile_id: string }>(
+      'SELECT profile_id FROM journey_processed_events WHERE workspace_id = $1 AND event_id = $2',
+      [ws, messageId],
+    );
+    expect(rows).toEqual([{ profile_id: person }]);
+  }, 120_000);
+});
+
+describe.skipIf(!hasTestDatabase())('the sweep never locks a folded-away person (#1011 review)', () => {
+  it('defers a person a merge folded away after the sweep looked them up', async () => {
+    const folded = newId('prf');
+    const survivor = newId('prf');
+    await seedProfile(survivor, { user: `user-${survivor}` });
+    await seedProfile(folded, { anonymous: `anon-${folded}` });
+    // The sweep's canonical lookup runs now: `folded` is the person today.
+    const looked = await d.db.withWorkspace(ws, (tx) => canonicalPeople(tx, ws, [folded]));
+    expect(looked.get(folded)).toBe(folded);
+
+    // A merge commits between that lookup and the profile lock.
+    await runBatch([event({ anonymousId: `anon-${folded}`, userId: `user-${survivor}` })]);
+    expect(await mergedInto(folded)).toBe(survivor);
+
+    // The lock must not hand the folded-away row back. Claiming a participant row with it would
+    // write the survivor's profile without holding the survivor, which is the cycle with a merge.
+    const stale = await d.db.withWorkspace(ws, (tx) => lockProfileRows(tx, ws, [...new Set(looked.values())]));
+    expect(stale).toEqual([]);
+
+    // The next sweep's lookup finds the survivor, and that row is locked.
+    const next = await d.db.withWorkspace(ws, (tx) => canonicalPeople(tx, ws, [folded]));
+    expect(next.get(folded)).toBe(survivor);
+    expect(await d.db.withWorkspace(ws, (tx) => lockProfileRows(tx, ws, [...new Set(next.values())]))).toEqual([survivor]);
   }, 120_000);
 });
