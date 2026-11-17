@@ -1,4 +1,5 @@
 import { newId } from '@agentic-marketing/core';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Db, Tx } from './pool';
 import * as schema from './schema';
 
@@ -27,6 +28,8 @@ export interface OutboxEntry {
   payload: Record<string, unknown>;
   /** Stable id of the action, unique per workspace (a redelivery must not enqueue a second row). */
   operationKey: string;
+  /** Broadcast or journey the events belong to, for a publication barrier. */
+  subjectRef?: string;
   /** Overrides the generated row id (tests and imports that already have one). */
   id?: string;
 }
@@ -81,6 +84,7 @@ export async function enqueueOutbox(tx: Tx, workspaceId: string, entry: OutboxEn
       kind: entry.kind,
       payload: entry.payload,
       operationKey: entry.operationKey,
+      subjectRef: entry.subjectRef ?? null,
     })
     .onConflictDoNothing({ target: [schema.outbox.workspaceId, schema.outbox.operationKey] })
     .returning({ id: schema.outbox.id });
@@ -203,6 +207,26 @@ export async function failOutbox(
     [claim.workspaceId, claim.id, claim.claimToken, maxAttempts, retrySeconds, sanitiseOutboxError(err), permanent],
   );
   return rows[0]?.state ?? 'stale';
+}
+
+/**
+ * Whether publication for one broadcast or journey is complete. A decision that depends on
+ * ClickHouse events (the canary check, the subject-test winner) must wait while a row is pending or
+ * being delivered; a failed row must not block it forever, so the caller proceeds but can warn.
+ */
+export async function outboxPublicationBarrier(
+  tx: Tx,
+  workspaceId: string,
+  subjectRef: string,
+): Promise<{ outstanding: number; failed: number }> {
+  const [row] = await tx
+    .select({
+      outstanding: sql<number>`count(*) FILTER (WHERE ${schema.outbox.state} IN ('pending', 'delivering'))::int`,
+      failed: sql<number>`count(*) FILTER (WHERE ${schema.outbox.state} = 'failed')::int`,
+    })
+    .from(schema.outbox)
+    .where(and(eq(schema.outbox.workspaceId, workspaceId), eq(schema.outbox.subjectRef, subjectRef)));
+  return { outstanding: Number(row?.outstanding ?? 0), failed: Number(row?.failed ?? 0) };
 }
 
 /** Removes delivered rows older than the retention window. Failed rows stay for inspection. */

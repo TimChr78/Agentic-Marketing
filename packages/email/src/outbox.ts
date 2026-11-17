@@ -14,9 +14,13 @@ import { eq } from 'drizzle-orm';
 export async function enqueueMessageEvents(tx: Tx, workspaceId: string, events: MessageEvent[]): Promise<void> {
   if (!events.length) return;
   const identities = events.map((e) => `${e.messageId}:${e.type}:${e.eventId}`).sort();
+  // The broadcast or journey these events belong to. A decision that reads ClickHouse (canary,
+  // subject test) waits while this subject still has an undelivered row.
+  const subjects = [...new Set(events.map((e) => e.journeyId).filter((id): id is string => !!id))];
   await enqueueOutbox(tx, workspaceId, {
     kind: 'message_event',
     operationKey: `message-event:${hashValue({ events: identities })}`,
+    ...(subjects.length === 1 ? { subjectRef: subjects[0] } : {}),
     payload: { events },
   });
 }

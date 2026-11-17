@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS outbox (
   kind text NOT NULL,
   payload jsonb NOT NULL,
   operation_key text NOT NULL,
+  -- The broadcast or journey these events belong to, so a decision can tell whether its own
+  -- publication is still pending without scanning the payload.
+  subject_ref text,
   state text NOT NULL DEFAULT 'pending'
     CHECK (state IN ('pending', 'delivering', 'delivered', 'failed')),
   attempts integer NOT NULL DEFAULT 0,
@@ -41,6 +44,9 @@ CREATE INDEX IF NOT EXISTS outbox_ready ON outbox (next_attempt_at, created_at)
   WHERE state IN ('pending', 'delivering');
 -- Delivered rows are pruned long after the work settled; this keeps the prune cheap.
 CREATE INDEX IF NOT EXISTS outbox_delivered ON outbox (delivered_at) WHERE state = 'delivered';
+-- The publication barrier asks whether events for one broadcast/journey are still undelivered.
+CREATE INDEX IF NOT EXISTS outbox_undelivered_subject ON outbox (subject_ref)
+  WHERE state IN ('pending', 'delivering');
 
 ALTER TABLE outbox ENABLE ROW LEVEL SECURITY;
 ALTER TABLE outbox FORCE ROW LEVEL SECURITY;
@@ -55,6 +61,8 @@ COMMENT ON TABLE outbox IS
   'Durable queue of post-commit work a tenant transaction implies (#978 part 2); delivered rows are pruned.';
 COMMENT ON COLUMN outbox.operation_key IS
   'Stable id of the action this row delivers; unique per workspace so a redelivery enqueues nothing new.';
+COMMENT ON COLUMN outbox.subject_ref IS
+  'Broadcast or journey whose events this row publishes; a decision defers while its rows are undelivered.';
 COMMENT ON COLUMN outbox.claim_token IS
   'Token of the current claim; ack and fail only apply while it matches, fencing an expired claim.';
 COMMENT ON COLUMN outbox.failure_kind IS

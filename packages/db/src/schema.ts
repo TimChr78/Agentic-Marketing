@@ -554,6 +554,7 @@ export const outbox = pgTable(
     kind: text('kind').notNull(),
     payload: jsonb('payload').$type<Record<string, unknown>>().notNull(),
     operationKey: text('operation_key').notNull(),
+    subjectRef: text('subject_ref'),
     state: text('state').$type<OutboxState>().notNull().default('pending'),
     attempts: integer('attempts').notNull().default(0),
     nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),

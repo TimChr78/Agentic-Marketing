@@ -1,5 +1,5 @@
-import { canaryAssignment } from '@agentic-marketing/audience';
-import { outbox } from '@agentic-marketing/email';
+import { canaryAssignment, dispatchOutboxOnce } from '@agentic-marketing/audience';
+import { enqueueMessageEvents, outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { eventually, startTestServer, testPort, type User } from './harness';
@@ -271,6 +271,109 @@ describe('staged send', () => {
     const all = await messagesOf(id);
     expect(all.length).toBe(PEOPLE);
     expect(all.every((m) => m.profile_id)).toBe(true);
+  }, 60_000);
+
+  it('defers the canary check until its delivery events are published', async () => {
+    const id = await broadcast({
+      template,
+      segment,
+      stagedSend: { canaryPercent: 20, wait: 'PT2H', minCanary: 5, maxUnsubscribeRate: 0.02 },
+    });
+    await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
+      20_000,
+    );
+    const canary = await canaryMessages(id, 20);
+    await waitForCanarySent(id, 20, 5);
+
+    // The unsubscribes are committed through the outbox (#978 part 2), so ClickHouse does not see
+    // them yet. The decision must wait for publication rather than read a clean canary.
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      enqueueMessageEvents(
+        tx,
+        ws,
+        canary.slice(0, 2).map((m, i) => event(m, 'unsubscribed', id, i)),
+      ),
+    );
+    // Hold the row out of the dispatcher's claim window, so the test observes the deferral rather
+    // than racing publication.
+    await t.srv.db.admin.query(
+      `UPDATE outbox SET next_attempt_at = now() + interval '1 hour'
+        WHERE workspace_id = $1 AND subject_ref = $2 AND state = 'pending'`,
+      [ws, id],
+    );
+    await checkNow(id);
+
+    // Deferred: the run parks on the check again instead of stopping or releasing the rest.
+    await eventually(
+      async () => {
+        const { rows } = await t.srv.db.admin.query<{ lease_until: Date | null }>(
+          'SELECT lease_until FROM broadcast_runs WHERE workspace_id = $1 AND broadcast_id = $2',
+          [ws, id],
+        );
+        return rows[0]?.lease_until && rows[0].lease_until.getTime() > Date.now();
+      },
+      Boolean,
+      20_000,
+    );
+    expect((await status(id)).stage?.stage).toBe('canary_waiting');
+    expect((await status(id)).run.status).toBe('running');
+    expect((await messagesOf(id)).length).toBe(canary.length);
+
+    // Publish, then the same check sees the unsubscribes and stops the send.
+    await t.srv.db.admin.query(
+      `UPDATE outbox SET next_attempt_at = now() - interval '1 second'
+        WHERE workspace_id = $1 AND subject_ref = $2`,
+      [ws, id],
+    );
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+    await checkNow(id);
+    const stopped = await eventually(
+      () => status(id),
+      (s) => s.run.status === 'stopped' && s.stage?.stage === 'stopped',
+      30_000,
+    );
+    expect(stopped.stage?.stopReason).toContain('unsubscribe rate');
+    expect(stopped.stage?.unsubscribed).toBeGreaterThanOrEqual(2);
+  }, 60_000);
+
+  it('never counts test sends in the canary', async () => {
+    const id = await broadcast({
+      template,
+      segment,
+      stagedSend: { canaryPercent: 20, wait: 'PT2H', minCanary: 5 },
+    });
+    await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
+      20_000,
+    );
+    const canary = await canaryMessages(id, 20);
+    await waitForCanarySent(id, 20, 5);
+
+    // A test send assigned to the same broadcast and canary share, still queued for a future
+    // window: if the canary sizing counted it, the check would wait for it forever.
+    const testId = `msg_testcanary_${Date.now()}`;
+    await t.srv.db.admin.query(
+      `INSERT INTO messages (workspace_id, id, idempotency_key, channel, profile_id, purpose, template_id, template_version,
+                             journey_id, status, test, not_before)
+       VALUES ($1, $2, $2, 'email', $3, 'marketing_email', $4, 1, $5, 'queued', true, now() + interval '1 day')`,
+      [ws, testId, canary[0]!.profile_id, template, id],
+    );
+    await checkNow(id);
+
+    const done = await eventually(
+      () => status(id),
+      (s) => s.run.status === 'done' && s.stage?.stage === 'done',
+      30_000,
+    );
+    expect(done.stage?.checkSkipped).toBe(false);
+    expect(done.stage?.bounceRate).toBe(0);
+    // The real audience went out once; the test row is not part of it.
+    const all = await messagesOf(id);
+    expect(all.filter((m) => m.id !== testId)).toHaveLength(PEOPLE);
+    expect(all.find((m) => m.id === testId)?.status).toBe('queued');
   }, 60_000);
 
   it('stops when every canary message failed, and a person can still send the rest', async () => {

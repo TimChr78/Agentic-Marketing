@@ -20,7 +20,7 @@ import {
   zonedInstant,
   zonedParts,
 } from '@agentic-marketing/core';
-import { type Db, schema, type Tx } from '@agentic-marketing/db';
+import { type Db, outboxPublicationBarrier, schema, type Tx } from '@agentic-marketing/db';
 import {
   checkPushRecipient,
   checkRecipient,
@@ -60,6 +60,8 @@ const LEASE_MS = 120_000;
 // When some canary messages are only waiting for the delivery worker (nothing defers them), the
 // check looks again shortly instead of judging a partial canary (#285).
 const CANARY_RETRY_MS = 60_000;
+/** A publication barrier retries quickly: the dispatcher usually publishes within a second. */
+const PUBLICATION_RETRY_MS = 2_000;
 // A variant needs this many sends before its rate means anything; below it the test has no winner.
 const MIN_VARIANT_SENDS = 20;
 
@@ -658,7 +660,7 @@ async function variantResults(
   const rows = await tx
     .select({ id: schema.messages.id, variant: schema.messages.variant, status: schema.messages.status })
     .from(schema.messages)
-    .where(and(eq(schema.messages.journeyId, broadcastId), isNotNull(schema.messages.variant)));
+    .where(and(eq(schema.messages.journeyId, broadcastId), eq(schema.messages.test, false), isNotNull(schema.messages.variant)));
   const delivered = new Map<string, Set<string>>();
   const opened = new Map<string, Set<string>>();
   const clicked = new Map<string, Set<string>>();
@@ -744,7 +746,7 @@ async function canaryMessagesOf(
       notBefore: schema.messages.notBefore,
     })
     .from(schema.messages)
-    .where(eq(schema.messages.journeyId, broadcastId));
+    .where(and(eq(schema.messages.journeyId, broadcastId), eq(schema.messages.test, false)));
   return rows.flatMap((r) =>
     r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent) && !intentionallyNotSent(r)
       ? [{ id: r.id, status: r.status, notBefore: r.notBefore }]
@@ -1396,34 +1398,40 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
             .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
           return { more: false, holdout: holdoutEvents };
         }
+        // The decision reads ClickHouse, whose events are published through the outbox after the
+        // transaction that records them commits (#978 part 2). Decide only once this broadcast's
+        // publication is complete; a failed row must not block the send forever, so it proceeds
+        // with a warning (queue.outbox in `am doctor` reports the failure).
+        const publication = await outboxPublicationBarrier(tx, ws, broadcastId);
+        if (publication.outstanding > 0) {
+          const postponed = new Date(now.getTime() + PUBLICATION_RETRY_MS);
+          await tx
+            .update(schema.broadcastStages)
+            .set({ stage: 'canary_waiting', checkAt: postponed })
+            .where(eq(schema.broadcastStages.broadcastId, broadcastId));
+          await tx
+            .update(schema.broadcastRuns)
+            .set({ status: 'running', leaseUntil: postponed })
+            .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+          logger.info(
+            { broadcast: broadcastId, outstanding: publication.outstanding },
+            'canary check deferred until its message events are published',
+          );
+          return { more: false, holdout: holdoutEvents };
+        }
+        if (publication.failed > 0)
+          logger.warn(
+            { broadcast: broadcastId, failed: publication.failed },
+            'canary check proceeding with failed outbox events; `am doctor` reports them as queue.outbox',
+          );
         const stats = canaryIds.length
           ? await deps.events.messageStats(ws, { since: run.createdAt, journeyId: broadcastId, messageIds: canaryIds })
           : {};
-        // The SQL message rows and the consent ledger are the durable source of truth. Delivery
-        // events are published through the outbox after their transaction commits (#978 part 2), so
-        // a check that ran before publication would miss a bounce or complaint and release the rest
-        // of a send that should have stopped. `messageStats` stays as a floor for event-derived
-        // counts; the rows below cannot be behind the transaction that recorded them.
-        const dbSent = canaryRows.filter((m) => ['sent', 'delivered', 'bounced', 'complained'].includes(m.status)).length;
-        const dbBounced = canaryRows.filter((m) => m.status === 'bounced').length;
-        const dbComplained = canaryRows.filter((m) => m.status === 'complained').length;
-        const [unsubscribedRows] = canaryIds.length
-          ? await tx
-              .select({ n: count() })
-              .from(schema.consentRecords)
-              .where(
-                and(
-                  eq(schema.consentRecords.workspaceId, ws),
-                  inArray(schema.consentRecords.messageId, canaryIds),
-                  eq(schema.consentRecords.source, 'unsubscribe'),
-                ),
-              )
-          : [{ n: 0 }];
         const counts = {
-          sent: Math.max(stats.sent ?? 0, dbSent),
-          bounced: Math.max(stats.bounced ?? 0, dbBounced),
-          complained: Math.max(stats.complained ?? 0, dbComplained),
-          unsubscribed: Math.max(stats.unsubscribed ?? 0, Number(unsubscribedRows?.n ?? 0)),
+          sent: stats.sent ?? 0,
+          bounced: stats.bounced ?? 0,
+          complained: stats.complained ?? 0,
+          unsubscribed: stats.unsubscribed ?? 0,
         };
         const rate = (n: number) => (counts.sent ? n / counts.sent : 0);
         const rates = {
@@ -1438,7 +1446,8 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         // event has not landed yet, so it counts as sent rather than failing a healthy canary.
         const failedCanary = canaryRows.filter((m) => m.status === 'failed').length;
         const suppressedCanary = canaryRows.filter((m) => m.status === 'suppressed').length;
-        const delivered = counts.sent;
+        const dbSent = canaryRows.filter((m) => ['sent', 'delivered', 'bounced', 'complained'].includes(m.status)).length;
+        const delivered = Math.max(counts.sent, dbSent);
         // Only "too few to judge the rates" depends on the canary's size; a canary of any size
         // where half or more could not be delivered stops the run (#300).
         const undeliverable = failedCanary + suppressedCanary;
@@ -1489,6 +1498,26 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
 
     // The sample has run: judge it and let the rest of the audience follow in this same pass.
     if (test?.state === 'deciding' && (!test.decideAt || test.decideAt.getTime() <= now.getTime())) {
+      // The winner is read from ClickHouse events, published after commit by the outbox (#978
+      // part 2). Defer until this broadcast's publication is complete; a failed row proceeds with
+      // a warning instead of blocking the send forever.
+      const publication = await outboxPublicationBarrier(tx, ws, broadcastId);
+      if (publication.outstanding > 0) {
+        await tx
+          .update(schema.broadcastRuns)
+          .set({ status: 'running', leaseUntil: new Date(now.getTime() + PUBLICATION_RETRY_MS) })
+          .where(eq(schema.broadcastRuns.broadcastId, broadcastId));
+        logger.info(
+          { broadcast: broadcastId, outstanding: publication.outstanding },
+          'subject-test decision deferred until its message events are published',
+        );
+        return { more: false, holdout: holdoutEvents };
+      }
+      if (publication.failed > 0)
+        logger.warn(
+          { broadcast: broadcastId, failed: publication.failed },
+          'subject-test decision proceeding with failed outbox events; `am doctor` reports them as queue.outbox',
+        );
       const variants = await variantResults(tx, deps.events, ws, broadcastId, test.subjects);
       const picked = pickWinner(test.metric, variants);
       await tx
