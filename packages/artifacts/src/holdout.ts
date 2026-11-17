@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { sql } from 'drizzle-orm';
+import { type SQL, sql } from 'drizzle-orm';
 import { mergeComponentCtes } from './mergeComponent';
 
 // Holdout groups (#67): a deterministic share of a scope's entrants is held back from marketing
@@ -80,14 +80,49 @@ interface StoredArm {
 }
 
 /**
- * The arm this person already holds in one scope version (#944): their own row, or one written
- * under a profile that was merged into them. A merge moves assignments to the survivor (migration
- * 0041), but a run that selected a stale alias after a merge wrote its row on the alias — that row
- * is still this person's arm, and the earliest one wins when two disagree, so an arm is never
- * replaced by a later one. The walk reads the whole merge component of the id's representative
- * (#985), the same component the report groups assignments by, so a long chain or a cycle cannot
- * hide an arm from one path and show it to the other.
+ * The send path's one arm lookup (#944, #985, #1015). The person's representative comes from the
+ * shared component definition, the candidates are the assignments on their component, and only
+ * those whose own representative is the same person are kept. That last filter is what keeps the
+ * send in step with the report's `DISTINCT ON (representative)` grouping when a corrupt chain is
+ * longer than `MERGE_MAX_HOPS` and the walk truncates. A merge moves assignments to the survivor
+ * (migration 0041), but a run that selected a stale alias after a merge wrote its row on the alias —
+ * that row is still this person's arm, and the earliest one wins when two disagree, so an arm is
+ * never replaced by a later one. Exported so `merge-component-plan.test.ts` can assert the lookup
+ * uses `profiles_merged_into`.
  */
+export function oldestArmQuery(workspaceId: string, scope: HoldoutScope, hashVersion: string, profileId: string): SQL {
+  return sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
+      seeds: sql`SELECT ${profileId}::text AS id`,
+      componentOf: sql`SELECT representative AS rep FROM person_representative WHERE origin = ${profileId}`,
+      name: 'person',
+    })},
+    person AS (SELECT representative COLLATE "default" AS id FROM person_representative WHERE origin = ${profileId}),
+    candidate AS (
+      SELECT a.profile_id, a.arm, a.assigned_at
+      FROM holdout_assignments a
+      JOIN person_component mc ON mc.profile_id = a.profile_id
+      WHERE a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type} AND a.scope_id = ${scope.id}
+        AND a.hash_version = ${hashVersion}
+    ), ${mergeComponentCtes(workspaceId, {
+      seeds: sql`SELECT DISTINCT profile_id AS id FROM candidate`,
+      name: 'arm',
+    })},
+    resolved AS (
+      SELECT c.profile_id, c.arm, c.assigned_at
+      FROM candidate c
+      JOIN arm_representative ar ON ar.origin = c.profile_id
+      WHERE ar.representative COLLATE "default" = (SELECT id FROM person)
+    )
+    SELECT person.id AS person, r.profile_id, r.arm, r.assigned_at
+    FROM person
+    LEFT JOIN resolved r ON TRUE
+    -- The shared order (also used by holdoutWinners and campaigns.holdoutResult): earliest decision
+    -- to the microsecond, then the lower profile id in code-unit order.
+    ORDER BY r.assigned_at, r.profile_id COLLATE "C"
+    LIMIT 1`;
+}
+
 async function oldestArm(
   tx: Tx,
   workspaceId: string,
@@ -95,22 +130,9 @@ async function oldestArm(
   hashVersion: string,
   profileId: string,
 ): Promise<{ person: string; arm: StoredArm | null }> {
-  const res = await tx.execute<{ person: string; profile_id: string | null; arm: HoldoutArm | null; assigned_at: Date | null }>(sql`
-    WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
-      seeds: sql`SELECT ${profileId}::text AS id`,
-      componentOf: sql`SELECT representative AS rep FROM merge_representative WHERE origin = ${profileId}`,
-    })},
-    person AS (SELECT representative AS id FROM merge_representative WHERE origin = ${profileId})
-    SELECT person.id AS person, a.profile_id, a.arm, a.assigned_at
-    FROM person
-    LEFT JOIN merge_component mc ON TRUE
-    LEFT JOIN holdout_assignments a
-      ON a.workspace_id = ${workspaceId} AND a.scope_type = ${scope.type} AND a.scope_id = ${scope.id}
-     AND a.hash_version = ${hashVersion} AND a.profile_id = mc.profile_id
-    -- The shared order (also used by holdoutWinners and campaigns.holdoutResult): earliest decision
-    -- to the microsecond, then the lower profile id in code-unit order.
-    ORDER BY a.assigned_at, a.profile_id COLLATE "C"
-    LIMIT 1`);
+  const res = await tx.execute<{ person: string; profile_id: string | null; arm: HoldoutArm | null; assigned_at: Date | null }>(
+    oldestArmQuery(workspaceId, scope, hashVersion, profileId),
+  );
   const row = res.rows[0]!;
   return {
     person: row.person,

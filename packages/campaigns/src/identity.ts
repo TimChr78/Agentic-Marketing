@@ -1,6 +1,7 @@
-import { mergeComponentCtes } from '@agentic-marketing/artifacts';
+import { randomUUID } from 'node:crypto';
+import { MERGE_MAX_HOPS, mergeComponentCtes } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 // One identity resolution for campaign conversions (#590).
 //
@@ -80,6 +81,17 @@ export function identityScopeProfileLimit(): number {
   return Number.isInteger(override) && override > 0 ? override : IDENTITY_SCOPE_PROFILE_LIMIT;
 }
 
+/**
+ * The traversal bound for one campaign's merge-component expansion (#1015 review). It is separate
+ * from the mapping bound: a component member that was never merged away contributes no mapping, so
+ * a survivor with many aliases must not spend the mapping bound. It still caps the work and the
+ * memory of the expansion; above it resolution is skipped like any other over-limit load.
+ */
+export const IDENTITY_COMPONENT_PROFILE_LIMIT = 2 * IDENTITY_MAP_LIMIT;
+
+/** Identifier rows per cursor fetch while the map is built, so the byte check can stop a load. */
+const IDENTITY_IDENTIFIER_PAGE = 1_000;
+
 /** The all-or-nothing map a caller ships when resolution was skipped at the bound. */
 export const overLimitIdentityMap = (limit = IDENTITY_MAP_LIMIT): IdentityMap => ({ pairs: [], overLimit: true, limit });
 
@@ -134,18 +146,22 @@ const PROFILE_ID_CHUNK = 10_000;
  * set, every merge and identifier in those profiles' merge components. The workspace always comes
  * from the caller's transaction.
  *
- * Both reads are bounded (#986): the merge component is expanded from the campaign's people only
- * (never the workspace's whole merge list) and stops one row past the map's bound, and the
- * identifier read stops as soon as the pairs pass it. An over-bound load returns the existing
- * over-limit result, so a surface reports the shared note instead of holding a partial map.
- * `limit` is injectable so the over-bound path can be exercised without 300,000 rows.
+ * Both reads are bounded (#986, #1015 review): the merge component is expanded from the campaign's
+ * people only (never the workspace's whole merge list), the forward walk and the expansion stop at
+ * their traversal bound, and identifiers are read through a cursor in pages whose byte cost is
+ * checked as they arrive. The traversal bound is separate from the mapping bound — a survivor with
+ * many aliases contributes no mapping for itself — and the mapping bound applies only to the pairs
+ * that would ship. Any over-bound load returns the existing over-limit result, so a surface reports
+ * the shared note instead of holding a partial map. `limit` and `maxBytes` are injectable so the
+ * over-bound paths can be exercised without 300,000 rows or 32 MiB of keys.
  */
 export async function loadIdentityMap(
   tx: Tx,
   workspaceId: string,
-  opts: { profileIds?: readonly string[]; limit?: number } = {},
+  opts: { profileIds?: readonly string[]; limit?: number; maxBytes?: number } = {},
 ): Promise<IdentityMap> {
   const limit = opts.limit ?? IDENTITY_MAP_LIMIT;
+  const maxBytes = opts.maxBytes ?? IDENTITY_MAP_MAX_BYTES;
   const scope = opts.profileIds ? [...new Set(opts.profileIds)] : undefined;
   if (scope && !scope.length) return emptyIdentityMap();
   if (scope && scope.length > limit) return overLimitIdentityMap(limit);
@@ -164,65 +180,92 @@ export async function loadIdentityMap(
   }
   if (!seeds.length) return emptyIdentityMap();
 
-  // One representative per seed, the same walk the holdout send and report use (#985).
-  const representatives = await tx.execute<{ representative: string }>(sql`
+  // One representative per seed through the same bounded walk the holdout send and report use
+  // (#985). A chain past the walk bound is corrupt; resolution is skipped rather than following it.
+  const representatives = await tx.execute<{ representative: string; truncated: boolean }>(sql`
     WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
       seeds: sql`SELECT DISTINCT unnest(${sql.param(seeds)}::text[]) AS id`,
     })}
-    SELECT DISTINCT representative FROM merge_representative`);
-  const reps = representatives.rows.map((row) => row.representative);
-  if (reps.length > limit) return overLimitIdentityMap(limit);
+    SELECT DISTINCT representative, truncated FROM merge_representative`);
+  if (representatives.rows.some((row) => row.truncated)) return overLimitIdentityMap(limit);
+  const reps = [...new Set(representatives.rows.map((row) => row.representative))];
   if (!reps.length) return emptyIdentityMap();
 
-  // The whole component around those representatives, one row per connected profile. Every
-  // component member contributes at least one pair once merged, so one row past the pair bound is
-  // enough to skip resolution; the LIMIT also stops the walk at that row.
-  const component = await tx.execute<{ representative: string; profile_id: string; merged_into: string | null }>(sql`
+  // The whole component around those representatives, one row per connected profile, capped by its
+  // own traversal bound. The `depth` rows at the walk bound mean the component is corrupt-deep.
+  const component = await tx.execute<{ representative: string; profile_id: string; merged_into: string | null; depth: number }>(sql`
     WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
       componentOf: sql`SELECT DISTINCT unnest(${sql.param(reps)}::text[]) AS rep`,
     })}
-    SELECT mc.representative, mc.profile_id, p.merged_into
+    SELECT mc.representative, mc.profile_id, p.merged_into, mc.depth
     FROM merge_component mc
     LEFT JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = mc.profile_id
-    LIMIT ${limit + 1}`);
-  if (component.rows.length > limit) return overLimitIdentityMap(limit);
+    LIMIT ${IDENTITY_COMPONENT_PROFILE_LIMIT + 1}`);
+  if (component.rows.length > IDENTITY_COMPONENT_PROFILE_LIMIT) return overLimitIdentityMap(limit);
+  if (component.rows.some((row) => row.depth >= MERGE_MAX_HOPS)) return overLimitIdentityMap(limit);
 
+  // The map's bound is spent by the mappings it will ship, not by component rows: an unmerged
+  // survivor contributes no pair. Both the pair and the byte bound are checked as pairs arrive.
   const pairs: IdentityPair[] = [];
+  const seen = new Set<string>();
+  let bytes = 0;
+  const add = (pair: IdentityPair): boolean => {
+    // The same rules identityMapOf applies, so stopping early can never disagree with it.
+    if (!pair.key || !pair.profileId || pair.key === pair.profileId) return true;
+    const id = `${pair.kind}:${pair.key}`;
+    if (seen.has(id)) return true;
+    const size = Buffer.byteLength(pair.key) + Buffer.byteLength(pair.profileId) + 8;
+    const oversized =
+      Buffer.byteLength(JSON.stringify(pair.key)) + 2 > IDENTITY_FIELD_BYTES ||
+      Buffer.byteLength(JSON.stringify(pair.profileId)) + 2 > IDENTITY_FIELD_BYTES;
+    if (pairs.length + 1 > limit || bytes + size > maxBytes || oversized) return false;
+    seen.add(id);
+    bytes += size;
+    pairs.push(pair);
+    return true;
+  };
+
   const personOf = new Map<string, string>();
   for (const row of component.rows) {
     personOf.set(row.profile_id, row.representative);
     // A merged-away profile resolves to its person; an unmerged one already is their own profile.
-    if (row.merged_into !== null) pairs.push({ key: row.profile_id, profileId: row.representative, kind: 'profile' });
+    if (row.merged_into !== null && !add({ key: row.profile_id, profileId: row.representative, kind: 'profile' }))
+      return overLimitIdentityMap(limit);
   }
 
   // Merging re-points identifiers to the survivor, so every component member is an owner to look
-  // at. Stop as soon as the identifier pairs pass the bound instead of reading them all first.
+  // at. A cursor fetches them in bounded pages, so a survivor with many long identifiers stops at
+  // the bound instead of being loaded first and rejected afterwards.
   const owners = [...personOf.keys()];
-  let counted = pairs.length;
   for (let i = 0; i < owners.length; i += PROFILE_ID_CHUNK) {
-    const remaining = limit - counted + 1;
-    if (remaining <= 0) return overLimitIdentityMap(limit);
-    const identifiers = await tx
-      .select({ type: schema.identifiers.type, value: schema.identifiers.value, profileId: schema.identifiers.profileId })
-      .from(schema.identifiers)
-      .where(
-        and(
-          eq(schema.identifiers.workspaceId, workspaceId),
-          inArray(schema.identifiers.type, ['anonymous_id', 'user_id']),
-          inArray(schema.identifiers.profileId, owners.slice(i, i + PROFILE_ID_CHUNK)),
-        ),
-      )
-      .limit(remaining);
-    counted += identifiers.length;
-    if (counted > limit) return overLimitIdentityMap(limit);
-    for (const identifier of identifiers)
-      pairs.push({
-        key: identifier.value,
-        profileId: personOf.get(identifier.profileId) ?? identifier.profileId,
-        // The query only selects the two identifier kinds the event store can resolve an event by.
-        kind: identifier.type as IdentityKind,
-      });
+    const cursor = sql.raw(`identity_ids_${randomUUID().replaceAll('-', '')}`);
+    await tx.execute(sql`DECLARE ${cursor} NO SCROLL CURSOR FOR
+      SELECT type, value, profile_id FROM identifiers
+      WHERE workspace_id = ${workspaceId}
+        AND type IN ('anonymous_id', 'user_id')
+        AND profile_id = ANY(${sql.param(owners.slice(i, i + PROFILE_ID_CHUNK))}::text[])`);
+    try {
+      for (;;) {
+        const page = Math.max(1, Math.min(IDENTITY_IDENTIFIER_PAGE, limit - pairs.length + 1));
+        const fetched = await tx.execute<{ type: string; value: string; profile_id: string }>(
+          sql`FETCH FORWARD ${sql.raw(String(page))} FROM ${cursor}`,
+        );
+        for (const identifier of fetched.rows) {
+          const added = add({
+            key: identifier.value,
+            profileId: personOf.get(identifier.profile_id) ?? identifier.profile_id,
+            // The query only selects the two identifier kinds the event store can resolve an event by.
+            kind: identifier.type as IdentityKind,
+          });
+          if (!added) return overLimitIdentityMap(limit);
+        }
+        if (fetched.rows.length < page) break;
+      }
+    } finally {
+      // A committed transaction closes it anyway; closing here keeps the bound honest on the way out.
+      await tx.execute(sql`CLOSE ${cursor}`).catch(() => {});
+    }
   }
 
-  return identityMapOf(pairs, limit);
+  return identityMapOf(pairs, limit, maxBytes);
 }

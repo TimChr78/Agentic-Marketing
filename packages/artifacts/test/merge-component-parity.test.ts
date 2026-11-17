@@ -82,6 +82,37 @@ describe.skipIf(!hasTestDatabase())('one merge component for the send and the re
     }, 60_000);
   }
 
+  it('agrees beyond the walk bound, where the person splits at the bound', async () => {
+    // A chain longer than MERGE_MAX_HOPS (256) is corruption, but both paths must still resolve
+    // each profile the same way: control at the far end and treatment at the near end belong to
+    // different groups, and each send reads the arm its own group has in the report.
+    const hops = 300;
+    const ids = await insertChain('beyond', hops);
+    const target = scope();
+    await assign(target, ids[0]!, 'control', EARLY);
+    await assign(target, ids.at(-1)!, 'treatment', LATE);
+
+    await d.db.withWorkspace(d.workspace, async (tx) => {
+      const winners = await holdoutWinners(tx, d.workspace, target, HASH);
+      expect([winners.control, winners.treatment]).toEqual([1, 1]);
+      const page = await winners.page(undefined, 10);
+
+      // The far end resolves to the node where the bound stopped it; the near end is a terminal.
+      const canonical = await canonicalPeople(tx, d.workspace, ids);
+      expect(canonical.get(ids[0]!)).toBe(ids[256]);
+      expect(canonical.get(ids.at(-1)!)).toBe(ids.at(-1));
+
+      // Each send reads the arm its own report group has, before the send re-records anything.
+      const armOf = (id: string) => page.find((winner) => winner.person === canonical.get(id))?.arm;
+      const nearEnd = ids.at(-1)!;
+      expect((await assignHoldout(tx, d.workspace, target, { percent: 50 }, nearEnd))?.assignment.arm).toBe(armOf(nearEnd));
+      expect(armOf(nearEnd)).toBe('treatment');
+      const farEnd = ids[0]!;
+      expect((await assignHoldout(tx, d.workspace, target, { percent: 50 }, farEnd))?.assignment.arm).toBe(armOf(farEnd));
+      expect(armOf(farEnd)).toBe('control');
+    });
+  }, 60_000);
+
   it('agrees on a cycle', async () => {
     // prf_cycle_a is lexically lowest, so it is the representative of the cycle.
     await insertProfiles(
