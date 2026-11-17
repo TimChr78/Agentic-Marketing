@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { expectLinear } from '../../../test-support/linear';
 import { redactCredentials, redactionFallbacks, releasedRedaction } from '../src/diagnostics';
 import { redactCredentials as redact01425 } from './redaction-01425-reference';
 
@@ -10,7 +11,6 @@ import { redactCredentials as redact01425 } from './redaction-01425-reference';
 
 /** Below the 24-character bare-token rule, so only a key or a shape pass can find it. */
 const SECRET = 'S3cr3tV4l';
-const MB = 1024 * 1024;
 
 let markerIndex = 0;
 const marker = (): string => {
@@ -281,26 +281,33 @@ describe('the credential shapes on a grid (#989 round 2)', () => {
     expect(differences).toHaveLength(0);
   });
 
-  it('stays linear on a megabyte of each grid shape', () => {
-    const slow: string[] = [];
-    const measure = (text: string): number => {
-      const started = performance.now();
-      redactCredentials(text);
-      return performance.now() - started;
-    };
-    // A sample of the grid, not every combination: one megabyte each already exercises every pass.
+  // Growth, not a wall-clock budget: an absolute millisecond limit depends on the runner, and the
+  // repo's rule is the ratio check (test-support/linear.ts, #994). 4x the units must not cost 8x the
+  // time; a super-linear pass shows as a ratio near sixteen.
+  const linearFailure = (name: string, unit: string): string | null => {
+    try {
+      expectLinear((n) => unit.repeat(n), redactCredentials, 200);
+      return null;
+    } catch (error) {
+      return `${name}: ${(error as Error).message}`;
+    }
+  };
+
+  it('grows linearly on a sample of the grid', () => {
     const units: [string, string][] = [];
     for (const [index, combo] of [...grid()].entries()) if (index % 1_000 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...pemGrid()].entries()) if (index % 400 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...schemeGrid()].entries()) if (index % 600 === 0) units.push([combo.name, combo.input]);
     for (const [index, combo] of [...schemeChainGrid()].entries()) if (index % 1_200 === 0) units.push([combo.name, combo.input]);
-    for (const [name, input] of units) {
-      const unit = `${input}\n`;
-      const text = unit.repeat(Math.ceil(MB / unit.length));
-      const elapsed = measure(text);
-      if (elapsed >= 5_000) slow.push(`${name} ${elapsed.toFixed(0)}ms`);
-    }
-    expect(slow.slice(0, 10)).toEqual([]);
-    expect(slow).toHaveLength(0);
-  }, 180_000);
+    // One text carrying every sampled shape, so the ratio is measured on their mix in one run.
+    const unit = units.map(([, input]) => `${input}\n`).join('');
+    expect(linearFailure('grid sample', unit)).toBeNull();
+  }, 300_000);
+
+  it('grows linearly on the shape that once exceeded a wall-clock budget on CI', () => {
+    // `scheme dbPass" => " upper basic after a note`, repeated to a megabyte, took 7.4 s on the CI
+    // runner under a 5 s absolute budget. The budget is gone; the shape stays pinned here.
+    const unit = `${pair('dbPass', '" => ', 'BASIC s1234')}\n`;
+    expect(linearFailure('scheme behind an arrow', unit)).toBeNull();
+  }, 300_000);
 });

@@ -244,9 +244,11 @@ export function redactCredentials(text: string): string {
   }
   const shaped = applyRegions(spans, regions);
   if (shaped === spans.text) return shaped;
-  // The replacement can leave the marker beside text the released passes had no reason to touch
-  // (`token => 'x'y`). The release's own pass on the result reaches the fixed point, so a second
-  // call to this function changes nothing.
+  // The replacement can leave the marker beside text the released passes had no reason to touch,
+  // and more than one of them consumes such a run: the glue takes a quoted tail (`token => 'x'y`)
+  // and the compound pass takes a bare one (`apiSecret:[redacted]://://`). Only the release's own
+  // passes reach the fixed point a second call needs, so they run here -- on the shaped text, which
+  // is smaller than the input.
   return releasedRedaction01425(shaped);
 }
 
@@ -1582,6 +1584,9 @@ function schemeWordEnd(text: string, start: number): number {
   return index;
 }
 
+/** The letters a scheme name can start with, lower-cased ASCII: a cheap reject before any slice. */
+const SCHEME_INITIALS: ReadonlySet<number> = new Set([...AUTH_SCHEMES, ...ARROW_SCHEMES].map((scheme) => scheme.charCodeAt(0)));
+
 /**
  * The end of an authorization value at `start` (`Bearer abc`), or -1. The released rules keep a
  * scheme word and redact the token behind it, but a value behind an arrow stops at the space after
@@ -1590,6 +1595,9 @@ function schemeWordEnd(text: string, start: number): number {
  * belongs to the value it covers, so it stays linear (#989 review).
  */
 function schemeValueEnd(text: string, start: number, schemes: ReadonlySet<string>, least = 1): number {
+  // Almost every value in a long message starts with something no scheme starts with; rejecting on
+  // the first letter saves a slice and a lower-case copy per candidate (#1019 CI).
+  if (!SCHEME_INITIALS.has(text.charCodeAt(start) | 0x20)) return -1;
   let index = start;
   let found = 0;
   for (;;) {
