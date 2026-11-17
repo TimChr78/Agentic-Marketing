@@ -19,6 +19,7 @@ import {
   envFileKeys,
   liveChecks,
   offlineChecks,
+  postgresVersionCheck,
 } from '../src/ops/checks';
 import { VERSION } from '../src/version';
 
@@ -384,6 +385,43 @@ describe('am doctor brand-domain checks', () => {
   });
 });
 
+describe('am doctor Postgres version check', () => {
+  it('reports the running server version and accepts 18', () => {
+    const check = postgresVersionCheck({ version: '18.7', versionNum: '180007' });
+    expect(check).toMatchObject({ id: 'postgres.version', status: 'ok' });
+    expect(check.message).toContain('PostgreSQL 18.7');
+    expect(check.message).not.toMatch(/deprecated/i);
+  });
+
+  it('accepts 17 too', () => {
+    const check = postgresVersionCheck({ version: '17.6', versionNum: '170006' });
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('PostgreSQL 17.6');
+  });
+
+  it('notes that 16 is supported but deprecated for new installs', () => {
+    const check = postgresVersionCheck({ version: '16.12', versionNum: '160012' });
+    expect(check.status).toBe('ok');
+    expect(check.message).toContain('PostgreSQL 16.12');
+    expect(check.message).toMatch(/deprecated for new installs/i);
+    expect(check.hint).toContain('docs/deployment/postgres-18.md');
+  });
+
+  it('warns below the supported minimum of 16 and names the upgrade', () => {
+    const check = postgresVersionCheck({ version: '15.8', versionNum: '150008' });
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('PostgreSQL 15.8');
+    expect(check.message).toContain('minimum (16)');
+    expect(check.hint).toContain('PostgreSQL 18');
+  });
+
+  it('falls back to the text version when server_version_num is missing', () => {
+    expect(postgresVersionCheck({ version: '18.7' }).status).toBe('ok');
+    expect(postgresVersionCheck({ version: '15.8' }).status).toBe('warn');
+    expect(postgresVersionCheck({ version: 'unknown' }).status).toBe('info');
+  });
+});
+
 describe('am doctor live checks', () => {
   const dbName = runScoped(`am_doctor_${process.pid}_${randomBytes(4).toString('hex')}`);
   const basePgUrl = new URL(process.env.TEST_DATABASE_URL ?? 'postgres://am:am@localhost:5432/am_test');
@@ -423,8 +461,9 @@ describe('am doctor live checks', () => {
 
     const checks = await liveChecks(config);
     const byId = new Map(checks.map((item) => [item.id, item]));
-    for (const id of ['postgres', 'clickhouse', 'nats', 'valkey', 'dns', 'egress', 'brand-domains'])
+    for (const id of ['postgres', 'postgres.version', 'clickhouse', 'nats', 'valkey', 'dns', 'egress', 'brand-domains'])
       expect(byId.get(id)?.status, `${id}: ${JSON.stringify(byId.get(id))}`).toBe('ok');
+    expect(byId.get('postgres.version')?.message).toContain('PostgreSQL');
     expect(byId.get('migrations')?.status).toBe('warn');
     expect(
       checks.filter((item) => item.status === 'fail'),

@@ -16,6 +16,7 @@ import {
   createBackup,
   cronMatches,
   exportClickHouse,
+  isOnlyIgnoredTransactionTimeout,
   listBackups,
   nextCronRun,
   parseCron,
@@ -39,6 +40,22 @@ function toolMajor(tool: string): number {
 }
 
 const pgToolsReady = toolMajor('pg_dump') >= 16 && toolMajor('pg_restore') >= 16;
+
+describe('restore compatibility with a 16 target', () => {
+  it('accepts only the transaction_timeout that PostgreSQL 16 cannot know (#1001)', () => {
+    const rejected =
+      'pg_restore failed (exit 1): pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "transaction_timeout"\n' +
+      'Command was: SET transaction_timeout = 0;\n' +
+      'pg_restore: warning: errors ignored on restore: 1';
+    expect(isOnlyIgnoredTransactionTimeout(rejected, 16)).toBe(true);
+    // The 18 server supports the setting: a failure there is a real restore failure.
+    expect(isOnlyIgnoredTransactionTimeout(rejected, 18)).toBe(false);
+    // Any other ignored error is a real problem, even on 16.
+    expect(isOnlyIgnoredTransactionTimeout(rejected.replace('restore: 1', 'restore: 2'), 16)).toBe(false);
+    expect(isOnlyIgnoredTransactionTimeout('pg_restore failed (exit 1): connection refused', 16)).toBe(false);
+  });
+});
+
 const chUrl = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 const chUp = await fetch(new URL('/ping', chUrl), { signal: AbortSignal.timeout(2_000) })
   .then((response) => response.ok)

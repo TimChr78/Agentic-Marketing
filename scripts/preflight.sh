@@ -35,7 +35,7 @@ note() { printf '      %s\n' "$*"; }
 MIN_FREE_GB=${AM_TEST_MIN_FREE_GB:-10}
 PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.65.0-noble
 IMAGES=(
-  postgres:16-alpine
+  postgres:18-alpine
   clickhouse/clickhouse-server:26.8
   valkey/valkey:8.1.9
   nats:2.15.0-alpine

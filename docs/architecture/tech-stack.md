@@ -23,7 +23,7 @@ This table describes what the repository ships today. Roadmap items are marked *
 
 | Area | Choice | License | Alternatives considered | Why |
 |---|---|---|---|---|
-| OLTP | **PostgreSQL 16** (18 planned, [#1001](https://github.com/TimChr78/Agentic-Marketing/issues/1001)) | PostgreSQL | MySQL | Transactions, JSONB, RLS, partitioning; journey and job state live here too. Compose pins `postgres:16-alpine` and CI runs `postgres:16` |
+| OLTP | **PostgreSQL 18** (16 is the supported minimum; [#1001](https://github.com/TimChr78/Agentic-Marketing/issues/1001)) | PostgreSQL | MySQL | Transactions, JSONB, RLS, partitioning; journey and job state live here too. Compose pins `postgres:18-alpine` and CI runs `postgres:18`; new clusters get data checksums by default. Async I/O, B-tree skip scan and `uuidv7()` help reporting, and `pg_upgrade` keeps planner statistics. 16 stays supported through at least June 2027 ([upgrade path](../deployment/postgres-18.md)) |
 | Events / analytics | **ClickHouse** | Apache-2.0 | TimescaleDB, Druid, DuckDB | Best-in-class for event analytics at this scale; JSON type; TTL; single node goes very far |
 | Event bus | **NATS JetStream** | Apache-2.0 | Kafka, Redpanda (BSL), Redis Streams, Postgres only | Single small binary, durable streams, consumer groups, replay, clusterable; much lighter to self-host than Kafka. See [ADR-0003](adr/0003-storage-and-event-bus.md) |
 | Hot state / cache | **Valkey 8** | BSD-3 | Redis (license changed), Dragonfly (BSL) | Sub-ms session state, counters, rate limits; Redis-protocol compatible |

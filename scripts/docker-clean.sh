@@ -80,7 +80,7 @@ volume_bytes() {
   fi
   for name in "$@"; do
     local kb
-    kb=$("$TIMEOUT" 20 docker run --rm -v "$name":/v:ro --entrypoint du postgres:16-alpine -sk /v 2>/dev/null | awk 'NR == 1 { print $1 }')
+    kb=$("$TIMEOUT" 20 docker run --rm -v "$name":/v:ro --entrypoint du postgres:18-alpine -sk /v 2>/dev/null | awk 'NR == 1 { print $1 }')
     [ -n "$kb" ] && total=$((total + kb))
   done
   echo $((total * 1024))

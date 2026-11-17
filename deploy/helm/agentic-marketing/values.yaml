@@ -1,6 +1,8 @@
 # Agentic Marketing on Kubernetes. Postgres, ClickHouse, NATS (JetStream) and Valkey are not part
 # of this chart: point it at managed services or operators you already run (see
-# docs/deployment/kubernetes.md for a reference deployment).
+# docs/deployment/kubernetes.md for a reference deployment). Use PostgreSQL 18 for a new cluster;
+# 16 is the supported minimum (through at least June 2027) and its major upgrade is covered in
+# docs/deployment/postgres-18.md.
 
 # Released images (linux/amd64 and linux/arm64) are published to GitHub's registry for every
 # version tag. To run your own build, push it to your registry and set repository and tag.

@@ -78,7 +78,7 @@ Adding a capability = one `defineCommand(...)` in a package + adding it to `apps
 
 ## Run locally
 
-Requirements: Node 26 LTS, pnpm 10, PostgreSQL 16, ClickHouse (26.8 LTS), NATS with JetStream (`nats-server -js`) and Valkey (or Redis), local or Docker. `CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` default to localhost. Node 26 no longer ships corepack, so install pnpm once, at the version pinned in `package.json` (`packageManager`): `npm install -g --ignore-scripts "pnpm@$(node -p 'require("./package.json").packageManager.split("@")[1]')"`.
+Requirements: Node 26 LTS, pnpm 10, PostgreSQL 18 (16 is still supported), ClickHouse (26.8 LTS), NATS with JetStream (`nats-server -js`) and Valkey (or Redis), local or Docker. `CLICKHOUSE_URL`, `NATS_URL` and `VALKEY_URL` default to localhost. Node 26 no longer ships corepack, so install pnpm once, at the version pinned in `package.json` (`packageManager`): `npm install -g --ignore-scripts "pnpm@$(node -p 'require("./package.json").packageManager.split("@")[1]')"`.
 
 ```bash
 pnpm install
@@ -417,6 +417,11 @@ scripts/test-services.sh reset          # drop the volumes
 scripts/docker-clean.sh --yes           # remove only resources labelled am-test=1
 ```
 
+The stack runs PostgreSQL 18 in the `pg18_data` volume. A stack created before 0.16.0 keeps its
+PostgreSQL 16 data in `pg_data`; the first `up` after updating recreates the Postgres container on
+the new, empty volume (test data is disposable), or you can drop the old volume when no test run is
+active with `docker volume rm am-test_pg_data` (or `scripts/docker-clean.sh --yes`).
+
 The defaults are the host's long-lived test ports (25432, 28123, 26379, 24222, 28200), bound to
 `127.0.0.1`. The stack carries a dev OpenBao whose root token is `root` and a writable Postgres
 (`am:am`), so it is not published on the LAN by default: `scripts/test-services.sh` prints the bind
@@ -565,7 +570,7 @@ The tests need the four services on localhost, not Docker: native packages or th
 - start it with `--custom_settings_prefixes=SQL_` (the image's default config has it): the row-policy tests set `SQL_workspace`, and without the prefix ClickHouse rejects the setting;
 - any server time zone works. Event times are stored and queried as UTC (query parameters are typed `DateTime64(3, 'UTC')`; `packages/events/test/utc-params.test.ts` enforces it).
 
-For example, ClickHouse's single binary: `clickhouse server -- --path=./data/ch/ --http_port=8123 --tcp_port=9000 --listen_host=127.0.0.1 --custom_settings_prefixes=SQL_`, Postgres 16 (the default `max_connections=100` covers four parallel test files), `nats-server -js` and `valkey-server --save "" --appendonly no`.
+For example, ClickHouse's single binary: `clickhouse server -- --path=./data/ch/ --http_port=8123 --tcp_port=9000 --listen_host=127.0.0.1 --custom_settings_prefixes=SQL_`, Postgres 18 (16 also works; the default `max_connections=100` covers four parallel test files), `nats-server -js` and `valkey-server --save "" --appendonly no`.
 
 ## Conventions
 

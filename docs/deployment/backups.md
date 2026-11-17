@@ -111,8 +111,9 @@ Where it writes:
 3. otherwise `./backups` under the directory the command was started from.
 
 The `pg_dump`, `pg_restore` and ClickHouse HTTP calls stream to disk. The image includes
-`postgresql-client-16`, matching the `postgres:16` service. Outside the image, install the
-PostgreSQL 16 client tools; a missing `pg_dump` stops the backup with an error.
+`postgresql-client-18`, which matches the `postgres:18` service and can also dump a 16 server for
+the [PostgreSQL 18 upgrade](postgres-18.md). Outside the image, install the PostgreSQL 18 client
+tools; a missing `pg_dump` stops the backup with an error.
 
 Backups contain subscriber addresses and consent records. The CLI sets umask `077` and creates the
 backup directory (including the hidden `.partial` directory used during a run) with mode `0700` and
@@ -400,7 +401,7 @@ project:
 7. Run `docker compose exec app am doctor` (or `am smoke`) to check the install.
 
 The integration test in `apps/server/test/backup.test.ts` does the Postgres part automatically when
-`pg_dump` is on `PATH` (CI installs PostgreSQL 16): it creates a database, inserts a marker, backs
+`pg_dump` is on `PATH` (CI installs PostgreSQL 18): it creates a database, inserts a marker, backs
 it up, deletes the row, restores, and checks that the row comes back. It also checks the manifest
 kind and versions, the `0700`/`0600` modes, `--list`, a newer migration head, a corrupted checksum,
 that `--verify` passes on a good backup and fails on a tampered file, that a wrong `MASTER_KEY` is

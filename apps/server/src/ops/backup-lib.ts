@@ -195,7 +195,7 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<v
     child.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'ENOENT')
         finish(
-          new Error(`${command} was not found. Install the PostgreSQL 16 client tools (postgresql-client-16 in the image) and try again.`),
+          new Error(`${command} was not found. Install the PostgreSQL 18 client tools (postgresql-client-18 in the image) and try again.`),
         );
       else finish(err);
     });
@@ -389,7 +389,39 @@ export async function restorePostgres(databaseUrl: string, dumpFile: string): Pr
   const clientEnv = postgresClientEnv(databaseUrl);
   if (!clientEnv.PGDATABASE) throw new Error('DATABASE_URL has no database name');
   // The database name is safe in argv; the password stays in PGPASSWORD.
-  await run('pg_restore', ['--clean', '--if-exists', '--no-owner', '--dbname', clientEnv.PGDATABASE, dumpFile], clientEnv);
+  const args = ['--clean', '--if-exists', '--no-owner', '--dbname', clientEnv.PGDATABASE, dumpFile];
+  try {
+    await run('pg_restore', args, clientEnv);
+  } catch (err) {
+    // pg_dump 18 writes `SET transaction_timeout = 0` (a 17+ setting) into every archive, including
+    // one read from a 16 server, and pg_restore 18 then gets one error from that statement when the
+    // target is 16. It ignores the error and restores everything else; accept exactly that case so
+    // an install kept on 16 with POSTGRES_IMAGE can still restore (#1001).
+    const message = err instanceof Error ? err.message : String(err);
+    if (!(await onlyRejectedTransactionTimeout(databaseUrl, message))) throw err;
+    process.stderr.write(
+      'warning: PostgreSQL 16 rejected the 18 client\'s "SET transaction_timeout"; the rest of the dump restored normally.\n',
+    );
+  }
+}
+
+/** True only for a 16 target whose sole restore error is the 18 client's transaction_timeout. */
+export function isOnlyIgnoredTransactionTimeout(message: string, targetMajor: number): boolean {
+  return targetMajor < 17 && message.includes('transaction_timeout') && message.includes('errors ignored on restore: 1');
+}
+
+async function onlyRejectedTransactionTimeout(databaseUrl: string, message: string): Promise<boolean> {
+  if (!message.includes('transaction_timeout') || !message.includes('errors ignored on restore: 1')) return false;
+  const client = new pg.Client({ connectionString: databaseUrl });
+  try {
+    await client.connect();
+    const { rows } = await client.query<{ num: string }>("SELECT current_setting('server_version_num') AS num");
+    return isOnlyIgnoredTransactionTimeout(message, Math.floor(Number(rows[0]?.num ?? 0) / 10000));
+  } catch {
+    return false;
+  } finally {
+    await client.end().catch(() => {});
+  }
 }
 
 export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ dir: string; manifest: BackupManifest }> {
