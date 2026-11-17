@@ -84,8 +84,8 @@ const shutdown = async () => {
   await shutdownTelemetry();
   process.exit(0);
 };
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+process.on('SIGTERM', () => void shutdown());
+process.on('SIGINT', () => void shutdown());
 
 /**
  * A dump before migrations change the schema, so an upgrade can always go back. It must never
