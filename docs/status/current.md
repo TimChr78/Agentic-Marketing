@@ -53,7 +53,8 @@ _Last updated: 2026-11-17_
   - **0.14.27** (holdout report in SQL with paging #972, 30-day idempotency key retention #976 with migration 0104, Better Auth 1.7.23 with its plugins grouped and the minor/patch updates replacing Dependabot #980/#981) is released and verified. Follow-ups: #985 (holdout chain parity), #986 (identity map memory), #989 (redaction shapes needing input context), #996 (AppError details unredacted).
   - **0.14.28** (AppError details redacted at every exit: #996) is released and verified.
   - **0.15.0** (consent, identity and erasure lock protocol, #978; Node 26, #1005) is released and verified: prepared keys #983, transactional outbox #988, durable erasure #1009, lock activation #1010. Drain upgrade; scheduler replica required; erasure finishes in a background job; retention pruning of unconfirmed signups paused. Follow-ups: #1008 (alerts and guardrails read delayed events), #1011 (journey trait writes vs. merges).
-  - **0.15.1** (the five bugs from the 0.15.0 wave and promise-safety follow-ups: #985, #986, #989, #1008, #1011, #1014, #1025, #1028; oxlint type-aware rules #1002) is released. 0.16.0 (PostgreSQL 18 #1001, engagement segments #441, unsubscribe CSS warning #872) is approved and held in #1018, #1023 and #1022.
+  - **0.15.1** (the five bugs from the 0.15.0 wave and promise-safety follow-ups: #985, #986, #989, #1008, #1011, #1014, #1025, #1028; oxlint type-aware rules #1002) was tagged but not published (its release run failed on redaction wall-clock budgets).
+  - **0.15.2** (everything in 0.15.1, plus growth-only redaction timing checks #1033) is released. 0.16.0 (PostgreSQL 18 #1001, engagement segments #441, unsubscribe CSS warning #872) is approved and held in #1018, #1023 and #1022.
   - Follow-ups filed: #936 (an unchanged-status signup leaves no ledger row) and #937 (redaction value shapes the rules do not consume).
   - Decisions taken with the recommended options: #906 documents the same-key retry rule and adds an optional key to MCP tools; #904 documents the header-copying limit; #917 keeps `unattributed` and adds `unmatched` and `spendTruncated`; #911 archives the older of two active mandates; #900 hides archived artifacts from `artifacts.list` unless `includeArchived` is set.
   - **Follow-ups filed (S3):** #671, #672 and #673.
@@ -101,4 +102,4 @@ The Wave 5 epic #439 is closed (complete in code); these checks are tracked in #
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.15.1, released from `main`; v0.15.0 is verified.
+- The last release is v0.15.2, released from `main`; v0.15.0 is verified (v0.15.1 was tagged but never published).
