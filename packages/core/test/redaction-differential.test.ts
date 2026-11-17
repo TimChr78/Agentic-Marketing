@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
-import { redactCredentials, releasedRedaction } from '../src/diagnostics';
+import { redactCredentials, redactionFallbacks, releasedRedaction } from '../src/diagnostics';
+import { redactCredentials as releasedGuardRedaction } from '../src/redaction-01425';
 import { redactCredentials as redact01420 } from './redaction-01420-reference';
 import { redactCredentials as redact01423 } from './redaction-01423-reference';
 import { redactCredentials as redact01424 } from './redaction-01424-reference';
@@ -25,10 +26,11 @@ import { redactCredentials as redact01425 } from './redaction-01425-reference';
  */
 // Each comparison runs every generated case through several full redactor implementations. On a
 // loaded CI runner one of them took longer than the global 20 s test timeout (release 0.14.25 CI),
-// so this file allows two minutes per test; growth is guarded by the scaling tests elsewhere. The
-// #989 pipeline records the original-text span of every character it keeps, which costs more per
-// case, so the ceiling leaves room for the release-gate run at scale 160.
-vi.setConfig({ testTimeout: 300_000 });
+// so this file raises the per-test ceiling; growth is guarded by the scaling tests elsewhere. The
+// #989 pipeline records the original-text span of every character it keeps, and every shaped case
+// also runs the frozen release as a guard, so the ceiling leaves room for the release-gate run at
+// scale 160.
+vi.setConfig({ testTimeout: 900_000 });
 
 const SCALE = Math.max(1, Math.floor(Number(process.env.REDACTION_DIFFERENTIAL_SCALE) || 1));
 
@@ -537,6 +539,47 @@ function* originalShapes(): Generator<Generated> {
       name: `shape pem keyed ${label}`,
       secrets: [keyed],
     };
+    // A traditional encrypted block carries an RFC 1421 preamble before its base64 body.
+    const encrypted = marker();
+    yield {
+      input: `-----BEGIN ${label}-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,0123456789ABCDEF\n\nMIIEowIBAAKCAQEA${encrypted}\n-----END ${label}----- ${sentinel()}`,
+      name: `shape pem encrypted ${label}`,
+      secrets: [encrypted],
+    };
+    const arrowed = marker();
+    yield {
+      input: `${label === 'PRIVATE KEY' ? 'token' : 'apiSecret'} => -----BEGIN ${label}-----\nMIIEowIBAAKCAQEA${arrowed}\n-----END ${label}----- ${sentinel()}`,
+      name: `shape pem after an arrow ${label}`,
+      secrets: [arrowed],
+    };
+  }
+  // The review's round-2 inputs: an arrow whose value starts a typographic pair, a shape after a
+  // long-key pair, and a marker right before a block (#989 review).
+  {
+    const overlap = marker();
+    yield {
+      input: `password => token:\u201cfirst probe${overlap}\u201d ${sentinel()}`,
+      name: 'review overlap arrow and typographic',
+      secrets: [overlap],
+    };
+    const shifted = marker();
+    yield {
+      input: `organizationSecondaryAuthToken="x" token: \u201ca probe${shifted}\u201d token=x ${sentinel()}`,
+      name: 'review shape after a long-key pair',
+      secrets: [shifted],
+    };
+    const afterMarker = marker();
+    yield {
+      input: `${'token=x apiSecret=x '.repeat(7)}\n-----BEGIN PRIVATE KEY-----\nprobe${afterMarker}\n-----END PRIVATE KEY----- ${sentinel()}`,
+      name: 'review block after markers',
+      secrets: [afterMarker],
+    };
+    const field = marker();
+    yield {
+      input: `password=[redacted]"hunter2${field}":"x" ${sentinel()}`,
+      name: 'review field glued to a caller marker',
+      secrets: [field],
+    };
   }
 }
 
@@ -661,34 +704,33 @@ describe('the new redactor never keeps what an earlier release removed (#937)', 
 // original spans and applied to the released output, so the instrumented pipeline must stay
 // byte-identical to the vendored 0.14.25 release, and every planted value the issue names must go.
 describe('the shapes decided from the original spans (#989)', () => {
-  /** The one documented difference: a field attached to a marker the caller sent. */
-  const ATTACHED_FIELD = /\[redacted\]["']/;
-
-  // The one place the #989 work takes less than 0.14.25, because the original text proves the
-  // remainder is not the value: a field appended to a marker the caller sent.
-  it('keeps an appended field the released pipeline glued away', () => {
-    for (const input of ['token=[redacted]"status":"ok"', "token=[redacted]'kind':'x'"]) {
-      expect(redact01425(input), input).toBe('token=[redacted]');
-      expect(redactCredentials(input), input).toBe(input);
-    }
-  });
-
   it('runs the released pipeline byte-identically to 0.14.25', () => {
+    // Unconditional (#989 review): no shape, no field and no bookkeeping fix may make the base
+    // remove less than the release did, on any case.
     const differences: string[] = [];
     let compared = 0;
     for (const { input, name } of everyCase()) {
       compared += 1;
       const expected = redact01425(input);
       const actual = releasedRedaction(input);
-      if (actual === expected) continue;
-      // A field the caller attached to its own marker is the one case where the #989 layer keeps
-      // text 0.14.25 removed; the pipeline itself must still be the release's.
-      if (ATTACHED_FIELD.test(input) && actual === input) continue;
-      differences.push(`${name}: ${JSON.stringify(actual.slice(0, 80))} != ${JSON.stringify(expected.slice(0, 80))}`);
+      if (actual !== expected)
+        differences.push(`${name}: ${JSON.stringify(actual.slice(0, 80))} != ${JSON.stringify(expected.slice(0, 80))}`);
     }
     expect(differences.slice(0, 10)).toEqual([]);
     expect(differences).toHaveLength(0);
     expect(compared).toBeGreaterThan(1_000);
+  });
+
+  it('keeps the frozen copy the runtime guard uses equal to the vendored release', () => {
+    // `redactCredentials` compares its pipeline with the frozen function in `src/redaction-01425.ts`
+    // and falls back to it on any difference. That copy and the test's reference must stay the same
+    // function, or the guard would prove nothing.
+    const differences: string[] = [];
+    for (const { input, name } of generated()) {
+      if (releasedGuardRedaction(input) !== redact01425(input)) differences.push(name);
+    }
+    expect(differences.slice(0, 10)).toEqual([]);
+    expect(differences).toHaveLength(0);
   });
 
   it('removes every planted value in the shapes it adds', () => {
@@ -699,6 +741,12 @@ describe('the shapes decided from the original spans (#989)', () => {
     }
     expect(leaks.slice(0, 10)).toEqual([]);
     expect(leaks).toHaveLength(0);
+  });
+
+  it('never needed the released fallback', () => {
+    // The counter only moves when the instrumented pipeline and the frozen release disagree, which
+    // is exactly what no case may cause (#989 review).
+    expect(redactionFallbacks.count).toBe(0);
   });
 
   it('stays idempotent on every generated input and shape', () => {

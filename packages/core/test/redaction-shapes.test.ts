@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { redactCredentials } from '../src/diagnostics';
+import { redactCredentials, releasedRedactionWithOrigins } from '../src/diagnostics';
 import { redactCredentials as released } from './redaction-01424-reference';
 
 // #937/#989: the value shapes the released rules leave behind. Every case here is a shape an issue
@@ -182,6 +182,26 @@ describe('a PEM private key block (#989)', () => {
     expect(idempotent('-----BEGIN PRIVATE KEY-----')).toBe('[redacted]');
   });
 
+  it('takes the RFC 1421 preamble of an encrypted block', () => {
+    // A traditional encrypted key carries `Proc-Type` and `DEK-Info` lines and a blank line before
+    // its base64 body; the key material after them must go too (#989 review).
+    const encrypted = (preamble: string, body = 'MIIEowIBAAKCAQEA'): string =>
+      `-----BEGIN RSA PRIVATE KEY-----\n${preamble}${body}\n-----END RSA PRIVATE KEY-----`;
+    expect(idempotent(encrypted(''))).toBe('[redacted]');
+    expect(idempotent(encrypted('Proc-Type: 4,ENCRYPTED\n'))).toBe('[redacted]');
+    expect(idempotent(encrypted('Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,0123456789ABCDEF\n\n'))).toBe('[redacted]');
+    expect(idempotent(encrypted('proc-type: 4,ENCRYPTED\ndek-info: DES-EDE3-CBC,0123456789ABCDEF\n\n'))).toBe('[redacted]');
+    // No footer, so the block runs to the end of its body: the preamble and body go, prose stays.
+    expect(
+      idempotent('-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,0123\n\nMIIEowIBAAKCAQEA\nthen prose'),
+    ).toBe('[redacted]\nthen prose');
+  });
+
+  it('leaves a preamble-like prose line outside a block alone', () => {
+    for (const input of ['Proc-Type: 4,ENCRYPTED is what openssl used', 'DEK-Info: AES-256-CBC,0123456789ABCDEF'])
+      expect(idempotent(input), input).toBe(input);
+  });
+
   it('reads a run of headers without a footer once (#989 round 1)', () => {
     // The round-3 review input: a keyed header repeated, and only an unrelated footer at the end.
     // Each header is read with its own line, so the scan stays linear and nothing is a block.
@@ -201,26 +221,62 @@ describe('a PEM private key block (#989)', () => {
   });
 });
 
-describe('a field attached to a marker (#989)', () => {
-  // #979 removed every run glued to a marker, because attachment alone cannot tell a credential
-  // remainder from an appended field. The original span does: a marker the caller sent is not
-  // evidence that a value ended there, so an appended field keeps its text.
-  it('keeps an appended field after a marker the caller sent', () => {
-    for (const input of ['token=[redacted]"status":"ok"', 'token=[redacted]"status":"ok","error":"x"', "token=[redacted]'kind':'x'"])
-      expect(idempotent(input), input).toBe(input);
-  });
-
-  it('still removes a bare or chained remainder, which may be a credential tail', () => {
+describe('a field attached to a marker (#989 round 2)', () => {
+  // #989 round 1 tried to keep an appended field after a marker the caller sent. That is not safe:
+  // the original span says who wrote the marker, never that what follows is harmless
+  // (`password=[redacted]"hunter2":"x"`), so the released glue runs unchanged and removes the run.
+  it('removes the whole attached run, as the release does', () => {
+    expect(idempotent('password=[redacted]"hunter2":"x"')).toBe('password=[redacted]');
+    expect(idempotent('token=[redacted]"v":"probeSecret42"')).toBe('token=[redacted]');
+    expect(idempotent('token=[redacted]"status":"ok"')).toBe('token=[redacted]');
+    expect(idempotent("token=[redacted]'kind':'x'")).toBe('token=[redacted]');
     expect(idempotent(`token=[redacted]${SECRET}`)).toBe('token=[redacted]');
-    expect(idempotent("token=[redacted]'x''y''z'")).toBe('token=[redacted]');
-    expect(idempotent('token=[redacted]"a","b"')).toBe('token=[redacted]');
   });
 
-  it('keeps removing a field after a marker the pipeline produced', () => {
-    // Here the released pipeline did replace a value at that position, so the attached run may be
-    // its remainder: the additive rule wins over the field shape.
-    expect(idempotent('token=abc"status":"ok"')).toBe('token=[redacted]');
-    expect(idempotent(`{"token":{"v":"${SECRET}"}}`)).toBe('{"token":[redacted]}}');
+  it('still stops at a credential key it must not consume', () => {
+    expect(idempotent(`token=[redacted]apiSecret="${SECRET}"`)).toBe('token=[redacted]apiSecret=[redacted]');
+  });
+});
+
+describe('the original spans a shape is applied through (#989 round 2)', () => {
+  // A kept rule head is copied with each character's own origin, and an inserted marker takes the
+  // origin of the position it was inserted at. Before that, a fabricated origin shifted the span of
+  // the next value and left `pw` behind.
+  it('maps a value after a long key without shifting the next one', () => {
+    expect(idempotent('organizationSecondaryAuthToken="x" token: \u201ca pw\u201d token=x')).toBe(
+      '[redacted]"[redacted]" token: [redacted] token=[redacted]',
+    );
+  });
+
+  it('reaches the fixed point in one call when a marker precedes a block', () => {
+    const input = `${'token=x apiSecret=x '.repeat(7)}\n-----BEGIN PRIVATE KEY-----\npw\n-----END PRIVATE KEY-----`;
+    expect(idempotent(input)).toBe(`${'token=[redacted] apiSecret=[redacted] '.repeat(7)}\n[redacted]`);
+  });
+
+  it('keeps every origin monotone and inside the input', () => {
+    const inputs = [
+      `token=${SECRET}`,
+      'organizationSecondaryAuthToken="x" token: \u201ca pw\u201d token=x',
+      `password => token:\u201cfirst ${SECRET}\u201d`,
+      '-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\n\nMIIE\n-----END RSA PRIVATE KEY-----',
+      `a b c d e f ${SECRET} g h i j`,
+      '',
+    ];
+    for (const input of inputs) {
+      const spans = releasedRedactionWithOrigins(input);
+      expect(spans.sound, input).toBe(true);
+      for (let index = 0; index < spans.origins.length; index += 1) {
+        expect(spans.origins[index], input).toBeLessThan(input.length + 1);
+        if (index > 0) expect(spans.origins[index]!, input).toBeGreaterThanOrEqual(spans.origins[index - 1]!);
+      }
+    }
+  });
+
+  it('merges two shapes that claim one value', () => {
+    // An arrow whose value starts a typographic pair: the union is removed, so no tail survives.
+    expect(idempotent(`password => token:\u201cfirst ${SECRET}\u201d`)).toBe('password =[redacted]');
+    // The pair is a separate value after the arrow's bare one, so each gets its own marker.
+    expect(idempotent(`token => token: \u201ca ${SECRET} b\u201d`)).toBe('token =[redacted] [redacted]');
   });
 });
 

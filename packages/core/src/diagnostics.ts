@@ -2,6 +2,7 @@
 // copied verbatim into the audit log and the agent ledger, so text that came from a provider, a
 // driver or an exception must be reduced to a safe diagnostic before it is put there: a provider's
 // own error code and message, never its body, and never a token the body or an exception echoes.
+import { redactCredentials as releasedRedaction01425 } from './redaction-01425';
 
 /**
  * Anything whose value is a credential: the key is kept (it says what failed), the value is not.
@@ -21,24 +22,19 @@ const ID_LIKE = '(?:[a-z]{2,5})_[0-9a-f]{32}';
 /**
  * One replacement rule: the pattern, and the text its replacement keeps around the marker. Rule 1
  * keeps the key and the separator (`$1$2$3[redacted]`), the scheme rule writes `$1` and one space,
- * and the URL rule keeps its `@`; everything between is replaced by the marker.
+ * and the URL rule keeps its `@`; everything between is replaced by the marker. The kept text is
+ * written by the rule itself, so every kept character keeps its own origin (#989 review).
  */
-interface Frame {
-  /** The text written before the marker, and how many match characters it stands for. */
-  readonly text: string;
-  readonly length: number;
-}
-
 interface Rule {
   readonly pattern: RegExp;
-  /** What a match keeps before the marker (`$1$2$3`). */
-  readonly head?: (match: RegExpExecArray) => Frame;
-  /** What a match keeps after the marker (a URL's `@`). */
-  readonly tail?: (match: RegExpExecArray) => Frame;
+  /**
+   * Writes what the replacement keeps before the marker and returns how many match characters it
+   * stands for: the marker's origin is then the value's first character.
+   */
+  readonly head?: (source: SpannedText, match: RegExpExecArray, start: number, builder: SpannedBuilder) => number;
+  /** Writes what the replacement keeps after the marker and returns how many match characters it stands for. */
+  readonly tail?: (source: SpannedText, match: RegExpExecArray, end: number, builder: SpannedBuilder) => number;
 }
-
-const nothing: Frame = { text: '', length: 0 };
-const verbatim = (text: string): Frame => ({ text, length: text.length });
 
 /**
  * Token-shaped values, in the order they must be applied: a named credential (`access_token=…`,
@@ -55,7 +51,11 @@ const REDACTIONS: readonly Rule[] = [
       `(${CREDENTIAL_KEY})(["']?)(\\s*[:=]\\s*)(?!(?:Bearer|Basic)\\s|\\[redacted\\]|(?:${COMPOUND_CREDENTIAL_KEY})\\s*[:=])("(?:[^"\\\\]|\\\\.)*"|'[^']*'|[^\\s,;&}\\]"']+)`,
       'gi',
     ),
-    head: (match) => verbatim(`${match[1]}${match[2]}${match[3]}`),
+    head: (_source, match, start, builder) => {
+      const length = match[1]!.length + match[2]!.length + match[3]!.length;
+      builder.copy(start, start + length);
+      return length;
+    },
   },
   // The prefixes Shopify, Stripe, Slack, GitHub, AWS, Google and JWT issuers use.
   { pattern: /\b(?:shpat_|shpss_|shpca_|sk_live_|sk_test_|rk_|xox[abposr]-|ghp_|gho_|github_pat_|ya29\.)[A-Za-z0-9._-]{4,}/gi },
@@ -65,7 +65,12 @@ const REDACTIONS: readonly Rule[] = [
   // what the rule replaces, exactly as the released `$1 [redacted]` does.
   {
     pattern: /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{6,}/gi,
-    head: (match) => ({ text: `${match[1]} `, length: match[1]!.length }),
+    head: (_source, match, start, builder) => {
+      const length = match[1]!.length;
+      builder.copy(start, start + length);
+      builder.insert(' ', start + length);
+      return length;
+    },
   },
   // 24+ characters with no separators: a token, not a word, an id or a number. Our own external
   // ids are one exception, so a message may still name the artifact it is about; a provider's error
@@ -79,27 +84,25 @@ const MARKER = '[redacted]';
 /**
  * A text, and where each of its characters came from (#989). `origins[k]` is the offset, in the
  * input of `redactCredentials`, of the character at `text[k]`. A pass that copies text keeps every
- * character's own offset; a pass that replaces a value writes the marker with the offset of the
- * value's first character, so the array stays non-decreasing.
- *
- * Two things then need no second copy of the pipeline: an original span maps to the range of the
- * released output that came from it (one bound search), and a marker the pipeline itself wrote is
- * recognisable (its ten characters share one offset, while a `[redacted]` the caller sent has ten
- * offsets of its own).
+ * character's own offset; a pass that replaces a value writes the marker with the origin of the
+ * value's first character. `sound` says those offsets are non-decreasing, which is what makes an
+ * original span map to an output range with one bound search: a pass that ever broke it sets it to
+ * false and the shape passes then stand down.
  */
 interface SpannedText {
   readonly text: string;
   readonly origins: Int32Array;
+  readonly sound: boolean;
 }
 
 /** The input text: every character is its own origin. */
 function unspanned(text: string): SpannedText {
   const origins = new Int32Array(text.length);
   for (let index = 0; index < text.length; index += 1) origins[index] = index;
-  return { text, origins };
+  return { text, origins, sound: true };
 }
 
-/** A copied range of the source text, or text a pass inserted in place of a value. */
+/** A copied range of the source text, or text a pass inserted at a position of the source. */
 interface Piece {
   readonly from: number;
   readonly to: number;
@@ -108,7 +111,9 @@ interface Piece {
 
 /**
  * Builds the next pass's text and its origins in one go. A pass states only what it copies and
- * what it replaces, so its output can never drift from the released pass's slices.
+ * what it replaces, so its output can never drift from the released pass's slices. An insertion
+ * names a position of the text the pass is reading, and its origin is that position's own origin:
+ * the caller never has to translate an offset into the original text itself (#989 review).
  */
 class SpannedBuilder {
   private readonly pieces: Piece[] = [];
@@ -120,15 +125,16 @@ class SpannedBuilder {
     this.size += to - from;
   }
 
-  insert(text: string, origin: number): void {
+  insert(text: string, at: number): void {
     if (text.length === 0) return;
-    this.pieces.push({ from: origin, to: origin, insert: text });
+    this.pieces.push({ from: at, to: at, insert: text });
     this.size += text.length;
   }
 
   build(source: SpannedText): SpannedText {
     const parts: string[] = new Array<string>(this.pieces.length);
     const origins = new Int32Array(this.size);
+    const last = source.origins.length - 1;
     let at = 0;
     for (let index = 0; index < this.pieces.length; index += 1) {
       const piece = this.pieces[index]!;
@@ -138,15 +144,35 @@ class SpannedBuilder {
         at += piece.to - piece.from;
       } else {
         parts[index] = piece.insert;
-        origins.fill(piece.from, at, at + piece.insert.length);
+        // The insertion sits at a position of the source text: its origin is that character's.
+        const origin = last < 0 ? 0 : source.origins[Math.min(piece.from, last)]!;
+        origins.fill(origin, at, at + piece.insert.length);
         at += piece.insert.length;
       }
     }
-    return { text: parts.join(''), origins };
+    return { text: parts.join(''), origins, sound: source.sound && isMonotone(origins) };
   }
 }
 
-/** The released pipeline: the rules and every pass 0.14.25 shipped, on the whole original text. */
+/** Whether `origins` never decreases, which the span mapping relies on. */
+function isMonotone(origins: Int32Array): boolean {
+  for (let index = 1; index < origins.length; index += 1) {
+    if (origins[index]! < origins[index - 1]!) return false;
+  }
+  return true;
+}
+
+/**
+ * How often the span-recording pipeline was distrusted and the frozen release's own output returned
+ * instead (#989 review). No content is recorded; a non-zero count is a bug, and the differential
+ * keeps it at zero.
+ */
+export const redactionFallbacks = { count: 0 };
+
+/**
+ * The released pipeline: the rules and every pass 0.14.25 shipped, on the whole original text, with
+ * the original offset of every character it keeps.
+ */
 function redactReleasedPipeline(text: string): SpannedText {
   // A long camelCase credential key is replaced as a token by the rules below, after which its
   // value can no longer be told from any other text. So the plain value of such a key is replaced
@@ -179,21 +205,44 @@ export function releasedRedaction(text: string): string {
 }
 
 /**
+ * The instrumented pipeline with its origins, for the tests that check the bookkeeping itself
+ * (#989 review): every pass must leave the offsets monotone and each one pointing into the text the
+ * caller gave.
+ */
+export function releasedRedactionWithOrigins(text: string): SpannedText {
+  return redactReleasedPipeline(text);
+}
+
+/** Whether the text holds anything one of the #989 shapes can be read from. */
+const TYPOGRAPHIC_START = /[\u201c\u2018\u00ab\u201e\u2039]/;
+function hasOriginalShape(text: string): boolean {
+  return text.includes('PRIVATE KEY') || text.includes('=>') || TYPOGRAPHIC_START.test(text);
+}
+
+/**
  * Removes token-shaped values from free text: an exception's message, a provider's answer, a log
  * line that is about to become an AppError.
  *
- * The released pipeline runs first and unchanged; the #989 shapes then replace value spans it could
- * only see in part, decided from the ORIGINAL text and carried into its output by the recorded
- * origins. Nothing new runs before it, so no released removal can be lost (#989).
+ * The release's own function produces the output first. Only a text that can hold a #989 shape is
+ * run through the instrumented pipeline as well, and then the two base outputs must agree byte for
+ * byte: a lost character, or an origin that stopped being monotone, means the span bookkeeping is
+ * not trustworthy, and the release's output is returned with nothing added. Nothing new ever runs
+ * before the release, and nothing here can remove less than it.
  */
 export function redactCredentials(text: string): string {
-  const released = redactReleasedPipeline(text);
-  const shaped = redactOriginalValueShapes(text, released);
-  if (shaped === released.text) return shaped;
+  const released = releasedRedaction01425(text);
+  if (!hasOriginalShape(text)) return released;
+  const spans = redactReleasedPipeline(text);
+  if (!spans.sound || spans.text !== released) {
+    redactionFallbacks.count += 1;
+    return released;
+  }
+  const shaped = redactOriginalValueShapes(text, spans);
+  if (shaped === spans.text) return shaped;
   // The replacement can leave the marker beside text the released passes had no reason to touch
-  // (`token => 'x'y`). One more released pass reaches the fixed point, so a second call to this
-  // function changes nothing; it can only remove more.
-  return redactReleasedPipeline(shaped).text;
+  // (`token => 'x'y`). The release's own pass on the result reaches the fixed point, so a second
+  // call to this function changes nothing.
+  return releasedRedaction01425(shaped);
 }
 
 /** The #946/#956 additions, then the rules again, until nothing changes. */
@@ -227,8 +276,8 @@ function applyRules(source: SpannedText): SpannedText {
 
 /**
  * One global replacement, read with an `exec` loop so the match offsets are known: everything
- * between matches is copied, the match's own `head` and `tail` are written, and the marker takes
- * the place of the value in between. The result is byte-identical to the released `$1$2$3[redacted]`
+ * between matches is copied, the rule writes the match's own kept text, and the marker takes the
+ * place of the value in between. The result is byte-identical to the released `$1$2$3[redacted]`
  * replacement.
  */
 function applyRule(source: SpannedText, rule: Rule): SpannedText {
@@ -245,12 +294,10 @@ function applyRule(source: SpannedText, rule: Rule): SpannedText {
       pattern.lastIndex += 1;
       continue;
     }
-    const head = rule.head ? rule.head(match) : nothing;
-    const tail = rule.tail ? rule.tail(match) : nothing;
     builder.copy(copied, start);
-    builder.insert(head.text, start);
-    builder.insert(MARKER, Math.min(start + head.length, end));
-    builder.insert(tail.text, Math.max(end - tail.length, start + head.length));
+    const head = rule.head ? rule.head(source, match, start, builder) : 0;
+    builder.insert(MARKER, Math.min(start + head, end));
+    if (rule.tail) rule.tail(source, match, end, builder);
     copied = end;
   }
   if (copied === 0) return source;
@@ -1192,48 +1239,21 @@ function gluedRunEnd(text: string, start: number): number {
   return index;
 }
 
-/** A quoted name followed by `:` (`"status":"ok"`, `'kind': 'x'`): an appended field, not a value. */
-function isAttachedField(text: string, start: number): boolean {
-  const quote = text.charAt(start);
-  if (quote !== '"' && quote !== "'") return false;
-  const nameEnd = pairValueEnd(text, start);
-  if (nameEnd < 0) return false;
-  let index = nameEnd;
-  while (isSpace(text.charAt(index))) index += 1;
-  return text.charAt(index) === ':';
-}
-
-/**
- * Whether the marker at `position` is one a pass wrote (#989): its ten characters then share the
- * offset of the value it replaced, while a `[redacted]` the caller sent kept ten offsets of its own.
- */
-function isPipelineMarker(source: SpannedText, position: number): boolean {
-  const origin = source.origins[position];
-  if (origin === undefined) return false;
-  for (let index = position + 1; index < position + MARKER.length; index += 1) {
-    if (source.origins[index] !== origin) return false;
-  }
-  return true;
-}
-
 /**
  * A value the released pipeline replaced only in part, with the rest glued to the marker:
  * `token=[redacted]shortpw`, `{"token":[redacted]"shortpw"]}`, `{"secret":[redacted]"v":"x"}}`,
  * `SIGNINGKEY=[redacted]'x'`. Only the attached run is removed, in one scan; it stops before a
  * credential key or scheme anchor, which a later pass still needs.
  *
- * A marker the caller sent is not evidence that a value ended there, so an appended field after it
- * (`token=[redacted]"status":"ok"`) keeps its text (#989). Anything else attached to such a marker
- * -- a bare run, a fragment chain -- may still be the tail of a value, so it is removed: the
- * additive rule wins.
+ * The whole attached run goes, as the release does it (#989 review): attachment alone cannot tell a
+ * credential remainder from an appended field, and `password=[redacted]"hunter2":"x"` proves the
+ * run is not safe to keep.
  */
-function gluedMarkerSpan(source: SpannedText, valueStart: number): ValueSpan | null {
-  const text = source.text;
+function gluedMarkerSpan(text: string, valueStart: number): ValueSpan | null {
   if (!text.startsWith(MARKER, valueStart)) return null;
   const start = valueStart + MARKER.length;
   const char = text.charAt(start);
   if (char === '' || isSpace(char) || char === ']' || char === '}') return null;
-  if (!isPipelineMarker(source, valueStart) && isAttachedField(text, start)) return null;
   let end = gluedRunEnd(text, start);
   const anchor = shapeAnchor(text, start, end);
   if (anchor >= 0) end = anchor;
@@ -1254,13 +1274,7 @@ function hasGluedMarker(text: string): boolean {
 
 function redactMarkerGlue(source: SpannedText): SpannedText {
   if (!hasGluedMarker(source.text)) return source;
-  return redactPairValues(
-    source,
-    (value, nameEnd) => separatorEnd(value, nameEnd, true),
-    (_value, valueStart) => gluedMarkerSpan(source, valueStart),
-    isShapesCredentialKey,
-    '',
-  );
+  return redactPairValues(source, (value, nameEnd) => separatorEnd(value, nameEnd, true), gluedMarkerSpan, isShapesCredentialKey, '');
 }
 
 /**
@@ -1286,10 +1300,17 @@ function redactSettledValueShapes(source: SpannedText): SpannedText {
  */
 const URL_PASSWORD: Rule = {
   pattern: /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#@:]*):[^\s/?#]*@/g,
-  /** The scheme and userinfo and the `:` before the password. */
-  head: (match) => verbatim(`${match[1]}:`),
-  /** The `@` that closes the userinfo. */
-  tail: () => verbatim('@'),
+  /** The scheme and userinfo and the `:` before the password, copied with their own origins. */
+  head: (_source, match, start, builder) => {
+    const length = match[1]!.length + 1;
+    builder.copy(start, start + length);
+    return length;
+  },
+  /** The `@` that closes the userinfo, which is the match's last character. */
+  tail: (_source, _match, end, builder) => {
+    builder.copy(end - 1, end);
+    return 1;
+  },
 };
 
 function redactUrlPasswords(source: SpannedText): SpannedText {
@@ -1385,21 +1406,60 @@ function isPemBodyLine(text: string, start: number): boolean {
   return true;
 }
 
+/** How many RFC 1421 preamble lines an encrypted block may carry before its base64 body. */
+const PEM_PREAMBLE_LIMIT = 4;
+/** How much of one preamble line is read; a real one is short (`DEK-Info: AES-256-CBC,<32 hex>`). */
+const PEM_PREAMBLE_LINE_LIMIT = 128;
+
+/**
+ * An RFC 1421 preamble line of an encrypted block: `Proc-Type: 4,ENCRYPTED` or
+ * `DEK-Info: AES-256-CBC,0123…`, read case-insensitively and bounded, so the key material after
+ * them is still inside the block (#989 review). Nothing else on the line is accepted, which keeps
+ * ordinary prose that happens to contain a colon out of the block.
+ */
+function isPemPreambleLine(text: string, start: number): boolean {
+  const limit = Math.min(text.length, start + PEM_PREAMBLE_LINE_LIMIT);
+  const line = text.slice(start, limit).toLowerCase();
+  const prefix = line.startsWith('proc-type:') ? 10 : line.startsWith('dek-info:') ? 9 : 0;
+  if (prefix === 0) return false;
+  for (let index = prefix; index < line.length && line.charAt(index) !== '\n'; index += 1) {
+    const code = line.charCodeAt(index);
+    const value =
+      (code >= 97 && code <= 122) ||
+      (code >= 48 && code <= 57) ||
+      code === 32 ||
+      code === 44 ||
+      code === 45 ||
+      code === 47 ||
+      code === 43 ||
+      code === 61 ||
+      code === 13;
+    if (!value) return false;
+  }
+  return true;
+}
+
 /**
  * Where the block whose header ends at `headerEnd` ends: the end of its footer line, whose label
  * must match the header's exactly, or -- with no footer -- the end of its last body line, so a
- * truncated dump never runs past text that is not key material.
+ * truncated dump never runs past text that is not key material. An encrypted block's RFC 1421
+ * preamble (`Proc-Type`, `DEK-Info`, a blank line) is part of the block (#989 review).
  *
  * Only this block's own lines are read (the scan stops at the first line that is neither a matching
- * footer nor a body line), so a text of many headers without footers is read once (#989 review).
+ * footer, a preamble line nor a body line), so a text of many headers without footers is read once.
  */
 function pemBlockEnd(text: string, headerEnd: number, label: string): number {
   let end = headerEnd;
   let lineStart = nextLineStart(text, headerEnd);
+  let preambles = 0;
   while (lineStart < text.length) {
     const footer = pemFooterEnd(text, lineStart, label);
     if (footer >= 0) return footer;
-    if (!isPemBodyLine(text, lineStart)) return end;
+    if (preambles < PEM_PREAMBLE_LIMIT && isPemPreambleLine(text, lineStart)) {
+      preambles += 1;
+    } else if (!isPemBodyLine(text, lineStart)) {
+      return end;
+    }
     end = lineEnd(text, lineStart);
     lineStart = nextLineStart(text, end);
   }
@@ -1443,8 +1503,6 @@ const TYPOGRAPHIC_CLOSERS: ReadonlyMap<string, string> = new Map([
   ['\u201e', '\u201c'],
   ['\u2039', '\u203a'],
 ]);
-
-const TYPOGRAPHIC_OPENERS = [...TYPOGRAPHIC_CLOSERS.keys()];
 
 /**
  * A value in typographic quotes: `token: “short pw”`. The rules read only up to the first space
@@ -1566,21 +1624,37 @@ function firstOriginAtLeast(origins: Int32Array, offset: number, from: number): 
 }
 
 /**
+ * The union of overlapping regions, in order (#989 review). Two shapes can claim one value --
+ * `password => token:“first pw”` is an arrow whose value starts a typographic pair -- and dropping
+ * the second would leave the tail of the value in place. Only a region fully inside an earlier one
+ * disappears, because the union already covers it.
+ */
+function mergeRegions(regions: Region[]): Region[] {
+  regions.sort((left, right) => left.start - right.start || right.end - left.end);
+  const merged: Region[] = [];
+  for (const region of regions) {
+    const last = merged[merged.length - 1];
+    if (last && region.start <= last.end) {
+      if (region.end > last.end) merged[merged.length - 1] = { start: last.start, end: region.end };
+      continue;
+    }
+    merged.push(region);
+  }
+  return merged;
+}
+
+/**
  * The released output with each region replaced by the marker. A region the released pipeline
- * already removed whole (it maps to an empty range) changes nothing, and a region that overlaps an
- * earlier one is dropped, so the regions stay a monotone list. Every index of the output is visited
- * once.
+ * already removed whole (it maps to an empty range) changes nothing. Every index of the output is
+ * visited once.
  */
 function applyRegions(released: SpannedText, regions: readonly Region[]): string {
   const { text, origins } = released;
   const parts: string[] = [];
   let copied = 0;
-  let applied = 0;
   for (const region of regions) {
-    if (region.end <= region.start || region.start < applied) continue;
     const start = firstOriginAtLeast(origins, region.start, copied);
     const end = firstOriginAtLeast(origins, region.end, start);
-    applied = region.end;
     if (end <= start) continue;
     parts.push(text.slice(copied, start), MARKER);
     copied = end;
@@ -1600,20 +1674,24 @@ const separatorEndPair = (text: string, nameEnd: number): number => separatorEnd
  * and byte-identically, and this can only take away more of the same values.
  */
 function redactOriginalValueShapes(original: string, released: SpannedText): string {
+  if (!released.sound) return released.text;
   const regions: Region[] = [];
   pemRegions(original, regions);
   if (original.includes('PRIVATE KEY')) {
+    // A block under a credential key is a pair's value, whichever separator the line used.
     collectPairRegions(original, separatorEndPair, keyedPemValueSpan, isShapesCredentialKey, regions);
+    if (original.includes('=>')) {
+      collectPairRegions(original, arrowSeparatorEnd, keyedPemValueSpan, isShapesCredentialKey, regions);
+    }
   }
-  if (TYPOGRAPHIC_OPENERS.some((opener) => original.includes(opener))) {
+  if (TYPOGRAPHIC_START.test(original)) {
     collectPairRegions(original, separatorEndPair, typographicValueSpan, isShapesCredentialKey, regions);
   }
   if (original.includes('=>')) {
     collectPairRegions(original, arrowSeparatorEnd, arrowValueSpan, isShapesCredentialKey, regions);
   }
   if (regions.length === 0) return released.text;
-  regions.sort((left, right) => left.start - right.start || right.end - left.end);
-  return applyRegions(released, regions);
+  return applyRegions(released, mergeRegions(regions));
 }
 
 /**
