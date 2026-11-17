@@ -1,0 +1,13 @@
+# Blank issues are off: a report that skips the form is missing the version or the steps, and a
+# security problem must not be filed publicly in the first place.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/TimChr78/Agentic-Marketing/security/advisories/new
+    about: "Do not open a public issue for a security problem. SECURITY.md says what is in scope and when to expect an answer."
+  - name: Read the documentation
+    url: https://github.com/TimChr78/Agentic-Marketing/tree/main/docs
+    about: "Deployment, operations, agents, integrations and the architecture decision records."
+  - name: Contribute
+    url: https://github.com/TimChr78/Agentic-Marketing/blob/main/CONTRIBUTING.md
+    about: "Setup, the checks, changelog fragments and how releases are cut."

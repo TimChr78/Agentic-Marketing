@@ -1,10 +1,19 @@
-import { artifactTypes, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
+import { artifactTypes, canonicalPeople, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { fingerprintParts, requestEmail, requestPush, requestSms, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
-import { consentStateOf, currentConsent, purposeAllowed, type ResolvedEvent, refusedPurposes } from '@agentic-marketing/profiles';
+import {
+  canonicalProfile,
+  consentStateOf,
+  currentConsent,
+  lockProfileRows,
+  purposeAllowed,
+  type ResolvedEvent,
+  refusedPurposes,
+  withIdentityLock,
+} from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { contextFor, ENTERED, evaluate, publishedSegments, relevant } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -25,6 +34,16 @@ export interface JourneyDeps {
 }
 
 const graphs = new Map<string, Graph>();
+
+/** How many due candidates one sweep may examine, per unit of its batch. */
+const SCAN_LIMIT_FACTOR = 10;
+/**
+ * Where each workspace's last bounded scan stopped, so the next sweep continues past a run of
+ * people another transaction is writing instead of re-examining them (and never walks a whole
+ * workspace backlog in one round). A scan that reached the end of the due set, or filled its batch,
+ * clears its entry and starts from the oldest again.
+ */
+const scanCursors = new Map<string, { dueAt: Date; id: string }>();
 
 /** The compiled graph of a journey version (versions are immutable, so it is cached forever). */
 async function graphOf(tx: Tx, journeyId: string, version: number): Promise<Graph> {
@@ -63,14 +82,25 @@ export async function publishedJourneys(tx: Tx): Promise<PublishedJourney[]> {
   return out;
 }
 
-/** Enters people into journeys whose trigger the events match, and wakes those waiting for them. */
-export async function matchEvents(
+/**
+ * Enters people into journeys whose trigger the events match. The caller holds the workspace
+ * identity lock (`withIdentityLock`): this runs after the batch that resolved the events, so a merge
+ * may have committed in between, and the canonical lookup below is only truthful while no merge can
+ * interleave. Without both, a participant could be inserted against an id that was already folded
+ * away (#1011).
+ */
+export async function enterJourneys(
   tx: Tx,
   workspaceId: string,
   resolved: ResolvedEvent[],
-  deps: JourneyDeps,
-): Promise<{ entered: number; woken: number; holdout: JourneyEvent[] }> {
-  if (!resolved.length) return { entered: 0, woken: 0, holdout: [] };
+): Promise<{ entered: number; holdout: JourneyEvent[]; enrolled: { eventId: string; profileId: string }[] }> {
+  if (!resolved.length) return { entered: 0, holdout: [], enrolled: [] };
+  // Follow a merge that committed after the batch. SQL only: nothing personal is decrypted here.
+  const canonical = await canonicalPeople(
+    tx,
+    workspaceId,
+    resolved.map((r) => r.profileId),
+  );
   const journeys = await publishedJourneys(tx);
   // A campaign's control group is the outer scope: its sending members inherit the campaign's
   // assignment instead of randomising the same person again. Loaded once per batch.
@@ -78,9 +108,13 @@ export async function matchEvents(
   for (const c of await publishedCampaigns(tx))
     if (c.content.controlGroup) for (const m of c.content.members) campaignOf.set(m.artifactId, c);
   let entered = 0;
-  let woken = 0;
   const holdout: JourneyEvent[] = [];
-  for (const { event: e, profileId } of resolved) {
+  // The events whose processing inserted a participant, with the person they enrolled. They get a
+  // durable processed marker, so a redelivery cannot enrol the same event twice (#1011 review), and
+  // the marker names the person so an erasure removes it (an event id can carry an address).
+  const enrolled = new Map<string, string>();
+  for (const { event: e, profileId: resolvedId } of resolved) {
+    const profileId = canonical.get(resolvedId) ?? resolvedId;
     for (const j of journeys) {
       const t = j.graph.trigger;
       const hit = t.event ? t.event === e.name && e.name !== ENTERED : e.name === ENTERED && e.properties.segment_id === t.segment;
@@ -153,6 +187,7 @@ export async function matchEvents(
         continue;
       }
       entered += res.length;
+      enrolled.set(e.messageId, profileId);
       if (assigned?.created)
         holdout.push({
           workspaceId,
@@ -169,14 +204,60 @@ export async function matchEvents(
           detail: holdoutDetail(assigned.assignment, campaign?.id),
         });
     }
-    // Wake whoever waits for this event (wait-for-event and goal nodes).
+  }
+  return { entered, holdout, enrolled: [...enrolled].map(([eventId, profileId]) => ({ eventId, profileId })) };
+}
+
+/**
+ * Wakes the people already waiting for one of this batch's events (wait-for-event and goal nodes).
+ * SQL only, so it runs in the same transaction as the enrolment: a participant this event enrols is
+ * `ready`, never `waiting`, and therefore cannot be woken by the event that created it (#1011
+ * review).
+ */
+export async function wakeWaiters(tx: Tx, workspaceId: string, resolved: ResolvedEvent[]): Promise<number> {
+  if (!resolved.length) return 0;
+  // Same merge-following reason as `enterJourneys` (#1011).
+  const canonical = await canonicalPeople(
+    tx,
+    workspaceId,
+    resolved.map((r) => r.profileId),
+  );
+  let woken = 0;
+  for (const r of resolved) {
+    const profileId = canonical.get(r.profileId) ?? r.profileId;
     const w = await tx.execute(sql`
       UPDATE journey_participants SET matched = true, waiting_event = NULL, due_at = now(), updated_at = now()
-      WHERE workspace_id = ${workspaceId} AND profile_id = ${profileId} AND waiting_event = ${e.name} AND status = 'waiting'`);
+      WHERE workspace_id = ${workspaceId} AND profile_id = ${profileId} AND waiting_event = ${r.event.name} AND status = 'waiting'`);
     woken += w.rowCount ?? 0;
   }
-  await wakeWaitUntil(tx, workspaceId, resolved, deps);
-  return { entered, woken, holdout };
+  return woken;
+}
+
+/**
+ * The events of this batch the journey hook has not applied yet. A redelivered event has a row from
+ * the transaction that enrolled someone for it and is skipped entirely: its enrolment and the
+ * wake-up it caused happened exactly once (#1011 review).
+ */
+async function freshEvents(tx: Tx, workspaceId: string, resolved: ResolvedEvent[]): Promise<ResolvedEvent[]> {
+  if (!resolved.length) return [];
+  const ids = [...new Set(resolved.map((r) => r.event.messageId))];
+  const rows = await tx.execute<{ event_id: string }>(sql`
+    SELECT event_id FROM journey_processed_events
+    WHERE workspace_id = ${workspaceId} AND event_id = ANY(${sql.param(ids)}::text[])`);
+  const done = new Set(rows.rows.map((r) => r.event_id));
+  return resolved.filter((r) => !done.has(r.event.messageId));
+}
+
+/** Records the events whose enrolment committed, in that same transaction. */
+async function markProcessed(tx: Tx, workspaceId: string, enrolled: { eventId: string; profileId: string }[]): Promise<void> {
+  if (!enrolled.length) return;
+  await tx.execute(sql`
+    INSERT INTO journey_processed_events (workspace_id, event_id, profile_id)
+    VALUES ${sql.join(
+      enrolled.map((e) => sql`(${workspaceId}, ${e.eventId}, ${e.profileId})`),
+      sql`, `,
+    )}
+    ON CONFLICT DO NOTHING`);
 }
 
 /**
@@ -225,13 +306,31 @@ async function wakeWaitUntil(tx: Tx, workspaceId: string, resolved: ResolvedEven
   }
 }
 
-/** The after-resolve hook for the profile workers. */
+/**
+ * The after-resolve hook for the profile workers. One event is applied once, however often the
+ * batch is delivered.
+ */
 export function journeyHook(db: Db, deps: JourneyDeps) {
   return async (workspaceId: string, resolved: ResolvedEvent[]) => {
+    if (!resolved.length) return;
     let holdout: JourneyEvent[] = [];
-    await db.withWorkspace(workspaceId, async (tx) => {
-      holdout = (await matchEvents(tx, workspaceId, resolved, deps)).holdout;
-    });
+    // One transaction for the writes an event causes: enrolment and the wake-up of the people
+    // already waiting for it see the same state, so a participant this event enrols cannot be woken
+    // by it and a sweeper tick cannot run in between (#1011 review). The workspace identity lock
+    // keeps a merge from interleaving, and no network I/O runs under it.
+    await db.withWorkspace(workspaceId, (tx) =>
+      withIdentityLock(tx, workspaceId, async () => {
+        const fresh = await freshEvents(tx, workspaceId, resolved);
+        if (!fresh.length) return;
+        const entered = await enterJourneys(tx, workspaceId, fresh);
+        holdout = entered.holdout;
+        await wakeWaiters(tx, workspaceId, fresh);
+        await markProcessed(tx, workspaceId, entered.enrolled);
+      }),
+    );
+    // Wait-until conditions may reach ClickHouse, so this recheck runs in its own transaction,
+    // without the lock. It is idempotent, and the sweeper rechecks the same conditions later.
+    await db.withWorkspace(workspaceId, (tx) => wakeWaitUntil(tx, workspaceId, resolved, deps));
     // ClickHouse is outside the transaction: an assignment that committed but whose event did not
     // is still measured from the table, and a lost event only affects the timeline.
     if (holdout.length) await deps.events.insertJourneyEvents(holdout).catch((err) => logger.warn({ err }, 'holdout events not stored'));
@@ -503,18 +602,27 @@ async function applyEffect(
   const plan = await publishedSingleton(tx, 'tracking_plan');
   const def = plan?.traits.find((x) => x.name === eff.trait);
   if (def && def.pii !== 'none') return `skipped: ${eff.trait} is personal data`;
-  await tx.execute(sql`
+  // A participant can sit on the id its person was merged away from (a hook that ran after the
+  // merge, before #1011), so follow the merge in SQL only, and never report a write that matched no
+  // row as if it happened (#1011).
+  const person = await canonicalProfile(tx, workspaceId, p.profileId);
+  if (!person) return `skipped: ${eff.trait} not written: the person no longer exists`;
+  const written = await tx.execute(sql`
     UPDATE profiles SET traits = jsonb_set(traits, ARRAY[${eff.trait}], ${JSON.stringify(eff.value)}::jsonb), updated_at = now()
-    WHERE workspace_id = ${workspaceId} AND id = ${p.profileId} AND merged_into IS NULL`);
+    WHERE workspace_id = ${workspaceId} AND id = ${person.id} AND merged_into IS NULL`);
+  if (!written.rowCount) return `skipped: ${eff.trait} not written: the person was merged away or erased`;
   return `${eff.trait} = ${JSON.stringify(eff.value)}`;
 }
 
 /**
- * One sweep: per workspace, claim due participants, advance them, apply effects and write
- * states in one transaction. Returns how many participants moved.
+ * One sweep: per workspace, lock the due people's profile rows, claim their due participants,
+ * advance them, apply effects and write states in one transaction. Returns how many participants
+ * moved. See the row order in `packages/profiles/src/identity.ts`: profile rows are locked first and
+ * never waited for, which keeps a sweep and an SDK batch from deadlocking (#1011).
  */
 export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; now?: () => Date } = {}): Promise<number> {
   const now = opts.now ?? (() => new Date());
+  const batch = opts.batch ?? 200;
   const { rows } = await db.admin.query<{ workspace_id: string }>(
     `SELECT DISTINCT workspace_id FROM journey_participants WHERE status IN ('ready', 'waiting') AND due_at <= $1 LIMIT 100`,
     [now()],
@@ -523,10 +631,65 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
   for (const { workspace_id: ws } of rows) {
     const journeyEvents: JourneyEvent[] = [];
     moved += await db.withWorkspace(ws, async (tx) => {
+      // Profile rows first: the people due now, resolved to the profile they belong to today (a
+      // participant can sit on an id a merge folded away). Locking them before any participant row
+      // is the order every writer uses (#1011); SKIP LOCKED means this transaction never waits for a
+      // row a batch or a merge holds, so it cannot be the second half of a lock cycle.
+      //
+      // Candidates are read in due order, oldest first, and the scan goes on past someone whose
+      // profile is locked until the batch is filled or no candidates are left: a locked person must
+      // not spend the batch, and due time — not the profile id — decides who moves first (#1011
+      // review).
+      const claimable: string[] = [];
+      const scanLimit = Math.max(1, batch * SCAN_LIMIT_FACTOR);
+      let after = scanCursors.get(ws);
+      let scanned = 0;
+      let reachedEnd = false;
+      while (claimable.length < batch && scanned < scanLimit) {
+        const want = Math.min(batch - claimable.length, scanLimit - scanned);
+        const page = await tx.execute<{ id: string; profile_id: string; due_at: Date }>(sql`
+          SELECT id, profile_id, due_at FROM journey_participants
+          WHERE status IN ('ready', 'waiting') AND due_at <= ${now()}
+            ${after ? sql`AND (due_at, id) > (${after.dueAt}::timestamptz, ${after.id}::bigint)` : sql``}
+          ORDER BY due_at, id LIMIT ${want}`);
+        if (!page.rows.length) {
+          reachedEnd = true;
+          break;
+        }
+        const last = page.rows[page.rows.length - 1]!;
+        after = { dueAt: last.due_at, id: last.id };
+        scanned += page.rows.length;
+        const canonical = await canonicalPeople(
+          tx,
+          ws,
+          page.rows.map((r) => r.profile_id),
+        );
+        const roots = [...new Set(page.rows.map((r) => canonical.get(r.profile_id) ?? r.profile_id))];
+        // The lock carries `merged_into IS NULL`, so a merge that committed after the lookup above
+        // leaves nothing locked for that person: the candidate is deferred to the next sweep instead
+        // of claiming a participant row whose survivor this transaction does not hold.
+        const locked = new Set(await lockProfileRows(tx, ws, roots, { skipLocked: true }));
+        for (const row of page.rows) {
+          const root = canonical.get(row.profile_id) ?? row.profile_id;
+          if (locked.has(root)) claimable.push(row.id);
+        }
+        if (page.rows.length < want) {
+          reachedEnd = true;
+          break;
+        }
+      }
+      if (reachedEnd || claimable.length >= batch) scanCursors.delete(ws);
+      else if (after) scanCursors.set(ws, after);
+      if (scanCursors.size > 10_000) scanCursors.clear();
+      if (!claimable.length) return 0;
       const due = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants
         WHERE status IN ('ready', 'waiting') AND due_at <= ${now()}
-        ORDER BY due_at LIMIT ${opts.batch ?? 200} FOR UPDATE SKIP LOCKED`);
+          AND id IN (${sql.join(
+            claimable.map((id) => sql`${Number(id)}`),
+            sql`, `,
+          )})
+        ORDER BY due_at, id LIMIT ${batch} FOR UPDATE SKIP LOCKED`);
       if (!due.rows.length) return 0;
       const list = await tx
         .select()
@@ -540,6 +703,9 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
       const segments = await publishedSegments(tx);
       const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
       for (const p of list) {
+        // The row can sit on an id a merge folded away (a participant the hook inserted before
+        // #1011). The trait step follows the `merged_into` chain itself; the other reads stay on the
+        // stored id, which a merge moves along with the person.
         const t = now();
         // Someone who refused the journey's purpose leaves before the next step (#108). Consent
         // changes exit them at once (exitRefusedJourneys); this catches whatever got past that.

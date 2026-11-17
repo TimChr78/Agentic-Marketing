@@ -84,6 +84,7 @@ describe('metrics exposition', () => {
       'am_http_requests_total',
       'am_http_request_duration_seconds',
       'am_commands_total',
+      'am_redaction_fallbacks_total',
       'am_queue_messages_pending',
       'am_queue_messages_oldest_seconds',
       'am_journey_participants_due',
@@ -103,6 +104,8 @@ describe('metrics exposition', () => {
     expect(body).toMatch(/am_http_requests_total\{route="v1",status="4xx"\} [1-9]/);
     // The command ran through the executor's callback, not through a hard dependency.
     expect(body).toContain('am_commands_total{command="system.status",effect="read",outcome="ok"} 1');
+    // The redaction span guard is always exported, at zero when nothing fell back (#989 review).
+    expect(body).toContain('am_redaction_fallbacks_total 0');
     // Every dependency answered the same checks `/readyz` makes, plus the NATS TCP probe.
     for (const name of ['postgres', 'clickhouse', 'nats', 'valkey'])
       expect(body, name).toMatch(new RegExp(`am_dependency_up\\{name="${name}"\\} 1`));

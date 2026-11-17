@@ -1,5 +1,6 @@
 import { connect } from 'node:net';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import { redactionFallbacks } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { identityLockSnapshot } from '@agentic-marketing/profiles';
 
@@ -151,6 +152,16 @@ export function createMetricsRegistry(): MetricsRegistry {
         const [command, effect, outcome] = key.split('\u0000');
         sample('am_commands_total', `command=${label(command)},effect=${label(effect)},outcome=${label(outcome)}`, commands.get(key) ?? 0);
       }
+
+      // Redaction defence in depth (#989): the span-recording pipeline is compared with the frozen
+      // release on every call, and a disagreement is served from the release instead. A non-zero
+      // rate means the bookkeeping is wrong somewhere, so it must be visible. No label, no content.
+      metric(
+        'am_redaction_fallbacks_total',
+        'counter',
+        'Texts where the redaction span pipeline disagreed with the frozen release, so the release output was used.',
+      );
+      sample('am_redaction_fallbacks_total', '', redactionFallbacks.count);
 
       // The workspace identity lock (#978): how long writers waited for it and how long they held
       // it. No workspace or person label: the protocol is per-process.

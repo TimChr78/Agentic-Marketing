@@ -26,6 +26,8 @@ export interface ConsumerOptions {
   ackWaitMs?: number;
   /** Wait up to this long to fill a batch. */
   maxWaitMs?: number;
+  /** How long one pull waits on the server for messages (default 1 s). */
+  pullExpiresMs?: number;
 }
 
 export interface EventBus {
@@ -62,14 +64,134 @@ export function classifyFetchError(err: unknown): FetchFailure {
   return 'transient';
 }
 
+/**
+ * One pull's messages. The pinned client returns its iterator immediately and waits for messages
+ * inside it, so a shutdown ends the wait by stopping the batch, not by racing the fetch: `stop`
+ * and `close` are what its queued iterator provides (#1028 review).
+ */
+export interface MessageBatch extends AsyncIterable<FetchedMessage> {
+  /** Ends the iteration; the pinned JetStream client's `ConsumerMessages` provides it. */
+  stop?: (err?: Error) => void;
+  /** Some iterators only expose an async close. */
+  close?: () => Promise<unknown> | unknown;
+}
+
 /** The parts of a JetStream consumer the loop uses, so it can be tested with a fake. */
 export interface PullConsumer {
-  fetch(opts: { max_messages: number; expires: number }): Promise<AsyncIterable<FetchedMessage>>;
+  fetch(opts: { max_messages: number; expires: number }): Promise<MessageBatch>;
 }
 export interface FetchedMessage {
   data: Uint8Array;
   ack(): void;
   nak(delayMs?: number): void;
+}
+
+/**
+ * The pull, or null when `signal` aborts first. A consumer whose connection is reconnecting can
+ * leave `fetch` waiting for a server that is not there yet, so a worker that is shutting down must
+ * not be held by it (#1028); whatever was pulled before the abort is still handled.
+ */
+async function fetchOrAbort(
+  consumer: PullConsumer,
+  opts: { max_messages: number; expires: number },
+  signal: AbortSignal,
+): Promise<MessageBatch | null> {
+  if (signal.aborted) return null;
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<null>((resolve) => {
+    onAbort = () => resolve(null);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([consumer.fetch(opts), aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
+ * Ends a batch that is mid-iteration. Its unacked messages are redelivered by JetStream after the
+ * ack wait, which is the same at-least-once contract as a crash (#1028 review).
+ */
+function stopBatch(batch: MessageBatch): void {
+  try {
+    if (batch.stop) batch.stop();
+    else if (batch.close) void Promise.resolve(batch.close()).catch(() => {});
+  } catch {
+    // An iterator that is already closed has nothing left to stop.
+  }
+}
+
+/**
+ * The messages of one fetched batch, until it ends or `signal` aborts. The wait for messages lives
+ * inside the iterator, not in `fetch()`, so stopping the batch is what releases it: a consumer on a
+ * connection that is reconnecting would otherwise keep a shutdown waiting (#1028 review).
+ */
+async function* messagesOrAbort(batch: MessageBatch, signal: AbortSignal): AsyncGenerator<FetchedMessage> {
+  if (signal.aborted) {
+    stopBatch(batch);
+    return;
+  }
+  const onAbort = () => stopBatch(batch);
+  signal.addEventListener('abort', onAbort, { once: true });
+  try {
+    for await (const message of batch) yield message;
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/** A pause before the next pull, cut short by an abort, so a back-off never holds a shutdown. */
+async function pauseUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * What a consumer loop is doing, kept per process so a shutdown that waits for it can say what it
+ * is waiting on instead of only naming the loop (#1028). The names carry no tenant data.
+ */
+export type ConsumerPhase = 'starting' | 'pulling' | 'waiting' | 'handling' | 'backing-off' | 'stopped';
+
+const phases = new Map<string, { phase: ConsumerPhase; since: number }>();
+
+function setPhase(name: string, phase: ConsumerPhase): void {
+  phases.set(name, { phase, since: Date.now() });
+}
+
+/** Every consumer loop this process started, its phase and how long it has been in it. */
+export function consumerPhases(): { name: string; phase: ConsumerPhase; forMs: number }[] {
+  const now = Date.now();
+  return [...phases].map(([name, entry]) => ({ name, phase: entry.phase, forMs: now - entry.since }));
+}
+
+/**
+ * The consumer, or null when `signal` aborts first. Creating or updating a durable consumer is a
+ * NATS API call, and on a connection that is reconnecting it can wait for a server that is not
+ * there, so a shutdown must not be held by it (#1028).
+ */
+async function ensureConsumerOrAbort(ensure: () => Promise<PullConsumer>, signal: AbortSignal): Promise<PullConsumer | null> {
+  if (signal.aborted) return null;
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<null>((resolve) => {
+    onAbort = () => resolve(null);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([ensure(), aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
 }
 
 /**
@@ -80,49 +202,68 @@ export interface FetchedMessage {
  */
 export async function consumeLoop(
   ensureConsumer: () => Promise<PullConsumer>,
-  o: Pick<ConsumerOptions, 'name' | 'maxBatch' | 'maxWaitMs'>,
+  o: Pick<ConsumerOptions, 'name' | 'maxBatch' | 'maxWaitMs' | 'pullExpiresMs'>,
   decode: (data: Uint8Array) => BusEvent,
   handler: (events: BusEvent[]) => Promise<void>,
   signal: AbortSignal,
   opts: { retryMs?: number } = {},
 ): Promise<void> {
-  let consumer = await ensureConsumer();
-  let failures = 0;
-  const maxBatch = o.maxBatch ?? 1000;
-  while (!signal.aborted) {
-    const msgs: FetchedMessage[] = [];
-    const started = Date.now();
-    // Always fetch at least once (the fetch itself waits up to a second for messages), then keep
-    // filling the batch while there is time left.
-    try {
-      do {
-        const batch = await consumer.fetch({ max_messages: maxBatch - msgs.length, expires: 1000 });
-        for await (const m of batch) msgs.push(m);
-      } while (msgs.length < maxBatch && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted);
-      failures = 0;
-    } catch (err) {
-      failures++;
-      const kind = classifyFetchError(err);
-      if (kind === 'fatal' || failures >= MAX_FETCH_FAILURES) {
-        logger.error({ err, consumer: o.name, failures }, 'event fetch keeps failing; stopping the worker');
-        throw err;
+  try {
+    setPhase(o.name, 'starting');
+    const created = await ensureConsumerOrAbort(ensureConsumer, signal);
+    if (!created) return;
+    let consumer = created;
+    let failures = 0;
+    const maxBatch = o.maxBatch ?? 1000;
+    while (!signal.aborted) {
+      const msgs: FetchedMessage[] = [];
+      const started = Date.now();
+      // Always fetch at least once (the fetch itself waits up to a second for messages), then keep
+      // filling the batch while there is time left.
+      try {
+        do {
+          setPhase(o.name, 'pulling');
+          const batch = await fetchOrAbort(consumer, { max_messages: maxBatch - msgs.length, expires: o.pullExpiresMs ?? 1000 }, signal);
+          if (!batch) break;
+          setPhase(o.name, 'waiting');
+          for await (const message of messagesOrAbort(batch, signal)) msgs.push(message);
+        } while (msgs.length < maxBatch && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted);
+        failures = 0;
+      } catch (err) {
+        failures++;
+        const kind = classifyFetchError(err);
+        if (kind === 'fatal' || failures >= MAX_FETCH_FAILURES) {
+          logger.error({ err, consumer: o.name, failures }, 'event fetch keeps failing; stopping the worker');
+          throw err;
+        }
+        logger.warn({ err, consumer: o.name, fetched: msgs.length, failures, kind }, 'event fetch failed; retrying');
+        if (kind === 'missing_consumer') {
+          setPhase(o.name, 'starting');
+          const recreated = await ensureConsumerOrAbort(ensureConsumer, signal).catch(() => consumer);
+          if (!recreated) return;
+          consumer = recreated;
+        }
+        // What was fetched before the error is still handled; anything not acked is re-delivered.
+        if (!msgs.length) {
+          setPhase(o.name, 'backing-off');
+          await pauseUnlessAborted(Math.min((opts.retryMs ?? FETCH_RETRY_MS) * failures, FETCH_RETRY_MAX_MS), signal);
+          continue;
+        }
       }
-      logger.warn({ err, consumer: o.name, fetched: msgs.length, failures, kind }, 'event fetch failed; retrying');
-      if (kind === 'missing_consumer') consumer = await ensureConsumer().catch(() => consumer);
-      // What was fetched before the error is still handled; anything not acked is re-delivered.
-      if (!msgs.length) {
-        await new Promise((r) => setTimeout(r, Math.min((opts.retryMs ?? FETCH_RETRY_MS) * failures, FETCH_RETRY_MAX_MS)));
-        continue;
+      // A shutdown does not start new work: whatever was pulled but not acked is re-delivered.
+      if (signal.aborted) return;
+      if (!msgs.length) continue;
+      try {
+        setPhase(o.name, 'handling');
+        await handler(msgs.map((m) => decode(m.data)));
+        for (const m of msgs) m.ack();
+      } catch (err) {
+        logger.error({ err, consumer: o.name, events: msgs.length }, 'event handler failed; batch will be re-delivered');
+        for (const m of msgs) m.nak(2_000);
       }
     }
-    if (!msgs.length) continue;
-    try {
-      await handler(msgs.map((m) => decode(m.data)));
-      for (const m of msgs) m.ack();
-    } catch (err) {
-      logger.error({ err, consumer: o.name, events: msgs.length }, 'event handler failed; batch will be re-delivered');
-      for (const m of msgs) m.nak(2_000);
-    }
+  } finally {
+    setPhase(o.name, 'stopped');
   }
 }
 

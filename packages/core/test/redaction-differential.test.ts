@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
-import { redactCredentials } from '../src/diagnostics';
+import { redactCredentials, redactionFallbacks, releasedRedaction } from '../src/diagnostics';
+import { redactCredentials as releasedGuardRedaction } from '../src/redaction-01425';
 import { redactCredentials as redact01420 } from './redaction-01420-reference';
 import { redactCredentials as redact01423 } from './redaction-01423-reference';
 import { redactCredentials as redact01424 } from './redaction-01424-reference';
+import { redactCredentials as redact01425 } from './redaction-01425-reference';
 
 // #902 round 5: a standing differential check against the vendored 0.14.20 redactor, not only a
 // fixed fixture. Its rule is mechanical: a maximal run of non-space characters that 0.14.20 removed
@@ -13,7 +15,8 @@ import { redactCredentials as redact01424 } from './redaction-01424-reference';
 //
 // The same differential runs against the 0.14.23 redactor (the release this batch started from, #946
 // and #956): whatever it removed must stay removed, and a second pass must change nothing. New code
-// may only remove more, never less.
+// may only remove more, never less. The 0.14.25 reference (#979) is the release the #989 spans build
+// on, and it is also the byte-for-byte baseline of the instrumented pipeline.
 //
 // Every generated input ends with a unique sentinel word, so an assertion failure names its case.
 
@@ -23,8 +26,11 @@ import { redactCredentials as redact01424 } from './redaction-01424-reference';
  */
 // Each comparison runs every generated case through several full redactor implementations. On a
 // loaded CI runner one of them took longer than the global 20 s test timeout (release 0.14.25 CI),
-// so this file allows two minutes per test; growth is guarded by the scaling tests elsewhere.
-vi.setConfig({ testTimeout: 120_000 });
+// so this file raises the per-test ceiling; growth is guarded by the scaling tests elsewhere. The
+// #989 pipeline records the original-text span of every character it keeps, and every shaped case
+// also runs the frozen release as a guard, so the ceiling leaves room for the release-gate run at
+// scale 160.
+vi.setConfig({ testTimeout: 900_000 });
 
 const SCALE = Math.max(1, Math.floor(Number(process.env.REDACTION_DIFFERENTIAL_SCALE) || 1));
 
@@ -478,6 +484,153 @@ function* review(): Generator<Generated> {
       name: `review marker prose ${spaces}`,
       secrets: [],
     };
+  // Round 3: blocks the released pipeline already removed (so every mapped region is empty), and a
+  // preamble-like diagnostic line that is longer than any real preamble (#989 review).
+  {
+    const blocks = '\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
+    yield {
+      input: `${'ordinary '.repeat(20)}password="${blocks.repeat(20)}" ${sentinel()}`,
+      name: 'review blocks inside a replaced value',
+      secrets: [],
+    };
+    yield {
+      input: `-----BEGIN PRIVATE KEY-----\nProc-Type:${' '.repeat(118)}; ordinary diagnostic\nnext prose ${sentinel()}`,
+      name: 'review oversized preamble line',
+      secrets: [],
+    };
+  }
+}
+
+/**
+ * The shapes #989 adds, each with a unique marker planted inside the value: a typographic-quoted
+ * value, a value after `=>`, and a PEM private-key block (standalone and under a credential key).
+ * The released pipeline leaves input text from every one of them, so a case here says which value a
+ * reader would call the credential.
+ */
+const TYPOGRAPHIC_PAIRS: readonly (readonly [string, string])[] = [
+  ['\u201c', '\u201d'],
+  ['\u2018', '\u2019'],
+  ['\u00ab', '\u00bb'],
+  ['\u201e', '\u201c'],
+  ['\u2039', '\u203a'],
+];
+const PEM_LABELS = ['PRIVATE KEY', 'RSA PRIVATE KEY', 'EC PRIVATE KEY', 'OPENSSH PRIVATE KEY', 'ENCRYPTED PRIVATE KEY'];
+
+function* originalShapes(): Generator<Generated> {
+  for (const key of SHAPE_KEYS) {
+    for (const [open, close] of TYPOGRAPHIC_PAIRS) {
+      const token = marker();
+      yield {
+        input: `${key}: ${open}S3cr3tV4l${token} with spaces${close} ${sentinel()}`,
+        name: `shape typographic ${key} ${open}`,
+        secrets: [token],
+      };
+    }
+    const arrow = marker();
+    yield {
+      input: `'${key}' => 'S3cr3tV4l ${arrow} with spaces' ${sentinel()}`,
+      name: `shape arrow quoted ${key}`,
+      secrets: [arrow],
+    };
+    const bare = marker();
+    yield { input: `${key} => S3cr3tV4l${bare} ${sentinel()}`, name: `shape arrow bare ${key}`, secrets: [bare] };
+    const nested = marker();
+    yield {
+      input: `'${key}' => ${key}Key="S3cr3tV4l${nested}" ${sentinel()}`,
+      name: `shape arrow nested ${key}`,
+      secrets: [nested],
+    };
+  }
+  for (const label of PEM_LABELS) {
+    const standalone = marker();
+    yield {
+      input: `-----BEGIN ${label}-----\nMIIEowIBAAKCAQEA${standalone}\n-----END ${label}----- ${sentinel()}`,
+      name: `shape pem ${label}`,
+      secrets: [standalone],
+    };
+    const keyed = marker();
+    yield {
+      input: `password=-----BEGIN ${label}-----\nMIIEowIBAAKCAQEA${keyed}\n-----END ${label}----- ${sentinel()}`,
+      name: `shape pem keyed ${label}`,
+      secrets: [keyed],
+    };
+    // A traditional encrypted block carries an RFC 1421 preamble before its base64 body.
+    const encrypted = marker();
+    yield {
+      input: `-----BEGIN ${label}-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-256-CBC,0123456789ABCDEF\n\nMIIEowIBAAKCAQEA${encrypted}\n-----END ${label}----- ${sentinel()}`,
+      name: `shape pem encrypted ${label}`,
+      secrets: [encrypted],
+    };
+    const arrowed = marker();
+    yield {
+      input: `${label === 'PRIVATE KEY' ? 'token' : 'apiSecret'} => -----BEGIN ${label}-----\nMIIEowIBAAKCAQEA${arrowed}\n-----END ${label}----- ${sentinel()}`,
+      name: `shape pem after an arrow ${label}`,
+      secrets: [arrowed],
+    };
+  }
+  // The review's round-4 inputs: an authorization value behind an arrow or a key, whose token is
+  // shorter than the six characters the released scheme rule needs (#989 review).
+  for (const [name, build] of [
+    ['arrow bearer short', (secret: string) => `token => Bearer ${secret}`],
+    ['arrow bearer no space', (secret: string) => `token=>Bearer ${secret}`],
+    ['arrow basic', (secret: string) => `token=>Basic ${secret}`],
+    ['arrow digest', (secret: string) => `apiSecret => Digest ${secret}`],
+    ['keyed digest', (secret: string) => `token: Digest ${secret}`],
+    ['keyed scheme chain', (secret: string) => `token: Bearer Bearer ${secret}`],
+  ] as const) {
+    markerIndex += 1;
+    // Two characters: far below the released scheme rule, and unique inside this case.
+    const secret = `p${markerIndex}`;
+    yield { input: `${build(secret)} ${sentinel()}`, name: `shape ${name}`, secrets: [secret] };
+  }
+
+  // The review's round-5 inputs: a mixed scheme chain behind a key and an arrow, and a scheme word
+  // used as prose, which is read as a scheme (#989 review).
+  for (const [name, build] of [
+    ['mixed chain digest bearer', (secret: string) => `token: Digest Bearer ${secret}`],
+    ['mixed chain digest basic', (secret: string) => `token: Digest Basic ${secret}`],
+    ['mixed chain proxy authorization', (secret: string) => `Proxy-Authorization: Digest Bearer ${secret}`],
+    ['mixed chain arrow', (secret: string) => `token => Digest Bearer ${secret}`],
+    ['scheme word in prose', (secret: string) => `token: Token expired${secret} at noon`],
+  ] as const) {
+    markerIndex += 1;
+    const secret = `p${markerIndex}`;
+    yield { input: `${build(secret)} ${sentinel()}`, name: `shape ${name}`, secrets: [secret] };
+  }
+
+  // The review's round-2 inputs: an arrow whose value starts a typographic pair, a shape after a
+  // long-key pair, and a marker right before a block (#989 review).
+  {
+    const overlap = marker();
+    yield {
+      input: `password => token:\u201cfirst probe${overlap}\u201d ${sentinel()}`,
+      name: 'review overlap arrow and typographic',
+      secrets: [overlap],
+    };
+    const shifted = marker();
+    yield {
+      input: `organizationSecondaryAuthToken="x" token: \u201ca probe${shifted}\u201d token=x ${sentinel()}`,
+      name: 'review shape after a long-key pair',
+      secrets: [shifted],
+    };
+    const afterMarker = marker();
+    yield {
+      input: `${'token=x apiSecret=x '.repeat(7)}\n-----BEGIN PRIVATE KEY-----\nprobe${afterMarker}\n-----END PRIVATE KEY----- ${sentinel()}`,
+      name: 'review block after markers',
+      secrets: [afterMarker],
+    };
+    const field = marker();
+    yield {
+      input: `password=[redacted]"hunter2${field}":"x" ${sentinel()}`,
+      name: 'review field glued to a caller marker',
+      secrets: [field],
+    };
+  }
+}
+
+function* allShapes(): Generator<Generated> {
+  yield* shapes();
+  yield* originalShapes();
 }
 
 function* generated(): Generator<Generated> {
@@ -488,6 +641,12 @@ function* generated(): Generator<Generated> {
   yield* review();
   yield* randomPairs();
   yield* random();
+}
+
+/** Every generated case: the general corpus plus the value shapes. */
+function* everyCase(): Generator<Generated> {
+  yield* generated();
+  yield* allShapes();
 }
 
 describe('the new redactor never keeps what 0.14.23 removed (#946, #956)', () => {
@@ -543,11 +702,12 @@ describe('the new redactor never keeps what an earlier release removed (#937)', 
     ['0.14.20', redact01420],
     ['0.14.23', redact01423],
     ['0.14.24', redact01424],
+    ['0.14.25', redact01425],
   ];
 
   it('removes every planted value a reference removed', () => {
     const leaks: string[] = [];
-    for (const { input, name, secrets } of shapes()) {
+    for (const { input, name, secrets } of allShapes()) {
       const after = redactCredentials(input);
       for (const [release, redact] of references) {
         const before = redact(input);
@@ -562,7 +722,7 @@ describe('the new redactor never keeps what an earlier release removed (#937)', 
 
   it('stays idempotent on every generated shape', () => {
     const unstable: string[] = [];
-    for (const { input, name } of shapes()) {
+    for (const { input, name } of allShapes()) {
       const once = redactCredentials(input);
       if (redactCredentials(once) !== once) unstable.push(name);
     }
@@ -570,8 +730,7 @@ describe('the new redactor never keeps what an earlier release removed (#937)', 
     expect(unstable).toHaveLength(0);
   });
 
-  // Round 2: these are either skipped shapes or text after a marker that the released pipeline
-  // leaves alone. The new passes must not remove anything here.
+  // Round 2: text the released pipeline leaves alone. The new passes must not remove anything here.
   it('leaves text the released pipeline leaves unchanged', () => {
     const unchanged = [
       'token: [redacted] ordinary diagnostics; operator said \u201cok\u201d.',
@@ -579,17 +738,70 @@ describe('the new redactor never keeps what an earlier release removed (#937)', 
       'token=[redacted] "service recovered" "request completed"',
       'note="-----BEGIN PRIVATE KEY-----" status="ok"\nmore ordinary diagnostics',
       'see -----BEGIN RSA PRIVATE KEY-----\nS3cr3tV4l\n-----END RSA PRIVATE KEY----- here',
-      'token: \u201cshort pw\u201d',
-      "'password' => 'x'",
-      ':password => "x"',
-      'apiSecret => xyz',
-      `token => ${'\'a\'"b" '.repeat(16)}'S3cr3tV4l'`,
-      // Round 3 PEM inputs: skipped with PEM, so they must equal the released output.
-      `${'password=[redacted] RSA PRIVATE KEY-----\n'.repeat(1_024)}-----END PUBLIC KEY-----`,
-      '-----BEGIN RSA PRIVATE KEY-----\nS3cr3tV4l\n-----END RSA PRIVATE KEY-----\n-----END EC PRIVATE KEY-----',
-      "can't load key\n-----BEGIN PRIVATE KEY-----\nS3cr3tV4l\n-----END PRIVATE KEY-----",
+      'the header -----BEGIN CERTIFICATE----- is public',
+      '-----BEGIN CERTIFICATE-----\nS3cr3tV4l\n-----END CERTIFICATE-----',
     ];
-    for (const input of unchanged) expect(redactCredentials(input), input).toBe(redact01424(input));
+    for (const input of unchanged) expect(redactCredentials(input), input).toBe(redact01425(input));
+  });
+});
+
+// #989: the shapes whose evidence only the original text keeps. Each one is decided from the
+// original spans and applied to the released output, so the instrumented pipeline must stay
+// byte-identical to the vendored 0.14.25 release, and every planted value the issue names must go.
+describe('the shapes decided from the original spans (#989)', () => {
+  it('runs the released pipeline byte-identically to 0.14.25', () => {
+    // Unconditional (#989 review): no shape, no field and no bookkeeping fix may make the base
+    // remove less than the release did, on any case.
+    const differences: string[] = [];
+    let compared = 0;
+    for (const { input, name } of everyCase()) {
+      compared += 1;
+      const expected = redact01425(input);
+      const actual = releasedRedaction(input);
+      if (actual !== expected)
+        differences.push(`${name}: ${JSON.stringify(actual.slice(0, 80))} != ${JSON.stringify(expected.slice(0, 80))}`);
+    }
+    expect(differences.slice(0, 10)).toEqual([]);
+    expect(differences).toHaveLength(0);
+    expect(compared).toBeGreaterThan(1_000);
+  });
+
+  it('keeps the frozen copy the runtime guard uses equal to the vendored release', () => {
+    // `redactCredentials` compares its pipeline with the frozen function in `src/redaction-01425.ts`
+    // and falls back to it on any difference. That copy and the test's reference must stay the same
+    // function, or the guard would prove nothing.
+    const differences: string[] = [];
+    for (const { input, name } of generated()) {
+      if (releasedGuardRedaction(input) !== redact01425(input)) differences.push(name);
+    }
+    expect(differences.slice(0, 10)).toEqual([]);
+    expect(differences).toHaveLength(0);
+  });
+
+  it('removes every planted value in the shapes it adds', () => {
+    const leaks: string[] = [];
+    for (const { input, name, secrets } of originalShapes()) {
+      const after = redactCredentials(input);
+      for (const secret of secrets) if (after.includes(secret)) leaks.push(`${secret} kept in ${name}`);
+    }
+    expect(leaks.slice(0, 10)).toEqual([]);
+    expect(leaks).toHaveLength(0);
+  });
+
+  it('never needed the released fallback', () => {
+    // The counter only moves when the instrumented pipeline and the frozen release disagree, which
+    // is exactly what no case may cause (#989 review).
+    expect(redactionFallbacks.count).toBe(0);
+  });
+
+  it('stays idempotent on every generated input and shape', () => {
+    const unstable: string[] = [];
+    for (const { input, name } of everyCase()) {
+      const once = redactCredentials(input);
+      if (redactCredentials(once) !== once) unstable.push(name);
+    }
+    expect(unstable.slice(0, 10)).toEqual([]);
+    expect(unstable).toHaveLength(0);
   });
 });
 

@@ -48,11 +48,21 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
       'restored-user',
     ]);
 
+    // The snapshot also brings back the person's journey event markers, and their event ids are
+    // caller-supplied (they can name the person), so the replay must remove them with the rows.
+    await restored.db.admin.query(
+      `INSERT INTO journey_processed_events (workspace_id, profile_id, event_id)
+       VALUES ($1, $2, 'customer@example.test:purchase-1')`,
+      [live.workspace, profile],
+    );
+
     const replayed = await replayErasures(restored.url.toString(), log);
     expect(replayed).toMatchObject({ erasures: 1, profiles: 1, cleanupJobs: 1 });
 
     const left = await restored.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [live.workspace, profile]);
     expect(left.rowCount).toBe(0);
+    const markers = await restored.db.admin.query('SELECT 1 FROM journey_processed_events WHERE workspace_id = $1', [live.workspace]);
+    expect(markers.rowCount).toBe(0);
     const jobs = await restored.db.admin.query<{
       state: string;
       next_attempt_at: Date;
