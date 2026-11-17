@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { MessageEvent } from '@agentic-marketing/events';
-import { profileForMessage, recordConsentEvidence } from '@agentic-marketing/profiles';
+import { canonicalProfile, recordConsentEvidence } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq, sql } from 'drizzle-orm';
@@ -40,13 +40,17 @@ export async function withdraw(
   m: Msg,
   source: 'unsubscribe',
   proof: Record<string, unknown>,
-  kp: KeyProvider,
+  /**
+   * Kept for callers and the prepared-key wiring in part 3. A withdrawal records consent against
+   * the canonical profile id only and never decrypts, so this provider must not be called.
+   */
+  _kp: KeyProvider,
   recordedAt: Date,
   /** The provider event's id, when there is one, so a redelivery adds no evidence row (#936). */
   eventId?: string,
 ) {
   if (!m.profileId) return;
-  const person = await profileForMessage(tx, m.workspaceId, m.profileId, kp);
+  const person = await canonicalProfile(tx, m.workspaceId, m.profileId);
   if (!person) return;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const basis = purposes.find((p) => p.key === m.purpose)?.basis ?? 'consent';
