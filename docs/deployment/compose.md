@@ -75,3 +75,5 @@ docker compose up -d
 ```
 
 The app takes a Postgres backup and runs migrations before it serves. `am backup`, `am restore` and `am smoke` are described in [UPGRADING.md](../../UPGRADING.md) and [operations](operations.md).
+
+A release whose notes say **drain** (0.15.0 is the first) is not a rolling restart: stop the app with `docker compose stop app` before you change `AM_VERSION`, then start it and resume traffic once the container is healthy. Old and new writers must not run at the same time, and a rollback drains in the same way.

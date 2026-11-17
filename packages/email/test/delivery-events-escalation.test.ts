@@ -1,5 +1,4 @@
 import { createDb, type Db } from '@agentic-marketing/db';
-import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
@@ -14,12 +13,11 @@ let d: Awaited<ReturnType<typeof createDisposableDb>>;
 let db: Db;
 const sid = `SM${'d'.repeat(32)}`;
 const hash = 'a'.repeat(64);
-const kp = {} as KeyProvider;
 
 const bounce = (at: string) =>
   [{ eventId: `${sid}:bounced`, type: 'bounced' as const, bounce: 'hard' as const, providerMessageId: sid, at }] as const;
 
-const apply = (at: string) => db.withWorkspace(d.workspace, (tx) => applyDeliveryEvents(tx, [...bounce(at)], 'test', kp));
+const apply = (at: string) => db.withWorkspace(d.workspace, (tx) => applyDeliveryEvents(tx, [...bounce(at)], 'test'));
 
 /** What every caller does: log the returned transitions only after `withWorkspace` committed. */
 async function applyAndLog(at: string) {
@@ -63,7 +61,7 @@ describe.skipIf(!hasTestDatabase())('STOP suppression escalation logging (A3)', 
     try {
       await expect(
         db.withWorkspace(d.workspace, async (tx) => {
-          const result = await applyDeliveryEvents(tx, [...bounce('2026-01-05T00:00:00Z')], 'test', kp);
+          const result = await applyDeliveryEvents(tx, [...bounce('2026-01-05T00:00:00Z')], 'test');
           expect(result.escalations).toHaveLength(1);
           throw new Error('rolled back after the escalation');
         }),

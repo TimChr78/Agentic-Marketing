@@ -1,10 +1,9 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { MessageEvent } from '@agentic-marketing/events';
-import { canonicalProfile, recordConsentEvidence } from '@agentic-marketing/profiles';
-import type { KeyProvider } from '@agentic-marketing/secrets';
+import { canonicalProfile, lockIdentity, recordConsentEvidence, withIdentityLocks } from '@agentic-marketing/profiles';
 import { logger } from '@agentic-marketing/telemetry';
-import { eq, sql } from 'drizzle-orm';
+import { eq, inArray, or, sql } from 'drizzle-orm';
 import type { DeliveryEvent } from './adapters';
 
 // What providers report about messages (webhooks, or the send response itself): the message log,
@@ -40,16 +39,14 @@ export async function withdraw(
   m: Msg,
   source: 'unsubscribe',
   proof: Record<string, unknown>,
-  /**
-   * Kept for callers and the prepared-key wiring in part 3. A withdrawal records consent against
-   * the canonical profile id only and never decrypts, so this provider must not be called.
-   */
-  _kp: KeyProvider,
   recordedAt: Date,
   /** The provider event's id, when there is one, so a redelivery adds no evidence row (#936). */
   eventId?: string,
 ) {
   if (!m.profileId) return;
+  // A withdrawal needs the canonical profile id only, never decrypted personal data, so it can run
+  // under the identity lock. Taking it here as well keeps a direct caller on the protocol.
+  await lockIdentity(tx, m.workspaceId);
   const person = await canonicalProfile(tx, m.workspaceId, m.profileId);
   if (!person) return;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
@@ -101,12 +98,31 @@ export function logSuppressionEscalation(escalation: SuppressionEscalation): voi
 }
 
 /** Applies a provider's delivery events to the message log, suppressions and consent. */
-export async function applyDeliveryEvents(
-  tx: Tx,
-  events: DeliveryEvent[],
-  provider: string,
-  kp: KeyProvider,
-): Promise<DeliveryEventsResult> {
+export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provider: string): Promise<DeliveryEventsResult> {
+  if (!events.length) return { events: [], escalations: [] };
+  // The identity lock comes before the first event, including a message status update: a
+  // withdrawal in a later event of the same batch then records against the survivor of a merge that
+  // committed first, and a merge that starts later waits for this batch.
+  const workspaces = await workspacesOfEvents(tx, events);
+  return withIdentityLocks(tx, workspaces, () => applyDeliveryEventsLocked(tx, events, provider));
+}
+
+/** The distinct workspaces the batch names, from SQL only. Read before the lock; takes no row lock. */
+async function workspacesOfEvents(tx: Tx, events: DeliveryEvent[]): Promise<string[]> {
+  const ids = events.map((e) => e.messageId).filter((v): v is string => Boolean(v));
+  const providerIds = events.map((e) => e.providerMessageId).filter((v): v is string => Boolean(v));
+  const conditions = [];
+  if (ids.length) conditions.push(inArray(schema.messages.id, ids));
+  if (providerIds.length) conditions.push(inArray(schema.messages.providerMessageId, providerIds));
+  if (!conditions.length) return [];
+  const rows = await tx
+    .selectDistinct({ workspaceId: schema.messages.workspaceId })
+    .from(schema.messages)
+    .where(or(...conditions));
+  return rows.map((r) => r.workspaceId);
+}
+
+async function applyDeliveryEventsLocked(tx: Tx, events: DeliveryEvent[], provider: string): Promise<DeliveryEventsResult> {
   const out: MessageEvent[] = [];
   const escalations: SuppressionEscalation[] = [];
   for (const e of events) {
@@ -182,7 +198,7 @@ export async function applyDeliveryEvents(
     }
     if (!m.test && (e.type === 'complained' || e.type === 'unsubscribed'))
       // The same clamped instant, so the consent record cannot post-date the event either.
-      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, kp, atDate, `evt:${e.eventId}`);
+      await withdraw(tx, m, 'unsubscribe', { messageId: m.id, via: `${provider} ${e.type}` }, atDate, `evt:${e.eventId}`);
   }
   return { events: out, escalations };
 }

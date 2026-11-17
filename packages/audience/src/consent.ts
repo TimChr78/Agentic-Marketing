@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type Db, enqueueOutbox, type Tx } from '@agentic-marketing/db';
 import { fingerprintParts, type LinkSigner, sendRequestHash } from '@agentic-marketing/email';
-import { type ConsentInput, type ResolvedEvent, recordConsentEvidence } from '@agentic-marketing/profiles';
+import { type ConsentInput, type ResolvedEvent, recordConsentEvidence, withIdentityLock } from '@agentic-marketing/profiles';
 import { CONFIRMED, DOI_DAYS, type DoiToken, publishedForm, SUBMITTED } from './forms';
 import { IMPORTED } from './import';
 
@@ -183,7 +183,12 @@ export function consentHook(deps: ConsentHookDeps) {
       if (plan) doi.set(`${r.event.sourceId}:${r.event.messageId}`, plan);
     }
     await deps.db.withWorkspace(workspaceId, async (tx) => {
-      for (const r of ours) await handle(tx, workspaceId, r, doi.get(`${r.event.sourceId}:${r.event.messageId}`));
+      // The lock comes before the batch: a form, confirmation or import event resolves the person
+      // and appends evidence in the same serialised order as a merge. The double opt-in send intent
+      // was prepared outside this transaction (#978 part 2), so no provider call runs under it.
+      await withIdentityLock(tx, workspaceId, async () => {
+        for (const r of ours) await handle(tx, workspaceId, r, doi.get(`${r.event.sourceId}:${r.event.messageId}`));
+      });
     });
   };
 }

@@ -1,9 +1,9 @@
-import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
+import { DEFAULT_PURPOSES, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
 import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
-import { personCrypto, recordConsentEvidence } from '@agentic-marketing/profiles';
-import type { KeyProvider } from '@agentic-marketing/secrets';
+import { personCrypto, recordConsentEvidence, withIdentityLock } from '@agentic-marketing/profiles';
+import { type KeyProvider, type PreparedKeys, prepareKeys } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -31,13 +31,83 @@ interface Deps {
   email: EmailServices;
 }
 
-async function profilesWithPhone(tx: Tx, ws: string, kp: KeyProvider, phone: string) {
-  const hash = await personCrypto(tx, ws, kp).matchHash('phone', phone);
+async function profilesWithPhone(tx: Tx, ws: string, prepared: PreparedKeys, phone: string) {
+  const hash = await personCrypto(tx, ws, prepared.provider).matchHash('phone', phone);
   const rows = await tx
     .select({ profileId: schema.identifiers.profileId })
     .from(schema.identifiers)
     .where(and(eq(schema.identifiers.type, 'phone'), eq(schema.identifiers.value, hash)));
   return { hash, profileIds: rows.map((r) => r.profileId) };
+}
+
+export interface SmsOptOutInput {
+  workspaceId: string;
+  providerId: string;
+  /** The matched keyword in its canonical spelling. */
+  keyword: string;
+  /** Whether the keyword is a STOP (withdraw and suppress) or a START (lift the stop only). */
+  intent: 'stop' | 'start';
+  phone: string;
+  /** The person's action time: this is a synchronous write, never when a job got to it (#928). */
+  receivedAt: Date;
+  /** The matching key, unwrapped before the transaction; no provider call runs under the lock. */
+  prepared: PreparedKeys;
+}
+
+export interface SmsOptOutResult {
+  profileIds: string[];
+  /** The number of STOP rows a START lifted. Always 0 for a STOP. */
+  lifted: number;
+}
+
+/**
+ * Applies a STOP or START keyword. The caller has prepared the transport already; the identity lock
+ * is taken here, before the phone hash is resolved, so a STOP records against the survivor of a
+ * merge and a START cannot lift a suppression for a person who was just merged away.
+ *
+ * A START only lifts a `stop` row. A hard bounce or complaint for the same number is a delivery
+ * fact, not an opt-out (#664, #750), and neither keyword grants consent: marketing texts still need
+ * a new, separate consent.
+ */
+export async function applySmsOptOut(tx: Tx, input: SmsOptOutInput): Promise<SmsOptOutResult> {
+  const { workspaceId } = input;
+  return withIdentityLock(tx, workspaceId, async () => {
+    const purposes: Purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+    if (input.intent === 'stop') {
+      const { hash, profileIds } = await profilesWithPhone(tx, workspaceId, input.prepared, input.phone);
+      const smsMarketing = purposes.filter((p) => isMarketing(p.basis) && p.channels.includes('sms'));
+      for (const profileId of profileIds)
+        await recordConsentEvidence(
+          tx,
+          workspaceId,
+          profileId,
+          purposes,
+          smsMarketing.map((p) => ({
+            purpose: p.key,
+            channel: 'sms',
+            status: p.basis === 'legitimate_interest' ? ('objected' as const) : ('withdrawn' as const),
+            source: 'unsubscribe' as const,
+            recordedAt: input.receivedAt,
+            proof: { via: `SMS ${input.keyword}`, provider: input.providerId },
+          })),
+        );
+      // A STOP is the weakest suppression reason: DO NOTHING leaves a hard_bounce or complaint
+      // row in place, so a later START (which deletes only 'stop') cannot unsuppress it (#664,
+      // #750).
+      await tx.insert(schema.suppressions).values({ workspaceId, channel: 'sms', valueHash: hash, reason: 'stop' }).onConflictDoNothing();
+      logger.info({ workspace: workspaceId, profiles: profileIds.length }, 'SMS STOP recorded');
+      return { profileIds, lifted: 0 };
+    }
+
+    // Only the SMS stop row for this number is removed: a hard bounce or complaint is kept.
+    const { hash, profileIds } = await profilesWithPhone(tx, workspaceId, input.prepared, input.phone);
+    const lifted = await tx
+      .delete(schema.suppressions)
+      .where(and(eq(schema.suppressions.channel, 'sms'), eq(schema.suppressions.valueHash, hash), eq(schema.suppressions.reason, 'stop')))
+      .returning({ reason: schema.suppressions.reason });
+    logger.info({ workspace: workspaceId, lifted: lifted.length }, 'SMS START lifted the stop suppression');
+    return { profileIds, lifted: lifted.length };
+  });
 }
 
 export function smsRoutes(deps: Deps) {
@@ -72,74 +142,52 @@ export function smsRoutes(deps: Deps) {
         headers: Object.fromEntries(c.req.raw.headers),
         body: await c.req.text(),
       };
-      const result = await deps.db.withWorkspace(target.ws, async (tx) => {
-        const [provider] = await tx.select().from(schema.smsProviders).where(eq(schema.smsProviders.id, target.id));
-        if (!provider) return { status: 404 as const };
-        const transport = await smsTransportFor(tx, provider, deps.kp, deps.email.adapterDeps);
-        if (!transport.verifyWebhook(req)) return { status: 401 as const };
+      // The matching key is unwrapped before the write transaction: the STOP/START block holds the
+      // identity lock and must not reach the key provider (#978 part 3).
+      const prepared = kind === 'inbound' ? await prepareKeys(deps.db, target.ws, deps.kp, { purposes: ['matching'] }) : null;
+      try {
+        const result = await deps.db.withWorkspace(target.ws, async (tx) => {
+          const [provider] = await tx.select().from(schema.smsProviders).where(eq(schema.smsProviders.id, target.id));
+          if (!provider) return { status: 404 as const };
+          const transport = await smsTransportFor(tx, provider, deps.kp, deps.email.adapterDeps);
+          if (!transport.verifyWebhook(req)) return { status: 401 as const };
 
-        if (kind === 'status') {
-          const applied = await applyDeliveryEvents(tx, transport.parseStatus(req), provider.adapter, deps.kp);
-          await enqueueMessageEvents(tx, target.ws, applied.events);
-          return { status: 200 as const, events: applied.events, escalations: applied.escalations };
+          if (kind === 'status') {
+            const applied = await applyDeliveryEvents(tx, transport.parseStatus(req), provider.adapter);
+            await enqueueMessageEvents(tx, target.ws, applied.events);
+            return { status: 200 as const, events: applied.events, escalations: applied.escalations };
+          }
+
+          const inbound = transport.parseInbound(req);
+          if (!inbound) return { status: 400 as const };
+          const match = classifySmsReply(inbound.body);
+          // The provider's payload carries no message time, so the request's arrival is the action's
+          // time; it is a synchronous write and never the time a later job got to it (#928).
+          const receivedAt = new Date();
+          let reply: string | null = null;
+          if (match?.intent === 'stop' || match?.intent === 'start') {
+            await applySmsOptOut(tx, {
+              workspaceId: target.ws,
+              providerId: provider.id,
+              keyword: match.keyword,
+              intent: match.intent,
+              phone: inbound.from,
+              receivedAt,
+              prepared: prepared!,
+            });
+          } else if (match?.intent === 'help') reply = billingOf(provider).helpText;
+          return { status: 200 as const, reply: transport.reply(reply) };
+        });
+        if (result.status !== 200) return c.json({ error: result.status === 401 ? 'bad_signature' : 'not_found' }, result.status);
+        if ('events' in result) {
+          // After the transaction committed: a rolled-back escalation leaves no log behind.
+          for (const escalation of result.escalations ?? []) logSuppressionEscalation(escalation);
+          return c.json({ ok: true });
         }
-
-        const inbound = transport.parseInbound(req);
-        if (!inbound) return { status: 400 as const };
-        const match = classifySmsReply(inbound.body);
-        // The provider's payload carries no message time, so the request's arrival is the action's
-        // time; it is a synchronous write and never the time a later job got to it (#928).
-        const receivedAt = new Date();
-        let reply: string | null = null;
-        if (match?.intent === 'stop') {
-          const { hash, profileIds } = await profilesWithPhone(tx, target.ws, deps.kp, inbound.from);
-          const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
-          const smsMarketing = purposes.filter((p) => isMarketing(p.basis) && p.channels.includes('sms'));
-          for (const profileId of profileIds)
-            await recordConsentEvidence(
-              tx,
-              target.ws,
-              profileId,
-              purposes,
-              smsMarketing.map((p) => ({
-                purpose: p.key,
-                channel: 'sms',
-                status: p.basis === 'legitimate_interest' ? ('objected' as const) : ('withdrawn' as const),
-                source: 'unsubscribe' as const,
-                recordedAt: receivedAt,
-                proof: { via: `SMS ${match.keyword}`, provider: provider.id },
-              })),
-            );
-          // A STOP is the weakest suppression reason: DO NOTHING leaves a hard_bounce or complaint
-          // row in place, so a later START (which deletes only 'stop') cannot unsuppress it (#664,
-          // #750).
-          await tx
-            .insert(schema.suppressions)
-            .values({ workspaceId: target.ws, channel: 'sms', valueHash: hash, reason: 'stop' })
-            .onConflictDoNothing();
-          logger.info({ workspace: target.ws, profiles: profileIds.length }, 'SMS STOP recorded');
-        } else if (match?.intent === 'start') {
-          // Lifts the block only; marketing texts need a new consent. Only the SMS stop row for
-          // this number is removed: a hard bounce or complaint for the same number is a delivery
-          // fact, not an opt-out, and stays suppressed (#664).
-          const { hash } = await profilesWithPhone(tx, target.ws, deps.kp, inbound.from);
-          const lifted = await tx
-            .delete(schema.suppressions)
-            .where(
-              and(eq(schema.suppressions.channel, 'sms'), eq(schema.suppressions.valueHash, hash), eq(schema.suppressions.reason, 'stop')),
-            )
-            .returning({ reason: schema.suppressions.reason });
-          logger.info({ workspace: target.ws, lifted: lifted.length }, 'SMS START lifted the stop suppression');
-        } else if (match?.intent === 'help') reply = billingOf(provider).helpText;
-        return { status: 200 as const, reply: transport.reply(reply) };
-      });
-      if (result.status !== 200) return c.json({ error: result.status === 401 ? 'bad_signature' : 'not_found' }, result.status);
-      if ('events' in result) {
-        // After the transaction committed: a rolled-back escalation leaves no log behind.
-        for (const escalation of result.escalations ?? []) logSuppressionEscalation(escalation);
-        return c.json({ ok: true });
+        return c.body(result.reply!.body, 200, { 'content-type': result.reply!.contentType });
+      } finally {
+        prepared?.provider.dispose();
       }
-      return c.body(result.reply!.body, 200, { 'content-type': result.reply!.contentType });
     },
   );
 

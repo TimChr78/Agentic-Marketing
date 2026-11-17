@@ -1,6 +1,7 @@
 import { connect } from 'node:net';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { Db } from '@agentic-marketing/db';
+import { identityLockSnapshot } from '@agentic-marketing/profiles';
 
 // A small Prometheus exposition (text format 0.0.4) built by hand: the server needs a handful of
 // counters, one histogram and a few gauges, which is less code than a dependency and keeps the
@@ -150,6 +151,28 @@ export function createMetricsRegistry(): MetricsRegistry {
         const [command, effect, outcome] = key.split('\u0000');
         sample('am_commands_total', `command=${label(command)},effect=${label(effect)},outcome=${label(outcome)}`, commands.get(key) ?? 0);
       }
+
+      // The workspace identity lock (#978): how long writers waited for it and how long they held
+      // it. No workspace or person label: the protocol is per-process.
+      const identity = identityLockSnapshot();
+      const lockHistogram = (name: string, help: string, h: { buckets: number[]; sum: number; count: number }) => {
+        metric(name, 'histogram', help);
+        for (let i = 0; i < identity.buckets.length; i++)
+          sample(`${name}_bucket`, `le=${label(String(identity.buckets[i]))}`, h.buckets[i] ?? 0);
+        sample(`${name}_bucket`, 'le="+Inf"', h.count);
+        sample(`${name}_sum`, '', h.sum);
+        sample(`${name}_count`, '', h.count);
+      };
+      metric('am_identity_lock_acquisitions_total', 'counter', 'Workspace identity lock acquisitions, including reentrant takes.');
+      sample('am_identity_lock_acquisitions_total', '', identity.acquisitions);
+      metric('am_identity_lock_contended_total', 'counter', 'Identity lock acquisitions that had to wait for another transaction.');
+      sample('am_identity_lock_contended_total', '', identity.contended);
+      lockHistogram('am_identity_lock_wait_seconds', 'Time spent waiting for the workspace identity lock, in seconds.', identity.wait);
+      lockHistogram(
+        'am_identity_lock_hold_seconds',
+        'Time the workspace identity lock was held by the protected block, in seconds.',
+        identity.hold,
+      );
 
       metric('am_queue_messages_pending', 'gauge', 'Messages waiting to be sent (status queued or sending).');
       if (gauges.messagesPending !== undefined) sample('am_queue_messages_pending', '', gauges.messagesPending);

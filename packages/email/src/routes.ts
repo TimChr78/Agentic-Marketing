@@ -13,7 +13,7 @@ import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { bodyLimit } from '@agentic-marketing/ingest';
-import { effectiveTopicStatus, findTopic, recordTopicPreference, topicChoicesOf } from '@agentic-marketing/profiles';
+import { effectiveTopicStatus, findTopic, recordTopicPreference, topicChoicesOf, withIdentityLock } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
@@ -106,7 +106,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
         } catch {
           return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
         }
-        const applied = await applyDeliveryEvents(tx, parsed, provider.adapter, deps.kp);
+        const applied = await applyDeliveryEvents(tx, parsed, provider.adapter);
         // The events the delivery recorded are published by the outbox dispatcher after commit
         // (#978 part 2): ClickHouse is never written inside the transaction that changes consent.
         await enqueueMessageEvents(tx, ws, applied.events);
@@ -156,28 +156,32 @@ export function emailRoutes(deps: EmailRouteDeps) {
   const unsubscribe = async (token: string) => {
     const link = deps.email.links.verify<UnsubscribeLink>(token);
     if (!link) return null;
-    const recorded = await deps.db.withWorkspace(link.w, async (tx) => {
-      const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, link.m));
-      const msg: Msg =
-        m ??
-        ({
-          workspaceId: link.w,
-          id: link.m,
-          profileId: link.p,
-          purpose: link.u,
-          channel: 'email',
-          templateId: null,
-          templateVersion: null,
-          journeyId: null,
-        } as Msg);
-      // A one-click unsubscribe is a synchronous write: the link POST is the person's action.
-      const at = new Date();
-      await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, deps.kp, at);
-      const event = messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() }, '');
-      // The unsubscribe event is published after commit by the outbox dispatcher (#978 part 2).
-      await enqueueMessageEvents(tx, link.w, [event]);
-      return event;
-    });
+    const recorded = await deps.db.withWorkspace(link.w, async (tx) =>
+      // The lock comes before the message lookup: a merged-away message still resolves to the
+      // survivor, and the withdrawal lands on whoever is canonical when this commits.
+      withIdentityLock(tx, link.w, async () => {
+        const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, link.m));
+        const msg: Msg =
+          m ??
+          ({
+            workspaceId: link.w,
+            id: link.m,
+            profileId: link.p,
+            purpose: link.u,
+            channel: 'email',
+            templateId: null,
+            templateVersion: null,
+            journeyId: null,
+          } as Msg);
+        // A one-click unsubscribe is a synchronous write: the link POST is the person's action.
+        const at = new Date();
+        await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, at);
+        const event = messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() }, '');
+        // The unsubscribe event is published after commit by the outbox dispatcher (#978 part 2).
+        await enqueueMessageEvents(tx, link.w, [event]);
+        return event;
+      }),
+    );
     if (recorded.profileId) await consentChanged(link.w, [recorded.profileId], `unsubscribe:${link.m}`);
     return link;
   };

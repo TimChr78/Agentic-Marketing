@@ -58,7 +58,7 @@ describe.skipIf(!hasTestDatabase())('withdrawal on a merged-away message profile
 
     recorder.reset();
     await d.db.withWorkspace(d.workspace, (tx) =>
-      withdraw(tx, msg, 'unsubscribe', { via: 'test' }, recorder, new Date('2026-01-02T03:04:05Z'), 'evt-withdrawal'),
+      withdraw(tx, msg, 'unsubscribe', { via: 'test' }, new Date('2026-01-02T03:04:05Z'), 'evt-withdrawal'),
     );
 
     expect(recorder.calls).toHaveLength(0);

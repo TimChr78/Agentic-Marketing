@@ -30,7 +30,7 @@ async function waitingMessage(id: string): Promise<void> {
   );
 }
 
-const apply = (events: DeliveryEvent[]) => t.srv.db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, events, 'test', t.srv.keyProvider));
+const apply = (events: DeliveryEvent[]) => t.srv.db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, events, 'test'));
 
 const messageRow = async (id: string) =>
   (

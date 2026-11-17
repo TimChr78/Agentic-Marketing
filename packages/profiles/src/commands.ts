@@ -15,7 +15,7 @@ import {
   findTopic,
   mergedFamily,
   purposeAllowed,
-  recordConsent,
+  recordConsentEvidence,
   recordTopicPreference,
   topicChoicesOf,
   topicSummary,
@@ -23,6 +23,7 @@ import {
 import { personCrypto } from './crypto';
 import { isProfileCursorTimestamp } from './cursor';
 import { disposeErasure, eraseProfileStage, type PreparedErasure, prepareErasure } from './erasure';
+import { withIdentityLock } from './identity';
 
 // Profile, consent and data-subject-request commands. Personal data is decrypted only for
 // principals with profiles:pii; agents additionally see only traits the attribute schema marks
@@ -523,25 +524,33 @@ export const recordConsentCommand = defineCommand({
   handler: async (input, ctx) => {
     if (ctx.principal.type === 'agent' && input.status === 'granted')
       throw new AppError('forbidden', 'Agents cannot record a consent; only a person (or the person’s own action) can.');
-    const p = await canonical(ctx, input.profileId);
-    const purposes = await purposesOf(ctx);
-    if (!purposes.some((x) => x.key === input.purpose))
-      throw new AppError('invalid_input', `Unknown purpose "${input.purpose}". See purposes.list.`);
-    const n = await recordConsent(ctx.tx, ctx.principal.workspaceId, p.id, purposes, [
-      {
-        purpose: input.purpose,
-        channel: input.channel,
-        status: input.status,
-        source: ctx.principal.type === 'agent' ? 'agent' : input.source,
-        proof: input.proof,
-        recordedBy: ctx.principal.userId,
-        // A synchronous command handler: now() is the person's (or caller's) action time.
-        recordedAt: new Date(),
-      },
-    ]);
-    const state = currentConsent(await consentStateOf(ctx.tx, ctx.principal.workspaceId, p.id), input.purpose, input.channel || undefined);
-    const basis = purposes.find((x) => x.key === input.purpose)?.basis ?? 'consent';
-    return { recorded: n > 0, allowed: purposeAllowed(basis, state?.status) };
+    // The identity lock comes first: a writer that reads the canonical profile and appends evidence
+    // without it can land on a profile a concurrent merge just folded away.
+    return withIdentityLock(ctx.tx, ctx.principal.workspaceId, async () => {
+      const p = await canonical(ctx, input.profileId);
+      const purposes = await purposesOf(ctx);
+      if (!purposes.some((x) => x.key === input.purpose))
+        throw new AppError('invalid_input', `Unknown purpose "${input.purpose}". See purposes.list.`);
+      const n = await recordConsentEvidence(ctx.tx, ctx.principal.workspaceId, p.id, purposes, [
+        {
+          purpose: input.purpose,
+          channel: input.channel,
+          status: input.status,
+          source: ctx.principal.type === 'agent' ? 'agent' : input.source,
+          proof: input.proof,
+          recordedBy: ctx.principal.userId,
+          // A synchronous command handler: now() is the person's (or caller's) action time.
+          recordedAt: new Date(),
+        },
+      ]);
+      const state = currentConsent(
+        await consentStateOf(ctx.tx, ctx.principal.workspaceId, p.id),
+        input.purpose,
+        input.channel || undefined,
+      );
+      const basis = purposes.find((x) => x.key === input.purpose)?.basis ?? 'consent';
+      return { recorded: n > 0, allowed: purposeAllowed(basis, state?.status) };
+    });
   },
 });
 
@@ -678,20 +687,22 @@ export const setTopicPreference = defineCommand({
   handler: async (input, ctx) => {
     if (ctx.principal.type === 'agent' && input.status === 'subscribed')
       throw new AppError('forbidden', 'Agents cannot subscribe someone to a topic; only a person (or the person’s own action) can.');
-    const p = await canonical(ctx, input.profileId);
-    const found = findTopic(await purposesOf(ctx), input.topic);
-    if (!found) throw new AppError('invalid_input', `Unknown topic "${input.topic}". See purposes.list for the topics in force.`);
-    const recorded = await recordTopicPreference(
-      ctx.tx,
-      ctx.principal.workspaceId,
-      p.id,
-      found.purpose.key,
-      found.topic.key,
-      input.status,
-      ctx.principal.type === 'agent' ? 'agent' : 'api',
-      { note: input.note, recordedBy: ctx.principal.userId },
-    );
-    return { recorded, topic: found.topic.key, purpose: found.purpose.key, status: input.status };
+    return withIdentityLock(ctx.tx, ctx.principal.workspaceId, async () => {
+      const p = await canonical(ctx, input.profileId);
+      const found = findTopic(await purposesOf(ctx), input.topic);
+      if (!found) throw new AppError('invalid_input', `Unknown topic "${input.topic}". See purposes.list for the topics in force.`);
+      const recorded = await recordTopicPreference(
+        ctx.tx,
+        ctx.principal.workspaceId,
+        p.id,
+        found.purpose.key,
+        found.topic.key,
+        input.status,
+        ctx.principal.type === 'agent' ? 'agent' : 'api',
+        { note: input.note, recordedBy: ctx.principal.userId },
+      );
+      return { recorded, topic: found.topic.key, purpose: found.purpose.key, status: input.status };
+    });
   },
 });
 

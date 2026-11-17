@@ -9,7 +9,7 @@ import {
   type Tx,
 } from '@agentic-marketing/db';
 import { and, eq, inArray, type SQL, sql } from 'drizzle-orm';
-import { lockIdentity } from './identity';
+import { assertIdentityLock, lockIdentity } from './identity';
 
 // The consent and objection ledger (security-and-privacy.md §2). Records are append-only;
 // consent_state is the latest record per purpose and channel, over a profile and every profile
@@ -169,11 +169,15 @@ export function newConsentEvidence<T extends ConsentInput>(records: T[], existin
 
 /**
  * Records the evidence a write adds (#936): every distinct action, with exact duplicates and event
- * redeliveries folded. Use this in every writer that knows the person's action time; `recordConsent`
- * remains the raw append. This helper adds no lock of its own: it keeps the same concurrency
- * behaviour as `recordConsent` on main.
+ * redeliveries folded. Use this in every writer that knows the person's action time.
+ *
+ * The caller must already hold the workspace identity lock (`withIdentityLock`), taken before it
+ * read the canonical profile. The helper asserts that instead of taking the lock itself, so a
+ * caller cannot invert the order by holding a row lock first; the raw append (`recordConsent`) and
+ * the rebuild are package-internal.
  */
 export async function recordConsentEvidence(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
+  assertIdentityLock(tx, 'recordConsentEvidence');
   if (!records.length) return 0;
   const family = await mergedFamily(tx, workspaceId, profileId);
   const existing = await tx
@@ -195,7 +199,8 @@ export async function recordConsentEvidence(tx: Tx, workspaceId: string, profile
   return recordConsent(tx, workspaceId, profileId, purposes, newConsentEvidence(records, existing));
 }
 
-export async function recordConsent(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
+/** The raw append. Package-internal: callers go through `recordConsentEvidence`. */
+async function recordConsent(tx: Tx, workspaceId: string, profileId: string, purposes: Purposes, records: ConsentInput[]) {
   if (!records.length) return 0;
   const inserted = await tx
     .insert(schema.consentRecords)
@@ -509,7 +514,10 @@ export async function recordTopicPreference(
       .select({ mergedInto: schema.profiles.mergedInto })
       .from(schema.profiles)
       .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, canonicalId)));
-    if (!profile?.mergedInto) break;
+    // The person was erased while the link was still out: record nothing rather than recreating a
+    // choice (or a row) for a profile that no longer exists.
+    if (!profile) return false;
+    if (!profile.mergedInto) break;
     canonicalId = profile.mergedInto;
     if (i === 19) throw new Error('Profile merge chain exceeds the supported depth.');
   }
