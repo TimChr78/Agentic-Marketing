@@ -1,0 +1,3 @@
+# Every path is owned by the repository owner until there are teams to split it. A branch rule that
+# requires review from the code owner reads this file; keep the catch-all last if that changes.
+* @TimChr78
