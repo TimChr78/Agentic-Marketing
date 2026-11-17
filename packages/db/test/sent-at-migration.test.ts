@@ -209,8 +209,9 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'idempotency_keys',
         'agent_actions',
         'broadcast_runs',
+        'erasure_cleanup_jobs',
       ])
-        await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
+        await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
       await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
       await d.db.admin.query(
         `INSERT INTO experience_rollouts (workspace_id, artifact_id, version, steps, step_hours, step_index, share, status, paused_at)

@@ -186,10 +186,10 @@ describe.skipIf(!hasTestDatabase())('durable erasure cleanup (#978 part 2b)', ()
   it('backs off after a failure and stops after the attempt bound', async () => {
     await enqueue('era_retry');
     const first = (await claimFor('era_retry'))!;
-    await failErasureCleanup(d.db, first, new Error('ClickHouse unavailable\n\tretry later'));
+    await failErasureCleanup(d.db, first, { category: 'clickhouse_error', errorClass: 'ClickHouseError', statusCode: 503 });
     const retried = (await row('era_retry'))!;
     expect(retried.state).toBe('pending_external');
-    expect(retried.last_error).toBe('ClickHouse unavailable retry later');
+    expect(retried.last_error).toBe('clickhouse_error (ClickHouseError, status 503)');
     expect(retried.next_attempt_at.getTime()).toBeGreaterThan(Date.now());
     // Attempt 1 backs off 5 s, and checkpoints are kept for the rerun.
     expect(await claimFor('era_retry')).toBeUndefined();
@@ -197,7 +197,7 @@ describe.skipIf(!hasTestDatabase())('durable erasure cleanup (#978 part 2b)', ()
     await makeDue('era_retry');
     const second = (await claimFor('era_retry'))!;
     expect(second.attempts).toBe(2);
-    await failErasureCleanup(d.db, second, new Error('still broken'), { maxAttempts: 2 });
+    await failErasureCleanup(d.db, second, { category: 'timeout' }, { maxAttempts: 2 });
     const failed = (await row('era_retry'))!;
     expect(failed.state).toBe('failed');
     expect(failed.attempts).toBe(2);
@@ -249,13 +249,39 @@ describe.skipIf(!hasTestDatabase())('durable erasure cleanup (#978 part 2b)', ()
     await d.db.admin.query("UPDATE outbox SET state = 'delivered' WHERE operation_key = 'barrier-a'");
     await expect(erasureOutboxOutstanding(d.db, d.workspace, ['prf_erased_a', 'prf_erased_b'])).resolves.toBe(1);
 
-    // A failed row cannot block completion, but it must not be requeued later either.
-    await expect(dropErasedProfileOutbox(d.db, d.workspace, ['prf_erased_a', 'prf_erased_b'])).resolves.toBe(1);
+    // Failed and delivered rows that name the person go; pending/delivering rows stay for the
+    // barrier.
+    await expect(dropErasedProfileOutbox(d.db, d.workspace, ['prf_erased_a', 'prf_erased_b'])).resolves.toBe(2);
     const left = await d.db.admin.query<{ operation_key: string }>(
       `SELECT operation_key FROM outbox WHERE workspace_id = $1 ORDER BY operation_key`,
       [d.workspace],
     );
-    expect(left.rows.map((r) => r.operation_key)).toEqual(['barrier-a', 'barrier-b', 'barrier-d', 'barrier-e']);
+    expect(left.rows.map((r) => r.operation_key)).toEqual(['barrier-b', 'barrier-d', 'barrier-e']);
+  });
+
+  it('removes delivered rows for the erased person and filters only their entries from a mixed batch', async () => {
+    await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1', [d.workspace]);
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, delivered_at)
+       VALUES
+         ($1, 'obx_done_doi', 'doi_send',
+          '{"profileId":"prf_erased_a","idempotencyKey":"doi:x","link":"https://x/confirm?token=anon-a"}', 'done-doi', 'delivered', now()),
+         ($1, 'obx_done_single', 'message_event',
+          '{"events":[{"profileId":"prf_erased_a","url":"https://x/?u=anon-a"}]}', 'done-single', 'delivered', now()),
+         ($1, 'obx_done_mixed', 'message_event',
+          '{"events":[{"profileId":"prf_erased_a","url":"https://x/?u=anon-a"},{"profileId":"prf_other","url":"https://x/?u=other"}]}',
+          'done-mixed', 'delivered', now()),
+         ($1, 'obx_done_other', 'doi_send', '{"profileId":"prf_other","idempotencyKey":"doi:y"}', 'done-other', 'delivered', now())`,
+      [d.workspace],
+    );
+    await expect(dropErasedProfileOutbox(d.db, d.workspace, ['prf_erased_a'])).resolves.toBe(2);
+    const left = await d.db.admin.query<{ operation_key: string; payload: { events?: { profileId: string }[]; profileId?: string } }>(
+      `SELECT operation_key, payload FROM outbox WHERE workspace_id = $1 ORDER BY operation_key`,
+      [d.workspace],
+    );
+    expect(left.rows.map((r) => r.operation_key)).toEqual(['done-mixed', 'done-other']);
+    expect(left.rows[0]?.payload.events).toEqual([{ profileId: 'prf_other', url: 'https://x/?u=other' }]);
+    expect(JSON.stringify(left.rows)).not.toContain('anon-a');
   });
 
   it('backs off on a bounded schedule', () => {

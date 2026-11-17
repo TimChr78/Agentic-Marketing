@@ -15,7 +15,7 @@ import {
   migrationHead,
   readDataKeySample,
   readErasureLog,
-  replayErasures,
+  replayErasuresAfterMigrate,
 } from '@agentic-marketing/db';
 import { keyProviderFromEnv } from '../keys';
 
@@ -993,8 +993,16 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   if (!opts.skipKeyCheck && manifest.format === 2 && manifest.key) await assertRestoredDataKey(databaseUrl, env, log);
 
   if (erasureLog.erasures.length || erasureLog.tombstones.length) {
+    // Migrate before replay: a snapshot older than 0.15.0 has no erasure_cleanup_jobs, and the
+    // replay must recreate the live database's pending jobs there (#978 part 2b review).
+    if (!env.APP_DB_PASSWORD)
+      throw new Error('APP_DB_PASSWORD is required to replay erasures during a restore: it applies pending migrations first');
     log(`replaying ${erasureLog.erasures.length} erasure(s) and ${erasureLog.tombstones.length} tombstone(s) recorded after the snapshot`);
-    const replayed = await replayErasures(databaseUrl, erasureLog, { log });
+    const replayed = await replayErasuresAfterMigrate(databaseUrl, erasureLog, {
+      appRole: role.role,
+      appRolePassword: env.APP_DB_PASSWORD,
+      log,
+    });
     log(
       `erasures replayed: ${replayed.profiles} profile(s) removed from the restored snapshot, ` +
         `${replayed.tombstones} tombstone(s) restored` +

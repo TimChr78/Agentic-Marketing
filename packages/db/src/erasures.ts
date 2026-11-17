@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { migrate } from './migrate';
 
 // Erasures live in the database they protect, so a restore from a snapshot taken before an
 // erasure would bring the erased person back (#144). `am restore` reads this log from the live
@@ -241,6 +242,36 @@ async function eraseFamily(client: pg.Client, workspaceId: string, profileIds: s
   await client.query('DELETE FROM profile_merges WHERE workspace_id = $1 AND (from_id = ANY($2) OR into_id = ANY($2))', params);
   const deleted = await client.query('DELETE FROM profiles WHERE workspace_id = $1 AND id = ANY($2)', params);
   return deleted.rowCount ?? 0;
+}
+
+export interface ReplayErasuresAfterMigrateOptions extends ReplayErasuresOptions {
+  /** The app role's password, needed because the migrations' GRANTs name it. */
+  appRolePassword: string;
+  appRole?: string;
+}
+
+/**
+ * Applies pending migrations, then replays the erasure log. A restore replaces the database with
+ * the snapshot's schema first: a snapshot taken before 0.15.0 has no `erasure_cleanup_jobs`, so a
+ * plain replay would have nowhere to recreate the live database's pending cleanup jobs. Migrating
+ * before the replay makes the table exist, so restored ClickHouse and hot-state data is cleaned.
+ */
+export async function replayErasuresAfterMigrate(
+  databaseUrl: string,
+  log: ErasureLog,
+  opts: ReplayErasuresAfterMigrateOptions,
+): Promise<ReplayErasuresResult> {
+  const pool = new pg.Pool({ connectionString: databaseUrl });
+  try {
+    await migrate(pool, {
+      appRolePassword: opts.appRolePassword,
+      ...(opts.appRole ? { appRole: opts.appRole } : {}),
+      ...(opts.log ? { log: opts.log } : {}),
+    });
+  } finally {
+    await pool.end();
+  }
+  return replayErasures(databaseUrl, log, opts.log ? { log: opts.log } : {});
 }
 
 /**

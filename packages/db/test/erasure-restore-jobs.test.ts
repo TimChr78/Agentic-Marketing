@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from 'vitest';
-import { readErasureLog, replayErasures } from '../src/erasures';
+import { readErasureLog, replayErasures, replayErasuresAfterMigrate } from '../src/erasures';
 import { createDisposableDb, hasTestDatabase } from './disposable';
 
 // A restore from a snapshot taken before an erasure brings the person back (#144). The SQL log
@@ -89,5 +89,49 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
       erasureId,
     ]);
     expect(jobs.rowCount).toBe(0);
+  });
+
+  it('migrates a pre-0108 snapshot before replaying, so the restored cleanup jobs exist', async () => {
+    const live = await createDisposableDb('erasure_jobs_pre0108_live');
+    // A snapshot taken before durable cleanup: its schema stops at 0107 and has no job table.
+    const restored = await createDisposableDb('erasure_jobs_pre0108_restored', { upTo: '0107_broadcast_defer_count.sql' });
+    open.push(live, restored);
+    const profile = 'prf_0000000000000000000000000000d00d';
+    const erasureId = 'era_0000000000000000000000000000d00d';
+    const selectors = Buffer.from('sealed selectors in a pre-0108 snapshot');
+    const selectorKey = Buffer.from('wrapped service key in a pre-0108 snapshot');
+    await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    await live.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'pre-0108 restore test', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek)
+       VALUES ($1, $2, ARRAY[$3]::text[], $4, $5, 'local-test')`,
+      [live.workspace, erasureId, profile, selectors, selectorKey],
+    );
+    const log = await readErasureLog(live.url.toString());
+
+    await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [live.workspace]);
+    await restored.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    // The table does not exist before the restore path migrates.
+    const before = await restored.db.admin.query("SELECT to_regclass('public.erasure_cleanup_jobs') AS table");
+    expect(before.rows[0]?.table).toBeNull();
+
+    const replayed = await replayErasuresAfterMigrate(restored.url.toString(), log, {
+      appRole: 'am_ops_test_app',
+      appRolePassword: 'am_ops_test_password',
+    });
+    expect(replayed).toMatchObject({ erasures: 1, profiles: 1, cleanupJobs: 1 });
+    const jobs = await restored.db.admin.query<{
+      state: string;
+      selectors: Buffer | null;
+      selector_key: Buffer | null;
+    }>('SELECT state, selectors, selector_key FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2', [
+      live.workspace,
+      erasureId,
+    ]);
+    expect(jobs.rows[0]).toMatchObject({ state: 'pending_external', selectors, selector_key: selectorKey });
   });
 });

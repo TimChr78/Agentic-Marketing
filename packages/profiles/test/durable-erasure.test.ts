@@ -3,7 +3,8 @@ import { claimErasureCleanupJobs } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { assertNoProviderCalls, localKeyProvider, recordingKeyProvider } from '@agentic-marketing/secrets';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { logger } from '@agentic-marketing/telemetry';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import { eraseProfile, erasureStatus } from '../src/commands';
 import { disposeErasure, eraseProfileStage, prepareErasure } from '../src/erasure';
@@ -110,6 +111,7 @@ const job = async (erasureId: string) => {
     selector_key: Buffer | null;
     selector_kek: string | null;
     profile_ids: string[];
+    last_error: string | null;
   }>('SELECT * FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2', [d.workspace, erasureId]);
   return rows[0] ?? null;
 };
@@ -379,5 +381,57 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     // The rerun repeated the same idempotent deletion, then checkpointed and completed.
     expect(calls).toHaveLength(2);
     expect((await job(erasedId))?.state).toBe('complete');
+  });
+
+  it('never stores or logs a raw external error that names the person', async () => {
+    const profile = 'prf_0000000000000000000000000000e0e0';
+    await seedPerson(profile);
+    const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+    let erasedId = '';
+    try {
+      erasedId = (
+        await d.db.withWorkspace(d.workspace, (tx) =>
+          eraseProfileStage(tx, {
+            workspaceId: d.workspace,
+            profileId: profile,
+            requestedBy: 'user_test',
+            reason: 'error text test',
+            prepared,
+          }),
+        )
+      ).erasureId;
+    } finally {
+      disposeErasure(prepared);
+    }
+    const secret = 'alice@example.com / anon-e0e0-secret';
+    const events = {
+      async deleteEventsOf() {
+        throw new Error(`ClickHouse rejected the delete for ${secret}`);
+      },
+    } as unknown as EventStore;
+    const { hot } = fakeHot();
+    const spy = vi.spyOn(logger, 'warn');
+    try {
+      const result = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot });
+      expect(result).toMatchObject({ claimed: 1, retried: 1 });
+      const stored = (await job(erasedId))!;
+      expect(stored.last_error).toMatch(/^clickhouse_error/);
+      expect(stored.last_error).not.toContain('alice@example.com');
+      expect(stored.last_error).not.toContain('anon-e0e0-secret');
+
+      const { events: okEvents } = fakeEvents();
+      const executor = createExecutor(d.db, services(okEvents, hot));
+      const status = await executor.execute(erasureStatus, { erasureId: erasedId }, userPrincipal('user_test', d.workspace, 'owner'), {
+        surface: 'rest',
+      });
+      expect(status.status).toBe('pending');
+      expect(status.lastError).toBe(stored.last_error);
+      expect(JSON.stringify(status)).not.toContain('alice@example.com');
+      expect(JSON.stringify(status)).not.toContain('anon-e0e0-secret');
+      expect(JSON.stringify(spy.mock.calls)).not.toContain('alice@example.com');
+      expect(JSON.stringify(spy.mock.calls)).not.toContain('anon-e0e0-secret');
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

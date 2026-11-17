@@ -7,12 +7,14 @@ import {
   ERASURE_CLEANUP_LEASE_MS,
   ERASURE_CLEANUP_MAX_ATTEMPTS,
   type ErasureCleanupClaim,
+  type ErasureCleanupFailureCategory,
+  erasureCleanupFailure,
   erasureOutboxOutstanding,
   failErasureCleanup,
+  formatErasureCleanupFailure,
   markErasureCleanupCheckpoint,
   renewErasureCleanupLease,
   resetErasureCleanupCheckpoints,
-  sanitiseOutboxError,
 } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
@@ -96,6 +98,7 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
       logger.debug({ erasureId: claim.erasureId }, 'erasure cleanup claim was taken over; skipping');
       continue;
     }
+    let stage: ErasureCleanupFailureCategory = 'barrier_wait';
     try {
       // A publisher still holding an outbox row for this person could recreate data after the
       // sweep. Wait for it before deleting anything; the job keeps its checkpoints meanwhile.
@@ -104,8 +107,10 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
         result.deferred++;
         continue;
       }
+      stage = 'unknown';
       const selectors = await selectorsFor(deps, claim);
       if (!claim.clickhouseDone) {
+        stage = 'clickhouse_error';
         await deps.events.deleteEventsOf(claim.workspaceId, {
           anonymousIds: selectors.anonymousIds,
           userIds: selectors.userIds,
@@ -117,6 +122,7 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
         }
       }
       if (!claim.hotstateDone) {
+        stage = 'hot_state_error';
         if (deps.hot)
           await deps.hot.deleteSnapshot(claim.workspaceId, {
             anonymousIds: selectors.anonymousIds,
@@ -127,6 +133,7 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
           continue;
         }
       }
+      stage = 'barrier_wait';
       // A publisher that was still in flight when the sweep started could have added a row just
       // after the barrier check: sweep again before completing instead of leaving it behind.
       if ((await erasureOutboxOutstanding(deps.db, claim.workspaceId, claim.profileIds)) > 0) {
@@ -135,8 +142,8 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
         result.deferred++;
         continue;
       }
-      // Failed rows never publish on their own, but leaving them would let `am outbox` requeue
-      // work that recreates the person after this job completes.
+      // Failed and delivered rows can still name the person (a DOI token, a click URL), and a
+      // requeue could deliver one after this job completes.
       await dropErasedProfileOutbox(deps.db, claim.workspaceId, claim.profileIds);
       // A requeue could have turned a failed row into a pending one between the checks: sweep once
       // more rather than complete on a queue that is no longer empty.
@@ -146,10 +153,12 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
         result.deferred++;
         continue;
       }
+      stage = 'unknown';
       if (await completeErasureCleanup(deps.db, claim)) result.completed++;
       else logger.debug({ erasureId: claim.erasureId }, 'erasure completion was stale; another claim owns the job');
     } catch (err) {
-      const state = await failErasureCleanup(deps.db, claim, err, {
+      const failure = erasureCleanupFailure(err, stage);
+      const state = await failErasureCleanup(deps.db, claim, failure, {
         maxAttempts: opts.maxAttempts ?? ERASURE_CLEANUP_MAX_ATTEMPTS,
       });
       if (state === 'stale') {
@@ -158,8 +167,12 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
       }
       if (state === 'failed') result.failed++;
       else result.retried++;
-      // The selectors can hold identifiers; log only the erasure id, attempt and a bounded reason.
-      logger.warn({ erasureId: claim.erasureId, attempts: claim.attempts, error: sanitiseOutboxError(err) }, 'erasure cleanup failed');
+      // Only the fixed category, class name and status are logged; a provider message can echo the
+      // selectors, which name the erased person.
+      logger.warn(
+        { erasureId: claim.erasureId, attempts: claim.attempts, error: formatErasureCleanupFailure(failure) },
+        'erasure cleanup failed',
+      );
     }
   }
   return result;
