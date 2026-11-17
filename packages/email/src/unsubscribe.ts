@@ -1041,20 +1041,25 @@ const RELATIVE_UNITS = new Set([
  * refusal, because the link may still be visible. Empty when the CSS only uses what the check
  * models, or when no CSS can reach the link.
  *
- * Only the link and its ancestors count. A rule reaches them when its simple selector matches one
- * of them, or — for a selector the check cannot parse — when its subject (the rightmost compound)
- * could match one. Selectors whose subject plainly names another element stay silent, so unrelated
- * footer or sidebar CSS does not warn. Inline styles on that same path count too.
+ * Only the link and its ancestors count. Every anchor to the URL is considered — a first anchor
+ * hidden by the modelled CSS must not mask a later usable one. A rule reaches them when its simple
+ * selector matches one of them, or — for a selector the check cannot parse — when its subject (the
+ * rightmost compound) could match one. Selectors whose subject plainly names another element stay
+ * silent, so unrelated footer or sidebar CSS does not warn. Inline styles on that same path count
+ * too, with CSS comments stripped first as in a stylesheet.
  */
 export function unsubscribeCssConstructs(html: string, url: string): string[] {
   const wanted = url.trim();
   if (!wanted) return [];
-  const path = unsubscribePath(html, wanted);
-  if (path === null) return [];
+  const elements = unsubscribeLinkElements(html, wanted);
+  if (elements.length === 0) return [];
   const constructs = new Set<string>();
   const css = styleText(html, () => false);
-  if (css !== null) collectCssConstructs(css, path, constructs);
-  for (const el of path) inspectDeclarations(el.declarations, constructs);
+  if (css !== null) collectCssConstructs(css, elements, constructs);
+  for (const el of elements) {
+    const style = el.attribs.style;
+    if (style !== undefined) inspectDeclarations(parseDeclarations(stripCssComments(style)), constructs);
+  }
   return [...constructs].slice(0, MAX_CSS_CONSTRUCTS);
 }
 
@@ -1065,19 +1070,24 @@ export function unsubscribeCssWarningMessage(constructs: readonly string[]): str
 }
 
 /**
- * The first anchor to the unsubscribe URL and its ancestor chain, root first. The first anchor is
- * enough: a later one is only relevant when the first is unusable, which is the refusal's job.
+ * The link and the ancestors of every anchor to the unsubscribe URL, deduplicated. A shared parent
+ * is visited once: walking up from each anchor stops at an element already collected, whose own
+ * ancestors are already there, so many matching anchors stay linear in the document.
  */
-function unsubscribePath(html: string, wanted: string): ElementInfo[] | null {
-  let found: ElementInfo[] | null = null;
+function unsubscribeLinkElements(html: string, wanted: string): ElementInfo[] {
   const stack: ElementInfo[] = [];
+  const included = new Set<ElementInfo>();
+  const elements: ElementInfo[] = [];
   const parser = new Parser(
     {
       onopentag(name, attribs) {
         stack.push(element(name, attribs));
-        if (name === 'a' && attribs.href !== undefined && attribs.href.trim() === wanted) {
-          found = stack.slice();
-          parser.pause();
+        if (name !== 'a' || attribs.href === undefined || attribs.href.trim() !== wanted) return;
+        for (let i = stack.length - 1; i >= 0; i--) {
+          const el = stack[i]!;
+          if (included.has(el)) break;
+          included.add(el);
+          elements.push(el);
         }
       },
       onclosetag(name) {
@@ -1089,8 +1099,8 @@ function unsubscribePath(html: string, wanted: string): ElementInfo[] | null {
     { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
   );
   parser.write(html);
-  if (found === null) parser.end();
-  return found;
+  parser.end();
+  return elements;
 }
 
 /**
@@ -1254,6 +1264,9 @@ function selectorCompounds(selector: string): string[] {
  * `*`, `[data-x]`), it could match, so it counts.
  */
 function selectorReaches(selector: string, path: ElementInfo[]): boolean {
+  // A CSS escape can spell any tag, class or id (`.foot\65 r` is `.footer`). The warning scan does
+  // not decode escapes, so an escaped selector could reach the link and must be reported.
+  if (selector.includes('\\')) return true;
   const simple = parseSimpleSelector(selector);
   if (simple !== null) return path.some((el) => selectorMatches(simple, el));
   const compounds = selectorCompounds(selector);
@@ -1345,8 +1358,12 @@ function hasTopLevelCombinator(selector: string): boolean {
 
 /** Names the selector features the check does not model; a simple selector adds nothing. */
 function addSelectorConstructs(selector: string, out: Set<string>): void {
-  if (parseSimpleSelector(selector) !== null) return;
   let named = false;
+  if (selector.includes('\\')) {
+    out.add('escaped selector');
+    named = true;
+  }
+  if (parseSimpleSelector(selector) !== null) return;
   if (hasTopLevelCombinator(selector)) {
     out.add('combinator');
     named = true;

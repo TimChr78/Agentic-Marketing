@@ -348,3 +348,45 @@ describe('link reachability', () => {
     expect(r.findings.filter((f) => f.category === 'links')).toEqual([]);
   });
 });
+
+// Review of #872 (B1–B3): the CSS warning must see escaped selectors, comments inside inline
+// styles, and every anchor to the unsubscribe URL. Each case goes through the real render, because
+// MJML decides the final markup the scan reads.
+describe('the unsubscribe CSS warning after the #872 review', () => {
+  const warning = (findings: Awaited<ReturnType<typeof checkEmailTemplate>>['findings']) =>
+    findings.find((f) => f.category === 'compliance' && f.severity === 'warning' && f.message.includes("can't evaluate"));
+
+  it('warns about an escaped selector that could hide the link (B1)', async () => {
+    const t = template({
+      mjml: mjml(
+        '<mj-text><a href="{{ unsubscribe_url }}" class="footer">Unsubscribe</a></mj-text>',
+        '<mj-style>.foot\\65 r{display:none}</mj-style>',
+      ),
+    });
+    const r = await checkEmailTemplate(t, opts());
+    expect(warning(r.findings)?.message).toContain('escaped selector');
+    expect(r.summary.blocking).toBe(0);
+  });
+
+  it('warns about an unsupported value behind a comment in an inline style (B2)', async () => {
+    const t = template({
+      mjml: mjml('<mj-text><a href="{{ unsubscribe_url }}" style="/* comment */transform:translateX(-9999px)">Unsubscribe</a></mj-text>'),
+    });
+    const r = await checkEmailTemplate(t, opts());
+    expect(warning(r.findings)?.message).toContain('`transform`');
+    expect(r.summary.blocking).toBe(0);
+  });
+
+  it('warns about CSS on a usable later anchor when the first is hidden (B3)', async () => {
+    const t = template({
+      mjml: mjml(
+        '<mj-text><a href="{{ unsubscribe_url }}" style="display:none">Unsubscribe</a>' +
+          '<a href="{{ unsubscribe_url }}" class="footer">Unsubscribe</a></mj-text>',
+        '<mj-style>.footer{transform:translateX(-9999px)}</mj-style>',
+      ),
+    });
+    const r = await checkEmailTemplate(t, opts());
+    expect(warning(r.findings)?.message).toContain('`transform`');
+    expect(r.summary.blocking).toBe(0);
+  });
+});

@@ -986,6 +986,38 @@ describe('CSS the unsubscribe-link check cannot evaluate is a warning (#872)', (
     );
   });
 
+  // Review of #872 (B1): an escape can spell any tag, class or id (`.foot\65 r` is `.footer`). The
+  // warning scan does not decode escapes, so an escaped selector must be treated as able to reach.
+  it('warns about an escaped selector that spells the link class', () => {
+    const html = `<style>.foot\\65 r{display:none}</style><a href="/unsubscribe" class="footer">Unsubscribe</a>`;
+    expect(unsubscribeLinkProblem(html, '/unsubscribe')).toBeNull();
+    expect(unsubscribeCssConstructs(html, '/unsubscribe')).toContain('escaped selector');
+  });
+
+  // Review of #872 (B2): a CSS comment before the first declaration hid the unsupported value.
+  it('strips comments from an inline style before reading its declarations', () => {
+    const html = `<a href="/unsubscribe" style="/* comment */transform:translateX(-9999px)">Unsubscribe</a>`;
+    expect(unsubscribeCssConstructs(html, '/unsubscribe')).toEqual(['transform']);
+  });
+
+  // Review of #872 (B3): a hidden first anchor must not mask warnings about a later usable one.
+  it('inspects every anchor to the URL, not only the first', () => {
+    const html =
+      '<style>.footer{transform:translateX(-9999px)}</style>' +
+      '<a href="/unsubscribe" style="display:none">Unsubscribe</a>' +
+      '<a href="/unsubscribe" class="footer">Unsubscribe</a>';
+    expect(unsubscribeLinkProblem(html, '/unsubscribe')).toBeNull();
+    expect(unsubscribeCssConstructs(html, '/unsubscribe')).toEqual(['transform']);
+  });
+
+  it('stays linear with many anchors to the URL', () => {
+    expectLinear(
+      (n) => `<style>.footer{transform:translateX(-1em)}</style>${`<a href="${URL}" class="footer">Unsubscribe</a>`.repeat(n)}`,
+      (html) => unsubscribeCssConstructs(html, URL),
+      2_000,
+    );
+  });
+
   // The refusal is unchanged: CSS the check models still refuses, and CSS it cannot evaluate still
   // passes the blocking check — it only gains a warning.
   it('leaves the refusal exactly as it was', () => {
