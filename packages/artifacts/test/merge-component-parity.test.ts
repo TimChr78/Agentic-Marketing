@@ -82,36 +82,54 @@ describe.skipIf(!hasTestDatabase())('one merge component for the send and the re
     }, 60_000);
   }
 
-  it('agrees beyond the walk bound, where the person splits at the bound', async () => {
-    // A chain longer than MERGE_MAX_HOPS (256) is corruption, but both paths must still resolve
-    // each profile the same way: control at the far end and treatment at the near end belong to
-    // different groups, and each send reads the arm its own group has in the report.
+  it('keeps a truncated chain’s groups stable across sends from every end', async () => {
+    // Past the walk bound a representative must still be a fixed point of resolution
+    // (rep(rep(x)) == rep(x)), or a send could copy an arm onto a profile the report groups
+    // somewhere else: p0's control copied to p256 used to land in p300's group and override its
+    // treatment. Every send is followed by a fresh report read, so a stray write cannot hide.
     const hops = 300;
     const ids = await insertChain('beyond', hops);
-    const target = scope();
-    await assign(target, ids[0]!, 'control', EARLY);
-    await assign(target, ids.at(-1)!, 'treatment', LATE);
+    const farEnd = ids[0]!;
+    const middle = ids[256]!;
+    const nearEnd = ids.at(-1)!;
 
-    await d.db.withWorkspace(d.workspace, async (tx) => {
-      const winners = await holdoutWinners(tx, d.workspace, target, HASH);
-      expect([winners.control, winners.treatment]).toEqual([1, 1]);
-      const page = await winners.page(undefined, 10);
+    const run = async (target: HoldoutScope, order: readonly string[], expected: readonly string[]) => {
+      await assign(target, farEnd, 'control', EARLY);
+      await assign(target, nearEnd, 'treatment', LATE);
+      await d.db.withWorkspace(d.workspace, async (tx) => {
+        const report = async () => {
+          const winners = await holdoutWinners(tx, d.workspace, target, HASH);
+          return [winners.control, winners.treatment] as const;
+        };
+        expect(await report()).toEqual([1, 1]);
 
-      // The far end resolves to the node where the bound stopped it; the near end is a terminal.
-      const canonical = await canonicalPeople(tx, d.workspace, ids);
-      expect(canonical.get(ids[0]!)).toBe(ids[256]);
-      expect(canonical.get(ids.at(-1)!)).toBe(ids.at(-1));
+        // Truncated resolution is the profile itself; the near end and everything within the
+        // bound of it resolve to the terminal, and each representative is its own representative.
+        const canonical = await canonicalPeople(tx, d.workspace, ids);
+        expect(canonical.get(farEnd)).toBe(farEnd);
+        expect(canonical.get(middle)).toBe(nearEnd);
+        expect(canonical.get(nearEnd)).toBe(nearEnd);
+        for (const id of [farEnd, middle, nearEnd]) {
+          const person = canonical.get(id)!;
+          expect(canonical.get(person)).toBe(person);
+        }
 
-      // Each send reads the arm its own report group has, before the send re-records anything.
-      const armOf = (id: string) => page.find((winner) => winner.person === canonical.get(id))?.arm;
-      const nearEnd = ids.at(-1)!;
-      expect((await assignHoldout(tx, d.workspace, target, { percent: 50 }, nearEnd))?.assignment.arm).toBe(armOf(nearEnd));
-      expect(armOf(nearEnd)).toBe('treatment');
-      const farEnd = ids[0]!;
-      expect((await assignHoldout(tx, d.workspace, target, { percent: 50 }, farEnd))?.assignment.arm).toBe(armOf(farEnd));
-      expect(armOf(farEnd)).toBe('control');
-    });
-  }, 60_000);
+        for (const [i, id] of order.entries()) {
+          expect((await assignHoldout(tx, d.workspace, target, { percent: 50 }, id))?.assignment.arm).toBe(expected[i]);
+          // Re-read after every send: neither arm may move.
+          expect(await report()).toEqual([1, 1]);
+        }
+        // A second send from every end is the same decision and still writes nothing.
+        for (const [i, id] of order.entries()) {
+          expect((await assignHoldout(tx, d.workspace, target, { percent: 50 }, id))?.assignment.arm).toBe(expected[i]);
+          expect(await report()).toEqual([1, 1]);
+        }
+      });
+    };
+
+    await run(scope(), [farEnd, middle, nearEnd], ['control', 'treatment', 'treatment']);
+    await run(scope(), [nearEnd, middle, farEnd], ['treatment', 'treatment', 'control']);
+  }, 120_000);
 
   it('agrees on a cycle', async () => {
     // prf_cycle_a is lexically lowest, so it is the representative of the cycle.

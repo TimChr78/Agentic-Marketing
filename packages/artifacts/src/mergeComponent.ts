@@ -14,7 +14,9 @@ import { type SQL, sql } from 'drizzle-orm';
 //
 // * The representative of an id is the end of its chain; on a corrupted cycle it is the lowest id
 //   on the cycle (COLLATE "C"), so every member of a cycle resolves to the same person. A chain
-//   deeper than `MERGE_MAX_HOPS` resolves to the node at the bound and is marked `truncated`.
+//   deeper than `MERGE_MAX_HOPS` resolves to the profile itself and is marked `truncated`: that
+//   keeps resolution idempotent (`rep(rep(x)) = rep(x)`), so the send can never copy an arm onto a
+//   profile the report groups under a different person.
 // * The component of a representative is every profile whose chain reaches it, cycle-safe.
 //
 // Both walks are bounded (`MERGE_MAX_HOPS`) so a corrupt chain cannot drive an unbounded recursive
@@ -37,6 +39,10 @@ export const MERGE_MAX_HOPS = 256;
  * `componentOf` must produce a single text column `rep` and adds
  * `<name>_component(representative, profile_id, depth)`. A caller that needs two resolutions in one
  * statement passes different `name`s. `name` defaults to `merge`.
+ *
+ * A representative is always a fixed point of resolution: a terminal is itself, a cycle's lowest
+ * id is itself, and a chain past the bound resolves to the profile itself. The send path relies on
+ * that when it re-records an arm under `person`, and the report groups by the same value.
  *
  * The representative's cycle minimum keeps the explicit `"C"` collation so the choice is stable in
  * any database locale, but every CTE that hands a representative out for a join casts it back to
@@ -63,24 +69,22 @@ export function mergeComponentCtes(workspaceId: string, opts: { seeds?: SQL; com
         JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = w.node
         WHERE p.merged_into IS NOT NULL AND w.depth < ${MERGE_MAX_HOPS}
       ) CYCLE node SET is_cycle USING cycle_path`,
-      // One row per chain: its terminal, the cycle's lowest id, or the node where the bound
-      // stopped it (marked truncated). `"C"` is for the cycle choice only; callers cast the value
-      // back before using it as a join key.
+      // One row per chain: its terminal, the cycle's lowest id, or the profile itself when the
+      // bound stopped it (marked truncated). Resolution is then idempotent, which is what lets the
+      // send re-record an arm under `person` without moving it into another person's report group.
+      // `"C"` is for the cycle choice only; callers cast the value back before using it as a key.
       sql`${representative}(origin, representative, truncated) AS (
         SELECT w.origin,
-          CASE WHEN w.is_cycle
-            THEN (SELECT min(cycle.node COLLATE "C") FROM unnest(w.cycle_path[array_position(w.cycle_path, ROW(w.node)):]) AS cycle(node text))
+          CASE
+            WHEN w.is_cycle
+              THEN (SELECT min(cycle.node COLLATE "C") FROM unnest(w.cycle_path[array_position(w.cycle_path, ROW(w.node)):]) AS cycle(node text))
+            WHEN w.depth >= ${MERGE_MAX_HOPS} AND p.merged_into IS NOT NULL THEN w.origin
             ELSE w.node
           END,
-          (NOT w.is_cycle AND w.depth >= ${MERGE_MAX_HOPS} AND EXISTS (
-            SELECT 1 FROM profiles p
-            WHERE p.workspace_id = ${workspaceId} AND p.id = w.node AND p.merged_into IS NOT NULL
-          ))
+          (NOT w.is_cycle AND w.depth >= ${MERGE_MAX_HOPS} AND p.merged_into IS NOT NULL)
         FROM ${walk} w
-        WHERE w.is_cycle OR w.depth >= ${MERGE_MAX_HOPS} OR NOT EXISTS (
-          SELECT 1 FROM profiles p
-          WHERE p.workspace_id = ${workspaceId} AND p.id = w.node AND p.merged_into IS NOT NULL
-        )
+        LEFT JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = w.node
+        WHERE w.is_cycle OR w.depth >= ${MERGE_MAX_HOPS} OR p.merged_into IS NULL
       )`,
     );
   if (opts.componentOf)

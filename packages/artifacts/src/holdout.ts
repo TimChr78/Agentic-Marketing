@@ -52,9 +52,11 @@ export function armFor(percent: number, workspaceId: string, scopeId: string, ha
 /**
  * Maps each profile id to the person it belongs to today: the representative of its merge component
  * (#944, #985). The representative is the end of the `merged_into` chain, or the lowest id on a
- * corrupted cycle; see {@link mergeComponentCtes} for the one definition the send path, the report
- * and the campaign identity map share. Used where a decision must be made once per person even
- * though a row can sit on an id the person was merged away from.
+ * corrupted cycle, or the profile itself when the chain is deeper than `MERGE_MAX_HOPS`; see
+ * {@link mergeComponentCtes} for the one definition the send path, the report and the campaign
+ * identity map share. It is always a fixed point, so resolving a representative returns it. Used
+ * where a decision must be made once per person even though a row can sit on an id the person was
+ * merged away from.
  *
  * The ids travel as one array parameter, not one per id: a large campaign's set is far past
  * PostgreSQL's 65,535-parameter limit, and `holdoutResult` would fail even without a single merge.
