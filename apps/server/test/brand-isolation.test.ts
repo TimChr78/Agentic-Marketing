@@ -34,6 +34,28 @@ let complaintB = '';
 const apiA = () => t.api(owner, wsA);
 const apiB = () => t.api(owner, wsB);
 
+/**
+ * Publishes a brand's queued message events and waits until the queue is empty. Sends record their
+ * events as outbox rows (#978), so a read of the metric layer right after one describes the send
+ * only once the dispatcher published it; a background dispatcher round may already hold the rows.
+ */
+const publishEvents = async (ws: string) => {
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+  await eventually(
+    async () =>
+      Number(
+        (
+          await t.srv.db.admin.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM outbox WHERE workspace_id = $1 AND state IN ('pending', 'delivering')`,
+            [ws],
+          )
+        ).rows[0]?.n ?? 0,
+      ),
+    (n) => n === 0,
+    10_000,
+  );
+};
+
 const inbox: { to: string[]; data: string }[] = [];
 const smtp = new SMTPServer({
   authOptional: true,
@@ -297,8 +319,8 @@ describe('per-brand data semantics (#189)', () => {
       () => apiB().call('messages.list', { profileId: bounceB }),
       (r) => r.messages[0]?.status === 'sent',
     );
-    // Decision events are outbox rows now (#978 part 2); publish them before analytics reads.
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 200 });
+    // Send events are outbox rows now (#978): publish brand B's queue before analytics reads.
+    await publishEvents(wsB);
     const a = await apiA().call('analytics.query', {
       measures: ['email.sent'],
       from: FROM,

@@ -924,7 +924,11 @@ export const broadcastStatus = defineCommand({
   input: z.object({ artifactId: BroadcastId }),
   output: z.object({
     run: Run,
-    messages: z.record(z.string(), z.number()),
+    messages: z
+      .record(z.string(), z.number())
+      .describe(
+        'Every message event this broadcast produced, by type (queued, sent, delivered, bounced, complained, clicked, unsubscribed). Events reach the event store through the outbox, so right after a send this counts what is published so far and can trail `delivery` by a moment',
+      ),
     delivery: z
       .record(z.string(), z.number())
       .optional()

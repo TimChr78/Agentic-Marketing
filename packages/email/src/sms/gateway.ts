@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton, type SmsTemplate } from '@agentic-marketing/artifacts';
 import { newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore, MessageEvent } from '@agentic-marketing/events';
+import type { EventStore } from '@agentic-marketing/events';
 import { consentStateOf, currentConsent, profileForMessage, purposeAllowed } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -165,7 +165,10 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
     const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
     const finish = async (status: 'suppressed' | 'failed', reason: string) => {
       await tx.update(schema.messages).set({ status, reason, updatedAt: new Date() }).where(eq(schema.messages.id, id));
-      return { kind: 'done' as const, event: decisionEvent(m, status, reason) };
+      // The status and its event commit together (#1008): a decision sees the event either
+      // published or queued, never missing.
+      await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason)]);
+      return { kind: 'done' as const };
     };
     const tpl = m.templateId ? await publishedSmsTemplate(tx, m.templateId, m.templateVersion) : null;
     if (!tpl?.template) return finish('failed', 'no_template: the template version is gone');
@@ -179,7 +182,11 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
       purposes,
     );
     if (hold.ok === false) return finish('suppressed', hold.reason);
-    if (hold.ok === 'later') return defer(tx, m, hold.until, hold.reason);
+    if (hold.ok === 'later') {
+      const held = await defer(tx, m, hold.until, hold.reason);
+      await enqueueMessageEvents(tx, ws, [held.event]);
+      return { kind: 'done' as const };
+    }
     const marketing = isMarketing(v.basis);
     const stream: 'marketing' | 'transactional' = marketing ? 'marketing' : 'transactional';
     const provider = (await tx.select().from(schema.smsProviders).where(eq(schema.smsProviders.enabled, true))).find((p) =>
@@ -215,16 +222,13 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
     };
   });
 
-  if (prepared.kind === 'done') {
-    await deps.events.insertMessageEvents([prepared.event]);
-    return;
-  }
+  if (prepared.kind === 'done') return;
   const { m, provider, transport, out, stream } = prepared;
-  let event: MessageEvent;
   try {
     const sent = await transport.send(out);
-    await db.withWorkspace(ws, (tx) =>
-      tx
+    // The outcome and its event commit in one transaction (#1008).
+    await db.withWorkspace(ws, async (tx) => {
+      await tx
         .update(schema.messages)
         .set({
           status: 'sent',
@@ -235,21 +239,20 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
           sentAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(schema.messages.id, id)),
-    );
-    event = decisionEvent(m, 'sent', '', provider.adapter);
+        .where(eq(schema.messages.id, id));
+      await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
+    });
   } catch (e) {
     const reason = `provider_error: ${failureText((e as Error).message)}`;
     const retry = m.attempts < MAX_ATTEMPTS;
     const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(stream, m.attempts) * 1000) : null;
     logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'SMS send failed');
-    await db.withWorkspace(ws, (tx) =>
-      tx
+    await db.withWorkspace(ws, async (tx) => {
+      await tx
         .update(schema.messages)
         .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
-        .where(eq(schema.messages.id, id)),
-    );
-    event = decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter);
+        .where(eq(schema.messages.id, id));
+      await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
+    });
   }
-  await deps.events.insertMessageEvents([event]);
 }
