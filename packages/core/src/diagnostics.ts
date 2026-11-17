@@ -1414,15 +1414,17 @@ const PEM_PREAMBLE_LINE_LIMIT = 128;
 /**
  * An RFC 1421 preamble line of an encrypted block: `Proc-Type: 4,ENCRYPTED` or
  * `DEK-Info: AES-256-CBC,0123…`, read case-insensitively and bounded, so the key material after
- * them is still inside the block (#989 review). Nothing else on the line is accepted, which keeps
- * ordinary prose that happens to contain a colon out of the block.
+ * them is still inside the block (#989 review). The WHOLE line must fit the bound and use the
+ * closed character set: a long line that merely starts like a header is prose, not a preamble, and
+ * stays outside the block.
  */
 function isPemPreambleLine(text: string, start: number): boolean {
-  const limit = Math.min(text.length, start + PEM_PREAMBLE_LINE_LIMIT);
-  const line = text.slice(start, limit).toLowerCase();
+  const end = lineEnd(text, start);
+  if (end - start > PEM_PREAMBLE_LINE_LIMIT) return false;
+  const line = text.slice(start, end).toLowerCase();
   const prefix = line.startsWith('proc-type:') ? 10 : line.startsWith('dek-info:') ? 9 : 0;
   if (prefix === 0) return false;
-  for (let index = prefix; index < line.length && line.charAt(index) !== '\n'; index += 1) {
+  for (let index = prefix; index < line.length; index += 1) {
     const code = line.charCodeAt(index);
     const value =
       (code >= 97 && code <= 122) ||
@@ -1645,16 +1647,21 @@ function mergeRegions(regions: Region[]): Region[] {
 
 /**
  * The released output with each region replaced by the marker. A region the released pipeline
- * already removed whole (it maps to an empty range) changes nothing. Every index of the output is
- * visited once.
+ * already removed whole (it maps to an empty range) changes nothing. The search cursor advances past
+ * every region, empty or not, so a text of blocks the release already removed is read once and not
+ * rescanned from the front for each one (#989 review).
  */
 function applyRegions(released: SpannedText, regions: readonly Region[]): string {
   const { text, origins } = released;
   const parts: string[] = [];
+  /** Where emitted output has reached. */
   let copied = 0;
+  /** Where the origin search has reached: it never moves backwards, empty range or not. */
+  let searched = 0;
   for (const region of regions) {
-    const start = firstOriginAtLeast(origins, region.start, copied);
+    const start = firstOriginAtLeast(origins, region.start, searched);
     const end = firstOriginAtLeast(origins, region.end, start);
+    searched = end;
     if (end <= start) continue;
     parts.push(text.slice(copied, start), MARKER);
     copied = end;

@@ -490,6 +490,15 @@ describe('the #989 original-span shapes stay linear', () => {
     expectLinear((n) => `token ${'='.repeat(n)}> value`, redactCredentials, 1_500);
     expectLinear((n) => `${'token => ,'.repeat(n)}`, redactCredentials, 1_500);
   }, 120_000);
+
+  it('does not rescan the prefix for blocks the release already removed', () => {
+    // The round-3 review fixture: every block sits inside one quoted value the released pipeline has
+    // already replaced, so every mapped region is empty. The search cursor must advance past them
+    // anyway; rescanning the retained prefix for each one was quadratic (9.4 s at n=16,000).
+    const unit = '\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
+    expectLinear((n) => `ordinary `.repeat(n) + 'password="' + unit.repeat(n) + '"', redactCredentials, 1_000);
+    expectLinear((n) => `ordinary `.repeat(n) + 'password="' + unit.repeat(n) + '"', redactCredentials, 2_000);
+  }, 120_000);
 });
 
 describe('random input never breaks the scanner (#902 round 3)', () => {

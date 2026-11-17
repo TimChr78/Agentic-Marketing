@@ -202,6 +202,17 @@ describe('a PEM private key block (#989)', () => {
       expect(idempotent(input), input).toBe(input);
   });
 
+  it('keeps a preamble-like line that runs past the bound', () => {
+    // The round-3 review input: a diagnostic line that starts like a preamble but is longer than any
+    // real one. It must stay; only the header line goes.
+    const diagnostic = `-----BEGIN PRIVATE KEY-----\nProc-Type:${' '.repeat(118)}; ordinary diagnostic\nnext prose`;
+    expect(idempotent(diagnostic)).toBe(`[redacted]\nProc-Type:${' '.repeat(118)}; ordinary diagnostic\nnext prose`);
+    // One character past the bound and using only preamble characters: also outside the block.
+    const long = `Proc-Type:${'A, '.repeat(40)}`;
+    const over = `-----BEGIN PRIVATE KEY-----\n${long}\nnext prose`;
+    expect(idempotent(over)).toBe(`[redacted]\n${long}\nnext prose`);
+  });
+
   it('reads a run of headers without a footer once (#989 round 1)', () => {
     // The round-3 review input: a keyed header repeated, and only an unrelated footer at the end.
     // Each header is read with its own line, so the scan stays linear and nothing is a block.

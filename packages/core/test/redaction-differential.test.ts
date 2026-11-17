@@ -484,6 +484,21 @@ function* review(): Generator<Generated> {
       name: `review marker prose ${spaces}`,
       secrets: [],
     };
+  // Round 3: blocks the released pipeline already removed (so every mapped region is empty), and a
+  // preamble-like diagnostic line that is longer than any real preamble (#989 review).
+  {
+    const blocks = '\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
+    yield {
+      input: `${'ordinary '.repeat(20)}password="${blocks.repeat(20)}" ${sentinel()}`,
+      name: 'review blocks inside a replaced value',
+      secrets: [],
+    };
+    yield {
+      input: `-----BEGIN PRIVATE KEY-----\nProc-Type:${' '.repeat(118)}; ordinary diagnostic\nnext prose ${sentinel()}`,
+      name: 'review oversized preamble line',
+      secrets: [],
+    };
+  }
 }
 
 /**
