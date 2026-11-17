@@ -233,7 +233,7 @@ export async function fakeSystemOne(handler: (r: FakeSystemOneRequest) => FakeSy
   const server = createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => (raw += c));
-    req.on('end', async () => {
+    const onEnd = async () => {
       res.setHeader('content-type', 'application/json');
       if (!req.url?.endsWith('/systemone')) {
         res.statusCode = 404;
@@ -273,7 +273,8 @@ export async function fakeSystemOne(handler: (r: FakeSystemOneRequest) => FakeSy
         res.statusCode = 500;
         res.end(JSON.stringify({ detail: (err as Error).message }));
       }
-    });
+    };
+    req.on('end', () => void onEnd());
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -290,7 +291,7 @@ export async function fakeLlm(handler: (r: FakeRequest) => FakeReply | Promise<F
   const server = createServer((req, res) => {
     let raw = '';
     req.on('data', (c) => (raw += c));
-    req.on('end', async () => {
+    const onEnd = async () => {
       const api = req.url?.endsWith('/chat/completions') ? 'openai' : req.url?.endsWith('/messages') ? 'anthropic' : null;
       res.setHeader('content-type', 'application/json');
       if (!api) {
@@ -316,7 +317,8 @@ export async function fakeLlm(handler: (r: FakeRequest) => FakeReply | Promise<F
         res.statusCode = 500;
         res.end(JSON.stringify({ error: { message: (err as Error).message } }));
       }
-    });
+    };
+    req.on('end', () => void onEnd());
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

@@ -344,7 +344,9 @@ Every MCP tool advertises an object `outputSchema` and returns matching `structu
 ## Checks
 
 ```bash
-pnpm lint        # Biome, the e2e selector check and the changelog fragment check, over the repository
+pnpm lint        # Biome, the e2e selector check, the changelog fragment check and oxlint, over the repository
+pnpm lint:oxlint # oxlint --type-aware: no-floating-promises, no-misused-promises and await-thenable
+                 # over packages/*/src and apps/server/src (mark intentional fire-and-forget with void)
 pnpm typecheck
 pnpm test        # every Vitest project; needs the shared test stack (scripts/test-services.sh up,
                  # eval "$(scripts/test-services.sh env)") or services of your own
