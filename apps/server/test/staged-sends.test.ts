@@ -94,6 +94,29 @@ const checkNow = async (artifactId: string) => {
   );
 };
 
+/**
+ * Publish this broadcast's queued events before a forced check reads ClickHouse. The decision
+ * barrier would otherwise defer until the scheduler's dispatcher catches up, which is correct in
+ * production but makes a forced check race CI timing.
+ */
+const flushOutbox = async (artifactId: string) => {
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await eventually(
+    async () =>
+      Number(
+        (
+          await t.srv.db.admin.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM outbox
+              WHERE workspace_id = $1 AND subject_ref = $2 AND state IN ('pending', 'delivering')`,
+            [ws, artifactId],
+          )
+        ).rows[0]?.n ?? 0,
+      ),
+    (n) => n === 0,
+    10_000,
+  );
+};
+
 const event = (m: MessageRow, type: 'unsubscribed' | 'bounced' | 'complained', broadcastId: string, n: number) => ({
   workspaceId: ws,
   messageId: m.id,
@@ -205,6 +228,7 @@ describe('staged send', () => {
     );
     const canaryCount = (await canaryMessages(id, 20)).length;
     await waitForCanarySent(id, 20, 5);
+    await flushOutbox(id);
     await checkNow(id);
 
     const done = await eventually(
@@ -240,6 +264,7 @@ describe('staged send', () => {
     await waitForCanarySent(id, 20, 5);
     // Two unsubscribes from ~24 canary sends is ~8%, over the 2% limit.
     await t.srv.events.insertMessageEvents(canary.slice(0, 2).map((m, i) => event(m, 'unsubscribed', id, i)));
+    await flushOutbox(id);
     await checkNow(id);
 
     const stopped = await eventually(
@@ -328,6 +353,7 @@ describe('staged send', () => {
       [ws, id],
     );
     await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+    await flushOutbox(id);
     await checkNow(id);
     const stopped = await eventually(
       () => status(id),
@@ -361,6 +387,7 @@ describe('staged send', () => {
        VALUES ($1, $2, $2, 'email', $3, 'marketing_email', $4, 1, $5, 'queued', true, now() + interval '1 day')`,
       [ws, testId, canary[0]!.profile_id, template, id],
     );
+    await flushOutbox(id);
     await checkNow(id);
 
     const done = await eventually(
@@ -405,6 +432,7 @@ describe('staged send', () => {
       `UPDATE messages SET status = 'failed', reason = 'provider outage' WHERE workspace_id = $1 AND journey_id = $2 AND status = 'queued'`,
       [ws, id],
     );
+    await flushOutbox(id);
     await checkNow(id);
 
     const stopped = await eventually(
@@ -483,6 +511,7 @@ describe('staged send', () => {
     expect(new Date(stage?.checkAt ?? 0).getTime()).toBeGreaterThanOrEqual(latestStart + 2 * 3_600_000);
 
     // The wait is over, but the canary has not gone out: the check is postponed, not run.
+    await flushOutbox(id);
     await checkNow(id);
     const parkedAt = await eventually(
       async () => {
@@ -505,6 +534,7 @@ describe('staged send', () => {
       [ws, id],
     );
     await waitForCanarySent(id, 20, canary.length);
+    await flushOutbox(id);
     await checkNow(id);
     const done = await eventually(
       () => status(id),
@@ -570,6 +600,7 @@ describe('staged send', () => {
       `UPDATE messages SET status = 'failed', reason = 'provider outage' WHERE workspace_id = $1 AND id = ANY($2)`,
       [ws, canaryIds],
     );
+    await flushOutbox(id);
     await checkNow(id);
     const stopped = await eventually(
       () => status(id),
@@ -588,6 +619,7 @@ describe('staged send', () => {
     const sent = canary.slice(half).map((m) => m.id);
     await t.srv.db.admin.query(`UPDATE messages SET status = 'failed' WHERE id = ANY($1)`, [failed]);
     await t.srv.db.admin.query(`UPDATE messages SET status = 'sent' WHERE id = ANY($1)`, [sent]);
+    await flushOutbox(id);
     await checkNow(id);
     const stopped = await eventually(
       () => status(id),
@@ -609,6 +641,7 @@ describe('staged send', () => {
         i % 2 ? 'holdout_control: campaign cmp_x holds this person out' : 'outside_send_window: the next opening is beyond maxDelay',
       ]);
     await t.srv.db.admin.query(`UPDATE messages SET status = 'sent' WHERE id = ANY($1)`, [canary.slice(half).map((m) => m.id)]);
+    await flushOutbox(id);
     await checkNow(id);
     const after = await eventually(
       () => status(id),
@@ -636,6 +669,7 @@ describe('staged send', () => {
       (n) => n === 0,
       30_000,
     );
+    await flushOutbox(id);
     await checkNow(id);
     const done = await eventually(
       () => status(id),

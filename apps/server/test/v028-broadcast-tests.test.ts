@@ -85,6 +85,25 @@ const decideNow = async (artifactId: string) => {
   );
 };
 
+/** Publish this broadcast's queued events before a forced decision reads ClickHouse. */
+const flushOutbox = async (artifactId: string) => {
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await eventually(
+    async () =>
+      Number(
+        (
+          await t.srv.db.admin.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM outbox
+              WHERE workspace_id = $1 AND subject_ref = $2 AND state IN ('pending', 'delivering')`,
+            [ws, artifactId],
+          )
+        ).rows[0]?.n ?? 0,
+      ),
+    (n) => n === 0,
+    10_000,
+  );
+};
+
 const localClock = (at: Date, zone: string) => {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(
     at,
@@ -346,6 +365,7 @@ describe('subject A/B test', () => {
       [ws, id],
     );
     await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+    await flushOutbox(id);
     await decideNow(id);
     const decided = await eventually(
       () => status(id),
@@ -376,6 +396,7 @@ describe('subject A/B test', () => {
     const a = sample.filter((m) => m.variant === 'A').slice(0, 5);
     const b = sample.filter((m) => m.variant === 'B').slice(0, 5);
     await t.srv.events.insertMessageEvents([...a.map((m, i) => click(m, id, i)), ...b.map((m, i) => click(m, id, 100 + i))]);
+    await flushOutbox(id);
     await decideNow(id);
 
     const done = await eventually(
@@ -410,6 +431,7 @@ describe('subject A/B test', () => {
     );
     const b = sample.filter((m) => m.variant === 'B');
     await t.srv.events.insertMessageEvents(b.map((m, i) => click(m, id, i)));
+    await flushOutbox(id);
     await decideNow(id);
 
     const done = await eventually(
