@@ -1,5 +1,5 @@
 import { newId } from '@agentic-marketing/core';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, or, sql } from 'drizzle-orm';
 import type { Db, Tx } from './pool';
 import * as schema from './schema';
 
@@ -239,6 +239,127 @@ export async function outboxPublicationBarrier(
     .where(and(eq(schema.outbox.workspaceId, workspaceId), eq(schema.outbox.subjectRef, subjectRef), eq(schema.outbox.state, 'failed')))
     .limit(1);
   return { outstanding: outstanding.length, failed: failed.length };
+}
+
+export interface PendingOutboxBatch {
+  /** The `message_event` payload: exactly the events the row will publish. */
+  payload: Record<string, unknown>;
+  /** The broadcast or journey the row names, when it names one. */
+  subjectRef: string | null;
+  /** A dead-lettered row: it will not publish without `am outbox`, but its events are still facts. */
+  deadLettered: boolean;
+}
+
+/**
+ * The message events the workspace still owes ClickHouse (or never will, when dead-lettered) for a
+ * set of subjects and individual messages (#1008). A decision that reads the metric layer snapshots
+ * these BEFORE its ClickHouse read and hands them to the same query, so an event that is published
+ * in between is counted once and one that is not yet published is not missed.
+ *
+ * A message is named in the payload of its `message_event` row, because a direct send has no
+ * broadcast or journey to carry in `subject_ref`; a broadcast or journey also matches its
+ * `subject_ref`, which is indexed. Only undelivered and failed rows are read, so the payload scan
+ * stays over the live queue and the dead letters, never the delivered history. `limit` bounds the
+ * rows; `truncated` says more matched, and a caller must then fail safe rather than decide on a
+ * partial snapshot.
+ */
+export async function pendingMessageEventPayloads(
+  tx: Tx,
+  workspaceId: string,
+  refs: { subjects?: string[]; messageIds?: string[] },
+  limit: number,
+): Promise<{ batches: PendingOutboxBatch[]; truncated: boolean }> {
+  const subjects = refs.subjects ?? [];
+  const messageIds = refs.messageIds ?? [];
+  if (!subjects.length && !messageIds.length) return { batches: [], truncated: false };
+  // The payload names the messages and the broadcast or journey of each event, so it covers rows
+  // written before `subject_ref` carried the subject (and a batch that mixes subjects).
+  const payloadMatch = sql`EXISTS (
+    SELECT 1 FROM jsonb_array_elements(
+      CASE WHEN jsonb_typeof(${schema.outbox.payload}->'events') = 'array' THEN ${schema.outbox.payload}->'events' ELSE '[]'::jsonb END
+    ) AS e
+    WHERE e->>'messageId' = ANY(${sql.param(messageIds)}::text[]) OR e->>'journeyId' = ANY(${sql.param(subjects)}::text[])
+  )`;
+  const relevant = () => {
+    const parts = [];
+    if (subjects.length) parts.push(inArray(schema.outbox.subjectRef, subjects));
+    parts.push(and(eq(schema.outbox.kind, 'message_event'), payloadMatch));
+    return or(...parts);
+  };
+  // One statement per state class so each predicate stays in WHERE and the partial indexes remain
+  // usable; a delivered row is never read.
+  const select = (state: 'undelivered' | 'failed') =>
+    tx
+      .select({
+        payload: schema.outbox.payload,
+        subjectRef: schema.outbox.subjectRef,
+        state: schema.outbox.state,
+      })
+      .from(schema.outbox)
+      .where(
+        and(
+          eq(schema.outbox.workspaceId, workspaceId),
+          state === 'undelivered' ? inArray(schema.outbox.state, ['pending', 'delivering']) : eq(schema.outbox.state, 'failed'),
+          relevant(),
+        ),
+      )
+      .orderBy(schema.outbox.createdAt)
+      .limit(limit + 1);
+  const rows = [...(await select('undelivered')), ...(await select('failed'))];
+  return {
+    batches: rows.slice(0, limit).map((r) => ({ payload: r.payload, subjectRef: r.subjectRef, deadLettered: r.state === 'failed' })),
+    truncated: rows.length > limit,
+  };
+}
+
+export interface OutboxPublicationLag {
+  /** Rows still to be published, pending or being delivered. */
+  outstanding: number;
+  /** Rows that will never publish without a requeue (`am outbox`): dead-lettered. */
+  failed: number;
+  /** When the oldest unpublished row was enqueued; null when nothing is waiting. */
+  oldestOutstandingAt: Date | null;
+}
+
+/**
+ * How far publication is behind for one workspace (#1008), so a reader of published events can say
+ * that a quiet result describes incomplete data rather than health. `kind` narrows it to the rows
+ * the reader depends on (the metric layer's `message_event` rows), because a stuck confirmation
+ * send says nothing about a deliverability read.
+ */
+export async function outboxPublicationLag(tx: Tx, workspaceId: string, opts: { kind?: string } = {}): Promise<OutboxPublicationLag> {
+  const kind = opts.kind ?? null;
+  const where = and(
+    eq(schema.outbox.workspaceId, workspaceId),
+    inArray(schema.outbox.state, ['pending', 'delivering']),
+    ...(kind ? [eq(schema.outbox.kind, kind)] : []),
+  );
+  // Two queries rather than one aggregate with FILTER: the partial indexes are declared per state,
+  // and a delivered row is never touched.
+  const pending = await tx
+    .select({ n: sql<number>`count(*)::int`, oldest: sql<Date | null>`min(${schema.outbox.createdAt})` })
+    .from(schema.outbox)
+    .where(where);
+  const failed = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(schema.outbox)
+    .where(
+      and(eq(schema.outbox.workspaceId, workspaceId), eq(schema.outbox.state, 'failed'), ...(kind ? [eq(schema.outbox.kind, kind)] : [])),
+    );
+  return {
+    outstanding: pending[0]?.n ?? 0,
+    failed: failed[0]?.n ?? 0,
+    oldestOutstandingAt: pending[0]?.oldest ? new Date(pending[0].oldest) : null,
+  };
+}
+
+/**
+ * How long the oldest unpublished row has waited, in milliseconds, or null when nothing is waiting.
+ * Future timestamps (a clock skew between the database and this process) count as zero rather than
+ * a negative age.
+ */
+export function outboxLagMs(lag: Pick<OutboxPublicationLag, 'oldestOutstandingAt'>, now = new Date()): number | null {
+  return lag.oldestOutstandingAt ? Math.max(0, now.getTime() - lag.oldestOutstandingAt.getTime()) : null;
 }
 
 /** Removes delivered rows older than the retention window. Failed rows stay for inspection. */

@@ -17,6 +17,8 @@ import {
   type AgentCounters,
   autonomySettings,
   decide,
+  type GuardrailCheck,
+  guardrailRefusal,
   type Impact,
   type MandateView,
   type PolicyInput,
@@ -107,8 +109,12 @@ export interface Services {
     agents: { agentId: string; goals: { measure: string; target?: number; direction: 'up' | 'down' }[] }[],
     range: { from: Date; to: Date },
   ) => Promise<Map<string, AgentOutcomes>>;
-  /** Why an agent's recent sends breach its mandate's guardrails, or null; registered by the server (metric layer). */
-  mandateGuardrails?: (tx: Tx, workspaceId: string, agentId: string, mandate: MandateView) => Promise<string | null>;
+  /**
+   * The state of an agent's mandate guardrails, registered by the server (metric layer). A measured
+   * breach and unavailable evidence both refuse a send, but only the breach is a finding the
+   * guardian may act on (#1008).
+   */
+  mandateGuardrails?: (tx: Tx, workspaceId: string, agentId: string, mandate: MandateView) => Promise<GuardrailCheck>;
 }
 
 /** Outcomes of an agent's actions (#310): its sends, its journeys against holdouts, its goals. */
@@ -1022,10 +1028,11 @@ export async function agentPolicy(
       }`,
     );
   const mandate = req.actionClass === 'read' ? null : ((await services.activeMandate?.(tx, agent.id)) ?? null);
-  const guardrailBreach =
+  const guardrailBreach = guardrailRefusal(
     mandate && REACH_CLASSES.includes(req.actionClass) && services.mandateGuardrails
       ? await services.mandateGuardrails(tx, principal.workspaceId, agent.id, mandate.view)
-      : null;
+      : null,
+  );
   // Several agents in one workspace (#426): who owns the artifact, and what other agents have pending.
   const coordination = await coordinationFor(tx, principal.workspaceId, agent.id, req.actionClass, req.impact);
   let policy = decide({

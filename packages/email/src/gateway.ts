@@ -2,7 +2,7 @@ import { DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agent
 import { type CampaignUtmCache, campaignUtmCampaign } from '@agentic-marketing/campaigns';
 import { AppError, hashValue, newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore, MessageEvent } from '@agentic-marketing/events';
+import type { EventStore } from '@agentic-marketing/events';
 import {
   consentStateOf,
   currentConsent,
@@ -350,7 +350,7 @@ async function deliverOne(
   utmCache: CampaignUtmCache,
 ) {
   type Prepared =
-    | { kind: 'done'; event: MessageEvent }
+    | { kind: 'done' }
     | {
         kind: 'send';
         m: typeof schema.messages.$inferSelect;
@@ -363,7 +363,10 @@ async function deliverOne(
     const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
     const finish = async (status: 'suppressed' | 'failed', reason: string): Promise<Prepared> => {
       await tx.update(schema.messages).set({ status, reason, updatedAt: new Date() }).where(eq(schema.messages.id, id));
-      return { kind: 'done', event: decisionEvent(m, status, reason) };
+      // The status and its event commit together (#1008), so a decision that sees the message also
+      // sees its event: published, or still queued for publication.
+      await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason)]);
+      return { kind: 'done' };
     };
     const tpl = m.templateId ? await publishedTemplateVersion(tx, m.templateId, m.templateVersion) : null;
     if (!tpl) return finish('failed', 'no_template: the template version is gone');
@@ -376,7 +379,12 @@ async function deliverOne(
       await purposesOf(tx),
     );
     if (hold.ok === false) return finish('suppressed', hold.reason);
-    if (hold.ok === 'later') return defer(tx, m, hold.until, hold.reason);
+    if (hold.ok === 'later') {
+      const held = await defer(tx, m, hold.until, hold.reason);
+      // A held message is a decision too: its event is published with the status that records it.
+      await enqueueMessageEvents(tx, ws, [held.event]);
+      return { kind: 'done' };
+    }
     const stream = streamOf(v.basis);
     const providers = await tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.enabled, true));
     const provider = providers.find((p) => p.useFor.includes(stream));
@@ -453,26 +461,31 @@ async function deliverOne(
     };
   });
 
-  if (prepared.kind === 'done') {
-    await deps.events.insertMessageEvents([prepared.event]);
-    return;
-  }
+  if (prepared.kind === 'done') return;
   const { m, provider, transport, out } = prepared;
-  let event: MessageEvent;
-  let reported: MessageEvent[] = [];
+  // Suppressions that this attempt's provider response escalated; logged after the commit.
   let escalations: SuppressionEscalation[] = [];
   try {
     const { providerMessageId, events: known } = await transport.send(out);
-    await db.withWorkspace(ws, (tx) =>
-      tx
+    // The send outcome and its event commit together (#1008): a decision that reads the metric
+    // layer after this commit finds the event, published or still queued. The event store is not
+    // written here at all, so a lagging or unavailable one cannot make a send invisible.
+    await db.withWorkspace(ws, async (tx) => {
+      await tx
         .update(schema.messages)
         .set({ status: 'sent', reason: null, providerId: provider.id, providerMessageId, sentAt: new Date(), updatedAt: new Date() })
-        .where(eq(schema.messages.id, id)),
-    );
-    event = decisionEvent(m, 'sent', '', provider.adapter);
+        .where(eq(schema.messages.id, id));
+      await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
+    });
     if (known?.length) {
-      const applied = await db.withWorkspace(ws, (tx) => applyDeliveryEvents(tx, known, provider.adapter));
-      reported = applied.events;
+      // The provider reported delivery facts with the send response. They keep their own
+      // transaction so `applyDeliveryEvents` takes the workspace's identity lock before any row
+      // lock, the order every consent writer uses; their events commit with the statuses they set.
+      const applied = await db.withWorkspace(ws, async (tx) => {
+        const result = await applyDeliveryEvents(tx, known, provider.adapter);
+        await enqueueMessageEvents(tx, ws, result.events);
+        return result;
+      });
       escalations = applied.escalations;
     }
   } catch (e) {
@@ -480,19 +493,18 @@ async function deliverOne(
     const retry = m.attempts < MAX_ATTEMPTS;
     const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(out.stream, m.attempts) * 1000) : null;
     logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'e-mail send failed');
-    await db.withWorkspace(ws, (tx) =>
-      tx
+    await db.withWorkspace(ws, async (tx) => {
+      await tx
         .update(schema.messages)
         .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
-        .where(eq(schema.messages.id, id)),
-    );
-    event = decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter);
+        .where(eq(schema.messages.id, id));
+      await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
+    });
   } finally {
     await transport.close?.();
   }
   // After the transaction committed: a rolled-back escalation leaves no log behind.
   for (const escalation of escalations) logSuppressionEscalation(escalation);
-  await deps.events.insertMessageEvents([event, ...reported]);
 }
 
 async function publishedTemplateVersion(tx: Tx, templateId: string, version: number | null) {

@@ -136,6 +136,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0106_transactional_outbox.sql': '0.15.0',
   '0107_broadcast_defer_count.sql': '0.15.0',
   '0108_erasure_cleanup_jobs.sql': '0.15.0',
+  '0109_journey_processed_events.sql': '0.15.1',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

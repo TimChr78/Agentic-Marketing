@@ -148,7 +148,8 @@ vi.mock('../../../app/api', async (importOriginal) => {
           };
         if (name === 'audiences.refreshSnapshot') return { members: 2, added: 1, removed: 0 };
         if (name === 'experiences.results') return h.results;
-        if (name === 'alerts.list') return { rules: h.rows.alert_rules ?? [] };
+        if (name === 'alerts.list')
+          return { rules: h.rows.alert_rules ?? [], publication: { outstanding: 0, failed: 0, oldestPendingAgeMs: null } };
         if (name === 'webhooks.list') return { endpoints: [] };
         if (name === 'members.list') return { members: [] };
         if (name === 'alerts.history') {

@@ -169,6 +169,22 @@ export interface MandateView {
 }
 
 /**
+ * What a mandate guardrail check found (#224, #1008). `unavailable` is not a breach: the agent's
+ * queued evidence was larger than one check reads, so nothing is known to be wrong and nothing is
+ * known to be fine. A send must wait for a person, but the guardian must not record a breach or a
+ * cap for it; it retries on the next round.
+ */
+export type GuardrailCheck = { state: 'clear' } | { state: 'breach'; reason: string } | { state: 'unavailable'; reason: string };
+
+/**
+ * The refusal text a non-clear check produces for the policy engine: both a measured breach and
+ * unavailable evidence stop an autonomous send until a person looks (or the queue drains).
+ */
+export function guardrailRefusal(check: GuardrailCheck | null | undefined): string | null {
+  return check && check.state !== 'clear' ? check.reason : null;
+}
+
+/**
  * The guardian's cap on an agent (#253): its levels are capped at `cap` for every class, and at
  * `irreversibleCap` for actions that cannot be undone, until a person clears it.
  */

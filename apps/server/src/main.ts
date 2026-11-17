@@ -9,6 +9,7 @@ import { prefixOf } from './domains';
 import { publicOnly } from './http/public-only';
 import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
 import { offlineChecks } from './ops/checks';
+import { createShutdown, drainWorkers } from './shutdown';
 import { COMMIT, VERSION } from './version';
 import { startScheduler, startWorkers } from './workers';
 
@@ -72,20 +73,34 @@ const workers = [
   ...(config.roles.has('scheduler') ? startScheduler(srv, stopWorkers.signal) : []),
 ];
 
-const shutdown = async () => {
-  logger.info('shutting down');
-  for (const s of servers) s.close();
-  stopWorkers.abort();
-  await Promise.allSettled(workers);
-  await srv.bus.close();
-  await srv.events.close();
-  await srv.hot.close();
-  await db.close();
-  await shutdownTelemetry();
-  process.exit(0);
-};
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+// Stop accepting traffic first, then drain the workers, then close the pools and clients. Every
+// step runs even when an earlier one fails; the exit code says whether anything was left behind.
+const shutdown = createShutdown({
+  log: logger,
+  exit: (code) => process.exit(code),
+  steps: [
+    {
+      name: 'http',
+      close: () => {
+        for (const s of servers) s.close();
+      },
+    },
+    {
+      name: 'workers',
+      close: () => {
+        stopWorkers.abort();
+        return drainWorkers(workers);
+      },
+    },
+    { name: 'bus', close: () => srv.bus.close() },
+    { name: 'events', close: () => srv.events.close() },
+    { name: 'hotstate', close: () => srv.hot.close() },
+    { name: 'database', close: () => db.close() },
+    { name: 'telemetry', close: () => shutdownTelemetry() },
+  ],
+});
+process.on('SIGTERM', shutdown.onSignal);
+process.on('SIGINT', shutdown.onSignal);
 
 /**
  * A dump before migrations change the schema, so an upgrade can always go back. It must never

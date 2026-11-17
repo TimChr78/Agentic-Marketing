@@ -329,6 +329,57 @@ describe('revenue expressions', () => {
   });
 });
 
+describe('pending message events (#1008)', () => {
+  const queued = {
+    workspaceId: 'ws_01',
+    messageId: 'msg_1',
+    eventId: 'sent:1',
+    type: 'sent' as const,
+    at: '2026-10-01T09:00:00.000Z',
+    profileId: 'prf_1',
+    channel: 'email',
+    purpose: 'marketing_email',
+    provider: 'log',
+    templateId: 'eml_1',
+    templateVersion: 1,
+    journeyId: 'bct_1',
+    reason: '',
+    url: '',
+  };
+
+  it('reads published rows plus the snapshot through the same aggregation and filters', () => {
+    const compiled = buildQuery(input({ measures: [measure('email.complained'), measure('email.sent')], pendingMessageEvents: [queued] }));
+    expect(compiled.sql).toContain('FROM (SELECT');
+    expect(compiled.sql).toContain('FROM message_events FINAL');
+    expect(compiled.sql).toContain('UNION ALL');
+    expect(compiled.sql).toContain('LEFT ANTI JOIN');
+    expect(compiled.sql).toContain('numbers({pending_n:UInt64})');
+    // The measure and its scope are unchanged: the snapshot has the same semantics by construction.
+    expect(compiled.sql).toContain("uniqExactIf(profile_id, profile_id != '' AND (type = 'complained'))");
+    expect(compiled.sql).toContain('type IN {types:Array(String)}');
+    expect(compiled.sql).toContain('channel IN {channels:Array(String)}');
+    expect(compiled.params).toMatchObject({
+      pending_n: 1,
+      pending_message_id: ['msg_1'],
+      pending_event_id: ['sent:1'],
+      pending_type: ['sent'],
+      pending_message_ids: ['msg_1'],
+    });
+  });
+
+  it('keeps the plain table when there is nothing queued', () => {
+    expect(buildQuery(input()).sql).toContain('FROM message_events FINAL WHERE');
+  });
+
+  it('refuses a snapshot on a source that has no message events', () => {
+    expect(() =>
+      buildQuery(
+        input({ source: 'events', measures: [measure('conversions')], conversionNames: ['Signup'], pendingMessageEvents: [queued] }),
+      ),
+    ).toThrow(/pending message events can only be read with message_events measures/);
+  });
+});
+
 describe('dimension expressions', () => {
   it('uses the event-time column that the source actually has', () => {
     expect(dimensionExpression('message_events', 'day')).toContain('toStartOfDay(at, {tz:String})');

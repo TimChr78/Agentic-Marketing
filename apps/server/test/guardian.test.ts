@@ -160,7 +160,10 @@ describe('the guardian (#253)', () => {
 
   it('caps an agent whose sends breach its guardrails', async () => {
     const s = await setup();
-    const services = { ...t.srv.services, mandateGuardrails: async () => 'Unsubscribe rate 3%, above its mandate’s guardrail of 1%.' };
+    const services = {
+      ...t.srv.services,
+      mandateGuardrails: async () => ({ state: 'breach' as const, reason: 'Unsubscribe rate 3%, above its mandate’s guardrail of 1%.' }),
+    };
     await runGuardianOnce(deps(services));
     const { guard, episodes } = await s.api.call('agents.guardian', { agentId: s.agentId });
     expect(guard).toMatchObject({ cap: 1 });

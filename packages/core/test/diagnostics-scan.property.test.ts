@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
-import { expectLinear } from '../../../test-support/linear';
+import { expectLinear, expectLinearRatio } from '../../../test-support/linear';
 import { redactCredentials } from '../src/diagnostics';
 
 // #898/#902/#920: the credential redaction has properties a table of examples cannot show: no planted secret survives whatever form the value takes, a
@@ -88,8 +88,8 @@ const FORM_KEYS = KEYS.filter((key) => key !== 'entryKey' && key !== 'monkey');
 
 /**
  * How a value carrying the secret can be written, given a key, including the #937 value shapes
- * (structured, typographic-quoted, escaped JSON, URL-encoded, nested). `=>` and PEM are not
- * here: their post-pipeline output has lost the evidence, so they are skipped shapes (#937).
+ * (structured, typographic-quoted, escaped JSON, URL-encoded, nested) and the #989 ones (a PEM
+ * block and a value after `=>`).
  */
 const FORMS: ((key: string) => string)[] = [
   (key) => `${key}=${SECRET}`,
@@ -113,6 +113,11 @@ const FORMS: ((key: string) => string)[] = [
   (key) => `{\\"${key}\\":\\"${SECRET}\\"}`,
   (key) => `${key}%3D${SECRET}`,
   () => `SIGNINGKEY=AZUREOPENAIKEY='${SECRET}'`,
+  (key) => `${key}: \u201c${SECRET} with spaces\u201d`,
+  (key) => `'${key}' => '${SECRET}'`,
+  (key) => `${key} => ${SECRET}`,
+  () => `\n-----BEGIN PRIVATE KEY-----\n${SECRET}\n-----END PRIVATE KEY-----`,
+  (key) => `${key}=-----BEGIN RSA PRIVATE KEY-----\n${SECRET}\n-----END RSA PRIVATE KEY-----`,
 ];
 
 function randomCase(random: () => number): string {
@@ -418,6 +423,89 @@ describe('the #937 value-shape passes stay linear', () => {
       if (second > Math.max(first * 10, 50)) slow.push(`${JSON.stringify(shape)} ${first.toFixed(1)}ms → ${second.toFixed(1)}ms`);
     }
     expect(slow).toEqual([]);
+  }, 120_000);
+});
+
+describe('the #989 original-span shapes stay linear', () => {
+  const MB = 1024 * 1024;
+  const measure = (text: string): number => {
+    const started = performance.now();
+    redactCredentials(text);
+    return performance.now() - started;
+  };
+  // Each pass reads one candidate at a time and never rescans a suffix, so a megabyte of headers
+  // without a footer, of quotes, or of arrows costs a few milliseconds to a few hundred.
+  const SHAPES: [string, string][] = [
+    // A PEM header per line and no matching footer anywhere: the round-3 quadratic input. The
+    // footer scan stops at the first line that is not body, so each header costs its own line.
+    ['pem headers without a footer', '-----BEGIN RSA PRIVATE KEY-----\n'],
+    ['keyed pem headers without a footer', 'password=-----BEGIN RSA PRIVATE KEY-----\n'],
+    // Many headers, one unrelated footer at the very end.
+    ['pem header, body and a stray footer', '-----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END PUBLIC KEY-----\n'],
+    // An unclosed typographic quote per line, and many pairs on one line.
+    ['unclosed typographic quotes', 'token: \u201cabc\n'],
+    ['typographic pairs on one line', 'token: \u201ca b\u201d '],
+    // Arrows: with a value, without one, and a bare run of arrow characters.
+    ['arrows with a value', "token => 'x' "],
+    ['an arrow with no value', 'token => ,'],
+    ['arrows back to back', 'token =>=>=> '],
+    // A field attached to the caller's own marker: the skip is decided per marker.
+    ['attached fields', 'token=[redacted]"status":"ok" '],
+    // Authorization values, behind an arrow and behind a key (#989 review round 4).
+    ['scheme behind an arrow', "token => Bearer 'abc' "],
+    ['scheme behind a key', 'token: Digest abc '],
+  ];
+
+  it('grows linearly on every repeated shape, with no wall-clock budget', () => {
+    // 4x the units (128 KB to 512 KB) must not cost 8x the time. An absolute millisecond limit would
+    // depend on the runner, which is what failed a grid shape on CI (#994).
+    const slow: string[] = [];
+    for (const [name, unit] of SHAPES) {
+      const base = Math.max(2, Math.ceil(MB / 8 / unit.length));
+      try {
+        expectLinearRatio((n) => unit.repeat(n), redactCredentials, base);
+      } catch (error) {
+        slow.push(`${name}: ${(error as Error).message}`);
+      }
+    }
+    expect(slow.slice(0, 10)).toEqual([]);
+    expect(slow).toHaveLength(0);
+  }, 300_000);
+
+  it('grows roughly linearly: 4× the input takes less than 10× the time', () => {
+    const slow: string[] = [];
+    for (const [name, unit] of SHAPES) {
+      // Large enough that JIT warm-up is not the measurement; 8,000 units is a few hundred KB.
+      const small = unit.repeat(8_000);
+      const large = unit.repeat(32_000);
+      measure(small);
+      const first = Math.min(measure(small), measure(small));
+      const second = Math.min(measure(large), measure(large));
+      if (second > Math.max(first * 10, 50)) slow.push(`${name} ${first.toFixed(1)}ms → ${second.toFixed(1)}ms`);
+    }
+    expect(slow).toEqual([]);
+  }, 180_000);
+
+  it('does not rescan the text for every PEM header without a footer', () => {
+    // The round-3 review input at a size where a quadratic rescan per header cannot hide.
+    expectLinearRatio((n) => `${'password=[redacted] RSA PRIVATE KEY-----\n'.repeat(n)}-----END PUBLIC KEY-----`, redactCredentials, 1_500);
+    expectLinearRatio((n) => '-----BEGIN PRIVATE KEY-----\n'.repeat(n), redactCredentials, 1_500);
+  }, 120_000);
+
+  it('does not rescan the line for every typographic quote or arrow', () => {
+    expectLinearRatio((n) => `token: \u201c${'a b '.repeat(n)}\u201d`, redactCredentials, 1_500);
+    expectLinearRatio((n) => `${'token => '.repeat(n)}x`, redactCredentials, 1_500);
+    expectLinearRatio((n) => `token ${'='.repeat(n)}> value`, redactCredentials, 1_500);
+    expectLinearRatio((n) => `${'token => ,'.repeat(n)}`, redactCredentials, 1_500);
+  }, 120_000);
+
+  it('does not rescan the prefix for blocks the release already removed', () => {
+    // The round-3 review fixture: every block sits inside one quoted value the released pipeline has
+    // already replaced, so every mapped region is empty. The search cursor must advance past them
+    // anyway; rescanning the retained prefix for each one was quadratic (9.4 s at n=16,000).
+    const unit = '\n-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n';
+    expectLinearRatio((n) => `ordinary `.repeat(n) + 'password="' + unit.repeat(n) + '"', redactCredentials, 1_000);
+    expectLinearRatio((n) => `ordinary `.repeat(n) + 'password="' + unit.repeat(n) + '"', redactCredentials, 2_000);
   }, 120_000);
 });
 

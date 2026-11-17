@@ -117,8 +117,18 @@ async function findings(tx: Tx, deps: GuardianDeps, workspaceId: string, agentId
             )
         )[0].n > 0
       : true;
-    const breach = sentSince ? await deps.services.mandateGuardrails(tx, workspaceId, agentId, mandate.view) : null;
-    if (breach) out.push({ kind: 'guardrail', action: 'cap', reason: breach, evidence: { mandate: mandate.view.id } });
+    // The guardrail reads the agent's own queued message events together with the published ones
+    // (#1008), so a ClickHouse or outbox outage does not delay the cap until the events arrive.
+    const check = sentSince ? await deps.services.mandateGuardrails(tx, workspaceId, agentId, mandate.view) : null;
+    if (check?.state === 'unavailable')
+      // No breach was measured: the backlog was simply too large to read in one check. Capping for
+      // that would outlive the backlog (the cap needs a person to clear it), so skip this round.
+      logger.warn(
+        { workspace: workspaceId, agent: agentId, reason: check.reason },
+        'guardrail evidence is unavailable; the guardian retries on the next round',
+      );
+    else if (check?.state === 'breach')
+      out.push({ kind: 'guardrail', action: 'cap', reason: check.reason, evidence: { mandate: mandate.view.id } });
   }
 
   const recent = async (kind: GuardianKind) => recentActions(tx, agentId, now, open.get(kind) ?? null);

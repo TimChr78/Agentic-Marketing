@@ -31,7 +31,7 @@ import { refreshPeople } from '@agentic-marketing/segments';
 import { endpointLocation, logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
 import { type Context, type ExecutionContext, Hono } from 'hono';
-import { mandateGuardrailBreach } from './agents/guardrails';
+import { mandateGuardrailCheck } from './agents/guardrails';
 import { agentOutcomes, agentOutcomesMany } from './agents/report';
 import type { Config } from './config';
 import { createDomainService, type PublicRequest } from './domains';
@@ -184,7 +184,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     // The agent's active mandate and its guardrails on its own sends (ADR-0016, #224).
     activeMandate: (tx, agentId) => activeMandate(tx, agentId),
     activeMandates: (tx, agentIds) => activeMandates(tx, agentIds),
-    mandateGuardrails: (tx, workspaceId, agentId, mandate) => mandateGuardrailBreach({ tx, events, workspaceId }, agentId, mandate),
+    mandateGuardrails: (tx, workspaceId, agentId, mandate) => mandateGuardrailCheck({ tx, events, workspaceId }, agentId, mandate),
     // What an agent's actions led to, for agents.report (#310).
     agentOutcomes: (tx, workspaceId, agentId, range, goals) => agentOutcomes({ tx, events, workspaceId }, agentId, range, goals),
     agentOutcomesMany: (tx, workspaceId, agents, range) => agentOutcomesMany({ tx, events, workspaceId }, agents, range),

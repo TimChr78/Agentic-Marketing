@@ -344,7 +344,9 @@ Every MCP tool advertises an object `outputSchema` and returns matching `structu
 ## Checks
 
 ```bash
-pnpm lint        # Biome, the e2e selector check and the changelog fragment check, over the repository
+pnpm lint        # Biome, the e2e selector check, the changelog fragment check and oxlint, over the repository
+pnpm lint:oxlint # oxlint --type-aware: no-floating-promises, no-misused-promises and await-thenable
+                 # over packages/*/src and apps/server/src (mark intentional fire-and-forget with void)
 pnpm typecheck
 pnpm test        # every Vitest project; needs the shared test stack (scripts/test-services.sh up,
                  # eval "$(scripts/test-services.sh env)") or services of your own
@@ -462,6 +464,20 @@ while a run database has a connection). Ports come from `testPort()` in
 `apps/server/test/harness.ts`, which gives each worker its own block; `TEST_PORT_OFFSET` moves
 every block and the seeded e2e server's default port, so a second checkout can run at the same
 time even against another stack.
+
+A file's test server closes within a bound: 20 s per step and 40 s in total (`AM_TEST_CLOSE_STAGE_MS`
+and `AM_TEST_CLOSE_MS`), under vitest's 60 s hook timeout. The workers step is the slow one because a
+consumer finishes the batch it is handling and those batches serialize on a workspace's identity lock:
+`v0145-campaign-identity`, which leaves events for all 16 profile shards, took 4.6–7.4 s with every
+core busy, so 20 s is several times a saturated close rather than a guess. A worker loop, the event bus,
+ClickHouse, Valkey or a database pool that does not close is named in the failure — with what each
+consumer was doing (`handling`, `waiting`, `pulling`, `starting`, `backing-off`) and for how long, the
+open handle kinds, and the pool counts plus which PostgreSQL backends are busy, what they wait on, for
+how long and under which application name; never their SQL, which can hold a password or personal data —
+instead of silently spending the hook timeout (#1028). A worker also stops while a pull is waiting on a
+reconnecting event bus: it ends the fetched batch, so a shutdown never waits for a connection that is not
+there, and the unacked messages are redelivered. `AM_TEST_CLOSE_TRACE=<file>` appends one line per step
+and per worker, which is how the bounds above were measured.
 
 The same setup pass, under the same lock, drops run databases that killed runs left behind. Ownership
 is a comment, not a name: every database the harness or a package test creates carries

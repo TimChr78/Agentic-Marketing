@@ -193,6 +193,7 @@ In Docker Compose, a Prometheus container on the same project network reaches th
 | `am_http_requests_total` | counter | `route`, `status` | HTTP requests by route group (`auth`, `v1`, `mcp`, `pages`, `public`, `ui`, `api`, `oauth`, `well-known`, `healthz`, `readyz`) and status class (`2xx`…`5xx`). `api` covers `/api/*` and SCIM (`/scim/*`); `oauth` is the connector and MCP OAuth edge (`/oauth/*`), so identity-provider failures never page as admin-UI regressions. |
 | `am_http_request_duration_seconds` | histogram | `route`, `status` | Request duration, same groups; buckets from 5 ms to 10 s. |
 | `am_commands_total` | counter | `command`, `effect`, `outcome` | Command executions; `outcome` is `ok` or `error` and covers REST, MCP and SCIM because they all run through one executor. |
+| `am_redaction_fallbacks_total` | counter | | Texts where the redaction pipeline's recorded spans disagreed with the frozen release, so the release's own output was returned. It should stay `0`: a non-zero value means a redaction pass recorded a span wrongly, and the affected text was redacted by the release alone. |
 | `am_queue_messages_pending` | gauge | | Messages in `queued` or `sending`. |
 | `am_queue_messages_oldest_seconds` | gauge | | Age of the oldest unsent message: how far the delivery queue is behind. |
 | `am_journey_participants_due` | gauge | | Journey participants whose next step is due now. |

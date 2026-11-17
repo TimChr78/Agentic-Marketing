@@ -190,8 +190,9 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       await d.db.admin.query(`GRANT CREATE ON SCHEMA public TO ${role}`);
       // The migration role owns the tables the migration files alter or index (profiles for 0099's
       // merged-into index, idempotency_keys for 0103's reversal columns and 0104's retention index,
-      // agent_actions for 0103's foreign key, broadcast_runs for 0107's defer counter). It is
-      // deliberately not a superuser and has no BYPASSRLS, so FORCE RLS applies to it.
+      // agent_actions for 0103's foreign key, broadcast_runs for 0107's defer counter,
+      // journey_processed_events for 0109's new table and its policy). It is deliberately not a
+      // superuser and has no BYPASSRLS, so FORCE RLS applies to it.
       for (const table of [
         'artifacts',
         'artifact_versions',
@@ -210,6 +211,7 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'agent_actions',
         'broadcast_runs',
         'erasure_cleanup_jobs',
+        'journey_processed_events',
       ])
         await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
       await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
