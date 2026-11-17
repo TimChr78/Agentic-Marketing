@@ -1010,15 +1010,16 @@ async function writeRestoreCapture(path: string, binding: RestoreCaptureBinding,
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
   const handle = await open(temporary, 'wx', 0o600);
   try {
-    await handle.writeFile(`${JSON.stringify(stored)}\n`, 'utf8');
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
+    try {
+      await handle.writeFile(`${JSON.stringify(stored)}\n`, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await rename(temporary, path);
     await chmod(path, 0o600);
   } catch (err) {
+    // A failed write, sync, close or rename must not leave sensitive capture content behind.
     await rm(temporary, { force: true });
     throw err;
   }
@@ -1138,10 +1139,16 @@ async function acquireRestoreLock(path: string): Promise<() => Promise<void>> {
   try {
     const handle = await open(path, 'wx', 0o600);
     try {
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`, 'utf8');
-      await handle.sync();
-    } finally {
-      await handle.close();
+      try {
+        await handle.writeFile(`${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`, 'utf8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+    } catch (initErr) {
+      // This attempt created the lock, so it must not leave it behind when initialising it fails.
+      await rm(path, { force: true });
+      throw initErr;
     }
   } catch (err) {
     if ((err as { code?: string }).code !== 'EEXIST') throw err;
