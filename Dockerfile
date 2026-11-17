@@ -24,6 +24,9 @@ COPY apps/server ./apps/server
 COPY apps/web ./apps/web
 # The build tooling (Vite, TypeScript) is a dev dependency, and base sets NODE_ENV=production.
 RUN pnpm install --frozen-lockfile --prod=false --filter "@agentic-marketing/web..."
+# `build:live` is Vite only (CI's static job typechecks every pull request), but the image is the
+# release artifact, so it checks the UI types it actually ships.
+RUN pnpm --filter @agentic-marketing/web typecheck
 RUN pnpm --filter @agentic-marketing/web build:live
 
 FROM base

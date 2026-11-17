@@ -8,10 +8,9 @@
 //   node scripts/test-affected.mjs --files a b c --print       map an explicit file list
 //   node scripts/test-affected.mjs --run -- --reporter=dot     extra Vitest arguments after --
 //
-// Without --base, the comparison base is the nearest origin/feat/phase-* branch that is an
-// ancestor of HEAD (the phase branch a task branch was cut from); otherwise origin/main. Setting
-// AM_AFFECTED_BASE overrides that, and an explicit --base overrides both. The chosen base and the
-// reason are printed, so a phase branch no longer diffs against main and runs the whole suite.
+// Without --base, the comparison base is origin/main: development happens there now, in patch
+// releases. Setting AM_AFFECTED_BASE overrides that, and an explicit --base overrides both. The
+// chosen base and the reason are printed, so a stale base cannot quietly select everything.
 //
 // Changed files are `git diff --name-only <base>...HEAD` plus staged, unstaged and untracked files.
 // The mapping is deliberately conservative: a path it cannot classify, a migration, the Vitest
@@ -576,50 +575,18 @@ function git(root, args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-/** Remote phase branches, the integration branches a task branch is cut from. */
-export function phaseBranches(root = ROOT) {
-  try {
-    return git(root, ['for-each-ref', '--format=%(refname:short)', 'refs/remotes/origin/feat/phase-*'])
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
-  } catch {
-    return [];
-  }
-}
-
 /**
- * The base to diff against when the caller names none. On a task branch cut from a phase branch,
- * `origin/main` includes every earlier task in the phase and the selection falls back to the whole
- * suite. The nearest phase branch is the one that is an ancestor of HEAD whose merge-base with HEAD
- * is closest: fewest commits between the merge-base and HEAD wins.
+ * The base to diff against when the caller names none: origin/main. Every patch release lands
+ * there, so a task branch no longer sits on an old phase branch whose merge-base would pull in
+ * every commit since it.
  */
-export function resolveDefaultBase({ root = ROOT } = {}) {
-  const candidates = [];
-  for (const branch of phaseBranches(root)) {
-    try {
-      git(root, ['merge-base', '--is-ancestor', branch, 'HEAD']);
-    } catch {
-      continue; // Not merged into this branch: not its base.
-    }
-    const mergeBase = git(root, ['merge-base', branch, 'HEAD']).trim();
-    const behind = Number(git(root, ['rev-list', '--count', `${mergeBase}..HEAD`]).trim());
-    candidates.push({ branch, mergeBase, behind });
-  }
-  if (!candidates.length) {
-    return { base: DEFAULT_BASE, reason: 'no origin/feat/phase-* branch is an ancestor of HEAD' };
-  }
-  candidates.sort((a, b) => a.behind - b.behind || a.branch.localeCompare(b.branch));
-  const nearest = candidates[0];
-  return {
-    base: nearest.branch,
-    reason: `nearest of ${candidates.length} phase branch(es): an ancestor of HEAD with the most recent merge-base (${nearest.behind} commit(s) since)`,
-  };
+export function resolveDefaultBase() {
+  return { base: DEFAULT_BASE, reason: 'the default base; development happens on main in patch releases' };
 }
 
 /**
- * The comparison base and why: an explicit `--base` wins, then `AM_AFFECTED_BASE`, then the nearest
- * phase branch, then `origin/main`.
+ * The comparison base and why: an explicit `--base` wins, then `AM_AFFECTED_BASE`, then
+ * `origin/main`.
  */
 export function resolveBase({ root = ROOT, explicit = null, env = process.env } = {}) {
   if (explicit) return { base: explicit, reason: 'the explicit --base' };

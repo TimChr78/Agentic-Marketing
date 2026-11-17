@@ -131,6 +131,13 @@ case "${1:-}" in
     profiles=()
     for profile in "$@"; do profiles+=(--profile "$profile"); done
     compose "${profiles[@]}" up -d --wait
+    # The shared-stack marker: the harness sweeps run databases only on a Postgres that carries it,
+    # so a stack someone else provisioned (or CI's service containers) is never touched. It is a
+    # database rather than a comment so a later `up` can recreate it idempotently.
+    if ! compose exec -T postgres psql -U am -d am -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = 'am_test_stack'" | grep -qx 1; then
+      compose exec -T postgres psql -U am -d am -v ON_ERROR_STOP=1 -c "CREATE DATABASE am_test_stack"
+    fi
     announce_bind
     wait_hint
     ;;

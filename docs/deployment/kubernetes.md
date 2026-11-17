@@ -115,6 +115,8 @@ Secrets (provider API keys, OAuth tokens) and personal data are encrypted with p
 
 Unwrapped data keys are cached in memory for ten minutes, so the KEK is called about once per data key and interval, not per request.
 
+With the chart, the location settings are plain `config` values (`OPENBAO_ADDR`, `OPENBAO_TOKEN_FILE`, `OPENBAO_TRANSIT_MOUNT`, `OPENBAO_TRANSIT_KEY`, `OPENBAO_NAMESPACE`, `AWS_KMS_KEY_ID`, `AWS_REGION`, `AWS_KMS_ENDPOINT`) and the credentials are Secret values (`OPENBAO_TOKEN`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `MASTER_KEY`), so a key never lands in the rendered ConfigMap. The `BACKUP_*` settings are `config` values too: the chart runs no backup job, but they reach a pod you run `am backup` or `am doctor` in.
+
 **Moving from `MASTER_KEY`:** set `KEY_PROVIDER` and its settings while keeping `MASTER_KEY`. Data keys wrapped by the local key keep working, and new ones are wrapped by the provider. Run `cli rotate-keys` once to re-wrap every existing data key, then remove `MASTER_KEY` (and `MASTER_KEY_PREVIOUS`).
 
 **Rolling out a Secret change.** The pod template carries a `checksum/secret` annotation. With `secrets.values` the rendered Secret is part of that hash, so a changed value rolls the four Deployments on `helm upgrade`. Helm cannot read a `secrets.existingSecret` (sealed-secrets, External Secrets, Vault agent, a manual `kubectl create secret`), so changing that object in place does not change the pod template and the running pods keep the old environment. After changing it, bump `secrets.revision` in the same upgrade, for example:
@@ -125,6 +127,8 @@ helm upgrade am deploy/helm/agentic-marketing --reuse-values \
 ```
 
 Alternatively, run `kubectl rollout restart deploy/am-agentic-marketing-api deploy/am-agentic-marketing-ingest deploy/am-agentic-marketing-worker deploy/am-agentic-marketing-scheduler` (use your release name). Do one of these for every Secret-only rotation, including `MASTER_KEY`, `METRICS_TOKEN` and a `KEY_PROVIDER` switch; otherwise the rotation silently does not take effect until the next unrelated rollout.
+
+**OTLP tracing.** Set `config.OTEL_EXPORTER_OTLP_ENDPOINT` to the collector (the exporter appends `/v1/traces`), or `config.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` to use a traces URL exactly as given. A collector that wants an `Authorization` header takes it from the Secret instead of the ConfigMap: put `OTEL_EXPORTER_OTLP_HEADERS` (or its trace-specific `OTEL_EXPORTER_OTLP_TRACES_HEADERS`) in `secrets.values` or in the `secrets.existingSecret` you already manage, in the same `name=value,other=value` form `.env.example` documents. The header wins over credentials embedded in the endpoint URL, and a changed `secrets.values` rolls the four roles through the Secret checksum.
 
 ## Sizing
 

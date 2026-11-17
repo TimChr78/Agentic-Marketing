@@ -246,6 +246,9 @@ jobs:
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
       - run: npx playwright install --with-deps chromium
       - run: pnpm e2e
+      # A retry must not hide a flake: list every test that only passed on retry (#990).
+      - if: always()
+        run: node scripts/playwright-flaky-summary.mjs
       # #60: `pnpm e2e` built the live UI, so its manifest now exists for the bundle-size check.
       # Phase 28 per-route budgets (#555) read the same manifest and must not skip here.
       - run: npx vitest run apps/web/test/bundle.test.ts apps/web/test/phase28-bundle.test.ts

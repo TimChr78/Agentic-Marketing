@@ -58,7 +58,13 @@ vi.mock('@xyflow/react', async () => {
     Handle: () => null,
     Position: { Top: 'top', Bottom: 'bottom' },
     applyNodeChanges: (_changes: unknown, nodes: Node[]) => nodes,
-    useReactFlow: () => ({ fitView: () => {}, screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }) }),
+    useReactFlow: () => ({
+      fitView: () => {},
+      getNodes: () => [],
+      screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
+    }),
+    useUpdateNodeInternals: () => () => {},
+    useStore: (selector: (state: { nodeLookup: Map<string, unknown> }) => unknown) => selector({ nodeLookup: new Map() }),
   };
 });
 

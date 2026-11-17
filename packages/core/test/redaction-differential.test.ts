@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { redactCredentials } from '../src/diagnostics';
 import { redactCredentials as redact01420 } from './redaction-01420-reference';
 import { redactCredentials as redact01423 } from './redaction-01423-reference';
+import { redactCredentials as redact01424 } from './redaction-01424-reference';
 
 // #902 round 5: a standing differential check against the vendored 0.14.20 redactor, not only a
 // fixed fixture. Its rule is mechanical: a maximal run of non-space characters that 0.14.20 removed
@@ -20,6 +21,11 @@ import { redactCredentials as redact01423 } from './redaction-01423-reference';
  * Multiplies the free-form generators. The structured ones are exhaustive and need no scaling; a
  * large run for the release gate sets `REDACTION_DIFFERENTIAL_SCALE=160` (about 1.3 million cases).
  */
+// Each comparison runs every generated case through several full redactor implementations. On a
+// loaded CI runner one of them took longer than the global 20 s test timeout (release 0.14.25 CI),
+// so this file allows two minutes per test; growth is guarded by the scaling tests elsewhere.
+vi.setConfig({ testTimeout: 120_000 });
+
 const SCALE = Math.max(1, Math.floor(Number(process.env.REDACTION_DIFFERENTIAL_SCALE) || 1));
 
 const KEYS = [
@@ -371,11 +377,115 @@ function* longKeys(): Generator<Generated> {
           }
 }
 
+/**
+ * The #937 value shapes, with a marker planted inside every value. They are kept out of
+ * `generated()` because 0.14.20 eats the `>` of `=>` as formatting, which the run-level comparison
+ * reads as a credential; the #937 check compares planted values one by one instead.
+ */
+const SHAPE_KEYS = ['token', 'secret', 'password', 'authToken', 'apiSecret', 'signingKey', 'userPwd'];
+const SHAPES: [string, (key: string, value: string) => string][] = [
+  ['array', (key, value) => `{"${key}":["${value}"]}`],
+  ['object', (key, value) => `{"${key}":{"v":"${value}"}}`],
+  ['bare array', (key, value) => `${key}=[${value}]`],
+  ['bare object', (key, value) => `${key}: {"v":"${value}"}`],
+  ['unicode double', (key, value) => `${key}: \u201c${value}\u201d`],
+  ['unicode single', (key, value) => `${key}: \u2018${value}\u2019`],
+  ['unicode guillemet', (key, value) => `${key}: \u00ab${value}\u00bb`],
+  ['unicode unclosed', (key, value) => `${key}: \u201c${value}`],
+  ['arrow quoted', (key, value) => `'${key}' => '${value}'`],
+  ['arrow double', (key, value) => `:${key} => "${value}"`],
+  ['arrow bare', (key, value) => `${key} => ${value}`],
+  ['escaped json', (key, value) => `{\\"${key}\\":\\"${value}\\"}`],
+  ['url encoded', (_key, value) => `password%3D${value}`],
+  ['url encoded quoted', (_key, value) => `token%22%3A%22${value}`],
+  ['url encoded name', (key, value) => `${key.replaceAll('_', '%5F')}=${value}`],
+  ['plain', (key, value) => `${key}=${value}`],
+  ['pwd pass', (_key, value) => `dbPass=${value}`],
+  ['pwd separator', (_key, value) => `user_pass: ${value}`],
+  ['nested pair', (key, value) => `SIGNINGKEY=${key}='${value}'`],
+  ['nested pair upper', (key, value) => `AZUREOPENAIKEY=${key}="${value}"`],
+  ['glued marker', (key, value) => `${key}=[redacted]${value}`],
+];
+/** Shapes whose point is a value too short for the rules to see, so only the marker goes in. */
+const SHORT_SHAPES: [string, (key: string, value: string) => string][] = [
+  ['scheme', (key, value) => `${key}=Bearer ${value}`],
+  ['scheme basic', (key, value) => `${key}: Basic ${value}`],
+];
+
+function* shapes(): Generator<Generated> {
+  for (const key of SHAPE_KEYS)
+    for (const [shape, build] of SHAPES) {
+      const token = marker();
+      const text = build(key, `S3cr3tV4l${token}`);
+      yield { input: `${text} ${sentinel()}`, name: `shape ${shape} ${key} ${JSON.stringify(text)}`, secrets: [token] };
+    }
+  for (const key of SHAPE_KEYS)
+    for (const [shape, build] of SHORT_SHAPES) {
+      const token = marker();
+      const text = build(key, token);
+      yield { input: `${text} ${sentinel()}`, name: `shape ${shape} ${key} ${JSON.stringify(text)}`, secrets: [token] };
+    }
+}
+
+/**
+ * The three shapes a review of the first version found, plus variants on either side of the 256
+ * character search boundary that version had. The released pipeline removes the planted value in
+ * every one; the new passes must not hide it, and the glue case must reach its fixed point.
+ */
+function* review(): Generator<Generated> {
+  for (const gaps of [0, 255, 256, 257]) {
+    const token = marker();
+    yield {
+      input: `token: \u201cx ${' '.repeat(gaps)}password\n=secret${token} ${sentinel()}`,
+      name: `review typographic password ${gaps}`,
+      secrets: [token],
+    };
+    const scheme = marker();
+    yield {
+      input: `token: \u201cx ${' '.repeat(gaps)}Bearer\nabcdef${scheme} ${sentinel()}`,
+      name: `review typographic bearer ${gaps}`,
+      secrets: [scheme],
+    };
+  }
+  for (const spaces of [254, 255, 256, 257, 300]) {
+    const token = marker();
+    yield {
+      input: `token=[${' '.repeat(spaces)}password\n=secret${token} ${sentinel()}`,
+      name: `review structured ${spaces}`,
+      secrets: [token],
+    };
+  }
+  for (const count of [16, 17, 100]) {
+    const token = marker();
+    yield {
+      input: `token=[redacted]${"'x'".repeat(count)}'secret${token}' ${sentinel()}`,
+      name: `review glue ${count}`,
+      secrets: [token],
+    };
+  }
+  // Round 2: a mixed arrow/glue chain and the over-redaction inputs.
+  {
+    const token = marker();
+    yield {
+      input: `token => ${'\'a\'"b" '.repeat(16)}'secret${token}' ${sentinel()}`,
+      name: 'review mixed chain',
+      secrets: [token],
+    };
+  }
+  for (const spaces of [0, 64, 256])
+    yield {
+      input: `token=[redacted]${' '.repeat(spaces)}"status":"ok" ${sentinel()}`,
+      name: `review marker prose ${spaces}`,
+      secrets: [],
+    };
+}
+
 function* generated(): Generator<Generated> {
   yield* structured();
   yield* nested();
   yield* longKeys();
   yield* findings();
+  yield* review();
   yield* randomPairs();
   yield* random();
 }
@@ -406,6 +516,80 @@ describe('the new redactor never keeps what 0.14.23 removed (#946, #956)', () =>
     }
     expect(unstable.slice(0, 10)).toEqual([]);
     expect(unstable).toHaveLength(0);
+  });
+});
+
+describe('the new redactor never keeps what 0.14.24 removed (#937)', () => {
+  it('removes every planted credential the 0.14.24 implementation removed', () => {
+    // 0.14.24 is the release this batch builds on; its provider qualifiers remove values 0.14.23
+    // leaves, and a shape pass must not hide one of those (the scheme pass once did).
+    const leaks: string[] = [];
+    for (const { input, name, secrets } of generated()) {
+      const before = redact01424(input);
+      const after = redactCredentials(input);
+      for (const secret of secrets)
+        if (input.includes(secret) && !before.includes(secret) && after.includes(secret)) leaks.push(`${secret} kept in ${name}`);
+    }
+    expect(leaks.slice(0, 10)).toEqual([]);
+    expect(leaks).toHaveLength(0);
+  });
+});
+
+// #937: the shapes this batch adds, compared against every release it builds on. A reference may
+// only remove part of a shape (0.14.20 turns `{"token":["x"]}` into `{"token":[redacted]"x"]}`); a
+// planted value it removed whole must be gone from the new output as well.
+describe('the new redactor never keeps what an earlier release removed (#937)', () => {
+  const references: [string, (text: string) => string][] = [
+    ['0.14.20', redact01420],
+    ['0.14.23', redact01423],
+    ['0.14.24', redact01424],
+  ];
+
+  it('removes every planted value a reference removed', () => {
+    const leaks: string[] = [];
+    for (const { input, name, secrets } of shapes()) {
+      const after = redactCredentials(input);
+      for (const [release, redact] of references) {
+        const before = redact(input);
+        for (const secret of secrets)
+          if (input.includes(secret) && !before.includes(secret) && after.includes(secret))
+            leaks.push(`${secret} kept from ${release} in ${name}`);
+      }
+    }
+    expect(leaks.slice(0, 10)).toEqual([]);
+    expect(leaks).toHaveLength(0);
+  });
+
+  it('stays idempotent on every generated shape', () => {
+    const unstable: string[] = [];
+    for (const { input, name } of shapes()) {
+      const once = redactCredentials(input);
+      if (redactCredentials(once) !== once) unstable.push(name);
+    }
+    expect(unstable.slice(0, 10)).toEqual([]);
+    expect(unstable).toHaveLength(0);
+  });
+
+  // Round 2: these are either skipped shapes or text after a marker that the released pipeline
+  // leaves alone. The new passes must not remove anything here.
+  it('leaves text the released pipeline leaves unchanged', () => {
+    const unchanged = [
+      'token: [redacted] ordinary diagnostics; operator said \u201cok\u201d.',
+      'token=[redacted] "status":"ok"',
+      'token=[redacted] "service recovered" "request completed"',
+      'note="-----BEGIN PRIVATE KEY-----" status="ok"\nmore ordinary diagnostics',
+      'see -----BEGIN RSA PRIVATE KEY-----\nS3cr3tV4l\n-----END RSA PRIVATE KEY----- here',
+      'token: \u201cshort pw\u201d',
+      "'password' => 'x'",
+      ':password => "x"',
+      'apiSecret => xyz',
+      `token => ${'\'a\'"b" '.repeat(16)}'S3cr3tV4l'`,
+      // Round 3 PEM inputs: skipped with PEM, so they must equal the released output.
+      `${'password=[redacted] RSA PRIVATE KEY-----\n'.repeat(1_024)}-----END PUBLIC KEY-----`,
+      '-----BEGIN RSA PRIVATE KEY-----\nS3cr3tV4l\n-----END RSA PRIVATE KEY-----\n-----END EC PRIVATE KEY-----',
+      "can't load key\n-----BEGIN PRIVATE KEY-----\nS3cr3tV4l\n-----END PRIVATE KEY-----",
+    ];
+    for (const input of unchanged) expect(redactCredentials(input), input).toBe(redact01424(input));
   });
 });
 

@@ -372,6 +372,12 @@ function ReviewContext({
   const held = !!approval.holdUntil && pending;
   return (
     <div className="space-y-5">
+      {approval.archived && (
+        <Alert tone="bad" title="This artifact is archived">
+          Nothing can be published on it, so this request can never go live. The sweep closes it as rejected; approving it now would reject
+          it too.
+        </Alert>
+      )}
       {stale && (
         <Alert tone="warn" title={`A newer draft (v${approval.artifactLatestVersion}) exists`}>
           Approving publishes v{approval.version}, the one shown here. The newer draft stays a draft.

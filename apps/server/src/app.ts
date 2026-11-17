@@ -204,6 +204,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   };
   const executor = createExecutor(db, services, {
     strictInputs: config.strictInputs,
+    idempotencyRetentionDays: config.idempotencyRetentionDays,
     onUnknownKeys: (command, unknown, principal) => {
       logger.warn({ command, unknownKeys: unknown.map((u) => u.path) }, 'command input has unknown keys');
       inputWarnings.record(command, unknown, principal);
@@ -637,6 +638,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     linksUrl: config.linksUrl,
     domains,
     retention: config.retention,
+    idempotencyRetentionDays: config.idempotencyRetentionDays,
     erasureGraceHours: config.erasureGraceHours,
     services,
   };

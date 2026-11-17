@@ -14,10 +14,12 @@ const h = vi.hoisted(() => ({
   holdPreview: false,
   previewHeld: [] as { recipeId: string; resolve: (value: unknown) => void }[],
   holdInstall: false,
-  installHeld: [] as { recipeId: string; resolve: (value: unknown) => void }[],
+  installHeld: [] as { recipeId: string; resolve: (value: unknown) => void; reject: (reason: unknown) => void }[],
   held: [] as { which: 'A' | 'B'; resolve: (value: unknown) => void }[],
   checkError: null as Error | null,
   installError: null as Error | null,
+  listError: null as Error | null,
+  getError: null as Error | null,
 }));
 
 vi.mock('../../../app/api', async (importOriginal) => {
@@ -27,6 +29,8 @@ vi.mock('../../../app/api', async (importOriginal) => {
     api: {
       call: vi.fn(async (name: string, input: Record<string, unknown>) => {
         h.calls.push({ name, input });
+        if (name === 'recipes.list' && h.listError) throw h.listError;
+        if (name === 'recipes.get' && h.getError) throw h.getError;
         if (name === 'recipes.list')
           return {
             recipes: h.empty
@@ -133,7 +137,8 @@ vi.mock('../../../app/api', async (importOriginal) => {
         }
         if (name === 'recipes.install') {
           if (h.installError) throw h.installError;
-          if (h.holdInstall) return new Promise((resolve) => h.installHeld.push({ recipeId: String(input.recipeId), resolve }));
+          if (h.holdInstall)
+            return new Promise((resolve, reject) => h.installHeld.push({ recipeId: String(input.recipeId), resolve, reject }));
           return { artifacts: [{ artifactId: `eml_${'b'.repeat(32)}`, name: 'Weekly newsletter' }] };
         }
         throw new Error(`unexpected command ${name}`);
@@ -161,6 +166,8 @@ beforeEach(() => {
   h.held = [];
   h.checkError = null;
   h.installError = null;
+  h.listError = null;
+  h.getError = null;
 });
 afterEach(cleanup);
 
@@ -442,7 +449,7 @@ describe('Starters gallery (#526)', () => {
     expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
   });
 
-  it('does not show an install success under parameters it was not run for', async () => {
+  it('shows an install that finished after a parameter edit as a notice for the earlier parameters (#961)', async () => {
     renderPage();
     await screen.findByRole('button', { name: /Weekly newsletter/ });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
@@ -455,10 +462,188 @@ describe('Starters gallery (#526)', () => {
     await act(async () => {
       h.installHeld[0].resolve({ artifacts: [{ artifactId: `eml_${'e'.repeat(32)}`, name: 'Old parameters draft' }] });
     });
+
+    // The drafts exist on the server; the notice says so, names the parameters it used and links
+    // each draft, instead of leaving the person to install a second full set by mistake.
+    const notice = await screen.findByText(/Your earlier install finished and created 1 draft/);
+    expect(notice).toBeTruthy();
+    expect(screen.getByText('Newsletter name: Northstar Journal')).toBeTruthy();
+    const link = screen.getByRole('link', { name: 'Old parameters draft' });
+    expect(link.getAttribute('href')).toBe(`/artifacts/eml_${'e'.repeat(32)}`);
+    // It is not the current parameters' install: no success alert for those, and Create drafts
+    // stays unavailable until the new parameters are checked.
+    expect(screen.queryByText(/^Created 1 draft/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
+
+    // The new parameters are unaffected: a check makes them ready, and their own install is the
+    // one that shows the success alert (and replaces the earlier notice).
+    h.holdInstall = false;
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(screen.getByText('Everything is in place.')).toBeTruthy());
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    expect(await screen.findByText('Created 1 drafts')).toBeTruthy();
+    expect(screen.queryByText(/Your earlier install finished/)).toBeNull();
+    expect(h.calls.filter((c) => c.name === 'recipes.install').at(-1)?.input.params).toMatchObject({ newsletterName: 'Fjeldvej' });
+  });
+
+  // #965 review B: a prerequisite check is not an install. It bumped the shared read sequence, so
+  // an install still in flight when the person checked the prerequisites lost its result: the
+  // drafts and links disappeared and Create drafts looked available for a second set.
+  it('keeps an install result when a prerequisite check resolves while it is pending (#965 review)', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /Weekly newsletter/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    h.holdInstall = true;
+    h.holdPreview = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(h.previewHeld).toHaveLength(1));
+
+    // The check answers first, then the install for the same parameters finishes.
+    await act(async () => {
+      h.previewHeld[0].resolve({
+        ready: true,
+        prerequisites: [{ kind: 'purpose', description: 'A published marketing purpose', ok: true, message: '' }],
+        artifacts: [{ key: 'tpl_weekly', type: 'email_template', name: 'Weekly newsletter' }],
+      });
+    });
+    await act(async () => {
+      h.installHeld[0].resolve({ artifacts: [{ artifactId: `eml_${'b'.repeat(32)}`, name: 'Weekly newsletter' }] });
+    });
+
+    // Its drafts are reported as this install's result, not as an earlier parameters' notice.
+    expect(await screen.findByText('Created 1 drafts')).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Weekly newsletter' }).getAttribute('href')).toBe(`/artifacts/eml_${'b'.repeat(32)}`);
+    expect(screen.queryByText(/Your earlier install/)).toBeNull();
+    expect(screen.getByText('Everything is in place.')).toBeTruthy();
+  });
+
+  // #961 review A: A -> B -> A. The install was started for A's *edited* parameters, and leaving A
+  // and coming back reloads A's defaults, so the old response must not be reported as this
+  // starter's install — it belongs to values that are no longer on screen.
+  it('drops an install started before a starter switch, even when the person returns to it (#961 review)', async () => {
+    h.two = true;
+    h.fastGet = true;
+    renderPage();
+    await screen.findByRole('button', { name: /Starter A/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    // Edit A's parameter and check it, so the install is enabled again for the edited value.
+    const field = screen.getByLabelText(/^A parameter/);
+    await userEvent.clear(field);
+    await userEvent.type(field, 'Edited A value');
+    await userEvent.click(screen.getByRole('button', { name: 'Check prerequisites' }));
+    await waitFor(() => expect(screen.getByText('Everything is in place.')).toBeTruthy());
+
+    h.holdInstall = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+
+    await userEvent.click(screen.getByRole('button', { name: /Starter B/ }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Starter B' })).toBeTruthy());
+    await userEvent.click(screen.getByRole('button', { name: /Starter A/ }));
+    await waitFor(() => expect(screen.getByLabelText(/^A parameter/)).toHaveProperty('value', 'A value'));
+
+    await act(async () => {
+      h.installHeld[0].resolve({ artifacts: [{ artifactId: `eml_${'d'.repeat(32)}`, name: 'Stale A draft' }] });
+    });
     await act(async () => {});
 
+    // Not this starter's install: no success alert, no link, and no earlier-parameters notice for
+    // a starter the person left in between.
     expect(screen.queryByText(/Created 1 drafts/)).toBeNull();
-    expect(screen.queryByText('Old parameters draft')).toBeNull();
+    expect(screen.queryByText('Stale A draft')).toBeNull();
+    expect(screen.queryByText(/Your earlier install/)).toBeNull();
+    expect(screen.getByLabelText(/^A parameter/)).toHaveProperty('value', 'A value');
+  });
+
+  it('drops a failed install started before a starter switch, even after returning (#961 review)', async () => {
+    h.two = true;
+    h.fastGet = true;
+    renderPage();
+    await screen.findByRole('button', { name: /Starter A/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    h.holdInstall = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+
+    await userEvent.click(screen.getByRole('button', { name: /Starter B/ }));
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Starter B' })).toBeTruthy());
+    await userEvent.click(screen.getByRole('button', { name: /Starter A/ }));
+    await waitFor(() => expect(screen.getByLabelText(/^A parameter/)).toHaveProperty('value', 'A value'));
+
+    await act(async () => {
+      h.installHeld[0].reject(new Error('The drafts could not be created'));
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText('That did not work')).toBeNull();
+    expect(screen.queryByText(/The drafts could not be created/)).toBeNull();
+    expect(screen.queryByText(/Your earlier install/)).toBeNull();
+  });
+
+  it('shows an install error for the earlier parameters, labelled as theirs (#961)', async () => {
+    renderPage();
+    await screen.findByRole('button', { name: /Weekly newsletter/ });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', false));
+
+    h.holdInstall = true;
+    await userEvent.click(screen.getByRole('button', { name: 'Create drafts' }));
+    await waitFor(() => expect(h.installHeld).toHaveLength(1));
+
+    await editParam('Fjeldvej');
+    await act(async () => {
+      h.installHeld[0].reject(new Error('The draft could not be created'));
+    });
+
+    expect(await screen.findByText(/Your earlier install did not finish/)).toBeTruthy();
+    expect(screen.getByText(/The draft could not be created/)).toBeTruthy();
+    expect(screen.getByText('Newsletter name: Northstar Journal')).toBeTruthy();
+    // It is not reported as the current parameters' error, which the person can still check.
+    expect(screen.queryByText('That did not work')).toBeNull();
     expect(screen.getByRole('button', { name: 'Create drafts' })).toHaveProperty('disabled', true);
+  });
+});
+
+// #966: one `error` state carried three different reads, but its only Retry button reloaded the
+// list. A failed `recipes.get` left the detail panel on "Loading the starter" forever, because
+// nothing but a selection change re-ran `load()` and re-selecting the same tile is a no-op.
+describe('Recipes Retry re-runs the read that failed (#966)', () => {
+  it('reloads the starter detail after a failed detail read, not the list', async () => {
+    h.getError = new Error('The starter could not be read');
+    renderPage();
+
+    // The list loads and selects its first starter; the detail read for it fails.
+    expect(await screen.findByText(/The starter could not be read/)).toBeTruthy();
+    expect(screen.queryByLabelText('Loading the starter')).toBeNull();
+    expect(h.calls.filter((c) => c.name === 'recipes.list')).toHaveLength(1);
+    expect(h.calls.filter((c) => c.name === 'recipes.get')).toHaveLength(1);
+
+    h.getError = null;
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(screen.getByLabelText(/^Newsletter name/)).toHaveProperty('value', 'Northstar Journal'));
+    expect(screen.getByRole('heading', { name: 'Weekly newsletter' })).toBeTruthy();
+    expect(h.calls.filter((c) => c.name === 'recipes.get')).toHaveLength(2);
+    // Retry repeated the detail read; the list was not read again.
+    expect(h.calls.filter((c) => c.name === 'recipes.list')).toHaveLength(1);
+  });
+
+  it('reloads the list after a failed list read', async () => {
+    h.listError = new Error('The starters could not be read');
+    renderPage();
+
+    expect(await screen.findByText('The starters could not be read')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Weekly newsletter/ })).toBeNull();
+
+    h.listError = null;
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByRole('button', { name: /Weekly newsletter/ })).toBeTruthy();
+    expect(h.calls.filter((c) => c.name === 'recipes.list')).toHaveLength(2);
+    await waitFor(() => expect(h.calls.filter((c) => c.name === 'recipes.get')).toHaveLength(1));
   });
 });

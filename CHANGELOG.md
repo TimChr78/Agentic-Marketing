@@ -2,6 +2,102 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.28] - 2026-11-17
+
+### Security
+
+- An error's structured `details` — object keys and values alike — are now redacted and length-bounded like its message, so a credential a command echoes back (for example a parameter name passed to `recipes.preview`) no longer reaches REST, MCP or the copilot client through `details`.
+
+### Upgrading from 0.14.27
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** error `details` returned by REST, MCP and the copilot are now redacted like the message: string values and object keys that look like credentials read `[redacted]` and are bounded, with at most 1,000 elements in total. Machine-readable fields and the `details.reason` codes clients switch on are unchanged.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.28.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.28 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.28` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.28). Run `docker compose exec app am doctor`.
+
+<!-- issues: 996 -->
+
+## [0.14.27] - 2026-11-16
+
+### Changed
+
+- **Breaking:** idempotency keys are kept for 30 days (`RETENTION_IDEMPOTENCY_DAYS`) instead of indefinitely. A key reused after that runs the operation again and stores a fresh row; the scheduler removes expired rows in small batches so `idempotency_keys` no longer grows without limit.
+
+### Fixed
+
+- The journey canvas no longer loses its node measurements on every re-render. The graph rebuilt its nodes each time it rendered without warnings, so React Flow could re-adopt them unmeasured and leave them hidden: the builder or read-only canvas could show no visible steps until something else made it measure again. The node list is now stable, and the canvas marks itself ready (`data-journey-ready`) once every node has been measured.
+- `campaigns.holdoutResult` chooses each person's winning holdout assignment in PostgreSQL over `profiles.merged_into`, in the same microsecond-then-profile-id order the send path uses, and computes the entrant counts and time bounds in SQL. The conversion-event and unsubscribe reads now run one bounded page of people at a time, fold each event page as it arrives, and keep only per-currency buyer counts saturating at k, so a long-running campaign's report no longer holds its whole assignment history, every conversion or every unsubscriber in memory.
+
+### Security
+
+- Better Auth and every `@better-auth/*` plugin move to 1.7.23 in one step. Dependabot had split the core from its plugins into two pull requests (#980 and #981), and each branch mixed 1.7.22 with 1.7.23, so typecheck failed in `packages/auth`; the dependabot groups now keep the core, plugins and their pinned peers together instead of letting the minor-and-patch group take a plugin.
+- The AI SDK update (7.0.172, with `@ai-sdk/anthropic` 4.0.104 and `@ai-sdk/openai-compatible` 3.0.92) carries the fix that keeps Azure image and Vertex tool-result downloads from sending an Azure bearer token or a Vertex Express Mode API key to the file host. Its UI message streams now keep a failed tool call's error text by default; this repository has no `toUIMessageStream` call site, and the in-app copilot's own NDJSON stream keeps showing tool errors with credential-shaped values redacted (a regression test drives a failing tool whose argument contains `password=…`). `jose` 6.2.17, the OpenTelemetry SDK and OTLP exporter 0.301.2, `jsdom` 31.0.1 and `@testing-library/user-event` 14.6.10 are updated with it.
+
+### Upgrading from 0.14.26
+
+- **Migrations:** `packages/db/migrations/0104_idempotency_keys_created_at.sql`.
+- **Configuration:** `RETENTION_IDEMPOTENCY_DAYS`.
+- **Breaking changes:** an idempotency key is kept for 30 days (`RETENTION_IDEMPOTENCY_DAYS`, 1 to 3650) instead of indefinitely: a key reused after that runs the operation again instead of replaying the first response, and the scheduler deletes expired keys in bounded batches. Better Auth 1.7.23: MCP routes verify tokens in process instead of fetching the server's own `/jwks`, and an OAuth authorization code is no longer consumed by a failed PKCE or redirect check. `campaigns.holdoutResult` returns the same figures, now computed in SQL with bounded memory.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.27.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.27 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.27` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.27). Run `docker compose exec app am doctor`.
+
+<!-- issues: 972, 976, 980, 981, 990 -->
+
+## [0.14.26] - 2026-11-16
+
+### Fixed
+
+- **Breaking:** an idempotent replay of a key whose action a person has since reversed with `agents.undo` now answers `409` with `details.reason: "idempotency_key_reversed"` instead of returning the stored response, which described something that is no longer true (for example a publish that was taken out of service again). Nothing is re-run; use a new idempotency key for the attempt you want. A key whose action is still in place replays exactly as before, and a person's keys are never reversed, because only an agent's writes have a ledger row to undo.
+- The stored response of an agent write now names every ledger entry it describes, so undoing any of them reverses the key. `config.import` with `publish` records one undoable publish per artifact besides its own entry, and undoing one of those now reverses the import's key too. Migration 0103 adds `idempotency_keys.reversed_at` and `idempotency_key_actions`; existing rows keep replaying.
+- `am doctor` reports a `redis://`, `rediss://`, `valkey://` or `nats://` endpoint as `scheme://host:port` (never its userinfo, path or query) instead of `(invalid URL)`, and a failed Valkey check names the endpoint it could not reach. A connection failure inside an `AggregateError` or a chain of causes now reports the nested code (`ECONNREFUSED`, `ETIMEDOUT`), so an unreachable Valkey reads as a host and a reason rather than a malformed URL.
+- The start-up single-active-mandate repair no longer records a workspace as repaired when a duplicate-mandate group has no usable mandate: it archives nothing, logs the group once per pass and looks at it again on the next start, so a later release (or a person fixing a row) is not blocked by a `data_repairs` marker written years earlier. A workspace recorded by an older release is re-examined once after upgrading.
+- New `artifacts.archive` (people only, audited) retires an artifact: it can no longer be published, the default `artifacts.list` hides it (`includeArchived` shows it), and its pending approval requests are closed as rejected. The "agent … already has an active mandate" refusal now names that command, so a duplicate published mandate can actually be archived before its replacement is published. A workspace singleton (brand, business context, tracking plan, purposes, delivery policy, conversion map) cannot be archived, since a workspace needs it; there is no unarchive command, and a live version is not unpublished by archiving.
+- Pending approval requests whose artifact is archived are now closed at start-up and on a few-hourly sweep, as rejected with the reason `approvals.approve` would give, instead of staying in the review queue forever after an upgrade archived a duplicate. `approvals.list` and `approvals.get` mark such a row with `archived: true` and the review queue and drawer say it can never publish, `system.status.pendingApprovals` no longer counts it (so the shell badge is not inflated), and a `policy:` decider such as `policy:archived` is shown as **System (policy)** in the decision history instead of the raw sentinel. A bundle is closed whole, so its other requests are not left undecidable.
+- On the Recipes page, an install that finishes after a parameter edit is reported instead of dropped: a notice says the earlier install created its drafts, names the parameters it ran with and links each draft, and the values now on screen are not marked as installed. An install that fails for the earlier parameters is shown the same way, labelled as theirs. Nothing changes when the person switches to another starter: a result for the starter they left is still discarded.
+- An install and a prerequisite check are now sequenced separately: checking the prerequisites while an install is still running no longer discards the install's drafts and links or leaves Create drafts looking available for a second set.
+- Switching starters now invalidates an install still in flight and clears its loading state, even when the person returns to the same starter: the starter reloads its parameter defaults, so a late result is not reported as the current values' install.
+- The held-change comment in the agent hold path now states the lock order the code enforces: the agent-policy lock first for every agent write, before the command's `impact`, which may lock artifacts. The inverse order it still described (a publish command's impact locking artifacts before the agent lock) was removed with that invariant and no longer exists, so a maintainer cannot reintroduce it from a stale note.
+- Docker Compose and the Helm chart forward the OTLP tracing settings the server actually reads: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and the header lists `OTEL_EXPORTER_OTLP_HEADERS` and `OTEL_EXPORTER_OTLP_TRACES_HEADERS` now reach the container instead of being a silent no-op in `.env`. In the chart the endpoint is a `config` value and the headers are documented as `secrets.values` entries (or part of an existing Secret), because a collector Authorization header is a credential.
+- The guard behind that fix parses the server-side source instead of matching one spelling, so an environment read through a variable (including a chain of aliases), a default parameter, an environment-typed parameter, a destructuring pattern, a constant key, `globalThis.process.env` or a helper that takes the variable name is checked too; an access it cannot resolve — including reads through an `env` imported from another module — fails until it is named with a reason.
+- What it found is fixed as well: `BACKUP_KEEP_DAYS`, `BACKUP_CRON` and `BETTER_AUTH_TRUSTED_ORIGINS` reach the Compose app container, and the chart gains `config` values for the backup settings, `PUBLIC_PORT`, `APP_DB_ROLE`, `BETTER_AUTH_TRUSTED_ORIGINS`, the OpenBao/AWS KMS location settings, with `OPENBAO_TOKEN`, the AWS keys and `MASTER_KEY_PREVIOUS` documented as Secret values (they were only settable through `extraEnv` before). Compose's host-side `AM_BIND`, `AM_PORT`, `PUBLIC_BIND` and the Postgres superuser `POSTGRES_PASSWORD` stay out of the app container on purpose, and the guard says why.
+- `.env.example` mentions `BETTER_AUTH_TRUSTED_ORIGINS` next to `TRUSTED_ORIGINS` (the documented list) and that a wildcard in it is refused at start-up.
+- On the Recipes page, Retry now repeats the read that failed: after a `recipes.get` (or the initial prerequisite preview) failure it reloads the selected starter, and after a `recipes.list` failure it reloads the gallery. The detail panel no longer sits on "Loading the starter" indefinitely, and its error is shown there with its own Retry instead of only above the gallery.
+
+### Upgrading from 0.14.25
+
+- **Migrations:** `packages/db/migrations/0103_idempotency_reversal.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** a retry with an idempotency key whose action a person reversed with `agents.undo` answers `409` (`details.reason: "idempotency_key_reversed"`) instead of replaying the old response; use a new key. Pending approvals on archived artifacts are closed as rejected by a sweep at start and every 6 hours, `system.status.pendingApprovals` no longer counts them, and `approvals.list`/`approvals.get` gain an `archived` flag. The new people-only `artifacts.archive` command archives an artifact (it does not unpublish a live version or stop anything already running on it). Docker Compose and the Helm chart now forward every environment variable the server reads (the three OTLP variables, the backup settings and `BETTER_AUTH_TRUSTED_ORIGINS`); unset values stay empty and change nothing.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.26.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.26 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.26` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.26). Run `docker compose exec app am doctor`.
+
+<!-- issues: 950, 951, 955, 957, 961, 963, 965, 966 -->
+
+## [0.14.25] - 2026-11-16
+
+### Fixed
+
+- A signup that leaves the consent status unchanged is kept in the ledger as evidence, so a delayed unsubscribe callback with an older action time no longer overrides the later signup; imports, SDK consent events, unsubscribe callbacks and SMS STOP follow the same rule. Every distinct action is kept and genuinely repeated signups add a row each; that growth is accepted. Only a redelivered event or an exact duplicate is folded: millisecond precision is the system's precision end to end, so two actions in the same millisecond with the same purpose, channel, status and source count as one. There is no time-window fold, and concurrent writers and merges are not serialised beyond what the platform already does (tracked separately).
+- Spend-gap warnings now belong to the accounts a report actually reads: `ads.performance` matches a stored gap per (platform, account) against the workspace's Meta and Google connections, and the note names the account. A gap kept after a connection was re-pointed or deleted (its partial spend still feeds reports) no longer makes every report warn with `spendTruncated: true` and a remedy no import could carry out. The rows are kept as history; a person can clear one with the new people-only `ads.spendGaps.clear` command, which leaves the stored spend untouched.
+- `analytics.campaignSummary` no longer publishes `meta.currency` for a single suppressed currency or for `UNKNOWN`. It names a currency only when there is exactly one revenue row, its amount is visible and the currency is known, which is the same rule `analytics.query` applies; a client keying suppression detection on `meta.currency === null` no longer misses a withheld revenue figure.
+- A below-k step whose only parent is itself (a disconnected self-loop, as `journeys.migrate` can leave behind) now gets the suppression note the funnel contract promises: a note names the step and k and says it is its own hidden subtree. A parentless below-k step is named in the all-steps-hidden note as well, so a fully withheld funnel is always explained.
+- A large Google Ads spend import is stored page by page in bounded chunks instead of being read into memory twice and written in one ClickHouse call, so a 90-day read at the raised page ceiling no longer risks an out-of-memory kill on the API process. The incomplete date range is recorded before the first insert, so a crash or OOM mid-import leaves the `spendTruncated` warning in place instead of losing it with the insert; chunks of one import share an `updated_at`, so a re-import still replaces the previous rows rather than double counting.
+
+### Security
+
+- Credential redaction now replaces the value in shapes the released rules leave in part, as passes over their output: a JSON array or object under a credential key (`{"token":["shortpw"]}`, `{"secret":{"v":"x"}}`), a short Authorization value (`authToken=Bearer abc`, `password: Basic xyz`), escaped JSON inside a string (`{\"password\":\"x\"}`), URL-encoded pairs (`password%3Dsecret`, `token%22%3A%22abc`, `api%5Fkey=`), a `Pwd`/`Pass` camel ending (`userPwd`, `dbPwd`, `dbPass`), a credential pair nested in another (`SIGNINGKEY=AZUREOPENAIKEY='x'`), and text attached to an existing marker (`token=[redacted]shortpw`). A typographic-quoted value (`token: “short pw”`), a value after `=>` (`'password' => 'x'`) and PEM private-key blocks are left as the released pipeline leaves them: its output no longer shows the opening quote or the arrow, and PEM needs header/footer context, so a safe pass needs the original input. Ordinary JSON, counters such as `"tokens": 1234`, prose with quotes or `=>`, a quoted or mid-line `BEGIN … PRIVATE KEY` mention, and public `BEGIN CERTIFICATE` blocks keep their text, and a second pass still changes nothing.
+
+### Upgrading from 0.14.24
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `analytics.campaignSummary` returns `meta.currency: null` for a single suppressed or `UNKNOWN` currency, where 0.14.24 named the currency. `ads.performance` no longer warns or sets `spendTruncated: true` for a spend gap whose account no current Meta or Google connection reads. A new people-only `ads.spendGaps.clear` acknowledges and removes one account's gap (it repairs nothing). The consent ledger keeps every distinct signup action, so repeated signups add rows.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.25.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.25 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.25` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.25). Run `docker compose exec app am doctor`.
+
+<!-- issues: 936, 937, 953, 958, 959, 962 -->
+
 ## [0.14.24] - 2026-11-16
 
 ### Changed

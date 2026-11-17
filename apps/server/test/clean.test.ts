@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
-import { classifyStale, cleanTestDatabases, clickHouseDropDecision } from './clean';
+import { classifyStale, cleanTestDatabases, clickHouseDropDecision, parseCleanArgs } from './clean';
 import { testDatabaseUrl } from './harness';
 
 // `pnpm test:clean` must only touch the run it is asked to clean. Other checkouts share the same
@@ -188,5 +188,12 @@ describe('ClickHouse drop decisions (#515 review)', () => {
   });
   it('always drops the current run, even when activity is unknown', () => {
     expect(clickHouseDropDecision({ ...base, inCurrentRun: true, active: null, name: 'x' })).toEqual({ drop: true });
+  });
+});
+
+describe('test:clean arguments (#987 review)', () => {
+  it('drops the `--` separator pnpm forwards', () => {
+    expect(parseCleanArgs(['--', '--templates'])).toEqual(['--templates']);
+    expect(parseCleanArgs(['--all-stale'])).toEqual(['--all-stale']);
   });
 });

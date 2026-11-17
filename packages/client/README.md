@@ -17,6 +17,9 @@ const artifact = await api.call('artifacts.create', { type: 'note', name: 'Hi', 
 runs it a second time. `callWithRetry` does that for you: it mints one key per logical call (or
 uses the `idempotencyKey` you pass) and keeps it across every attempt.
 
+The server remembers a key for 30 days (`RETENTION_IDEMPOTENCY_DAYS`): a retry after that runs the
+operation again, so keep retries for one logical operation inside that window.
+
 ```ts
 const sent = await callWithRetry(api, 'messages.sendEmail', { profileId, templateId }, { idempotencyKey: 'welcome-ada' });
 ```

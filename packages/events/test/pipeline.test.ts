@@ -88,16 +88,17 @@ describe('bus → ClickHouse sink', () => {
     expect(first).toEqual({ accepted: 30, duplicates: 0 });
     expect((await bus.publish([ev(0), ev(1)])).duplicates).toBe(2);
 
+    // The loop's own 5 s deadline is the bound: the sink is asynchronous, and a loaded runner
+    // polls less often rather than resolving later (#990 timing sweep).
     const started = Date.now();
     let found: Awaited<ReturnType<typeof store.eventsOf>> = [];
-    while (Date.now() - started < 10_000) {
+    while (Date.now() - started < 5_000) {
       found = await store.eventsOf(ws, { anonymousIds: ['anon-1'], userIds: [] }, { limit: 50 });
       if (found.length === 10) break;
       await new Promise((r) => setTimeout(r, 200));
     }
     expect(found).toHaveLength(10);
     expect(found[0]).toMatchObject({ eventId: 'm-28', name: 'product_viewed', properties: { sku: 'SKU-28', price: 128 } });
-    expect(Date.now() - started).toBeLessThan(5_000);
 
     await store.deleteEventsOf(ws, { anonymousIds: ['anon-1'], userIds: [] });
     expect(await store.eventsOf(ws, { anonymousIds: ['anon-1'], userIds: [] })).toHaveLength(0);

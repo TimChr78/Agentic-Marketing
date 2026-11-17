@@ -22,6 +22,10 @@ import { EMAIL_PARTS_FAILURE_TTL_MS, EmailPartsCache } from '../src/emailPartsCa
 // CodeQL alerts 4, 3, 2 and 1 (js/bad-tag-filter, js/incomplete-multi-character-sanitization):
 // the public archive renders e-mail HTML behind a strict CSP, and `emailParts` is the defence in
 // depth. The scanner must be linear, quote-aware and safe on hostile entities.
+// The 20,000-input differential and the size-cap parses run for several seconds on a loaded
+// runner; a per-file timeout keeps that from tripping the global 20 s one (#990).
+vi.setConfig({ testTimeout: 60_000 });
+
 const body = (html: string) => emailParts(`<style>.issue{color:#111827}</style><body>${html}</body>`).body;
 
 /**

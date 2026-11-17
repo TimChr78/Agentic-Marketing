@@ -24,6 +24,16 @@ type Values = Record<string, ParamValue>;
 const initialValues = (recipe: Recipe): Values =>
   Object.fromEntries(recipe.parameters.filter((p) => p.default !== undefined).map((p) => [p.key, p.default as ParamValue]));
 
+/** "1 draft" and "2 drafts": the notice names how many the earlier install created. */
+const drafts = (count: number) => `${count} draft${count === 1 ? '' : 's'}`;
+
+/** The parameters an install sent, as the labels the form showed, so a late result can name them. */
+const parametersSummary = (recipe: Recipe, values: Values): string[] =>
+  recipe.parameters
+    .filter((p) => values[p.key] !== undefined && values[p.key] !== '')
+    .slice(0, 4)
+    .map((p) => `${p.label}: ${String(values[p.key])}`);
+
 export default function RecipesPage({ embedded = false }: { embedded?: boolean }) {
   useCrumbs([{ label: embedded ? 'Starters' : 'Recipes' }]);
   const { can } = useWorkspace();
@@ -33,24 +43,38 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
   const [values, setValues] = useState<Values>({});
   const [preview, setPreview] = useState<Preview | null>(null);
   const [installed, setInstalled] = useState<Installed | null>(null);
+  // An install that finished after the person edited a parameter (#961). Its drafts exist on the
+  // server, so it is reported as theirs — clearly labelled — instead of disappearing, but it never
+  // marks the parameters now on screen as installed.
+  const [earlierInstall, setEarlierInstall] = useState<{ artifacts: Installed['artifacts']; summary: string[] } | null>(null);
+  const [earlierInstallError, setEarlierInstallError] = useState<{ message: string; summary: string[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Which read the error belongs to, so Retry repeats that read instead of always the list (#966).
+  // `detail` covers `recipes.get` and the initial `recipes.preview`, the two reads a selected
+  // starter needs.
+  const [failedRead, setFailedRead] = useState<'list' | 'detail' | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const canWrite = can('artifacts:write');
   // Never show the previous starter's form while the newly selected one is loading.
   const activeRecipe = recipe?.id === selected ? recipe : null;
+  // A failed detail read is shown in the detail panel, not only above the gallery: the panel must
+  // not sit on "Loading the starter" as if the read were still in flight.
+  const detailLoadFailed = failedRead === 'detail' && !activeRecipe;
 
   const loadList = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setFailedRead(null);
     try {
       const r = await api.call('recipes.list', {});
       setList(r.recipes);
       setSelected((current) => current ?? r.recipes[0]?.id ?? null);
     } catch (e) {
       setError(errText(e));
+      setFailedRead('list');
     } finally {
       setLoading(false);
     }
@@ -61,13 +85,32 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
   }, [loadList]);
 
   const loadSeq = useRef(0);
+  // A parameter edit moves this generation, so an install that resolves later can tell that it no
+  // longer belongs to the values on screen (#961).
+  const paramsGeneration = useRef(0);
+  // Installs are sequenced on their own, so a check that bumps `loadSeq` leaves them alone.
+  const installSeq = useRef(0);
+  const selectedRef = useRef(selected);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
   const load = useCallback(async (recipeId: string) => {
     // Only the latest selection may commit state (#616): a slower earlier read must not overwrite
     // the starter the person is now looking at.
     const seq = ++loadSeq.current;
+    // Selecting a starter is a new parameter generation, and it supersedes any install still in
+    // flight (#961 review): leaving A and coming back reloads A's defaults, so an install started
+    // for A's earlier values must not be reported as this starter's install. Clearing the
+    // installing state keeps the button honest for the starter now on screen.
+    paramsGeneration.current += 1;
+    installSeq.current += 1;
+    setInstalling(false);
     setError(null);
+    setFailedRead(null);
     setCheckError(null);
     setInstalled(null);
+    setEarlierInstall(null);
+    setEarlierInstallError(null);
     setRecipe(null);
     setPreview(null);
     try {
@@ -80,7 +123,9 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
       if (seq !== loadSeq.current) return;
       setPreview(nextPreview);
     } catch (e) {
-      if (seq === loadSeq.current) setError(errText(e));
+      if (seq !== loadSeq.current) return;
+      setError(errText(e));
+      setFailedRead('detail');
     }
   }, []);
 
@@ -99,10 +144,20 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     // check and an install success all describe the *old* parameters, so they are dropped, and
     // the sequence moves on so an in-flight check or install for them cannot commit.
     loadSeq.current += 1;
+    paramsGeneration.current += 1;
     setPreview(null);
     setCheckError(null);
     setInstalled(null);
+    setEarlierInstall(null);
+    setEarlierInstallError(null);
     setError(null);
+    setFailedRead(null);
+  };
+
+  /** Retry repeats the read that failed (#966): the selected starter's detail, or the gallery. */
+  const retry = () => {
+    if (failedRead === 'detail' && selected) void load(selected);
+    else void loadList();
   };
 
   const check = async () => {
@@ -126,18 +181,42 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
 
   const install = async () => {
     if (!recipe) return;
-    // Same rule as `check`: an install result may land under another selection or other parameters.
-    const seq = ++loadSeq.current;
+    // An install has its own sequence: it belongs to the starter it was started for and the
+    // parameter generation it sends, so a prerequisite check (a read, not a new set of parameters)
+    // cannot displace its result (#965 review B).
+    const seq = ++installSeq.current;
+    const recipeId = recipe.id;
+    const params = values;
+    const generation = paramsGeneration.current;
+    const summary = parametersSummary(recipe, params);
     setInstalling(true);
     setError(null);
+    setEarlierInstall(null);
+    setEarlierInstallError(null);
     try {
-      const out = await api.call('recipes.install', { recipeId: recipe.id, params: values });
-      if (seq !== loadSeq.current) return;
-      setInstalled(out);
+      const out = await api.call('recipes.install', { recipeId, params });
+      if (seq !== installSeq.current) return; // a newer install replaced this one
+      if (recipeId !== selectedRef.current) return; // the person left this starter (#792)
+      if (generation === paramsGeneration.current) {
+        setInstalled(out);
+        return;
+      }
+      // The values changed while this ran. The server did create the drafts, so dropping the
+      // response silently made people install a second full set (#961): report it, labelled as
+      // the earlier parameters', without marking these as installed.
+      setEarlierInstall({ artifacts: out.artifacts, summary });
     } catch (e) {
-      if (seq === loadSeq.current) setError(errText(e));
+      if (seq !== installSeq.current) return;
+      if (recipeId !== selectedRef.current) return;
+      if (generation === paramsGeneration.current) {
+        setError(errText(e));
+        return;
+      }
+      // A failure creates nothing to lose track of, but the person did click: it is shown rather
+      // than swallowed, labelled with the parameters it ran for (#961).
+      setEarlierInstallError({ message: errText(e), summary });
     } finally {
-      setInstalling(false);
+      if (seq === installSeq.current) setInstalling(false);
     }
   };
 
@@ -166,8 +245,8 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
           </p>
         </div>
 
-        {error && (
-          <Alert tone="bad" title="That did not work" action={<Button onClick={() => void loadList()}>Retry</Button>}>
+        {error && !detailLoadFailed && (
+          <Alert tone="bad" title="That did not work" action={<Button onClick={retry}>Retry</Button>}>
             {error}
           </Alert>
         )}
@@ -383,7 +462,48 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
                   </ul>
                 </Alert>
               )}
+
+              {earlierInstall && (
+                <Alert tone="warn" title={`Your earlier install finished and created ${drafts(earlierInstall.artifacts.length)}`}>
+                  <p>
+                    It used the parameters from before your last edit, so these drafts are for those earlier values, not the ones above.
+                    They already exist: open one to review it, and create drafts again only if you want a second set.
+                  </p>
+                  <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
+                    {earlierInstall.summary.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                  <ul className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+                    {earlierInstall.artifacts.map((a) => (
+                      <li key={a.artifactId}>
+                        <Link to={`/artifacts/${a.artifactId}`} className="font-medium text-accent hover:underline">
+                          {a.name}
+                        </Link>
+                      </li>
+                    ))}
+                  </ul>
+                </Alert>
+              )}
+
+              {earlierInstallError && (
+                <Alert tone="bad" title="Your earlier install did not finish">
+                  <p>
+                    It ran with the parameters from before your last edit, so this is not an error for the values above:{' '}
+                    {earlierInstallError.message}
+                  </p>
+                  <ul className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-muted">
+                    {earlierInstallError.summary.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                </Alert>
+              )}
             </>
+          ) : detailLoadFailed ? (
+            <Alert tone="bad" title="Could not load the starter" action={<Button onClick={retry}>Retry</Button>}>
+              {error} Try again.
+            </Alert>
           ) : (
             <LoadingBlock geometry="detail" label="Loading the starter" />
           )}

@@ -78,6 +78,8 @@ vi.mock('@xyflow/react', async () => {
         }),
       ),
     Background: () => null,
+    // The canvas readiness hook (#990) reads React Flow's node measurements; an empty lookup is ready.
+    useStore: (selector: (state: { nodeLookup: Map<string, unknown> }) => unknown) => selector({ nodeLookup: new Map() }),
     Controls: () => null,
     MiniMap: () => null,
     MarkerType: { ArrowClosed: 'arrow' },
