@@ -555,8 +555,20 @@ export async function seed(t: T, opts: { confirmedUrl?: string; now?: Date } = {
     type: 'segment',
     name: 'Engaged readers',
     content: {
-      description: 'Subscribers who opened recently.',
-      condition: { all: [{ consent: 'marketing_email' }, { event: 'Email Opened', within: 'P30D' }] },
+      description: 'Subscribers who opened or clicked recently.',
+      // Engagement lives in the message log, not the customer event stream (#441): opens and clicks
+      // are counted from what the platform sent.
+      condition: {
+        all: [
+          { consent: 'marketing_email' },
+          {
+            any: [
+              { message: 'opened', within: 'P30D' },
+              { message: 'clicked', within: 'P30D' },
+            ],
+          },
+        ],
+      },
     },
   });
   await pub(engaged.artifactId, 'Engaged readers');
@@ -716,8 +728,8 @@ export async function seed(t: T, opts: { confirmedUrl?: string; now?: Date } = {
           { consent: 'marketing_email' },
           {
             any: [
-              { event: 'Email Opened', within: 'P14D' },
-              { event: 'Email Clicked', within: 'P30D' },
+              { message: 'opened', within: 'P14D' },
+              { message: 'clicked', within: 'P30D' },
             ],
           },
         ],
@@ -1091,6 +1103,14 @@ export async function seed(t: T, opts: { confirmedUrl?: string; now?: Date } = {
       stoppedResult.unsubscribed / Math.max(stoppedResult.sent, 1),
       'complaint rate 2.2% over the canary (stop at 0.3%)',
     ],
+  );
+
+  // The engagement segment reads opens and clicks from the message log, so it has members only now
+  // that the issues above were sent (#441). A refresh forces membership instead of waiting a tick.
+  await eventually(
+    () => owner.call('segments.refresh', { artifactId: engaged.artifactId }),
+    (r) => r.members > 0,
+    30_000,
   );
 
   // One send scheduled for the future.

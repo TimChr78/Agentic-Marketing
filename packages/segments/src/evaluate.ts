@@ -1,5 +1,6 @@
 import {
   DEFAULT_PURPOSES,
+  mergeComponentCtes,
   type Purposes,
   publishedSingleton,
   type SegmentCondition,
@@ -95,6 +96,7 @@ export async function evaluate(cond: SegmentCondition, ctx: EvalContext): Promis
   if ('not' in cond) return minus(await universe(ctx), await evaluate(cond.not, ctx));
   if ('trait' in cond) return traitSet(cond, ctx);
   if ('event' in cond) return eventSet(cond, ctx);
+  if ('message' in cond) return messageSet(cond, ctx);
   if ('consent' in cond) return consentSet(cond.consent, ctx);
   if ('topic' in cond) return topicSet(cond.topic, ctx);
   if ('score' in cond) return scoreSet(cond.score, ctx);
@@ -212,9 +214,108 @@ async function eventSet(c: Extract<SegmentCondition, { event: string }>, ctx: Ev
   return new Set([...perProfile].filter(([p, n]) => all.has(p) && ok(n)).map(([p]) => p));
 }
 
-async function consentSet(purpose: string, ctx: EvalContext): Promise<Set<string>> {
+/** The purposes a consent or message condition may name, resolved once per evaluation. */
+export async function purposesOf(ctx: Pick<EvalContext, 'tx' | '_purposes'>): Promise<Purposes> {
   ctx._purposes ??= publishedSingleton(ctx.tx, 'purposes').then((p) => p?.purposes ?? DEFAULT_PURPOSES);
-  const p = (await ctx._purposes).find((x) => x.key === purpose);
+  return ctx._purposes;
+}
+
+/** Validates a purpose key in a condition, so a typo fails with what to read instead of matching nobody. */
+export async function assertPurpose(purpose: string | undefined, ctx: Pick<EvalContext, 'tx' | '_purposes'>): Promise<void> {
+  if (purpose === undefined) return;
+  const purposes = await purposesOf(ctx);
+  if (!purposes.some((p) => p.key === purpose))
+    throw new AppError('invalid_input', `Unknown purpose "${purpose}" in a message condition. See purposes.list.`);
+}
+
+/** Postgres caps a statement at 65,535 parameters; resolve merge components in chunks this size. */
+const ID_CHUNK = 1000;
+const inList = (ids: string[]) =>
+  sql.join(
+    ids.map((id) => sql`${id}`),
+    sql`, `,
+  );
+
+/**
+ * Every profile id in the merge component of each of `reps`, mapped to its representative. Message
+ * events record the profile id the send knew, so a person who merged afterwards keeps the opens and
+ * clicks recorded under the profile that was folded into them (#441).
+ */
+async function componentOf(ctx: EvalContext, reps: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Set(reps)];
+  for (let i = 0; i < unique.length; i += ID_CHUNK) {
+    const chunk = unique.slice(i, i + ID_CHUNK);
+    const rows = (
+      await ctx.tx.execute<{ representative: string; profile_id: string }>(sql`
+        WITH RECURSIVE ${mergeComponentCtes(ctx.workspaceId, {
+          componentOf: sql`SELECT p.id AS rep FROM profiles p WHERE p.workspace_id = ${ctx.workspaceId} AND p.id IN (${inList(chunk)})`,
+        })}
+        SELECT representative COLLATE "default" AS representative, profile_id FROM merge_component`)
+    ).rows;
+    for (const r of rows) out.set(r.profile_id, r.representative);
+  }
+  return out;
+}
+
+/** The representative of each of these profile ids (the person it was merged into, if any). */
+async function representativesOf(ctx: EvalContext, ids: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Set(ids)];
+  for (let i = 0; i < unique.length; i += ID_CHUNK) {
+    const chunk = unique.slice(i, i + ID_CHUNK);
+    const rows = (
+      await ctx.tx.execute<{ origin: string; representative: string }>(sql`
+        WITH RECURSIVE ${mergeComponentCtes(ctx.workspaceId, {
+          seeds: sql`SELECT p.id AS id FROM profiles p WHERE p.workspace_id = ${ctx.workspaceId} AND p.id IN (${inList(chunk)})`,
+        })}
+        SELECT origin COLLATE "default" AS origin, representative COLLATE "default" AS representative FROM merge_representative`)
+    ).rows;
+    for (const r of rows) out.set(r.origin, r.representative);
+  }
+  return out;
+}
+
+/**
+ * A message condition (#441): what happened to the messages the platform sent, counted from the
+ * event store's message log. Opens and clicks live there, not in the customer event stream, so this
+ * is how "opened in the last 30 days" is asked. Opens and clicks reach no bus event, so membership
+ * moves when a segment is recomputed; a journey's wait-until still checks one person at once.
+ */
+async function messageSet(c: Extract<SegmentCondition, { message: string }>, ctx: EvalContext): Promise<Set<string>> {
+  await assertPurpose(c.purpose, ctx);
+  const all = await universe(ctx);
+  const min = c.count?.gte ?? (c.count?.lte === undefined ? 1 : 0);
+  const max = c.count?.lte;
+  const ok = (n: number) => n >= min && (max === undefined || n <= max);
+  // A scoped check reads the scope's merge components, so rows stored under a merged-away profile
+  // still count for the person it became.
+  const scoped = ctx.scope ? await componentOf(ctx, [...all]) : undefined;
+  const counts = await ctx.events.countMessageEvents(ctx.workspaceId, {
+    type: c.message,
+    sinceSeconds: c.within ? durationSeconds(c.within) : undefined,
+    channel: c.channel,
+    purpose: c.purpose,
+    sentBy: c.broadcast ?? c.journey,
+    profileIds: scoped ? [...scoped.keys()] : undefined,
+  });
+  const toPerson =
+    scoped ??
+    (await representativesOf(
+      ctx,
+      counts.map((r) => r.profileId),
+    ));
+  const perProfile = new Map<string, number>();
+  for (const r of counts) {
+    const person = toPerson.get(r.profileId);
+    if (person) perProfile.set(person, (perProfile.get(person) ?? 0) + r.count);
+  }
+  if (ok(0)) return new Set([...all].filter((p) => ok(perProfile.get(p) ?? 0)));
+  return new Set([...perProfile].filter(([p, n]) => all.has(p) && ok(n)).map(([p]) => p));
+}
+
+async function consentSet(purpose: string, ctx: EvalContext): Promise<Set<string>> {
+  const p = (await purposesOf(ctx)).find((x) => x.key === purpose);
   if (!p) throw new AppError('invalid_input', `Unknown purpose "${purpose}" in a consent condition. See purposes.list.`);
   const all = await universe(ctx);
   const states = await ctx.tx
@@ -238,8 +339,7 @@ async function consentSet(purpose: string, ctx: EvalContext): Promise<Set<string
 }
 
 async function topicSet(topic: string, ctx: EvalContext): Promise<Set<string>> {
-  ctx._purposes ??= publishedSingleton(ctx.tx, 'purposes').then((p) => p?.purposes ?? DEFAULT_PURPOSES);
-  const found = findTopic(await ctx._purposes, topic);
+  const found = findTopic(await purposesOf(ctx), topic);
   if (!found) throw new AppError('invalid_input', `Unknown topic "${topic}" in a segment condition. See purposes.list.`);
   const all = await universe(ctx);
   const rows = await ctx.tx
@@ -332,6 +432,9 @@ export function relevant(cond: SegmentCondition, e: BusEvent): boolean {
   // recomputes segments on its schedule).
   if ('topic' in cond) return false;
   if ('score' in cond) return false;
+  // Opens and clicks are message events, not customer events, so no event on the bus makes a
+  // message condition change. The scheduler's refresh (and segments.refresh) pick them up.
+  if ('message' in cond) return false;
   // Form confirmations (frm_) and imports (imp_) carry no consent field; the consent hook records theirs.
   if ('consent' in cond && /^(frm|imp)_/.test(e.sourceId)) return true;
   return Object.keys(e.traits).length > 0 || Object.keys(e.consent).length > 0 || e.type === 'identify';

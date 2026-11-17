@@ -13,7 +13,8 @@ import { usePickerIndex } from './pickerIndex';
 import { type LiveReference, mergeObservation, mergeReferenceSnapshots, type ReferenceSnapshot } from './referenceSnapshots';
 
 // Segment condition builder: the same tree agents read and write, edited as rows instead of JSON.
-// A condition is a group ({all}/{any}) or one leaf: trait, event, consent, segment or not.
+// A condition is a group ({all}/{any}) or one leaf: trait, event, message engagement, consent,
+// segment or not.
 
 type Op = 'eq' | 'neq' | 'in' | 'gt' | 'gte' | 'lt' | 'lte' | 'exists' | 'not_exists' | 'contains';
 type Scalar = string | number | boolean;
@@ -30,6 +31,16 @@ interface EventCondition {
   count?: { gte?: number; lte?: number };
   within?: string;
 }
+type MessageEvent = 'delivered' | 'opened' | 'clicked' | 'bounced' | 'complained' | 'unsubscribed';
+interface MessageCondition {
+  message: MessageEvent;
+  count?: { gte?: number; lte?: number };
+  within?: string;
+  channel?: 'email' | 'sms' | 'push';
+  purpose?: string;
+  broadcast?: string;
+  journey?: string;
+}
 interface ConsentCondition {
   consent: string;
 }
@@ -45,9 +56,17 @@ interface GroupCondition {
 interface AnyCondition {
   any: Condition[];
 }
-type Condition = GroupCondition | AnyCondition | NotCondition | TraitCondition | EventCondition | ConsentCondition | SegmentRefCondition;
+type Condition =
+  | GroupCondition
+  | AnyCondition
+  | NotCondition
+  | TraitCondition
+  | EventCondition
+  | MessageCondition
+  | ConsentCondition
+  | SegmentRefCondition;
 type Mode = 'all' | 'any';
-type Kind = 'trait' | 'event' | 'consent' | 'segment' | 'not' | 'group';
+type Kind = 'trait' | 'event' | 'message' | 'consent' | 'segment' | 'not' | 'group';
 
 interface PurposeOption {
   key: string;
@@ -93,6 +112,15 @@ const DURATIONS = [
 ];
 
 const NUM_RE = /^-?(?:\d+|\d*\.\d+)$/;
+
+const MESSAGE_EVENTS: { value: MessageEvent; label: string }[] = [
+  { value: 'delivered', label: 'Was delivered' },
+  { value: 'opened', label: 'Opened' },
+  { value: 'clicked', label: 'Clicked' },
+  { value: 'bounced', label: 'Bounced' },
+  { value: 'complained', label: 'Marked as spam' },
+  { value: 'unsubscribed', label: 'Unsubscribed' },
+];
 
 export function SegmentEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<SegmentContent>) {
   const set = (patch: Partial<SegmentContent>) => onChange({ ...content, ...patch });
@@ -300,6 +328,7 @@ function RowEditor({
         >
           <option value="trait">Trait</option>
           <option value="event">Did event</option>
+          <option value="message">Message engagement</option>
           <option value="consent">Allows purpose</option>
           <option value="segment">In segment</option>
           <option value="not">Not</option>
@@ -321,6 +350,9 @@ function RowEditor({
 
       {kind === 'trait' && <TraitRow c={condition as TraitCondition} onChange={onChange} index={n} readOnly={readOnly} />}
       {kind === 'event' && <EventRow c={condition as EventCondition} onChange={onChange} index={n} readOnly={readOnly} />}
+      {kind === 'message' && (
+        <MessageRow c={condition as MessageCondition} onChange={onChange} index={n} readOnly={readOnly} purposes={purposes} />
+      )}
       {kind === 'consent' && (
         <ConsentRow c={condition as ConsentCondition} onChange={onChange} index={n} readOnly={readOnly} purposes={purposes} />
       )}
@@ -530,6 +562,189 @@ function EventRow({
         </Select>
       </Field>
     </div>
+  );
+}
+
+/**
+ * Message engagement (#441): what happened to the messages the platform sent. Opens and clicks
+ * live in the message log, not the customer event stream, so this row is how "opened in the last
+ * 30 days" is built. The send, channel and purpose narrow it; `not` around the row is "never".
+ */
+function MessageRow({
+  c,
+  onChange,
+  index,
+  readOnly,
+  purposes,
+}: {
+  c: MessageCondition;
+  onChange: (c: Condition) => void;
+  index: number;
+  readOnly: boolean;
+  purposes: PurposesRead;
+}) {
+  const set = (patch: Partial<MessageCondition>) => {
+    const next: MessageCondition = { ...c, ...patch };
+    for (const [key, value] of Object.entries(patch)) if (value === undefined) delete (next as unknown as Record<string, unknown>)[key];
+    onChange(next);
+  };
+  const setCount = (raw: string) => {
+    if (raw.trim() === '') {
+      const next: MessageCondition = { ...c };
+      if (next.count) {
+        const count = { ...next.count };
+        delete count.gte;
+        if (count.lte === undefined) delete next.count;
+        else next.count = count;
+      }
+      onChange(next);
+    } else set({ count: { ...c.count, gte: Math.max(0, Math.floor(Number(raw) || 0)) } });
+  };
+  const source = c.broadcast ? 'broadcast' : c.journey ? 'journey' : 'any';
+  const missingPurpose = c.purpose && !purposes.purposes.some((p) => p.key === c.purpose);
+
+  return (
+    <div className="space-y-2">
+      <div className="grid gap-2 sm:grid-cols-[180px_150px_170px]">
+        <Field label={`Message event, condition ${index}`} hideLabel>
+          <Select
+            value={c.message}
+            disabled={readOnly}
+            aria-label={`Message event, condition ${index}`}
+            onChange={(e) => set({ message: e.target.value as MessageEvent })}
+          >
+            {MESSAGE_EVENTS.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={`At least how many messages, condition ${index}`} hideLabel unit="messages">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            inputMode="numeric"
+            value={c.count?.gte ?? ''}
+            readOnly={readOnly}
+            onChange={(e) => setCount(e.target.value)}
+          />
+        </Field>
+        <Field label={`In the last, condition ${index}`} hideLabel>
+          <Select
+            value={c.within ?? ''}
+            disabled={readOnly}
+            aria-label={`In the last, condition ${index}`}
+            onChange={(e) => set({ within: e.target.value || undefined })}
+          >
+            <option value="">Any time</option>
+            {DURATIONS.map((d) => (
+              <option key={d.value} value={d.value}>
+                {d.label}
+              </option>
+            ))}
+            {c.within && !DURATIONS.some((d) => d.value === c.within) && <option value={c.within}>{c.within}</option>}
+          </Select>
+        </Field>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label={`Channel, condition ${index}`} hideLabel>
+          <Select
+            value={c.channel ?? ''}
+            disabled={readOnly}
+            aria-label={`Channel, condition ${index}`}
+            onChange={(e) => set({ channel: (e.target.value || undefined) as MessageCondition['channel'] })}
+          >
+            <option value="">Any channel</option>
+            <option value="email">E-mail</option>
+            <option value="sms">SMS</option>
+            <option value="push">Push</option>
+          </Select>
+        </Field>
+        <Field label={`Purpose, condition ${index}`} hideLabel>
+          <Select
+            value={c.purpose ?? ''}
+            disabled={readOnly || purposes.loading}
+            aria-label={`Purpose, condition ${index}`}
+            onChange={(e) => set({ purpose: e.target.value || undefined })}
+          >
+            <option value="">
+              {purposes.loading ? 'Loading purposes…' : purposes.error ? `Couldn't load: ${purposes.error}` : 'Any purpose'}
+            </option>
+            {purposes.purposes.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.name}
+              </option>
+            ))}
+            {missingPurpose && c.purpose && <option value={c.purpose}>Unavailable purpose ({c.purpose})</option>}
+          </Select>
+        </Field>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label={`Sent from, condition ${index}`} hideLabel>
+          <Select
+            value={source}
+            disabled={readOnly}
+            aria-label={`Sent from, condition ${index}`}
+            onChange={(e) =>
+              set({ broadcast: undefined, journey: undefined, ...(e.target.value === 'any' ? {} : { [e.target.value]: '' }) })
+            }
+          >
+            <option value="any">Any send</option>
+            <option value="broadcast">From a broadcast</option>
+            <option value="journey">From a journey</option>
+          </Select>
+        </Field>
+        {source !== 'any' && (
+          <SendSourcePicker
+            type={source as 'broadcast' | 'journey'}
+            value={c[source] ?? ''}
+            onChange={(id) => set({ [source]: id } as Partial<MessageCondition>)}
+            disabled={readOnly}
+            index={index}
+          />
+        )}
+      </div>
+      <p className="text-[12px] text-muted">
+        Opens are counted only where the provider or the workspace tracks them, and a mailbox that pre-fetches the pixel can open a message
+        before the person does: treat opens as a hint and clicks as a signal.
+      </p>
+    </div>
+  );
+}
+
+/** One picker for the broadcast or journey the counted messages came from. */
+function SendSourcePicker({
+  type,
+  value,
+  onChange,
+  disabled,
+  index,
+}: {
+  type: 'broadcast' | 'journey';
+  value: string;
+  onChange: (id: string) => void;
+  disabled?: boolean;
+  index: number;
+}) {
+  const list = usePickerIndex(type);
+  const items = list.data?.artifacts ?? [];
+  const known = !value || items.some((a) => a.id === value);
+  const label = type === 'broadcast' ? `Broadcast, condition ${index}` : `Journey, condition ${index}`;
+  return (
+    <Field label={label} hideLabel>
+      <Select value={value} disabled={disabled || list.loading} aria-label={label} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{list.loading ? `Loading ${type}s…` : list.error ? `Couldn't load: ${list.error}` : `Choose a ${type}…`}</option>
+        {!known && value && <option value={value}>{value} (not found)</option>}
+        {items.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name}
+            {a.publishedVersion ? ` · live v${a.publishedVersion}` : ' · not live yet'}
+          </option>
+        ))}
+      </Select>
+    </Field>
   );
 }
 
@@ -908,6 +1123,7 @@ function kindOf(c: Condition): Kind {
   if ('not' in c) return 'not';
   if ('trait' in c) return 'trait';
   if ('event' in c) return 'event';
+  if ('message' in c) return 'message';
   if ('consent' in c) return 'consent';
   if ('segment' in c) return 'segment';
   return 'trait';
@@ -917,6 +1133,8 @@ function blank(kind: Kind): Condition {
   switch (kind) {
     case 'event':
       return { event: '' };
+    case 'message':
+      return { message: 'opened' };
     case 'consent':
       return { consent: '' };
     case 'segment':

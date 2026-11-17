@@ -670,6 +670,13 @@ const Duration = z
   .describe('Look-back window, e.g. "P7D"');
 const PropKey = z.string().regex(/^[A-Za-z0-9_]{1,64}$/, 'Letters, digits and _');
 const Scalar = z.union([z.string().max(500), z.number(), z.boolean()]);
+/**
+ * What happened to a message the platform sent (#441). These are the engagement outcomes stored in
+ * ClickHouse `message_events`; the platform's own sends are the source, so a segment can count an
+ * open or a click without waiting for (or inventing) a customer event.
+ */
+export const segmentMessageEvent = z.enum(['delivered', 'opened', 'clicked', 'bounced', 'complained', 'unsubscribed']);
+export type SegmentMessageEvent = z.infer<typeof segmentMessageEvent>;
 export type SegmentCondition =
   | { all: SegmentCondition[] }
   | { any: SegmentCondition[] }
@@ -680,6 +687,15 @@ export type SegmentCondition =
       value?: string | number | boolean | (string | number)[];
     }
   | { event: string; where?: Record<string, string | number | boolean>; count?: { gte?: number; lte?: number }; within?: string }
+  | {
+      message: SegmentMessageEvent;
+      count?: { gte?: number; lte?: number };
+      within?: string;
+      channel?: 'email' | 'sms' | 'push';
+      purpose?: string;
+      broadcast?: string;
+      journey?: string;
+    }
   | { consent: string }
   | { topic: string }
   | { score: { key: string; gte?: number; lte?: number } }
@@ -707,6 +723,35 @@ export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
         within: Duration.optional(),
       })
       .strict(),
+    z
+      .object({
+        message: segmentMessageEvent.describe(
+          'What happened to a message the platform sent: delivered, opened, clicked, bounced, complained or unsubscribed',
+        ),
+        count: z
+          .object({ gte: z.number().int().min(0).optional(), lte: z.number().int().min(0).optional() })
+          .optional()
+          .describe('How many such messages; default at least once'),
+        within: Duration.optional(),
+        channel: z.enum(['email', 'sms', 'push']).optional().describe('Only messages on this channel'),
+        purpose: z
+          .string()
+          .regex(/^[a-z][a-z0-9_]{0,63}$/)
+          .optional()
+          .describe('Only messages sent for this purpose, e.g. "marketing_email"'),
+        broadcast: z
+          .string()
+          .regex(/^bct_[0-9a-f]{32}$/)
+          .optional()
+          .describe('Only messages from this broadcast'),
+        journey: z
+          .string()
+          .regex(/^jrn_[0-9a-f]{32}$/)
+          .optional()
+          .describe('Only messages from this journey'),
+      })
+      .strict()
+      .refine((c) => !(c.broadcast && c.journey), 'Choose a broadcast or a journey, not both'),
     z
       .object({
         consent: z
@@ -1801,7 +1846,7 @@ export const artifactTypes = {
     prefix: 'seg',
     label: 'Segment',
     description:
-      'A group of people. Dynamic segments are defined by traits, events in a time window, consent and other segments, and are recomputed; static segments have an explicit member list (manual, CSV or API) for migrations and one-off sends; snapshots freeze another segment so the audience cannot change between review and send. Preview any mode with segments.preview, and edit lists with audiences.add, audiences.remove and audiences.import. Membership is not consent: sends still check consent, suppression and delivery policy.',
+      'A group of people. Dynamic segments are defined by traits, events in a time window, message engagement (opens, clicks and delivery outcomes of the messages this platform sent), consent and other segments, and are recomputed; static segments have an explicit member list (manual, CSV or API) for migrations and one-off sends; snapshots freeze another segment so the audience cannot change between review and send. Preview any mode with segments.preview, and edit lists with audiences.add, audiences.remove and audiences.import. Membership is not consent: sends still check consent, suppression and delivery policy.',
     content: segment,
   },
   experience: {

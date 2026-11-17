@@ -97,6 +97,30 @@ At 10M profiles × ~50 events/profile/month ≈ 500M rows/month, which a single 
 }
 ```
 
+A condition can count the platform's own engagement instead of a customer event: `message` names
+what happened to a message it sent, read from ClickHouse `message_events` (#441).
+
+```json
+{ "message": "opened", "within": "P30D", "count": { "gte": 2 },
+  "channel": "email", "purpose": "marketing_email", "broadcast": "bct_…" }
+```
+
+- `message` is `delivered`, `opened`, `clicked`, `bounced`, `complained` or `unsubscribed`.
+- `within` is an ISO 8601 window, `count` the number of such messages (default at least once; `{"lte": 0}`
+  is "never"), `channel` narrows to `email`, `sms` or `push`, and `purpose` to a published purpose key.
+- `broadcast` or `journey` (not both) counts only the messages that send produced.
+- `not`, `all` and `any` compose it like any other leaf, and a merge is followed: messages recorded
+  under a profile that was later merged in count for the person it became.
+- **How opens are measured:** an open comes from the provider's tracking pixel, so it exists only
+  where the adapter or the workspace tracks opens (open-pixel tracking is off by default;
+  `packages/email` adapters such as Brevo add their own). No mailbox or proxy marker is stored, so a
+  privacy-conscious mailbox that pre-fetches the pixel counts as an open. Treat opens as a hint and
+  clicks as a signal, and prefer `clicked` for offers that must not overstate engagement.
+- **Refreshes, not the event stream:** opens and clicks are message events, not customer events, so
+  a message condition changes membership when the segment is recomputed (the scheduler's regular
+  pass or `segments.refresh`), not on the event that streams a segment update. A journey's
+  wait-until still checks it for one person immediately.
+
 Two evaluation modes from the same definition:
 
 | Mode | Used for | How |

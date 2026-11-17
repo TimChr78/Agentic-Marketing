@@ -32,6 +32,19 @@ const durationText = (d: string) => {
 
 export { durationText };
 
+/** A message engagement condition in words (#441). */
+function messageText(event: string): string {
+  const text: Record<string, string> = {
+    delivered: 'Was delivered a message',
+    opened: 'Opened a message',
+    clicked: 'Clicked a link in a message',
+    bounced: 'Bounced a message',
+    complained: 'Marked a message as spam',
+    unsubscribed: 'Unsubscribed from a message',
+  };
+  return text[event] ?? `Had message event ${event}`;
+}
+
 export function ConditionView({ condition, depth = 0 }: { condition: unknown; depth?: number }) {
   const c = (condition ?? {}) as Cond;
   if (Array.isArray(c.all) || Array.isArray(c.any)) {
@@ -85,6 +98,37 @@ export function ConditionView({ condition, depth = 0 }: { condition: unknown; de
         {count?.gte !== undefined && <> at least {count.gte} times</>}
         {count?.lte !== undefined && <> at most {count.lte} times</>}
         {typeof c.within === 'string' && <> in the last {durationText(c.within)}</>}
+      </p>
+    );
+  }
+  if (typeof c.message === 'string') {
+    const count = c.count as { gte?: number; lte?: number } | undefined;
+    const channel = typeof c.channel === 'string' ? c.channel : undefined;
+    return (
+      <p className="text-[13px]">
+        {messageText(c.message)}
+        {channel && <> by {channel === 'email' ? 'e-mail' : channel}</>}
+        {typeof c.purpose === 'string' && (
+          <>
+            {' '}
+            for <Mono>{c.purpose}</Mono>
+          </>
+        )}
+        {count?.gte !== undefined && count.gte !== 1 && <> at least {count.gte} times</>}
+        {count?.lte !== undefined && <> at most {count.lte} times</>}
+        {typeof c.within === 'string' && <> in the last {durationText(c.within)}</>}
+        {typeof c.broadcast === 'string' && (
+          <>
+            {' '}
+            from broadcast <RefName id={c.broadcast} />
+          </>
+        )}
+        {typeof c.journey === 'string' && (
+          <>
+            {' '}
+            from journey <RefName id={c.journey} />
+          </>
+        )}
       </p>
     );
   }
