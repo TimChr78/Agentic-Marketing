@@ -124,6 +124,30 @@ describe('templates.check', () => {
     );
   });
 
+  it('warns, without blocking, when the footer uses CSS the check cannot evaluate (#872)', async () => {
+    const api = t.api(owner);
+    const created = await api.call('artifacts.create', {
+      type: 'email_template',
+      name: 'Footer behind a media query',
+      content: {
+        purpose: 'marketing_email',
+        subject: 'A calm subject',
+        mjml:
+          '<mjml><mj-head><mj-style>@media (max-width: 600px) { .footer { display: none; } }</mj-style></mj-head>' +
+          '<mj-body><mj-section><mj-column><mj-text>Hi</mj-text>' +
+          '<mj-text><a class="footer" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>' +
+          '</mj-column></mj-section></mj-body></mjml>',
+      },
+    });
+    const r = await api.call('templates.check', { artifactId: created.artifactId });
+    const finding = r.findings.find((f) => f.category === 'compliance' && f.message.includes("can't evaluate"));
+    expect(finding).toMatchObject({ severity: 'warning' });
+    expect(finding?.message).toContain('`@media`');
+    expect(finding?.message).toContain('check it in a client preview');
+    expect(r.summary.blocking).toBe(0);
+    expect(r.findings.filter((f) => f.category === 'compliance' && f.severity === 'blocking')).toEqual([]);
+  });
+
   it('checks links only when asked, through the egress guard, and caches each URL', async () => {
     const artifactId = await createTemplate(
       'Links',

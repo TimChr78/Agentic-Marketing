@@ -3,7 +3,7 @@ import type { EmailTemplate } from '@agentic-marketing/artifacts';
 import { redactCredentials } from '@agentic-marketing/core';
 import { Parser } from 'htmlparser2';
 import { type Rendered, type RenderOptions, type RenderVars, renderTemplate, templateRenderError, unsubscribeUrlFor } from './render';
-import { unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
+import { unsubscribeCssConstructs, unsubscribeCssWarningMessage, unsubscribeLinkProblem, unsubscribeProblemMessage } from './unsubscribe';
 
 // Pre-send checks (#90): a template can be valid MJML/Liquid and still fail in an inbox, so this
 // inspects the rendered e-mail (the same output the preview shows, with the sample data) for the
@@ -302,6 +302,16 @@ function checkCompliance(t: EmailTemplate, opts: EmailCheckOptions, c: Collector
       location: 'mjml',
       fix: 'Make the footer link to {{ unsubscribe_url }} visible and give it text, e.g. an “Unsubscribe” link.',
     });
+  else if (opts.marketing) {
+    // #872: CSS the check cannot evaluate may hide the link, but it may equally leave it visible.
+    // That is a warning, never a refusal: save and publish stay allowed, with a client preview.
+    const constructs = unsubscribeCssConstructs(renderedHtml, unsubscribeUrl);
+    if (constructs.length > 0)
+      c.add('compliance', 'unsubscribe-css', 'warning', unsubscribeCssWarningMessage(constructs), {
+        location: 'mjml',
+        fix: 'Check the footer in a mail client, or simplify the styles that decide whether the unsubscribe link shows.',
+      });
+  }
   // A physical address in the footer is a warning, but there is no workspace or brand field to
   // compare against, so there is nothing concrete to report; skip it rather than guess.
   if (opts.purposeChannels && !opts.purposeChannels.includes('email'))
