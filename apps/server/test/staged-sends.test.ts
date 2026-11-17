@@ -333,15 +333,17 @@ describe('staged send', () => {
     expect(resumed.stage?.stopReason).toContain('failed');
     expect((await messagesOf(id)).length).toBe(PEOPLE);
 
-    // The rest really goes out once its window opens.
-    await t.srv.db.admin.query(
-      `UPDATE messages SET not_before = now() - interval '1 minute' WHERE workspace_id = $1 AND journey_id = $2 AND status = 'queued'`,
-      [ws, id],
-    );
+    // The rest really goes out once its window opens. Update every row (not only `queued`): a row
+    // the worker already claimed as `sending` keeps its future not_before otherwise, and on a busy
+    // CI worker that left part of the rest unsent within the wait below.
+    await t.srv.db.admin.query(`UPDATE messages SET not_before = now() - interval '1 minute' WHERE workspace_id = $1 AND journey_id = $2`, [
+      ws,
+      id,
+    ]);
     const sentRest = await eventually(
       async () => (await messagesOf(id)).filter((m) => m.status === 'sent').length,
       (n) => n === PEOPLE - canary.length,
-      30_000,
+      60_000,
     );
     expect(sentRest).toBe(PEOPLE - canary.length);
   }, 90_000);

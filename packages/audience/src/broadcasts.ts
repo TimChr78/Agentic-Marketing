@@ -1399,11 +1399,31 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         const stats = canaryIds.length
           ? await deps.events.messageStats(ws, { since: run.createdAt, journeyId: broadcastId, messageIds: canaryIds })
           : {};
+        // The SQL message rows and the consent ledger are the durable source of truth. Delivery
+        // events are published through the outbox after their transaction commits (#978 part 2), so
+        // a check that ran before publication would miss a bounce or complaint and release the rest
+        // of a send that should have stopped. `messageStats` stays as a floor for event-derived
+        // counts; the rows below cannot be behind the transaction that recorded them.
+        const dbSent = canaryRows.filter((m) => ['sent', 'delivered', 'bounced', 'complained'].includes(m.status)).length;
+        const dbBounced = canaryRows.filter((m) => m.status === 'bounced').length;
+        const dbComplained = canaryRows.filter((m) => m.status === 'complained').length;
+        const [unsubscribedRows] = canaryIds.length
+          ? await tx
+              .select({ n: count() })
+              .from(schema.consentRecords)
+              .where(
+                and(
+                  eq(schema.consentRecords.workspaceId, ws),
+                  inArray(schema.consentRecords.messageId, canaryIds),
+                  eq(schema.consentRecords.source, 'unsubscribe'),
+                ),
+              )
+          : [{ n: 0 }];
         const counts = {
-          sent: stats.sent ?? 0,
-          bounced: stats.bounced ?? 0,
-          complained: stats.complained ?? 0,
-          unsubscribed: stats.unsubscribed ?? 0,
+          sent: Math.max(stats.sent ?? 0, dbSent),
+          bounced: Math.max(stats.bounced ?? 0, dbBounced),
+          complained: Math.max(stats.complained ?? 0, dbComplained),
+          unsubscribed: Math.max(stats.unsubscribed ?? 0, Number(unsubscribedRows?.n ?? 0)),
         };
         const rate = (n: number) => (counts.sent ? n / counts.sent : 0);
         const rates = {
@@ -1418,8 +1438,7 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         // event has not landed yet, so it counts as sent rather than failing a healthy canary.
         const failedCanary = canaryRows.filter((m) => m.status === 'failed').length;
         const suppressedCanary = canaryRows.filter((m) => m.status === 'suppressed').length;
-        const dbSent = canaryRows.filter((m) => ['sent', 'delivered', 'bounced', 'complained'].includes(m.status)).length;
-        const delivered = Math.max(counts.sent, dbSent);
+        const delivered = counts.sent;
         // Only "too few to judge the rates" depends on the canary's size; a canary of any size
         // where half or more could not be delivered stops the run (#300).
         const undeliverable = failedCanary + suppressedCanary;
