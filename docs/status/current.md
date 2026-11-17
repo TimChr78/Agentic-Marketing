@@ -2,7 +2,7 @@
 
 Durable handoff for the agent working on this repository. Update it when a long run starts, when work lands, and at every handoff. A new session should be able to resume from this file alone.
 
-_Last updated: 2026-11-14_
+_Last updated: 2026-11-17_
 
 ## Now
 
@@ -51,8 +51,8 @@ _Last updated: 2026-11-14_
   - **0.14.25** (consent evidence, redaction value shapes, reporting and ads: #936, #937, #953, #958, #959, #962) is released and verified. Two batches needed scope cuts after review: #936 keeps the newer-signup evidence rule and leaves serialising consent writers, merges and erasure to #978 (0.15.0); #937 covers structured values, short schemes, escaped JSON, URL-encoded pairs and Pwd/Pass names as passes after the released rules, while PEM blocks, typographic quotes and `=>` separators moved to #989.
   - **0.14.26** (approvals on archived artifacts, mandate repair and `artifacts.archive`, reversed replays after undo, doctor endpoints, OTLP/env forwarding with a syntax-aware env guard, Recipes install and retry: #950, #951, #955, #957, #961, #963, #965, #966; migration 0103) is released and verified.
   - **0.14.27** (holdout report in SQL with paging #972, 30-day idempotency key retention #976 with migration 0104, Better Auth 1.7.23 with its plugins grouped and the minor/patch updates replacing Dependabot #980/#981) is released and verified. Follow-ups: #985 (holdout chain parity), #986 (identity map memory), #989 (redaction shapes needing input context), #996 (AppError details unredacted).
-  - **0.14.28** (AppError details redacted at every exit: #996) is released.
-  - **0.15.0** is in progress; #978 (consent, identity and erasure lock protocol) ships as 0.15.0 in three PRs: https://claude.ai/artifact/6cW9tRJAjL6QCt8M7gsWW1
+  - **0.14.28** (AppError details redacted at every exit: #996) is released and verified.
+  - **0.15.0** (consent, identity and erasure lock protocol, #978; Node 26, #1005) is released: prepared keys #983, transactional outbox #988, durable erasure #1009, lock activation #1010. Drain upgrade; scheduler replica required; erasure finishes in a background job; retention pruning of unconfirmed signups paused. Follow-ups: #1008 (alerts and guardrails read delayed events), #1011 (journey trait writes vs. merges).
   - Follow-ups filed: #936 (an unchanged-status signup leaves no ledger row) and #937 (redaction value shapes the rules do not consume).
   - Decisions taken with the recommended options: #906 documents the same-key retry rule and adds an optional key to MCP tools; #904 documents the header-copying limit; #917 keeps `unattributed` and adds `unmatched` and `spendTruncated`; #911 archives the older of two active mandates; #900 hides archived artifacts from `artifacts.list` unless `includeArchived` is set.
   - **Follow-ups filed (S3):** #671, #672 and #673.
@@ -100,4 +100,4 @@ The Wave 5 epic #439 is closed (complete in code); these checks are tracked in #
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.14.28, released from `main`; v0.14.27 is verified.
+- The last release is v0.15.0, released from `main`; v0.14.28 is verified.
