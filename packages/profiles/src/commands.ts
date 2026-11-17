@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
-import { type IdentifierType, schema, type Tx } from '@agentic-marketing/db';
+import { AppError } from '@agentic-marketing/core';
+import { erasureCleanupJob, type IdentifierType, schema } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -22,6 +22,7 @@ import {
 } from './consent';
 import { personCrypto } from './crypto';
 import { isProfileCursorTimestamp } from './cursor';
+import { disposeErasure, eraseProfileStage, type PreparedErasure, prepareErasure } from './erasure';
 
 // Profile, consent and data-subject-request commands. Personal data is decrypted only for
 // principals with profiles:pii; agents additionally see only traits the attribute schema marks
@@ -853,97 +854,93 @@ export const exportProfile = defineCommand({
 });
 
 /**
- * Removes people for good: events (ClickHouse), hot state, messages, consent ledger, merges and
- * the profiles themselves (identifiers and keys cascade, so sealed data is crypto-shredded).
- * `suppress` keeps hashes of their e-mail and phone so they are never contacted again: right for
- * an erasure request, wrong for a retention cleanup (they may sign up again).
+ * Removes people for good (see `removeProfiles` in ./erasure for the SQL rows): events (ClickHouse),
+ * hot state, messages, consent ledger, merges and the profiles themselves (identifiers and keys
+ * cascade, so sealed data is crypto-shredded). `suppress` keeps hashes of their e-mail and phone so
+ * they are never contacted again: right for an erasure request, wrong for a retention cleanup (they
+ * may sign up again).
  */
-export async function removeProfiles(
-  tx: Tx,
-  ws: string,
-  family: string[],
-  services: { events: CommandContext['services']['events']; hot?: CommandContext['services']['hot'] },
-  opts: { suppress: boolean },
-) {
-  const ids = await tx.select().from(schema.identifiers).where(inArray(schema.identifiers.profileId, family));
-  // Events first: if this fails nothing else has changed, and the removal can simply be retried.
-  await services.events.deleteEventsOf(ws, {
-    anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-    userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
-    profileIds: family,
-  });
-  // And from the decision API's hot state.
-  await services.hot?.deleteSnapshot(ws, {
-    anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-    userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
-  });
-  // Their browsers and apps stop getting notifications.
-  const anon = ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value);
-  const users = ids.filter((i) => i.type === 'user_id').map((i) => i.value);
-  if (anon.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.anonymousId, anon));
-  if (users.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.userId, users));
-  await tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
-  // Out of every journey: no later step runs, and the participant's context (the trigger event) goes too.
-  await tx.delete(schema.journeyParticipants).where(inArray(schema.journeyParticipants.profileId, family));
-  // Out of every segment's materialised membership; static list rows cascade with the profile below.
-  await tx.delete(schema.segmentMemberships).where(inArray(schema.segmentMemberships.profileId, family));
-  const suppress = opts.suppress ? ids.filter((i) => i.type === 'email' || i.type === 'phone') : [];
-  if (suppress.length)
-    await tx
-      .insert(schema.suppressions)
-      .values(
-        suppress.map((i) => ({ workspaceId: ws, channel: i.type === 'email' ? 'email' : 'sms', valueHash: i.value, reason: 'erased' })),
-      )
-      .onConflictDoNothing();
-  const consent = await tx
-    .delete(schema.consentRecords)
-    .where(inArray(schema.consentRecords.profileId, family))
-    .returning({ id: schema.consentRecords.id });
-  await tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.fromId, family));
-  await tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.intoId, family));
-  // Cascades to identifiers, profile keys (crypto-shredding), consent state and decision scores.
-  await tx.delete(schema.profiles).where(inArray(schema.profiles.id, family));
-  return { profiles: family.length, identifiers: ids.length, consentRecords: consent.length };
-}
-
 export const eraseProfile = defineCommand({
   name: 'profiles.erase',
   title: 'Erase a person (erasure request)',
   description:
-    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again.',
+    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again. The person’s rows are gone when this returns `pending`; ClickHouse events and the decision API’s hot state are cleaned up by a durable job, whose progress `profiles.erasureStatus` reports.',
   input: z.object({ profileId: ProfileId, reason: z.string().min(1).max(500).describe('E.g. "Erasure request by e-mail on 2026-10-22"') }),
-  output: z.object({ erasureId: z.string(), profiles: z.number(), identifiers: z.number(), consentRecords: z.number() }),
+  output: z.object({
+    erasureId: z.string(),
+    counts: z.object({ profiles: z.number(), identifiers: z.number(), consentRecords: z.number() }),
+    status: z.literal('pending').describe('External cleanup is queued; poll profiles.erasureStatus for complete'),
+  }),
   permission: 'profiles:erase',
   effect: 'destructive',
   humansOnly: true,
   target: (i) => i.profileId,
+  prepare: async (_input, ctx) => {
+    const prepared = await prepareErasure(ctx.db, ctx.principal.workspaceId, ctx.services.keyProvider);
+    return { value: prepared, dispose: () => disposeErasure(prepared) };
+  },
   handler: async (input, ctx) => {
-    const ws = ctx.principal.workspaceId;
-    const p = await canonical(ctx, input.profileId);
-    const family = await mergedFamily(ctx.tx, ws, p.id);
-    const erasureId = newId('era');
-    // Tombstones first, in the same transaction, while the identifiers still exist: keyed hashes
-    // (never raw values) let the resolver drop events that were queued or arrive late (#210).
-    const erased = await ctx.tx
+    const prepared = ctx.prepared as PreparedErasure | undefined;
+    if (!prepared) throw new Error('profiles.erase runs without its prepared keys');
+    const result = await eraseProfileStage(ctx.tx, {
+      workspaceId: ctx.principal.workspaceId,
+      profileId: input.profileId,
+      requestedBy: ctx.principal.userId,
+      reason: input.reason,
+      prepared,
+    });
+    return { erasureId: result.erasureId, counts: result.counts, status: result.status };
+  },
+});
+
+export const erasureStatus = defineCommand({
+  name: 'profiles.erasureStatus',
+  title: 'Read an erasure’s status',
+  description:
+    'Whether an erasure’s external cleanup (ClickHouse events and the decision API’s hot state) has finished. The person’s SQL rows are already gone when profiles.erase returns. Erasures recorded before durable cleanup existed have no job and report complete.',
+  input: z.object({ erasureId: z.string().regex(/^era_[0-9a-f]{32}$/) }),
+  output: z.object({
+    erasureId: z.string(),
+    status: z
+      .enum(['pending', 'running', 'complete', 'failed'])
+      .describe('failed means the retry budget ran out; events may still remain in ClickHouse'),
+    counts: z.record(z.string(), z.number()),
+    profiles: z.number().int().describe('Profiles in the erased merged family'),
+    attempts: z.number().int(),
+    lastError: z.string().nullable(),
+    checkpoints: z.object({
+      clickhouse: z.boolean().describe('The ClickHouse event deletion finished'),
+      hotState: z.boolean().describe('The decision API hot-state deletion finished'),
+    }),
+    requestedAt: z.string(),
+    completedAt: z.string().nullable(),
+  }),
+  permission: 'profiles:read',
+  effect: 'read',
+  target: (i) => i.erasureId,
+  handler: async ({ erasureId }, ctx) => {
+    const [erasure] = await ctx.tx
       .select()
-      .from(schema.identifiers)
-      .where(and(eq(schema.identifiers.workspaceId, ws), inArray(schema.identifiers.profileId, family)));
-    if (erased.length) {
-      const crypto = personCrypto(ctx.tx, ws, ctx.services.keyProvider);
-      const hashes = [...new Set(await Promise.all(erased.map((i) => crypto.tombstoneHash(i.type, i.value))))];
-      await ctx.tx
-        .insert(schema.erasureTombstones)
-        .values(hashes.map((identHash) => ({ workspaceId: ws, identHash, erasedAt: sql`now()`, erasureId })))
-        .onConflictDoUpdate({
-          target: [schema.erasureTombstones.workspaceId, schema.erasureTombstones.identHash],
-          set: { erasedAt: sql`now()`, erasureId },
-        });
-    }
-    const counts = await removeProfiles(ctx.tx, ws, family, ctx.services, { suppress: true });
-    await ctx.tx
-      .insert(schema.erasures)
-      .values({ workspaceId: ws, id: erasureId, profileIds: family, requestedBy: ctx.principal.userId, reason: input.reason, counts });
-    return { erasureId, ...counts };
+      .from(schema.erasures)
+      .where(and(eq(schema.erasures.workspaceId, ctx.principal.workspaceId), eq(schema.erasures.id, erasureId)));
+    if (!erasure)
+      throw new AppError('not_found', `No erasure ${erasureId}. It may belong to another workspace or never have been recorded.`);
+    const job = await erasureCleanupJob(ctx.tx, ctx.principal.workspaceId, erasureId);
+    const complete = !job || job.state === 'complete';
+    return {
+      erasureId,
+      status: job ? (job.state === 'pending_external' ? ('pending' as const) : job.state) : ('complete' as const),
+      counts: erasure.counts,
+      profiles: erasure.profileIds.length,
+      attempts: job?.attempts ?? 0,
+      lastError: job?.lastError ?? null,
+      checkpoints: {
+        clickhouse: complete || Boolean(job?.clickhouseDone),
+        hotState: complete || Boolean(job?.hotstateDone),
+      },
+      requestedAt: erasure.at.toISOString(),
+      completedAt: job?.completedAt?.toISOString() ?? null,
+    };
   },
 });
 
@@ -960,6 +957,7 @@ export const profileCommands = [
   setTopicPreference,
   exportProfile,
   eraseProfile,
+  erasureStatus,
 ] as const;
 
 /**

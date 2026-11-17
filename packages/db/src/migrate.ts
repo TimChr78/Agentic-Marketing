@@ -135,6 +135,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0104_idempotency_keys_created_at.sql': '0.14.27',
   '0106_transactional_outbox.sql': '0.15.0',
   '0107_broadcast_defer_count.sql': '0.15.0',
+  '0108_erasure_cleanup_jobs.sql': '0.15.0',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

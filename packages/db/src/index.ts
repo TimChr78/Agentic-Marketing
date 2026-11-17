@@ -1,6 +1,7 @@
 export * from './backfill';
 export * from './data-keys';
 export * from './domains';
+export * from './erasureCleanup';
 export * from './erasures';
 export * from './idempotency';
 export * from './migrate';

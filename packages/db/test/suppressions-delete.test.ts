@@ -110,8 +110,9 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'idempotency_keys',
       'agent_actions',
       'broadcast_runs',
+      'erasure_cleanup_jobs',
     ])
-      await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
+      await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
     await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);
 
     const limitedUrl = new URL(d.url.toString());

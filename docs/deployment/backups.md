@@ -144,13 +144,24 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
 `am restore` closes the gap for erasures recorded in the live database:
 
 1. Before replacing Postgres it reads every row of `erasures` and `erasure_tombstones` from the
-   current database. If the log cannot be read, the restore stops rather than risk resurrecting
-   someone.
-2. After `pg_restore` it re-applies each erasure: profiles and identifiers the erasure names are
-   deleted again (with their profile keys, consent records, messages, journey participations,
-   segment memberships and push subscriptions), e-mail and phone suppression hashes are put back,
-   and the erasure row and its keyed tombstones are re-inserted. Replay is idempotent, so restoring
-   twice is safe, and entries for workspaces the snapshot no longer contains are skipped.
+   current database, together with any pending `erasure_cleanup_jobs`, and saves their union next
+   to the backup directory in a mode-600 file bound to that database (PostgreSQL's
+   `system_identifier` and database name) and that backup. If the log cannot be read, the restore
+   stops rather than risk resurrecting someone. A retry merges the live log with that saved copy
+   (replay is idempotent), so erasures recorded after a failed attempt are still replayed. The copy
+   is removed only after a successful replay; a file bound to another database or backup, or a
+   restore lock left by a crashed process, is refused by name so an operator can remove it
+   deliberately. The captured file holds erasure records (`reason`, `requestedBy`, profile ids and
+   counts), keyed tombstones, and the sealed cleanup selectors with their wrapped service key — no
+   plaintext identifiers. `reason` is operator text and may contain personal data, so do not copy
+   the file off-host.
+2. It applies pending migrations and then re-applies each erasure: profiles and identifiers the
+   erasure names are deleted again (with their profile keys, consent records, messages, journey
+   participations, segment memberships and push subscriptions), e-mail and phone suppression hashes
+   are put back, and the erasure row, keyed tombstones and cleanup jobs are re-inserted. The
+   migrations need `APP_DB_PASSWORD`, so a restore that has erasures to replay refuses to replace
+   anything without it. Replay is idempotent, so restoring twice is safe, and entries for workspaces
+   the snapshot no longer contains are skipped.
 3. It then restores ClickHouse, if asked, and reports how many profiles and tombstones were replayed.
 
 A person erased after the snapshot therefore stays erased: no profile, no identifiers, no profile

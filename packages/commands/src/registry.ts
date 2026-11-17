@@ -149,6 +149,12 @@ export interface CommandContext {
   /** The policy engine's decision for an agent write (ADR-0016). "ask" means the change must wait for a person. */
   policy?: PolicyOutcome;
   /**
+   * What the command's `prepare` hook returned, run before its transaction. A command uses this for
+   * work that must not happen under the transaction (e.g. unwrapping keys that part 3's identity
+   * lock protects).
+   */
+  prepared?: unknown;
+  /**
    * The agent a change is being published for when the caller is not the agent itself (#454): a
    * scheduler running a held agent change uses a system user principal but must still be treated as
    * that agent by publish hooks (a person's stop is sticky against it).
@@ -159,6 +165,24 @@ export interface CommandContext {
    * executor records it in the agent ledger. Only agent writes keep it.
    */
   undo?: UndoCollector;
+}
+
+export interface CommandPrepareContext {
+  principal: Principal;
+  services: Services;
+  /** The owner/app pool, for preparation that needs its own short transaction. */
+  db: Db;
+  surface?: Surface;
+}
+
+/**
+ * The result of a command's preparation. `value` reaches the handler as `ctx.prepared`; `dispose`
+ * runs after the handler's transaction commits or rolls back (and after every retry attempt), so
+ * in-memory key copies can be zeroed.
+ */
+export interface PreparedCommand<T = unknown> {
+  value: T;
+  dispose?: () => void;
 }
 
 export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType = z.ZodType, N extends string = string> {
@@ -223,6 +247,13 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
    * the message a direct send created, which guardrails need to find the agent's own sends.
    */
   ledgerImpact?: (output: z.output<O>) => Record<string, unknown> | undefined;
+  /**
+   * Preparation that runs before the command's transaction, with its own short transactions for
+   * anything that needs one. A retryable error (a key changed, a serialisation failure or a
+   * deadlock) rolls the transaction back, re-runs this and tries the handler again, up to three
+   * times; this is the command-level form of `withPreparedKeys` from packages/secrets.
+   */
+  prepare?: (input: z.output<I>, ctx: CommandPrepareContext) => Promise<PreparedCommand>;
   handler: (input: z.output<I>, ctx: CommandContext) => Promise<z.input<O>>;
 }
 
@@ -388,6 +419,54 @@ export function sanitizeAppError(err: AppError): AppError {
   return message === err.message && details === err.details ? err : new AppError(err.code, message, details);
 }
 
+/** True for an error a prepared command may retry: a changed key, a serialisation failure or a deadlock. */
+function isRetryablePreparation(err: unknown): boolean {
+  return (
+    (typeof err === 'object' && err !== null && (err as { retryable?: unknown }).retryable === true) ||
+    isSerializationFailure(err) ||
+    isDeadlock(err)
+  );
+}
+
+/**
+ * Runs a command's preparation and its transaction, retrying the whole pair when preparation or
+ * the transaction reports a retryable error. The transaction has rolled back before the retry, and
+ * every attempt disposes its prepared value. Without a `prepare` hook this is just the transaction.
+ */
+async function runPreparedCommand<I extends z.ZodType, T>(
+  prepare: ((input: z.output<I>, ctx: CommandPrepareContext) => Promise<PreparedCommand>) | undefined,
+  input: z.output<I>,
+  ctx: CommandPrepareContext,
+  run: (prepared: unknown) => Promise<T>,
+): Promise<T> {
+  if (!prepare) return run(undefined);
+  let last: unknown;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let prepared: PreparedCommand | undefined;
+    try {
+      prepared = await prepare(input, ctx);
+    } catch (err) {
+      if (attempt < 3 && isRetryablePreparation(err)) {
+        last = err;
+        continue;
+      }
+      throw err;
+    }
+    try {
+      return await run(prepared.value);
+    } catch (err) {
+      if (attempt < 3 && isRetryablePreparation(err)) {
+        last = err;
+        continue;
+      }
+      throw err;
+    } finally {
+      prepared.dispose?.();
+    }
+  }
+  throw last;
+}
+
 export function createExecutor(db: Db, services: Services, options: ExecutorOptions = {}) {
   const appendAudit = (
     tx: Tx,
@@ -518,205 +597,213 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const committed: (() => Promise<void>)[] = [];
       let policy: PolicyOutcome | undefined;
       try {
-        const result = await retrySnapshotConflicts(cmd.effect === 'read', () =>
-          db.withWorkspace(
-            principal.workspaceId,
-            async (tx) => {
-              committed.length = 0;
-              policy = undefined;
-              // Collect every ledger row this command writes, so its idempotency key can name all of
-              // them: config.import records one undoable publish per artifact besides its own row,
-              // and undoing any of them must reverse the stored response (#950 review).
-              ledgerActionsByTx.set(tx, []);
-              // Retention (#976): every cutoff below is computed by PostgreSQL against the clock
-              // that wrote created_at, so an app process with a skewed clock cannot change the
-              // window. The lookup ignores a key past the retention; the write path replaces its
-              // expired row.
-              const idempotencyRetentionDays = options.idempotencyRetentionDays ?? IDEMPOTENCY_RETENTION_DAYS;
-              // The agent-policy lock comes first for every agent write (#922 A2): before a
-              // command's `impact`, which may lock artifacts for the independent check. Taking it
-              // later is what let a held run and a publish request deadlock on the same artifact.
-              // See lockAgentPolicy for the one global order.
-              if (agent && cmd.effect !== 'read') await lockAgentPolicy(tx, principal.workspaceId, agent.id);
-              // The agent was resolved when the request (or a hosted run) began; a pause or revoke
-              // committed since then stops this command too (#275). Read under the lock above.
-              if (agent) {
-                const [current] = await tx
-                  .select({ status: schema.agents.status, statusReason: schema.agents.statusReason })
-                  .from(schema.agents)
-                  .where(eq(schema.agents.id, agent.id));
-                if (current && current.status !== 'active')
-                  throw new AppError(
-                    'forbidden',
-                    `This agent (${agent.name}) is ${current.status}${current.statusReason ? `: ${current.statusReason}` : ''}. ${
-                      current.status === 'paused' ? 'A person can resume it in Settings → Agents.' : 'Its credentials no longer work.'
-                    }`,
-                  );
-              }
-              // The idempotency replay comes before the policy engine (#930). A retry of a write
-              // that already ran must answer the stored response: re-deciding would count the
-              // first action against the limits, could refuse the retry, and would bill the
-              // independent check again. Authentication, permission, the missing-record guard,
-              // input validation and this agent's status (under the lock above) still ran, so a
-              // paused or revoked agent gets its usual refusal instead of a replay.
-              if (opts.idempotencyKey) {
-                // The key was serialised before BEGIN, so any winner has committed and its row is
-                // visible even in this read's snapshot (#812). Rows past the retention are ignored,
-                // so they do not replay and do not answer the reused conflict (#976).
-                const [hit] = await tx
-                  .select()
-                  .from(schema.idempotencyKeys)
-                  .where(
-                    and(
-                      eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
-                      eq(schema.idempotencyKeys.key, opts.idempotencyKey),
-                      sql`${schema.idempotencyKeys.createdAt} > now() - make_interval(days => ${idempotencyRetentionDays})`,
-                    ),
-                  );
-                if (hit) {
-                  // `inputHash` binds the caller too, so another principal presenting the key is a
-                  // conflict, never the first caller's stored response. Rows written before 0.14.21
-                  // carry the old caller-agnostic hash and answer 409 until a new key is used.
-                  if (hit.command !== cmd.name || hit.inputHash !== idempotencyHash)
-                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
-                      reason: 'idempotency_key_reused',
-                    });
-                  // The action this response described was undone since (#950): the stored answer
-                  // says something that is no longer true, so it is not replayed. Only an agent
-                  // write has a ledger row to undo, so a person's keys never reach this.
-                  if (hit.reversedAt)
+        const runTransaction = (prepared: unknown) =>
+          retrySnapshotConflicts(cmd.effect === 'read', () =>
+            db.withWorkspace(
+              principal.workspaceId,
+              async (tx) => {
+                committed.length = 0;
+                policy = undefined;
+                // Collect every ledger row this command writes, so its idempotency key can name all of
+                // them: config.import records one undoable publish per artifact besides its own row,
+                // and undoing any of them must reverse the stored response (#950 review).
+                ledgerActionsByTx.set(tx, []);
+                // Retention (#976): every cutoff below is computed by PostgreSQL against the clock
+                // that wrote created_at, so an app process with a skewed clock cannot change the
+                // window. The lookup ignores a key past the retention; the write path replaces its
+                // expired row.
+                const idempotencyRetentionDays = options.idempotencyRetentionDays ?? IDEMPOTENCY_RETENTION_DAYS;
+                // The agent-policy lock comes first for every agent write (#922 A2): before a
+                // command's `impact`, which may lock artifacts for the independent check. Taking it
+                // later is what let a held run and a publish request deadlock on the same artifact.
+                // See lockAgentPolicy for the one global order.
+                if (agent && cmd.effect !== 'read') await lockAgentPolicy(tx, principal.workspaceId, agent.id);
+                // The agent was resolved when the request (or a hosted run) began; a pause or revoke
+                // committed since then stops this command too (#275). Read under the lock above.
+                if (agent) {
+                  const [current] = await tx
+                    .select({ status: schema.agents.status, statusReason: schema.agents.statusReason })
+                    .from(schema.agents)
+                    .where(eq(schema.agents.id, agent.id));
+                  if (current && current.status !== 'active')
                     throw new AppError(
-                      'conflict',
-                      'The action this idempotency key answered was undone, so its stored response no longer holds. Nothing was re-run; use a new idempotency key.',
-                      { reason: 'idempotency_key_reversed' },
+                      'forbidden',
+                      `This agent (${agent.name}) is ${current.status}${current.statusReason ? `: ${current.statusReason}` : ''}. ${
+                        current.status === 'paused' ? 'A person can resume it in Settings → Agents.' : 'Its credentials no longer work.'
+                      }`,
                     );
-                  const replay = hit.response as z.output<C['output']>;
-                  // A replay returns before the handler, so computing targets only on the handler
-                  // path left the replay's audit row without them (#905). Compute them from the
-                  // stored response the same way. Every audited read stores its full output: the
-                  // commands with `auditTarget`/`auditTargets` and a `sensitiveOutput` are writes,
-                  // and the reads' targets are plain ids, so redaction never removes them.
-                  target = cmd.auditTarget?.(replay) ?? target;
-                  if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(replay);
-                  return replay;
                 }
-              }
-              // ADR-0016: every agent write passes the policy engine before the handler runs.
-              if (agent && cmd.effect !== 'read') {
-                const impact = cmd.impact ? await cmd.impact(parsed.data, { principal, tx, services }) : {};
-                policy = await agentPolicy(tx, services, principal, {
-                  command: cmd.name,
-                  actionClass: impact.actionClass ?? actionClassOf(cmd),
-                  impact,
-                  approvable: cmd.approvable === true,
-                  input: parsed.data,
-                });
-                if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
-              }
-              const undo = createUndoCollector();
-              const out = withInputWarnings(
-                cmd.output.parse(
-                  await cmd.handler(parsed.data, {
-                    principal,
-                    tx,
-                    services,
-                    surface: opts.surface,
-                    policy,
-                    undo,
-                    afterCommit: (fn) => committed.push(fn),
-                  }),
-                ),
-                unknownMessages,
-              ) as z.output<C['output']>;
-              // The handler ran: let it link the ledger row to what it created (e.g. a message id),
-              // while the policy decision itself stays the one made before the change.
-              if (agent && policy && cmd.ledgerImpact) {
-                const extra = cmd.ledgerImpact(out);
-                if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
-              }
-              if (opts.idempotencyKey) {
-                // Expired row first, fresh row second, both in this transaction and under the
-                // advisory lock. A DO UPDATE would carry over every other column and child row of
-                // the old request — the #975 columns `reversed_at` and `idempotency_key_actions`
-                // (links with ON DELETE CASCADE) — so a reused expired key must start clean; keep
-                // delete-then-insert. The predicate is computed in SQL so the database's clock
-                // decides what expired.
-                await tx
-                  .delete(schema.idempotencyKeys)
-                  .where(
-                    and(
-                      eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
-                      eq(schema.idempotencyKeys.key, opts.idempotencyKey),
-                      sql`${schema.idempotencyKeys.createdAt} <= now() - make_interval(days => ${idempotencyRetentionDays})`,
-                    ),
-                  );
-                try {
-                  await tx.insert(schema.idempotencyKeys).values({
-                    workspaceId: principal.workspaceId,
-                    key: opts.idempotencyKey,
+                // The idempotency replay comes before the policy engine (#930). A retry of a write
+                // that already ran must answer the stored response: re-deciding would count the
+                // first action against the limits, could refuse the retry, and would bill the
+                // independent check again. Authentication, permission, the missing-record guard,
+                // input validation and this agent's status (under the lock above) still ran, so a
+                // paused or revoked agent gets its usual refusal instead of a replay.
+                if (opts.idempotencyKey) {
+                  // The key was serialised before BEGIN, so any winner has committed and its row is
+                  // visible even in this read's snapshot (#812). Rows past the retention are ignored,
+                  // so they do not replay and do not answer the reused conflict (#976).
+                  const [hit] = await tx
+                    .select()
+                    .from(schema.idempotencyKeys)
+                    .where(
+                      and(
+                        eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
+                        eq(schema.idempotencyKeys.key, opts.idempotencyKey),
+                        sql`${schema.idempotencyKeys.createdAt} > now() - make_interval(days => ${idempotencyRetentionDays})`,
+                      ),
+                    );
+                  if (hit) {
+                    // `inputHash` binds the caller too, so another principal presenting the key is a
+                    // conflict, never the first caller's stored response. Rows written before 0.14.21
+                    // carry the old caller-agnostic hash and answer 409 until a new key is used.
+                    if (hit.command !== cmd.name || hit.inputHash !== idempotencyHash)
+                      throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                        reason: 'idempotency_key_reused',
+                      });
+                    // The action this response described was undone since (#950): the stored answer
+                    // says something that is no longer true, so it is not replayed. Only an agent
+                    // write has a ledger row to undo, so a person's keys never reach this.
+                    if (hit.reversedAt)
+                      throw new AppError(
+                        'conflict',
+                        'The action this idempotency key answered was undone, so its stored response no longer holds. Nothing was re-run; use a new idempotency key.',
+                        { reason: 'idempotency_key_reversed' },
+                      );
+                    const replay = hit.response as z.output<C['output']>;
+                    // A replay returns before the handler, so computing targets only on the handler
+                    // path left the replay's audit row without them (#905). Compute them from the
+                    // stored response the same way. Every audited read stores its full output: the
+                    // commands with `auditTarget`/`auditTargets` and a `sensitiveOutput` are writes,
+                    // and the reads' targets are plain ids, so redaction never removes them.
+                    target = cmd.auditTarget?.(replay) ?? target;
+                    if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(replay);
+                    return replay;
+                  }
+                }
+                // ADR-0016: every agent write passes the policy engine before the handler runs.
+                if (agent && cmd.effect !== 'read') {
+                  const impact = cmd.impact ? await cmd.impact(parsed.data, { principal, tx, services }) : {};
+                  policy = await agentPolicy(tx, services, principal, {
                     command: cmd.name,
-                    inputHash: idempotencyHash,
-                    response: redact(out, cmd.sensitiveOutput) as object,
+                    actionClass: impact.actionClass ?? actionClassOf(cmd),
+                    impact,
+                    approvable: cmd.approvable === true,
+                    input: parsed.data,
                   });
-                } catch (err) {
-                  // A live row from another caller (the unique key is workspace + key) still
-                  // answers the same clean conflict as a sequential reuse, never a silent
-                  // overwrite or a 500.
-                  if (isIdempotencyKeyConflict(err))
-                    throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
-                      reason: 'idempotency_key_reused',
-                    });
-                  throw err;
+                  if (policy.decision === 'deny') throw new PolicyDeniedError(policy);
                 }
-              }
-              // A read's target can only come from its output too (#763): a lookup resolves the
-              // person, a preview samples people, a list returns rows about people.
-              target = cmd.auditTarget?.(out) ?? target;
-              if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(out);
-              if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
-              if (agent && policy) {
-                const actionId = await recordAgentAction(
-                  tx,
-                  agent.id,
-                  cmd,
-                  policy,
-                  opts.surface,
-                  target,
-                  null,
-                  intentOf(parsed.data),
-                  undo.get(),
-                );
-                // Link the stored response to every ledger row the command wrote, so agents.undo can
-                // mark this key reversed and a replay stops describing an action that was undone.
-                // `recordAgentAction` collected each row, including the ones nested handlers wrote
-                // (config.import records one undoable publish per artifact besides its own row).
-                const actionIds = ledgerActionsByTx.get(tx) ?? (actionId === undefined ? [] : [actionId]);
-                if (opts.idempotencyKey && actionIds.length)
-                  await tx.insert(schema.idempotencyKeyActions).values(
-                    actionIds.map((agentActionId) => ({
+                const undo = createUndoCollector();
+                const out = withInputWarnings(
+                  cmd.output.parse(
+                    await cmd.handler(parsed.data, {
+                      principal,
+                      tx,
+                      services,
+                      surface: opts.surface,
+                      policy,
+                      undo,
+                      prepared,
+                      afterCommit: (fn) => committed.push(fn),
+                    }),
+                  ),
+                  unknownMessages,
+                ) as z.output<C['output']>;
+                // The handler ran: let it link the ledger row to what it created (e.g. a message id),
+                // while the policy decision itself stays the one made before the change.
+                if (agent && policy && cmd.ledgerImpact) {
+                  const extra = cmd.ledgerImpact(out);
+                  if (extra) policy = { ...policy, impact: { ...policy.impact, ...extra } };
+                }
+                if (opts.idempotencyKey) {
+                  // Expired row first, fresh row second, both in this transaction and under the
+                  // advisory lock. A DO UPDATE would carry over every other column and child row of
+                  // the old request — the #975 columns `reversed_at` and `idempotency_key_actions`
+                  // (links with ON DELETE CASCADE) — so a reused expired key must start clean; keep
+                  // delete-then-insert. The predicate is computed in SQL so the database's clock
+                  // decides what expired.
+                  await tx
+                    .delete(schema.idempotencyKeys)
+                    .where(
+                      and(
+                        eq(schema.idempotencyKeys.workspaceId, principal.workspaceId),
+                        eq(schema.idempotencyKeys.key, opts.idempotencyKey),
+                        sql`${schema.idempotencyKeys.createdAt} <= now() - make_interval(days => ${idempotencyRetentionDays})`,
+                      ),
+                    );
+                  try {
+                    await tx.insert(schema.idempotencyKeys).values({
                       workspaceId: principal.workspaceId,
-                      key: opts.idempotencyKey!,
-                      agentActionId,
-                    })),
+                      key: opts.idempotencyKey,
+                      command: cmd.name,
+                      inputHash: idempotencyHash,
+                      response: redact(out, cmd.sensitiveOutput) as object,
+                    });
+                  } catch (err) {
+                    // A live row from another caller (the unique key is workspace + key) still
+                    // answers the same clean conflict as a sequential reuse, never a silent
+                    // overwrite or a 500.
+                    if (isIdempotencyKeyConflict(err))
+                      throw new AppError('conflict', 'This idempotency key was already used for a different request. Use a new key.', {
+                        reason: 'idempotency_key_reused',
+                      });
+                    throw err;
+                  }
+                }
+                // A read's target can only come from its output too (#763): a lookup resolves the
+                // person, a preview samples people, a list returns rows about people.
+                target = cmd.auditTarget?.(out) ?? target;
+                if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(out);
+                if (cmd.effect !== 'read' && !cmd.auditsItself) await appendAudit(tx, principal, opts.surface, cmd, inputHash, target);
+                if (agent && policy) {
+                  const actionId = await recordAgentAction(
+                    tx,
+                    agent.id,
+                    cmd,
+                    policy,
+                    opts.surface,
+                    target,
+                    null,
+                    intentOf(parsed.data),
+                    undo.get(),
                   );
-              }
-              return out;
-            },
-            // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
-            {
-              snapshot: cmd.effect === 'read',
-              // Serialise the key before BEGIN (#812). A read's REPEATABLE READ snapshot must not
-              // predate the winner's commit, or the waiter re-runs the handler and then loses on
-              // the unique key. A session-level lock on the same connection, released after commit
-              // or rollback, gives the waiter a snapshot taken after the winner committed.
-              // Keyed by workspace + key only (#906 review round 3): every caller presenting one
-              // key must serialise before any handler runs, or two callers could both run handlers
-              // and the loser's external effects would survive its rolled-back transaction. The
-              // caller is still bound by `idempotencyHash`: after the lock, a row from another
-              // caller answers the reused conflict before the handler.
-              ...(opts.idempotencyKey ? { advisoryLockKey: `idempotency:${principal.workspaceId}:${opts.idempotencyKey}` } : {}),
-            },
-          ),
+                  // Link the stored response to every ledger row the command wrote, so agents.undo can
+                  // mark this key reversed and a replay stops describing an action that was undone.
+                  // `recordAgentAction` collected each row, including the ones nested handlers wrote
+                  // (config.import records one undoable publish per artifact besides its own row).
+                  const actionIds = ledgerActionsByTx.get(tx) ?? (actionId === undefined ? [] : [actionId]);
+                  if (opts.idempotencyKey && actionIds.length)
+                    await tx.insert(schema.idempotencyKeyActions).values(
+                      actionIds.map((agentActionId) => ({
+                        workspaceId: principal.workspaceId,
+                        key: opts.idempotencyKey!,
+                        agentActionId,
+                      })),
+                    );
+                }
+                return out;
+              },
+              // Reads see one consistent snapshot; writes keep read-committed so their locks see the latest rows.
+              {
+                snapshot: cmd.effect === 'read',
+                // Serialise the key before BEGIN (#812). A read's REPEATABLE READ snapshot must not
+                // predate the winner's commit, or the waiter re-runs the handler and then loses on
+                // the unique key. A session-level lock on the same connection, released after commit
+                // or rollback, gives the waiter a snapshot taken after the winner committed.
+                // Keyed by workspace + key only (#906 review round 3): every caller presenting one
+                // key must serialise before any handler runs, or two callers could both run handlers
+                // and the loser's external effects would survive its rolled-back transaction. The
+                // caller is still bound by `idempotencyHash`: after the lock, a row from another
+                // caller answers the reused conflict before the handler.
+                ...(opts.idempotencyKey ? { advisoryLockKey: `idempotency:${principal.workspaceId}:${opts.idempotencyKey}` } : {}),
+              },
+            ),
+          );
+        const result = await runPreparedCommand(
+          cmd.prepare,
+          parsed.data,
+          { principal, services, db, surface: opts.surface },
+          runTransaction,
         );
         // An audited read is recorded in its own transaction: the hash chain must be appended under
         // its lock with the latest entries visible, which a snapshot taken earlier would not show.

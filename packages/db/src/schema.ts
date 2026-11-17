@@ -569,6 +569,36 @@ export const outbox = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] }), uniqueIndex('outbox_operation_key').on(t.workspaceId, t.operationKey)],
 );
 
+export type ErasureCleanupState = 'pending_external' | 'running' | 'complete' | 'failed';
+/**
+ * Durable external cleanup for one erasure (#978 part 2b). `profiles.erase` writes it in the same
+ * transaction as the SQL deletion; the scheduler claims it with a lease and cleans ClickHouse and
+ * hot state outside any transaction, checkpointing each store.
+ */
+export const erasureCleanupJobs = pgTable(
+  'erasure_cleanup_jobs',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    erasureId: text('erasure_id').notNull(),
+    profileIds: text('profile_ids').array().notNull(),
+    state: text('state').$type<ErasureCleanupState>().notNull().default('pending_external'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: ts('next_attempt_at').notNull().defaultNow(),
+    leaseUntil: ts('lease_until'),
+    claimToken: text('claim_token'),
+    clickhouseDone: boolean('clickhouse_done').notNull().default(false),
+    hotstateDone: boolean('hotstate_done').notNull().default(false),
+    selectors: bytea('selectors'),
+    selectorKey: bytea('selector_key'),
+    selectorKek: text('selector_kek'),
+    lastError: text('last_error'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+    completedAt: ts('completed_at'),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.erasureId] })],
+);
+
 export const emailProviders = pgTable(
   'email_providers',
   {
