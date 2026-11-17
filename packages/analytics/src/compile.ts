@@ -1,3 +1,4 @@
+import { type MessageEvent, messageEventsWithPending } from '@agentic-marketing/events';
 import type { DimensionId, MeasureDef, SourceId, Unit } from './registry';
 import { MEASURES } from './registry';
 
@@ -50,6 +51,12 @@ export interface BuildInput {
   campaignMap?: CampaignMap;
   /** Restrict journey_events to one published version. Internal to named reports, never a user filter. */
   journeyVersion?: number;
+  /**
+   * Message events a decision already knows are committed but not published yet (#1008). They are
+   * read by the same query as published rows, so a metric means what it will mean once the outbox
+   * caught up. Only `message_events` measures accept them.
+   */
+  pendingMessageEvents?: readonly MessageEvent[];
 }
 
 export interface Column {
@@ -284,6 +291,9 @@ export function buildQuery(input: BuildInput): CompiledQuery {
   };
   const table = SOURCE_TABLE[source];
   const timeColumn = TIME_COLUMN[source];
+  const pending = input.pendingMessageEvents ?? [];
+  if (pending.length && source !== 'message_events')
+    throw new Error('pending message events can only be read with message_events measures');
   const revenue = measures.some((m) => m.id === 'revenue');
   const conversion = revenueExpressions(input.conversionRules, params);
 
@@ -376,7 +386,10 @@ export function buildQuery(input: BuildInput): CompiledQuery {
     where.push('name IN {names:Array(String)}');
   }
 
-  const innerSql = `SELECT ${inner.join(', ')} FROM ${table} FINAL WHERE ${where.join(' AND ')} ${
+  // With queued events the FROM is published rows UNION ALL the snapshot; without them it stays the
+  // plain table, so every ordinary query compiles exactly as before.
+  const from = pending.length ? messageEventsWithPending(pending, params) : `${table} FINAL`;
+  const innerSql = `SELECT ${inner.join(', ')} FROM ${from} WHERE ${where.join(' AND ')} ${
     groupBy.length ? `GROUP BY ${groupBy.join(', ')}` : ''
   }`;
 

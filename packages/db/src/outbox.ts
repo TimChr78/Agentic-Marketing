@@ -241,45 +241,75 @@ export async function outboxPublicationBarrier(
   return { outstanding: outstanding.length, failed: failed.length };
 }
 
+export interface PendingOutboxBatch {
+  /** The `message_event` payload: exactly the events the row will publish. */
+  payload: Record<string, unknown>;
+  /** The broadcast or journey the row names, when it names one. */
+  subjectRef: string | null;
+  /** A dead-lettered row: it will not publish without `am outbox`, but its events are still facts. */
+  deadLettered: boolean;
+}
+
 /**
- * Whether publication is complete for a set of subjects (a broadcast or journey) and individual
- * messages at once. A decision that reads ClickHouse events for more than one of them (the mandate
- * guardrails judge an agent's whole window) asks once instead of per subject. As in
- * `outboxPublicationBarrier`, a failed row is reported separately: it must not block a decision
- * forever, but a caller may not treat it as published either.
+ * The message events the workspace still owes ClickHouse (or never will, when dead-lettered) for a
+ * set of subjects and individual messages (#1008). A decision that reads the metric layer snapshots
+ * these BEFORE its ClickHouse read and hands them to the same query, so an event that is published
+ * in between is counted once and one that is not yet published is not missed.
  *
  * A message is named in the payload of its `message_event` row, because a direct send has no
- * broadcast or journey to carry in `subject_ref` (#1008). Rows written before that distinction
- * existed are found the same way: the payload is the only place the message id appears.
+ * broadcast or journey to carry in `subject_ref`; a broadcast or journey also matches its
+ * `subject_ref`, which is indexed. Only undelivered and failed rows are read, so the payload scan
+ * stays over the live queue and the dead letters, never the delivered history. `limit` bounds the
+ * rows; `truncated` says more matched, and a caller must then fail safe rather than decide on a
+ * partial snapshot.
  */
-export async function outboxPublicationOf(
+export async function pendingMessageEventPayloads(
   tx: Tx,
   workspaceId: string,
   refs: { subjects?: string[]; messageIds?: string[] },
-): Promise<{ outstanding: number; failed: number }> {
+  limit: number,
+): Promise<{ batches: PendingOutboxBatch[]; truncated: boolean }> {
   const subjects = refs.subjects ?? [];
   const messageIds = refs.messageIds ?? [];
-  if (!subjects.length && !messageIds.length) return { outstanding: 0, failed: 0 };
-  // The message half reads only undelivered or failed rows, so the payload scan stays small: the
-  // outbox holds the live queue and the dead letters, never the delivered history.
-  const messagesMatch = sql`EXISTS (
+  if (!subjects.length && !messageIds.length) return { batches: [], truncated: false };
+  // The payload names the messages and the broadcast or journey of each event, so it covers rows
+  // written before `subject_ref` carried the subject (and a batch that mixes subjects).
+  const payloadMatch = sql`EXISTS (
     SELECT 1 FROM jsonb_array_elements(
       CASE WHEN jsonb_typeof(${schema.outbox.payload}->'events') = 'array' THEN ${schema.outbox.payload}->'events' ELSE '[]'::jsonb END
-    ) AS e WHERE e->>'messageId' = ANY(${sql.param(messageIds)}::text[])
+    ) AS e
+    WHERE e->>'messageId' = ANY(${sql.param(messageIds)}::text[]) OR e->>'journeyId' = ANY(${sql.param(subjects)}::text[])
   )`;
-  const refMatches = (state: 'undelivered' | 'failed') => {
+  const relevant = () => {
     const parts = [];
     if (subjects.length) parts.push(inArray(schema.outbox.subjectRef, subjects));
-    if (messageIds.length) parts.push(and(eq(schema.outbox.kind, 'message_event'), messagesMatch));
-    const stateMatch =
-      state === 'undelivered' ? inArray(schema.outbox.state, ['pending', 'delivering']) : eq(schema.outbox.state, 'failed');
-    return and(eq(schema.outbox.workspaceId, workspaceId), stateMatch, or(...parts));
+    parts.push(and(eq(schema.outbox.kind, 'message_event'), payloadMatch));
+    return or(...parts);
   };
-  // One query per state class: each predicate is in WHERE, so the partial indexes outbox_ready and
-  // outbox_failed_subject stay usable and a delivered row is never scanned.
-  const outstanding = await tx.select({ n: sql<number>`count(*)::int` }).from(schema.outbox).where(refMatches('undelivered'));
-  const failed = await tx.select({ n: sql<number>`count(*)::int` }).from(schema.outbox).where(refMatches('failed'));
-  return { outstanding: outstanding[0]?.n ?? 0, failed: failed[0]?.n ?? 0 };
+  // One statement per state class so each predicate stays in WHERE and the partial indexes remain
+  // usable; a delivered row is never read.
+  const select = (state: 'undelivered' | 'failed') =>
+    tx
+      .select({
+        payload: schema.outbox.payload,
+        subjectRef: schema.outbox.subjectRef,
+        state: schema.outbox.state,
+      })
+      .from(schema.outbox)
+      .where(
+        and(
+          eq(schema.outbox.workspaceId, workspaceId),
+          state === 'undelivered' ? inArray(schema.outbox.state, ['pending', 'delivering']) : eq(schema.outbox.state, 'failed'),
+          relevant(),
+        ),
+      )
+      .orderBy(schema.outbox.createdAt)
+      .limit(limit + 1);
+  const rows = [...(await select('undelivered')), ...(await select('failed'))];
+  return {
+    batches: rows.slice(0, limit).map((r) => ({ payload: r.payload, subjectRef: r.subjectRef, deadLettered: r.state === 'failed' })),
+    truncated: rows.length > limit,
+  };
 }
 
 export interface OutboxPublicationLag {

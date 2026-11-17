@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import type {} from '@agentic-marketing/commands';
 import { type ClickHouseClient, createClient } from '@clickhouse/client';
+import { messageEventsWithPending } from './pending';
 import type { BusEvent } from './schema';
 
 // ClickHouse is the event store. This module is the only place that talks to it, and every
@@ -92,10 +93,21 @@ export interface EventStore {
   ): Promise<{ variants: { variant: string; exposed: number; converted: number }[]; unversioned: number }>;
   insertMessageEvents(events: MessageEvent[]): Promise<void>;
   insertJourneyEvents(events: JourneyEvent[]): Promise<void>;
-  /** Unique messages per event type since a time, optionally for one template or journey. */
+  /**
+   * Unique messages per event type since a time, optionally for one template or journey. A caller
+   * that must decide before the outbox published can pass the queued events: the same aggregation
+   * then reads published rows plus that snapshot (#1008).
+   */
   messageStats(
     workspaceId: string,
-    q: { since: Date; until?: Date; templateId?: string; journeyId?: string; messageIds?: string[] },
+    q: {
+      since: Date;
+      until?: Date;
+      templateId?: string;
+      journeyId?: string;
+      messageIds?: string[];
+      pendingEvents?: readonly MessageEvent[];
+    },
   ): Promise<Record<string, number>>;
   /** Per node and event type counts for a journey (analytics, canvas overlays). */
   journeyCounts(workspaceId: string, journeyId: string): Promise<{ node: string; type: string; count: number }[]>;
@@ -579,21 +591,24 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       });
     },
     async messageStats(workspaceId, q) {
+      const params: Record<string, unknown> = {
+        ws: workspaceId,
+        since: q.since.toISOString().replace('Z', ''),
+        ...(q.until ? { until: q.until.toISOString().replace('Z', '') } : {}),
+        t: q.templateId ?? '',
+        j: q.journeyId ?? '',
+        ids: q.messageIds ?? [],
+      };
       const rs = await query(workspaceId, {
-        query: `SELECT type, uniqExact(message_id) AS c FROM message_events FINAL
+        query: `SELECT type, uniqExact(message_id) AS c FROM ${
+          q.pendingEvents?.length ? messageEventsWithPending(q.pendingEvents, params) : 'message_events FINAL'
+        }
                 WHERE workspace_id = {ws:UUID} AND at >= {since:DateTime64(3, 'UTC')}
                 ${q.until ? "AND at < {until:DateTime64(3, 'UTC')}" : ''}
                 ${q.templateId ? 'AND template_id = {t:String}' : ''} ${q.journeyId ? 'AND journey_id = {j:String}' : ''}
                 ${q.messageIds ? 'AND message_id IN {ids:Array(String)}' : ''}
                 GROUP BY type`,
-        query_params: {
-          ws: workspaceId,
-          since: q.since.toISOString().replace('Z', ''),
-          ...(q.until ? { until: q.until.toISOString().replace('Z', '') } : {}),
-          t: q.templateId ?? '',
-          j: q.journeyId ?? '',
-          ids: q.messageIds ?? [],
-        },
+        query_params: params,
         format: 'JSONEachRow',
       });
       return Object.fromEntries((await rs.json<{ type: string; c: number }>()).map((r) => [r.type, Number(r.c)]));

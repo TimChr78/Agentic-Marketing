@@ -117,9 +117,8 @@ async function findings(tx: Tx, deps: GuardianDeps, workspaceId: string, agentId
             )
         )[0].n > 0
       : true;
-    // The guardrail also counts the message log while this agent's own message events are still
-    // unpublished or dead-lettered (#1008), so a ClickHouse or outbox outage delays the cap only by
-    // the SQL reads, never until the events arrive.
+    // The guardrail reads the agent's own queued message events together with the published ones
+    // (#1008), so a ClickHouse or outbox outage does not delay the cap until the events arrive.
     const breach = sentSince ? await deps.services.mandateGuardrails(tx, workspaceId, agentId, mandate.view) : null;
     if (breach) out.push({ kind: 'guardrail', action: 'cap', reason: breach, evidence: { mandate: mandate.view.id } });
   }
