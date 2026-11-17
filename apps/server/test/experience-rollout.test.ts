@@ -5,6 +5,7 @@ import { decideAll, loadPublishedExperiences, syncEdge } from '@agentic-marketin
 import type { DecideContext } from '@agentic-marketing/personalize/targeting';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { failFakeServer } from '../../../test-support/index';
 import { runAgentEventsOnce } from '../src/agents/events';
 import { runHoldsOnce } from '../src/agents/holds';
 import { type GuardrailReading, runExperienceRolloutsOnce } from '../src/agents/rollouts';
@@ -27,23 +28,27 @@ const kv = new Map<string, unknown>();
 
 beforeAll(async () => {
   cf = createServer(async (req, res) => {
-    const chunks: Buffer[] = [];
-    for await (const c of req) chunks.push(c as Buffer);
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '[]');
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const m = url.pathname.match(/^\/accounts\/([^/]+)\/storage\/kv\/namespaces\/([^/]+)(\/[^?]*)$/);
-    if (!m) return res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ success: false }));
-    const path = m[3];
-    if (path === '/bulk' && req.method === 'PUT') for (const e of body) kv.set(e.key, JSON.parse(e.value));
-    else if (path === '/bulk/delete' && req.method === 'POST') for (const k of body) kv.delete(k);
-    else if (path === '/keys' && req.method === 'GET') {
-      const prefix = url.searchParams.get('prefix') ?? '';
-      const names = [...kv.keys()].filter((k) => k.startsWith(prefix));
-      return res
-        .writeHead(200, { 'content-type': 'application/json' })
-        .end(JSON.stringify({ success: true, errors: [], result: names.map((name) => ({ name })) }));
+    try {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '[]');
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const m = url.pathname.match(/^\/accounts\/([^/]+)\/storage\/kv\/namespaces\/([^/]+)(\/[^?]*)$/);
+      if (!m) return res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ success: false }));
+      const path = m[3];
+      if (path === '/bulk' && req.method === 'PUT') for (const e of body) kv.set(e.key, JSON.parse(e.value));
+      else if (path === '/bulk/delete' && req.method === 'POST') for (const k of body) kv.delete(k);
+      else if (path === '/keys' && req.method === 'GET') {
+        const prefix = url.searchParams.get('prefix') ?? '';
+        const names = [...kv.keys()].filter((k) => k.startsWith(prefix));
+        return res
+          .writeHead(200, { 'content-type': 'application/json' })
+          .end(JSON.stringify({ success: true, errors: [], result: names.map((name) => ({ name })) }));
+      }
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ success: true, errors: [] }));
+    } catch {
+      failFakeServer(res, { success: false, errors: [{ code: 500, message: 'fake KV failed' }] });
     }
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ success: true, errors: [] }));
   });
   await new Promise<void>((r) => cf.listen(0, '127.0.0.1', r));
   cfBase = `http://127.0.0.1:${(cf.address() as AddressInfo).port}`;
