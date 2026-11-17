@@ -30,6 +30,16 @@ export const OAUTH_SELECTION_CLEANUP_TASK = 'oauth-workspace-selections.cleanup'
 export const OAUTH_SELECTION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 
 /**
+ * A worker loop's promise, labelled with the loop's name, so a shutdown that waits for it can say
+ * which one is still running instead of hanging silently (#1028). The label carries no tenant data.
+ */
+export type WorkerLoop = Promise<void> & { readonly worker: string };
+
+function loop(name: string, task: Promise<void>): WorkerLoop {
+  return Object.assign(task, { worker: name });
+}
+
+/**
  * The scheduler's recurring sweep of pending OAuth workspace choices nobody came back for. It is
  * deliberately cross-tenant, so it runs here (as the owner), never in a request.
  */
@@ -84,124 +94,163 @@ export function startScheduler(
     rolloutTickMs?: number;
     idempotencyCleanupTickMs?: number;
   } = {},
-): Promise<void>[] {
+): WorkerLoop[] {
   logger.info(
     'scheduler role: segment recomputation, broadcasts, the transactional outbox, erasure cleanup, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices, expired idempotency keys',
   );
   return [
     // One pass at start: an abandoned consent choice is short-lived, and nothing in the request
     // path may sweep across tenants (#838).
-    runOAuthSelectionCleanup(srv.db, signal),
+    loop('oauth-selection-cleanup', runOAuthSelectionCleanup(srv.db, signal)),
     // One pass at start: the 0.10.1 migration only adds the column; this fills completed rows in
     // short batches while sends continue, and stops when every row has its send time (#453).
-    runSentAtBackfill({ db: srv.db }, signal, {
-      log: (message) => logger.info(message),
-      onError: (err) => logger.error({ err }, 'sent_at backfill failed'),
-    }),
+    loop(
+      'sent-at-backfill',
+      runSentAtBackfill({ db: srv.db }, signal, {
+        log: (message) => logger.info(message),
+        onError: (err) => logger.error({ err }, 'sent_at backfill failed'),
+      }),
+    ),
     // The idempotency-key retention pass (#976): one pass at start, then periodically. It runs as
     // the owner in bounded batches with SKIP LOCKED, so several schedulers can share the work.
-    runIdempotencyKeyCleanup({ db: srv.db }, signal, {
-      retentionDays: srv.idempotencyRetentionDays,
-      tickMs: opts.idempotencyCleanupTickMs,
-      log: (message) => logger.info(message),
-      onError: (err) => logger.error({ err }, 'idempotency key cleanup failed'),
-    }),
+    loop(
+      'idempotency-key-cleanup',
+      runIdempotencyKeyCleanup({ db: srv.db }, signal, {
+        retentionDays: srv.idempotencyRetentionDays,
+        tickMs: opts.idempotencyCleanupTickMs,
+        log: (message) => logger.info(message),
+        onError: (err) => logger.error({ err }, 'idempotency key cleanup failed'),
+      }),
+    ),
     // One pass at start: the single-active-mandate repair (#911) keeps the mandate the runtime
     // uses and archives legacy duplicates; it needs the runtime's schema check, so it is code.
-    runActiveMandateRepair({ db: srv.db }, signal, {
-      log: (message) => logger.info(message),
-      onError: (err) => logger.error({ err }, 'single active mandate repair failed'),
-    }),
+    loop(
+      'mandate-repair',
+      runActiveMandateRepair({ db: srv.db }, signal, {
+        log: (message) => logger.info(message),
+        onError: (err) => logger.error({ err }, 'single active mandate repair failed'),
+      }),
+    ),
     // One pass at start, then every few hours: a request that names an archived artifact can never
     // publish, so it is closed as rejected instead of sitting in the queue (#957).
-    runArchivedApprovalSweep({ db: srv.db }, signal, {
-      log: (message) => logger.info(message),
-      onError: (err) => logger.error({ err }, 'archived approval sweep failed'),
-    }),
-    runSegmentScheduler(
-      {
-        db: srv.db,
-        events: srv.events,
-        bus: srv.bus,
-        tickMs: opts.segmentTickMs,
-        // Snapshots (what the decision API sees) follow a scheduled refresh at once.
-        afterRefresh: (ws, people) => refreshSnapshots({ db: srv.db, hot: srv.hot }, ws, people),
-      },
-      signal,
+    loop(
+      'archived-approval-sweep',
+      runArchivedApprovalSweep({ db: srv.db }, signal, {
+        log: (message) => logger.info(message),
+        onError: (err) => logger.error({ err }, 'archived approval sweep failed'),
+      }),
     ),
-    runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs),
+    loop(
+      'segments',
+      runSegmentScheduler(
+        {
+          db: srv.db,
+          events: srv.events,
+          bus: srv.bus,
+          tickMs: opts.segmentTickMs,
+          // Snapshots (what the decision API sees) follow a scheduled refresh at once.
+          afterRefresh: (ws, people) => refreshSnapshots({ db: srv.db, hot: srv.hot }, ws, people),
+        },
+        signal,
+      ),
+    ),
+    loop('broadcasts', runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs)),
     // Post-commit work enqueued by tenant transactions (#978 part 2): message events and DOI
     // confirmation sends. It runs across tenants, as the owner, and claims with SKIP LOCKED.
-    runOutboxDispatcher({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal),
-    runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention, erasureGraceHours: srv.erasureGraceHours }, signal),
+    loop('outbox-dispatcher', runOutboxDispatcher({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal)),
+    loop(
+      'retention',
+      runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention, erasureGraceHours: srv.erasureGraceHours }, signal),
+    ),
     // External erasure cleanup (#978 part 2b): ClickHouse and hot state, after the erasure's SQL
     // transaction committed. It waits for an in-flight outbox publisher of the erased person.
-    runErasureCleanup({ db: srv.db, kp: srv.keyProvider, events: srv.events, hot: srv.hot }, signal),
-    runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
-    runAudienceSyncs({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal),
-    runSpendImport({ db: srv.db, events: srv.events, kp: srv.keyProvider, egress: srv.egress }, signal),
-    runWarehouseExports(
-      {
-        db: srv.db,
-        events: srv.events,
-        kp: srv.keyProvider,
-        egress: srv.egress,
-        tickMs: opts.warehouseTickMs,
-        lagMs: opts.warehouseLagMs,
-      },
-      signal,
+    loop('erasure-cleanup', runErasureCleanup({ db: srv.db, kp: srv.keyProvider, events: srv.events, hot: srv.hot }, signal)),
+    loop('oauth-token-refresh', runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal)),
+    loop('audience-syncs', runAudienceSyncs({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal)),
+    loop('spend-import', runSpendImport({ db: srv.db, events: srv.events, kp: srv.keyProvider, egress: srv.egress }, signal)),
+    loop(
+      'warehouse-exports',
+      runWarehouseExports(
+        {
+          db: srv.db,
+          events: srv.events,
+          kp: srv.keyProvider,
+          egress: srv.egress,
+          tickMs: opts.warehouseTickMs,
+          lagMs: opts.warehouseLagMs,
+        },
+        signal,
+      ),
     ),
-    runEdgeSync({ db: srv.db, hot: srv.hot, kp: srv.keyProvider, egress: srv.egress, tickMs: opts.edgeTickMs }, signal),
-    runAlertEvaluator(
-      {
-        db: srv.db,
-        events: srv.events,
-        kp: srv.keyProvider,
-        email: srv.email,
-        directory: srv.directory,
-        publicUrl: srv.publicUrl,
-      },
-      signal,
-      { tickMs: opts.alertTickMs },
+    loop('edge-sync', runEdgeSync({ db: srv.db, hot: srv.hot, kp: srv.keyProvider, egress: srv.egress, tickMs: opts.edgeTickMs }, signal)),
+    loop(
+      'alerts',
+      runAlertEvaluator(
+        {
+          db: srv.db,
+          events: srv.events,
+          kp: srv.keyProvider,
+          email: srv.email,
+          directory: srv.directory,
+          publicUrl: srv.publicUrl,
+        },
+        signal,
+        { tickMs: opts.alertTickMs },
+      ),
     ),
-    runHolds({ db: srv.db, services: srv.services }, signal, opts.holdTickMs),
-    runGuardian(
-      { db: srv.db, services: srv.services, kp: srv.keyProvider, email: srv.email, directory: srv.directory, publicUrl: srv.publicUrl },
-      signal,
-      { tickMs: opts.guardianTickMs },
+    loop('holds', runHolds({ db: srv.db, services: srv.services }, signal, opts.holdTickMs)),
+    loop(
+      'guardian',
+      runGuardian(
+        { db: srv.db, services: srv.services, kp: srv.keyProvider, email: srv.email, directory: srv.directory, publicUrl: srv.publicUrl },
+        signal,
+        { tickMs: opts.guardianTickMs },
+      ),
     ),
-    runAgentNotifications(
-      { db: srv.db, kp: srv.keyProvider, email: srv.email, directory: srv.directory, publicUrl: srv.publicUrl },
-      signal,
-      { tickMs: opts.agentNotifyTickMs },
+    loop(
+      'agent-notifications',
+      runAgentNotifications(
+        { db: srv.db, kp: srv.keyProvider, email: srv.email, directory: srv.directory, publicUrl: srv.publicUrl },
+        signal,
+        { tickMs: opts.agentNotifyTickMs },
+      ),
     ),
-    runAgentEvents({ db: srv.db }, signal, { tickMs: opts.agentEventTickMs }),
-    runContentFetches({ db: srv.db, egress: srv.egress }, signal, { tickMs: opts.contentTickMs }),
-    runEnrollmentJobs({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, { tickMs: opts.enrollmentTickMs }),
-    runExperienceRollouts(
-      {
-        db: srv.db,
-        events: srv.events,
-        hot: srv.hot,
-        kp: srv.keyProvider,
-        email: srv.email,
-        directory: srv.directory,
-        publicUrl: srv.publicUrl,
-      },
-      signal,
-      { tickMs: opts.rolloutTickMs },
+    loop('agent-events', runAgentEvents({ db: srv.db }, signal, { tickMs: opts.agentEventTickMs })),
+    loop('content-sources', runContentFetches({ db: srv.db, egress: srv.egress }, signal, { tickMs: opts.contentTickMs })),
+    loop(
+      'enrollment-jobs',
+      runEnrollmentJobs({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, { tickMs: opts.enrollmentTickMs }),
     ),
-    runHostedAgents(
-      {
-        db: srv.db,
-        executor: srv.executor,
-        kp: srv.keyProvider,
-        email: srv.email,
-        directory: srv.directory,
-        publicUrl: srv.publicUrl,
-      },
-      signal,
-      { tickMs: opts.hostedAgentTickMs },
+    loop(
+      'experience-rollouts',
+      runExperienceRollouts(
+        {
+          db: srv.db,
+          events: srv.events,
+          hot: srv.hot,
+          kp: srv.keyProvider,
+          email: srv.email,
+          directory: srv.directory,
+          publicUrl: srv.publicUrl,
+        },
+        signal,
+        { tickMs: opts.rolloutTickMs },
+      ),
+    ),
+    loop(
+      'hosted-agents',
+      runHostedAgents(
+        {
+          db: srv.db,
+          executor: srv.executor,
+          kp: srv.keyProvider,
+          email: srv.email,
+          directory: srv.directory,
+          publicUrl: srv.publicUrl,
+        },
+        signal,
+        { tickMs: opts.hostedAgentTickMs },
+      ),
     ),
   ];
 }
@@ -211,12 +260,15 @@ export function startWorkers(
   srv: ReturnType<typeof createServer>,
   signal: AbortSignal,
   opts: { deliveries?: Pick<DeliveryDeps, 'webhookBackoffMs' | 'actionBackoffMs'>; passwordResetTickMs?: number } = {},
-): Promise<void>[] {
+): WorkerLoop[] {
   const run = (name: string, p: Promise<void>) =>
-    p.catch((err) => {
-      logger.error({ err, worker: name }, 'worker stopped');
-      throw err;
-    });
+    loop(
+      name,
+      p.catch((err) => {
+        logger.error({ err, worker: name }, 'worker stopped');
+        throw err;
+      }),
+    );
   logger.info('worker role: ClickHouse sink, profile workers, journeys, AI steps, e-mail, webhooks and actions');
   return [
     run('clickhouse-sink', runSink(srv.bus, srv.events, signal)),

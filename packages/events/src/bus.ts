@@ -73,6 +73,29 @@ export interface FetchedMessage {
 }
 
 /**
+ * The pull, or null when `signal` aborts first. A consumer whose connection is reconnecting can
+ * leave `fetch` waiting for a server that is not there yet, so a worker that is shutting down must
+ * not be held by it (#1028); whatever was pulled before the abort is still handled.
+ */
+async function fetchOrAbort(
+  consumer: PullConsumer,
+  opts: { max_messages: number; expires: number },
+  signal: AbortSignal,
+): Promise<AsyncIterable<FetchedMessage> | null> {
+  if (signal.aborted) return null;
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<null>((resolve) => {
+    onAbort = () => resolve(null);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([consumer.fetch(opts), aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
  * Fetches batches and hands them to `handler` until `signal` aborts. A failed pull is classified
  * (#307): transient errors are retried with a growing pause, a missing consumer is recreated, and
  * a fatal error or too many failures in a row reject, so `startWorkers` reports the worker as
@@ -96,7 +119,8 @@ export async function consumeLoop(
     // filling the batch while there is time left.
     try {
       do {
-        const batch = await consumer.fetch({ max_messages: maxBatch - msgs.length, expires: 1000 });
+        const batch = await fetchOrAbort(consumer, { max_messages: maxBatch - msgs.length, expires: 1000 }, signal);
+        if (!batch) break;
         for await (const m of batch) msgs.push(m);
       } while (msgs.length < maxBatch && Date.now() - started < (o.maxWaitMs ?? 1000) && !signal.aborted);
       failures = 0;

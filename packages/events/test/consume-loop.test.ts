@@ -94,6 +94,26 @@ describe('consumeLoop (#307)', () => {
     ).rejects.toThrow('Authorization Violation');
   });
 
+  it('stops while a pull is still waiting for a connection that is reconnecting', async () => {
+    // A fetch that never settles is what a reconnect leaves behind; the abort must not wait for it.
+    const consumer: PullConsumer = { fetch: () => new Promise<AsyncIterable<FetchedMessage>>(() => {}) };
+    const stop = new AbortController();
+    const started = Date.now();
+    const loop = consumeLoop(
+      async () => consumer,
+      opts,
+      decode,
+      async () => {},
+      stop.signal,
+      { retryMs: 1 },
+    );
+    // Let the loop reach its fetch, then close the way a shutdown does.
+    await new Promise((r) => setTimeout(r, 20));
+    stop.abort();
+    await expect(loop).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
   it('rejects after too many failures in a row, so the worker restarts', async () => {
     const consumer = scripted(
       Array.from({ length: MAX_FETCH_FAILURES }, () => new Error('stream reset')),

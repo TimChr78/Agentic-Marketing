@@ -13,7 +13,7 @@ import { loadConfig } from '../src/config';
 import { prefixOf } from '../src/domains';
 import { publicOnly } from '../src/http/public-only';
 import type { Commands } from '../src/registry';
-import { startScheduler, startWorkers } from '../src/workers';
+import { startScheduler, startWorkers, type WorkerLoop } from '../src/workers';
 import {
   ensureTemplateDatabase,
   quoteIdent,
@@ -51,6 +51,100 @@ export async function eventually<T>(fn: () => Promise<T>, ok: (v: T) => boolean,
     if (ok(v) || Date.now() - started > ms) return v;
     await new Promise((r) => setTimeout(r, 150));
   }
+}
+
+/**
+ * One step of closing a test server. `inspect` runs only when the step exceeded the budget, and
+ * says what it is still waiting for; it is capped itself, so a diagnostic cannot hang the hook.
+ */
+export interface CloseStage {
+  name: string;
+  close: () => void | Promise<void>;
+  inspect?: () => string | Promise<string>;
+}
+
+/** How long a test server's close may take before it reports what is still open (#1028). */
+const CLOSE_BUDGET_MS = Math.max(1_000, Number(process.env.AM_TEST_CLOSE_MS ?? 20_000));
+
+/** How long one close step may take. A step that hangs must not spend every later step's time. */
+const CLOSE_STAGE_MS = Math.max(100, Number(process.env.AM_TEST_CLOSE_STAGE_MS ?? 5_000));
+
+type SettleOutcome = 'done' | 'failed' | 'timeout';
+
+/** Whether `work` settled within `ms`, without waiting for it when it does not. */
+async function settleWithin(work: Promise<unknown>, ms: number): Promise<SettleOutcome> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<SettleOutcome>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  const settled = work.then<SettleOutcome, SettleOutcome>(
+    () => 'done',
+    () => 'failed',
+  );
+  const outcome = await Promise.race([settled, deadline]);
+  if (timer) clearTimeout(timer);
+  return outcome;
+}
+
+/** The stage's own account of what is still open, capped so the report itself cannot hang. */
+async function diagnose(stage: CloseStage): Promise<string> {
+  if (!stage.inspect) return '';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const detail = await Promise.race([
+      Promise.resolve().then(stage.inspect),
+      new Promise<string>((resolve) => {
+        timer = setTimeout(() => resolve('inspection timed out'), 2_000);
+      }),
+    ]);
+    return detail ? ` (${detail})` : '';
+  } catch {
+    return '';
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/** The handle kinds the process still holds, so a report names a socket, timer or file. */
+function openHandles(): string {
+  const info = process.getActiveResourcesInfo?.() ?? [];
+  const counts = new Map<string, number>();
+  for (const kind of info) counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  return [...counts].map(([kind, n]) => `${kind}${n > 1 ? ` ×${n}` : ''}`).join(', ') || 'none';
+}
+
+/**
+ * Runs teardown steps in order within one budget (#1028). A step that exceeds its cap is reported,
+ * never waited for: a file whose tests passed must not spend the hook timeout on a resource that
+ * will not close, and the report says which resource it was. The steps after it still run, so one
+ * stuck pool does not leave the others open too. A step that throws is named and the rest still
+ * run. Throws one error naming every problem, failing the file fast and clearly.
+ */
+export async function closeBounded(stages: readonly CloseStage[], limits: { budgetMs: number; stageMs?: number }): Promise<void> {
+  const stageMs = limits.stageMs ?? limits.budgetMs;
+  const started = Date.now();
+  const open: string[] = [];
+  const failed: string[] = [];
+  for (const stage of stages) {
+    const left = limits.budgetMs - (Date.now() - started);
+    if (left <= 0) {
+      open.push(`${stage.name}${await diagnose(stage)} (did not start: the budget was spent)`);
+      continue;
+    }
+    const stageStarted = Date.now();
+    const outcome = await settleWithin(
+      Promise.resolve().then(() => stage.close()),
+      Math.min(left, stageMs),
+    );
+    if (outcome === 'timeout') open.push(`${stage.name} (no close after ${Date.now() - stageStarted}ms${await diagnose(stage)})`);
+    else if (outcome === 'failed') failed.push(stage.name);
+  }
+  if (!open.length && !failed.length) return;
+  const problems = [
+    ...(open.length ? [`still open: ${open.join(', ')}`] : []),
+    ...(failed.length ? [`failed to close: ${failed.join(', ')}`] : []),
+  ];
+  throw new Error(`the test server did not close cleanly (#1028): ${problems.join('; ')}. Open handles: ${openHandles()}`);
 }
 
 export class TestOAuthProvider implements OAuthClientProvider {
@@ -352,7 +446,7 @@ export async function startTestServer(
     });
   }
   const stop = new AbortController();
-  const workers = [
+  const workers: WorkerLoop[] = [
     ...startWorkers(srv, stop.signal, {
       deliveries: { webhookBackoffMs: [200, 200], actionBackoffMs: [100] },
       // Password-reset tests drive delivery rounds directly, so the background loop cannot race them.
@@ -419,13 +513,77 @@ export async function startTestServer(
       }),
     async close() {
       stop.abort();
-      publicHttp?.close();
-      http?.close();
-      await Promise.allSettled(workers);
-      await srv.bus.close();
-      await srv.events.close();
-      await srv.hot.close();
-      await srv.db.close();
+      // A keep-alive socket keeps the listener's handles open for its idle timeout: destroy them
+      // instead of draining, so nothing outlives the file (#1028).
+      for (const server of [publicHttp, http] as ({ close: () => void; closeAllConnections?: () => void } | undefined)[]) {
+        server?.closeAllConnections?.();
+        server?.close();
+      }
+      const workersDone = Promise.allSettled(workers);
+      const running = new Set<Promise<unknown>>(workers);
+      for (const w of workers)
+        void w.then(
+          () => running.delete(w),
+          () => running.delete(w),
+        );
+      const workerReport = () => {
+        if (!running.size) return '';
+        const names = workers.filter((w) => running.has(w)).map((w) => w.worker);
+        return `${names.length} still running: ${names.join(', ')}`;
+      };
+      // Bounded, in order, and reported: a worker loop, the bus, ClickHouse, Valkey or a pool that
+      // will not close names itself instead of consuming the hook timeout silently (#1028).
+      await closeBounded(
+        [
+          {
+            name: 'workers',
+            close: async () => {
+              await workersDone;
+            },
+            inspect: workerReport,
+          },
+          { name: 'nats', close: () => srv.bus.close() },
+          { name: 'clickhouse', close: () => srv.events.close() },
+          { name: 'valkey', close: () => srv.hot.close() },
+          { name: 'postgres', close: () => srv.db.close(), inspect: () => databaseReport(pgUrl, srv.db) },
+        ],
+        { budgetMs: CLOSE_BUDGET_MS, stageMs: CLOSE_STAGE_MS },
+      );
     },
   };
+}
+
+/**
+ * What a stuck database pool is waiting for: how many clients each pool holds, and what PostgreSQL
+ * says its non-idle backends are doing. Read on the maintenance connection, which is not one of the
+ * pools, with its own short timeouts so the report cannot hang the close it is explaining (#1028).
+ */
+export async function databaseReport(pgUrl: URL, db: { admin: pg.Pool; app: pg.Pool }): Promise<string> {
+  const busy = (pool: pg.Pool) => `${pool.totalCount - pool.idleCount}/${pool.totalCount}`;
+  const pools = `admin ${busy(db.admin)} busy, app ${busy(db.app)} busy, ${db.admin.waitingCount + db.app.waitingCount} waiting`;
+  const client = new pg.Client({
+    connectionString: pgUrl.toString(),
+    connectionTimeoutMillis: 2_000,
+    statement_timeout: 2_000,
+    query_timeout: 2_000,
+  });
+  try {
+    await client.connect();
+    const { rows } = await client.query<{ state: string; wait: string; seconds: number; query: string }>(
+      `SELECT state,
+              coalesce(wait_event_type || ':' || wait_event, '') AS wait,
+              round(extract(epoch FROM now() - state_change))::int AS seconds,
+              left(replace(query, E'\n', ' '), 80) AS query
+       FROM pg_stat_activity
+       WHERE datname = current_database() AND pid <> pg_backend_pid() AND state <> 'idle'
+       ORDER BY state_change
+       LIMIT 5`,
+    );
+    const backends = rows.map((r) => `${r.state} ${r.wait} for ${r.seconds}s: ${r.query}`).join('; ');
+    return backends ? `${pools}; ${backends}` : pools;
+  } catch {
+    return pools;
+  } finally {
+    await client.end().catch(() => {});
+  }
 }

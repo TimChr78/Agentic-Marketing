@@ -460,6 +460,13 @@ while a run database has a connection). Ports come from `testPort()` in
 every block and the seeded e2e server's default port, so a second checkout can run at the same
 time even against another stack.
 
+A file's test server closes within a bound: 5 s per step and 20 s in total (`AM_TEST_CLOSE_STAGE_MS`
+and `AM_TEST_CLOSE_MS`). A worker loop, the event bus, ClickHouse, Valkey or a database pool that does
+not close is named in the failure — with the open handle kinds, and what PostgreSQL says its non-idle
+backends are doing — instead of silently spending the hook timeout (#1028). The loops carry their names,
+so the report says which one is still running. A worker also stops while a pull is waiting on a
+reconnecting event bus, so a shutdown never waits for a connection that is not there.
+
 The same setup pass, under the same lock, drops run databases that killed runs left behind. Ownership
 is a comment, not a name: every database the harness or a package test creates carries
 `COMMENT ON DATABASE ... IS 'am-test-run:<run>:<epoch>'`. The sweeper only considers databases with
