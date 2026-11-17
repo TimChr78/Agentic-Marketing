@@ -13,6 +13,13 @@ import {
 
 const SECRET = 'review_dummy_secret';
 
+/** Every array item and object entry below `value`, as the budget counts them. */
+function elementCount(value: unknown): number {
+  if (Array.isArray(value)) return value.length + value.reduce((n: number, item) => n + elementCount(item), 0);
+  if (value !== null && typeof value === 'object') return Object.entries(value).reduce((n, [, item]) => n + 1 + elementCount(item), 0);
+  return 0;
+}
+
 describe('redactErrorDetails', () => {
   it('redacts string values in nested objects and arrays, keeping keys and structure', () => {
     const details = {
@@ -81,6 +88,30 @@ describe('redactErrorDetails', () => {
     const markers = Array.from({ length: ERROR_DETAILS_MAX_ELEMENTS + 100 }, () => ERROR_DETAILS_TRUNCATED);
     const once = redactErrorDetails(markers) as string[];
     expect(once).toHaveLength(ERROR_DETAILS_MAX_ELEMENTS);
+    expect(redactErrorDetails(once)).toEqual(once);
+  });
+
+  it('applies one global budget across nested containers', () => {
+    const nestedArrays = Array.from({ length: ERROR_DETAILS_MAX_ELEMENTS }, () => [0]);
+    const onceArrays = redactErrorDetails(nestedArrays);
+    expect(elementCount(onceArrays)).toBeLessThanOrEqual(ERROR_DETAILS_MAX_ELEMENTS);
+    expect(redactErrorDetails(onceArrays)).toEqual(onceArrays);
+
+    const nestedObject = { first: Array.from({ length: ERROR_DETAILS_MAX_ELEMENTS }, () => 0), second: 1 };
+    const onceObject = redactErrorDetails(nestedObject);
+    expect(elementCount(onceObject)).toBeLessThanOrEqual(ERROR_DETAILS_MAX_ELEMENTS);
+    expect(redactErrorDetails(onceObject)).toEqual(onceObject);
+  });
+
+  it('applies the global budget to mixed nested arrays and objects', () => {
+    const input = {
+      items: Array.from({ length: 600 }, (_, i) => ({ i, tags: [i, i] })),
+      tail: { a: [1, 2, 3], b: 4 },
+    };
+
+    const once = redactErrorDetails(input);
+
+    expect(elementCount(once)).toBeLessThanOrEqual(ERROR_DETAILS_MAX_ELEMENTS);
     expect(redactErrorDetails(once)).toEqual(once);
   });
 
