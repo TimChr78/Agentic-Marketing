@@ -144,11 +144,17 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
 `am restore` closes the gap for erasures recorded in the live database:
 
 1. Before replacing Postgres it reads every row of `erasures` and `erasure_tombstones` from the
-   current database, together with any pending `erasure_cleanup_jobs`, and saves that log next to
-   the backup directory (mode 600; keyed hashes and sealed selectors only). If the log cannot be
-   read, the restore stops rather than risk resurrecting someone. A retry after a failure past the
-   replacement reads this saved log instead of the already-restored database, and removes it only
-   after the replay succeeds.
+   current database, together with any pending `erasure_cleanup_jobs`, and saves their union next
+   to the backup directory in a mode-600 file bound to that database (PostgreSQL's
+   `system_identifier` and database name) and that backup. If the log cannot be read, the restore
+   stops rather than risk resurrecting someone. A retry merges the live log with that saved copy
+   (replay is idempotent), so erasures recorded after a failed attempt are still replayed. The copy
+   is removed only after a successful replay; a file bound to another database or backup, or a
+   restore lock left by a crashed process, is refused by name so an operator can remove it
+   deliberately. The captured file holds erasure records (`reason`, `requestedBy`, profile ids and
+   counts), keyed tombstones, and the sealed cleanup selectors with their wrapped service key — no
+   plaintext identifiers. `reason` is operator text and may contain personal data, so do not copy
+   the file off-host.
 2. It applies pending migrations and then re-applies each erasure: profiles and identifiers the
    erasure names are deleted again (with their profile keys, consent records, messages, journey
    participations, segment memberships and push subscriptions), e-mail and phone suppression hashes

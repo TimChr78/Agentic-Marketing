@@ -42,6 +42,10 @@ export interface ErasureCleanupJobRecord {
   workspaceId: string;
   erasureId: string;
   profileIds: string[];
+  /** The live job's state, so a restore can keep an unfinished job over a completed one. */
+  state: string;
+  clickhouseDone: boolean;
+  hotstateDone: boolean;
   selectors: Buffer | null;
   selectorKey: Buffer | null;
   selectorKek: string | null;
@@ -183,17 +187,24 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
             workspace_id: string;
             erasure_id: string;
             profile_ids: string[];
+            state: string;
+            clickhouse_done: boolean;
+            hotstate_done: boolean;
             selectors: Buffer | null;
             selector_key: Buffer | null;
             selector_kek: string | null;
           }>(
-            `SELECT workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek
+            `SELECT workspace_id, erasure_id, profile_ids, state, clickhouse_done, hotstate_done,
+                    selectors, selector_key, selector_kek
              FROM erasure_cleanup_jobs`,
           )
         ).rows.map((row) => ({
           workspaceId: row.workspace_id,
           erasureId: row.erasure_id,
           profileIds: row.profile_ids,
+          state: row.state,
+          clickhouseDone: row.clickhouse_done,
+          hotstateDone: row.hotstate_done,
           selectors: row.selectors,
           selectorKey: row.selector_key,
           selectorKek: row.selector_kek,
