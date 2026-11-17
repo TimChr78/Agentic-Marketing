@@ -64,3 +64,51 @@ describe('a credential in a parameter name never comes back from an error (#996)
     expect(body.details.problems.join(' ')).toContain('[redacted]');
   });
 });
+
+// A schema error names the offending key. Zod's tree keeps the caller's key as an object key, so
+// the key itself must be redacted too, not only string values (#996 review).
+const keyedPreview = { recipeId: 'weekly-newsletter', params: { [PARAM]: {} } };
+
+describe('a credential used as an object key never comes back from an error (#996)', () => {
+  it('redacts the key in the REST validation details', async () => {
+    const res = await fetch(`${t.base}/v1/recipes.preview`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: owner.cookie, origin: t.base, 'x-workspace-id': ws },
+      body: JSON.stringify(keyedPreview),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(body)).not.toContain(SECRET);
+    expect(JSON.stringify(body.details)).toContain('password=[redacted]');
+  });
+
+  it('redacts the key in the MCP tool error', async () => {
+    const result = await mcp.callTool({ name: 'recipes.preview', arguments: keyedPreview });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(JSON.stringify(result)).toContain('password=[redacted]');
+  });
+
+  it('redacts a connector secret header name in the REST error', async () => {
+    // The HTTP connector's secrets schema is a record of header name to string; an integer value
+    // makes Zod report the caller's header name as an object key.
+    const res = await fetch(`${t.base}/v1/connections.create`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: owner.cookie, origin: t.base, 'x-workspace-id': ws },
+      body: JSON.stringify({
+        connector: 'http',
+        name: 'Leaky header',
+        settings: { baseUrl: 'https://api.example.com' },
+        secrets: { headers: { [PARAM]: 1 } },
+      }),
+    });
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toBe('invalid_input');
+    expect(JSON.stringify(body)).not.toContain(SECRET);
+    expect(JSON.stringify(body.details)).toContain('password=[redacted]');
+  });
+});

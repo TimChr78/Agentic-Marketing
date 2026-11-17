@@ -1108,12 +1108,29 @@ const STRUCTURAL_DETAIL_VALUES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The redacted, bounded form of one object key (#996 review). A Zod tree error keeps the caller's
+ * input key as an object key, so a key can carry a credential exactly like a value. Redacting two
+ * different keys can make them equal; the later one gets a deterministic ` #2`, ` #3` in original
+ * key order so no entry is silently dropped. Keys already distinct stay byte-for-byte identical, so
+ * a second pass changes nothing.
+ */
+function safeDetailKey(key: string, used: ReadonlySet<string>): string {
+  const base = redactedText(key, ERROR_DETAILS_MAX_CHARS);
+  let candidate = base;
+  for (let n = 2; used.has(candidate); n += 1) {
+    const suffix = ` #${n}`;
+    candidate = `${redactedText(key, Math.max(1, ERROR_DETAILS_MAX_CHARS - suffix.length))}${suffix}`;
+  }
+  return candidate;
+}
+
+/**
  * The safe copy of an AppError's `details` (#996): every string redacted and bounded, nested arrays
- * and objects walked with a depth and an element limit, object keys and the structure kept so
- * `details.reason` or `details.problems[].path` stay machine-readable, and non-string primitives
- * untouched. The original value is never mutated, and an unchanged value is returned as it is (so
- * an error with nothing to redact keeps its identity). Redaction is idempotent, so a second pass at
- * a serialisation point changes nothing.
+ * and objects walked with a depth and an element limit, object keys redacted and bounded with the
+ * structure kept so `details.reason` or `details.problems[].path` stay machine-readable, and
+ * non-string primitives untouched. The original value is never mutated, and an unchanged value is
+ * returned as it is (so an error with nothing to redact keeps its identity). Redaction is
+ * idempotent, so a second pass at a serialisation point changes nothing.
  */
 export function redactErrorDetails(details: unknown): unknown {
   let remaining = ERROR_DETAILS_MAX_ELEMENTS;
@@ -1132,50 +1149,54 @@ export function redactErrorDetails(details: unknown): unknown {
     if (seen.has(value)) return ERROR_DETAILS_TRUNCATED;
     seen.add(value);
     const next = depth + 1;
+    // Every element counts, including a marker this helper wrote on an earlier pass, so a second
+    // pass keeps the same bound. The terminal marker takes the last available slot.
+    const slots = Math.max(0, remaining);
 
     if (Array.isArray(value)) {
+      const truncated = value.length > slots;
+      const keep = truncated ? Math.max(0, slots - 1) : value.length;
       const out: unknown[] = [];
       let changed = false;
-      let index = 0;
-      for (; index < value.length; index += 1) {
-        const item: unknown = value[index];
-        // A marker this helper wrote does not count against the limit, so a second pass keeps it.
-        if (item === ERROR_DETAILS_TRUNCATED) {
-          out.push(item);
-          continue;
-        }
-        if (remaining <= 0) break;
+      for (let index = 0; index < keep; index += 1) {
         remaining -= 1;
+        const item: unknown = value[index];
         const clean = walk(item, next);
         if (clean !== item) changed = true;
         out.push(clean);
       }
-      if (index < value.length) {
+      if (truncated) {
+        if (remaining > 0) remaining -= 1;
         out.push(ERROR_DETAILS_TRUNCATED);
         changed = true;
       }
       return changed ? out : value;
     }
 
-    const out: Record<string, unknown> = {};
+    const entries = Object.entries(value as Record<string, unknown>);
+    const truncated = entries.length > slots;
+    const keep = truncated ? Math.max(0, slots - 1) : entries.length;
+    const used = new Set<string>();
+    // Built with Object.fromEntries so a caller key such as `__proto__` stays an own property
+    // instead of changing the prototype.
+    const pairs: [string, unknown][] = [];
     let changed = false;
-    let truncated = false;
-    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-      if (key === ERROR_DETAILS_TRUNCATED && item === ERROR_DETAILS_TRUNCATED) {
-        out[key] = item;
-        continue;
-      }
-      if (remaining <= 0) {
-        truncated = true;
-        break;
-      }
+    for (let index = 0; index < keep; index += 1) {
+      const [key, item] = entries[index]!;
       remaining -= 1;
+      const cleanKey = safeDetailKey(key, used);
+      if (cleanKey !== key) changed = true;
+      used.add(cleanKey);
       const clean = walk(item, next);
       if (clean !== item) changed = true;
-      out[key] = clean;
+      pairs.push([cleanKey, clean]);
     }
-    if (truncated) out[ERROR_DETAILS_TRUNCATED] = ERROR_DETAILS_TRUNCATED;
-    return changed || truncated ? out : value;
+    if (truncated) {
+      if (remaining > 0) remaining -= 1;
+      pairs.push([safeDetailKey(ERROR_DETAILS_TRUNCATED, used), ERROR_DETAILS_TRUNCATED]);
+      changed = true;
+    }
+    return changed ? Object.fromEntries(pairs) : value;
   };
 
   return walk(details, 0);

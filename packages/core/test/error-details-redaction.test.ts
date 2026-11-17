@@ -59,16 +59,65 @@ describe('redactErrorDetails', () => {
     expect(JSON.stringify(out)).toContain(ERROR_DETAILS_TRUNCATED);
   });
 
-  it('truncates past the element limit with a marker', () => {
+  it('truncates past the element limit with a marker, which occupies the last slot', () => {
     const array = redactErrorDetails(Array.from({ length: ERROR_DETAILS_MAX_ELEMENTS + 50 }, (_, i) => `item ${i}`)) as string[];
-    expect(array).toHaveLength(ERROR_DETAILS_MAX_ELEMENTS + 1);
+    expect(array).toHaveLength(ERROR_DETAILS_MAX_ELEMENTS);
     expect(array.at(-1)).toBe(ERROR_DETAILS_TRUNCATED);
+    // Knocking one item out for the marker still leaves only real content before it.
+    expect(array.at(-2)).toBe(`item ${ERROR_DETAILS_MAX_ELEMENTS - 2}`);
 
     const entries: Record<string, string> = {};
     for (let i = 0; i < ERROR_DETAILS_MAX_ELEMENTS + 50; i += 1) entries[`key${i}`] = `value ${i}`;
     const object = redactErrorDetails(entries) as Record<string, string>;
-    expect(Object.keys(object)).toHaveLength(ERROR_DETAILS_MAX_ELEMENTS + 1);
+    expect(Object.keys(object)).toHaveLength(ERROR_DETAILS_MAX_ELEMENTS);
     expect(object[ERROR_DETAILS_TRUNCATED]).toBe(ERROR_DETAILS_TRUNCATED);
+    // The first kept keys and their values are in original order; none was silently dropped.
+    expect(object.key0).toBe('value 0');
+    expect(object[`key${ERROR_DETAILS_MAX_ELEMENTS - 2}`]).toBe(`value ${ERROR_DETAILS_MAX_ELEMENTS - 2}`);
+    expect(object[`key${ERROR_DETAILS_MAX_ELEMENTS - 1}`]).toBeUndefined();
+  });
+
+  it('counts caller-supplied markers against the limit and stays idempotent', () => {
+    const markers = Array.from({ length: ERROR_DETAILS_MAX_ELEMENTS + 100 }, () => ERROR_DETAILS_TRUNCATED);
+    const once = redactErrorDetails(markers) as string[];
+    expect(once).toHaveLength(ERROR_DETAILS_MAX_ELEMENTS);
+    expect(redactErrorDetails(once)).toEqual(once);
+  });
+
+  it('redacts object keys with the same rules, keeping every entry distinct', () => {
+    const details = {
+      [`password=${SECRET}`]: 'kept value',
+      ['word '.repeat(ERROR_DETAILS_MAX_CHARS / 4)]: 'bounded key',
+    };
+
+    const out = redactErrorDetails(details) as Record<string, string>;
+    const keys = Object.keys(out);
+
+    expect(JSON.stringify(out)).not.toContain(SECRET);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe('password=[redacted]');
+    expect(keys[1]).toHaveLength(ERROR_DETAILS_MAX_CHARS);
+    expect(out[keys[0]!]).toBe('kept value');
+    expect(out[keys[1]!]).toBe('bounded key');
+  });
+
+  it('keeps colliding redacted keys distinct in original order, and stays idempotent', () => {
+    const details = { 'password=a': 1, 'password=b': 2, 'password=c': 3 };
+
+    const once = redactErrorDetails(details) as Record<string, number>;
+
+    expect(Object.keys(once)).toEqual(['password=[redacted]', 'password=[redacted] #2', 'password=[redacted] #3']);
+    expect(Object.values(once)).toEqual([1, 2, 3]);
+    expect(redactErrorDetails(once)).toEqual(once);
+  });
+
+  it('keeps a caller key such as __proto__ as an own property', () => {
+    const details = JSON.parse(`{"__proto__":"kept","password=${SECRET}":"x"}`) as Record<string, unknown>;
+
+    const out = redactErrorDetails(details) as Record<string, unknown>;
+
+    expect(Object.hasOwn(out, '__proto__')).toBe(true);
+    expect(JSON.stringify(out)).not.toContain(SECRET);
   });
 
   it('never mutates the error details it is given', () => {
