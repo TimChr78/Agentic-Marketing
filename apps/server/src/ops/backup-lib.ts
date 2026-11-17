@@ -8,11 +8,14 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { redactCredentials } from '@agentic-marketing/core';
 import {
+  type ErasureLog,
   ensureAppRoleInDatabase,
   lastServerVersion,
   latestMigration,
   listWorkspaceIds,
   migrationHead,
+  type ReplayErasuresAfterMigrateOptions,
+  type ReplayErasuresResult,
   readDataKeySample,
   readErasureLog,
   replayErasuresAfterMigrate,
@@ -104,6 +107,11 @@ export interface RestoreBackupOptions {
   log?: (message: string) => void;
   /** Restore even though the configured key cannot unseal the backup (secrets will be unreadable). */
   skipKeyCheck?: boolean;
+  /**
+   * Test seam: replaces the migrate-and-replay step. A failure here leaves the captured erasure
+   * log in place, exactly as a migration or replay error does, so a retry can replay it.
+   */
+  replay?: (databaseUrl: string, log: ErasureLog, opts: ReplayErasuresAfterMigrateOptions) => Promise<ReplayErasuresResult>;
 }
 
 export interface VerifyBackupOptions {
@@ -928,6 +936,74 @@ export function parseVerifyMaxAgeDays(value: string | undefined): number {
 }
 
 /**
+ * Where a restore saves the live erasure log before it replaces Postgres. It sits next to the
+ * backup directory (never inside a possibly read-only backup mount, never /tmp), mode 600, and is
+ * removed only after the replay succeeds. A retry after a failure past the replacement reads it
+ * instead of the restored database's now-older log.
+ */
+export function restoreErasureLogPath(dir: string): string {
+  const resolved = resolve(dir);
+  const name = basename(resolved).replace(/[^A-Za-z0-9._-]/g, '_');
+  return join(dirname(resolved), `.am-restore-erasure-log-${name}.json`);
+}
+
+const encodeBytes = (value: Buffer | null | undefined) => (value ? value.toString('base64') : null);
+
+async function writeRestoreErasureLog(path: string, log: ErasureLog): Promise<void> {
+  const stored = {
+    version: 1,
+    capturedAt: new Date().toISOString(),
+    erasures: log.erasures,
+    tombstones: log.tombstones,
+    cleanupJobs: (log.cleanupJobs ?? []).map((job) => ({
+      ...job,
+      selectors: encodeBytes(job.selectors),
+      selectorKey: encodeBytes(job.selectorKey),
+    })),
+  };
+  await writeFile(path, `${JSON.stringify(stored)}\n`, { encoding: 'utf8', mode: 0o600 });
+  // `mode` is ignored when the file already exists.
+  await chmod(path, 0o600);
+}
+
+const decodeBytes = (value: unknown): Buffer | null => (typeof value === 'string' && value ? Buffer.from(value, 'base64') : null);
+
+async function readRestoreErasureLog(path: string): Promise<ErasureLog | null> {
+  let text: string;
+  try {
+    text = await readFile(path, 'utf8');
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    const stored = JSON.parse(text) as {
+      erasures: ErasureLog['erasures'];
+      tombstones: ErasureLog['tombstones'];
+      cleanupJobs?: {
+        workspaceId: string;
+        erasureId: string;
+        profileIds: string[];
+        selectors: unknown;
+        selectorKey: unknown;
+        selectorKek: string | null;
+      }[];
+    };
+    return {
+      erasures: stored.erasures ?? [],
+      tombstones: stored.tombstones ?? [],
+      cleanupJobs: (stored.cleanupJobs ?? []).map((job) => ({
+        ...job,
+        selectors: decodeBytes(job.selectors),
+        selectorKey: decodeBytes(job.selectorKey),
+      })),
+    };
+  } catch (err) {
+    throw new Error(`the erasure log saved for an interrupted restore (${path}) is unreadable: ${(err as Error).message}`);
+  }
+}
+
+/**
  * Verifies a backup, refuses a newer schema unless forced, then replaces Postgres (and optionally
  * ClickHouse). It does not stop the app: the caller warns the operator to do that first.
  */
@@ -981,8 +1057,33 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   // Read the erasure log from the live database before it is replaced. A snapshot taken before an
   // erasure still contains that person and their key; replaying the log afterwards removes them
   // again (#144). This is also why a restore must not proceed when the log cannot be read.
-  log(`reading erasures recorded in the live database (snapshot from ${manifest.createdAt})`);
-  const erasureLog = await readErasureLog(databaseUrl);
+  //
+  // The log is saved next to the backup first: a failure after the replacement (a migration or
+  // replay error, a key check) must not lose erasures recorded after the snapshot. A retry reads
+  // that file instead of the already-restored database, and the file goes only after a replay.
+  const capturePath = restoreErasureLogPath(dir);
+  const capturedLog = await readRestoreErasureLog(capturePath);
+  const captured = capturedLog !== null;
+  let erasureLog: ErasureLog;
+  if (capturedLog) {
+    erasureLog = capturedLog;
+    log(`reusing the erasure log saved before an interrupted restore (${capturePath})`);
+  } else {
+    log(`reading erasures recorded in the live database (snapshot from ${manifest.createdAt})`);
+    erasureLog = await readErasureLog(databaseUrl);
+  }
+  const needsReplay = erasureLog.erasures.length > 0 || erasureLog.tombstones.length > 0 || (erasureLog.cleanupJobs?.length ?? 0) > 0;
+  // Every prerequisite is checked before the destructive step: the replay applies migrations,
+  // which needs the app role's password.
+  if (needsReplay && !env.APP_DB_PASSWORD)
+    throw new Error(
+      'APP_DB_PASSWORD is required to replay erasures during a restore: it applies pending migrations before the replay. Postgres has not been replaced.',
+    );
+  if (needsReplay && !captured) {
+    // An attempt that already saved the log keeps that copy: it predates its replacement.
+    await writeRestoreErasureLog(capturePath, erasureLog);
+    log(`saved the live erasure log for a retry after replacement (${capturePath})`);
+  }
 
   log('restoring Postgres (this replaces the current database)');
   await restorePostgres(databaseUrl, manifestPath(dir, manifest.postgres.file));
@@ -992,15 +1093,13 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   // deliberately overrides both. A backup written without a key reference has nothing to compare.
   if (!opts.skipKeyCheck && manifest.format === 2 && manifest.key) await assertRestoredDataKey(databaseUrl, env, log);
 
-  if (erasureLog.erasures.length || erasureLog.tombstones.length) {
+  if (needsReplay) {
     // Migrate before replay: a snapshot older than 0.15.0 has no erasure_cleanup_jobs, and the
     // replay must recreate the live database's pending jobs there (#978 part 2b review).
-    if (!env.APP_DB_PASSWORD)
-      throw new Error('APP_DB_PASSWORD is required to replay erasures during a restore: it applies pending migrations first');
     log(`replaying ${erasureLog.erasures.length} erasure(s) and ${erasureLog.tombstones.length} tombstone(s) recorded after the snapshot`);
-    const replayed = await replayErasuresAfterMigrate(databaseUrl, erasureLog, {
+    const replayed = await (opts.replay ?? replayErasuresAfterMigrate)(databaseUrl, erasureLog, {
       appRole: role.role,
-      appRolePassword: env.APP_DB_PASSWORD,
+      appRolePassword: env.APP_DB_PASSWORD ?? '',
       log,
     });
     log(
@@ -1008,7 +1107,13 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
         `${replayed.tombstones} tombstone(s) restored` +
         (replayed.skipped ? `, ${replayed.skipped} entr(ies) skipped for workspaces the snapshot does not have` : ''),
     );
-  } else log('no erasures to replay; the snapshot has nothing to resurrect');
+    // Only a successful replay retires the captured log.
+    await rm(capturePath, { force: true });
+  } else {
+    // A log file with nothing to replay (an earlier empty capture) must not linger.
+    if (captured) await rm(capturePath, { force: true });
+    log('no erasures to replay; the snapshot has nothing to resurrect');
+  }
 
   if (opts.clickhouse && manifest.clickhouse) {
     log('restoring ClickHouse');

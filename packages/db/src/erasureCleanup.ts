@@ -29,17 +29,32 @@ export interface ErasureCleanupFailure {
   statusCode?: number;
 }
 
+/** Error names an operator can act on; anything else is reported as `other`. */
+const KNOWN_ERROR_CLASSES = new Set([
+  'Error',
+  'TypeError',
+  'RangeError',
+  'AbortError',
+  'TimeoutError',
+  'AggregateError',
+  'ClickHouseError',
+  'ReplyError',
+  'MaxRetriesPerRequestError',
+]);
+
 /** Classifies an error without looking at its message, which may contain personal data. */
 export function erasureCleanupFailure(err: unknown, category: ErasureCleanupFailureCategory): ErasureCleanupFailure {
   const name = err instanceof Error ? err.name : '';
-  const errorClass = name.replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 60) || undefined;
+  // A name is caller/provider-controlled metadata, not a fixed code literal: map it against a
+  // small allowlist so an error naming a person can never reach last_error, the log or the status.
+  const errorClass = KNOWN_ERROR_CLASSES.has(name) ? name : 'other';
   const raw = (err as { status?: unknown; statusCode?: unknown }) ?? {};
   const status = typeof raw.statusCode === 'number' ? raw.statusCode : typeof raw.status === 'number' ? raw.status : undefined;
   const statusCode = status !== undefined && Number.isFinite(status) && status >= 0 ? Math.trunc(status) : undefined;
-  const timeout = err instanceof Error && /timeout/i.test(err.name);
+  const timeout = name === 'TimeoutError' || name === 'AbortError';
   return {
     category: timeout ? 'timeout' : category,
-    ...(errorClass ? { errorClass } : {}),
+    errorClass,
     ...(statusCode !== undefined ? { statusCode } : {}),
   };
 }
@@ -321,44 +336,60 @@ export async function erasureOutboxOutstanding(db: Db, workspaceId: string, prof
  *
  * A failed row can never deliver on its own, but `am outbox` could requeue it, so it goes. A
  * delivered row is kept no longer either: a DOI confirmation URL carries a token with the person's
- * anonymous id, and delivered message events keep identifying URLs. When a delivered message-event
- * batch mixes the erased person with other people, only their entries are removed and the rest of
- * the batch stays. Pending and delivering rows are left for the barrier.
+ * anonymous id, and delivered message events keep identifying URLs. When a message-event batch
+ * mixes the erased person with other people, only their entries are removed and the rest of the
+ * batch stays; that also applies to a failed batch, whose unrelated events are still worth
+ * requeueing.
+ *
+ * Both mutations are single SQL statements. A row that another process moves to `pending` or
+ * `delivering` between sweeps is excluded by the state predicate at the moment of the mutation,
+ * and the mixed batch is filtered from the payload the statement reads (under the row lock), so
+ * two erasures cleaning the same batch cannot restore each other's entries.
  */
 export async function dropErasedProfileOutbox(db: Db, workspaceId: string, profileIds: string[]): Promise<number> {
   if (!profileIds.length) return 0;
-  const erased = new Set(profileIds);
-  const { rows } = await db.admin.query<{
-    id: string;
-    kind: string;
-    payload: Record<string, unknown>;
-    state: string;
-  }>(
-    `SELECT o.id, o.kind, o.payload, o.state FROM outbox o
-     WHERE o.workspace_id = $1 AND o.state IN ('failed', 'delivered') AND ${NAMES_ERASED_PROFILE}`,
+  // A row wholly about the erased family: no event in its batch belongs to anyone else.
+  const deleted = await db.admin.query(
+    `DELETE FROM outbox o
+     WHERE o.workspace_id = $1
+       AND o.state IN ('failed', 'delivered')
+       AND (
+         (coalesce(jsonb_typeof(o.payload->'events'), 'none') <> 'array' AND o.payload->>'profileId' = ANY($2::text[]))
+         OR (
+           jsonb_typeof(o.payload->'events') = 'array'
+           AND jsonb_array_length(o.payload->'events') > 0
+           AND NOT EXISTS (
+             SELECT 1 FROM jsonb_array_elements(o.payload->'events') AS e(event)
+             WHERE NOT (e.event->>'profileId' = ANY($2::text[]))
+           )
+         )
+       )`,
     [workspaceId, profileIds],
   );
-  let removed = 0;
-  const owns = (value: unknown) => typeof value === 'string' && erased.has(value);
-  for (const row of rows) {
-    const events = Array.isArray(row.payload.events) ? (row.payload.events as Record<string, unknown>[]) : [];
-    const wholeRow = row.state === 'failed' || owns(row.payload.profileId) || (events.length > 0 && events.every((e) => owns(e.profileId)));
-    if (wholeRow) {
-      await db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND id = $2', [workspaceId, row.id]);
-      removed++;
-      continue;
-    }
-    if (events.length) {
-      const kept = events.filter((e) => !owns(e.profileId));
-      if (kept.length !== events.length)
-        await db.admin.query('UPDATE outbox SET payload = $3, updated_at = now() WHERE workspace_id = $1 AND id = $2', [
-          workspaceId,
-          row.id,
-          JSON.stringify({ ...row.payload, events: kept }),
-        ]);
-    }
-  }
-  return removed;
+  // A mixed batch keeps everyone else. The filter runs on the payload as it is when the row is
+  // locked, not on a copy read earlier by another cleanup.
+  await db.admin.query(
+    `UPDATE outbox o
+     SET payload = jsonb_set(o.payload, '{events}', (
+           SELECT coalesce(jsonb_agg(e.event), '[]'::jsonb)
+           FROM jsonb_array_elements(o.payload->'events') AS e(event)
+           WHERE NOT (e.event->>'profileId' = ANY($2::text[]))
+         )),
+         updated_at = now()
+     WHERE o.workspace_id = $1
+       AND o.state IN ('failed', 'delivered')
+       AND jsonb_typeof(o.payload->'events') = 'array'
+       AND EXISTS (
+         SELECT 1 FROM jsonb_array_elements(o.payload->'events') AS e(event)
+         WHERE e.event->>'profileId' = ANY($2::text[])
+       )
+       AND EXISTS (
+         SELECT 1 FROM jsonb_array_elements(o.payload->'events') AS e(event)
+         WHERE NOT (e.event->>'profileId' = ANY($2::text[]))
+       )`,
+    [workspaceId, profileIds],
+  );
+  return deleted.rowCount ?? 0;
 }
 
 /** The erasure's job for a workspace read (under RLS), or null when the erasure predates jobs. */

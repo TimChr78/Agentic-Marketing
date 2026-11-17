@@ -23,6 +23,7 @@ import {
   readVerifyStatus,
   restoreBackup,
   restoreClickHouse,
+  restoreErasureLogPath,
   runScheduledBackups,
   type ScheduleStatus,
   verifyBackup,
@@ -546,6 +547,47 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
     expect((await pool.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId])).rowCount).toBe(0);
     expect((await pool.query('SELECT 1 FROM erasure_tombstones WHERE workspace_id = $1', [workspaceId])).rowCount).toBe(2);
   }, 180_000);
+
+  it('fails before replacing Postgres when a replay needs APP_DB_PASSWORD', async () => {
+    await pool.query('CREATE TABLE IF NOT EXISTS restore_probe (id integer PRIMARY KEY)');
+    await pool.query('INSERT INTO restore_probe (id) VALUES (1) ON CONFLICT DO NOTHING');
+    const err = await restoreBackup({
+      dir: backupPath,
+      env: { DATABASE_URL: env.DATABASE_URL, APP_DB_ROLE: env.APP_DB_ROLE },
+      log: () => {},
+    }).catch((error: Error) => error);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/APP_DB_PASSWORD/);
+    // The database was not replaced: a table created after the snapshot still exists, and the
+    // person erased after it is still gone.
+    expect((await pool.query('SELECT count(*)::int AS n FROM restore_probe')).rows[0].n).toBe(1);
+    expect((await pool.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId])).rowCount).toBe(0);
+  }, 60_000);
+
+  it('keeps the captured erasure log when replay fails after replacement and replays it on retry', async () => {
+    const capture = restoreErasureLogPath(backupPath);
+    await rm(capture, { force: true });
+    const first = await restoreBackup({
+      dir: backupPath,
+      env,
+      log: () => {},
+      // The migration/replay step fails after Postgres has already been replaced.
+      replay: async () => {
+        throw new Error('migration failed after replacement');
+      },
+    }).catch((error: Error) => error);
+    expect(first).toBeInstanceOf(Error);
+    expect((first as Error).message).toMatch(/migration failed after replacement/);
+    expect((await stat(capture)).mode & 0o777).toBe(0o600);
+    // The snapshot is back, person included: the replay did not run.
+    expect((await pool.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId])).rowCount).toBe(1);
+
+    // A retry starts from a database whose own erasure log no longer has the erasure; the saved
+    // log from before the first replacement is what keeps the person erased.
+    expect(await withEnv(env, () => restoreRun([backupPath, '--yes']))).toBe(0);
+    expect((await pool.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [workspaceId, profileId])).rowCount).toBe(0);
+    await expect(stat(capture)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 240_000);
 });
 
 describe.skipIf(!pgToolsReady)('restore verifies the master key (#143)', () => {

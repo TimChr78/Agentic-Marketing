@@ -33,7 +33,8 @@ export async function run(args: string[]): Promise<number> {
 
   console.error('Restore replaces the current Postgres database (and ClickHouse tables with --clickhouse).');
   console.error('Erasures recorded in the live database are replayed afterwards, so people erased since the');
-  console.error('backup stay erased. Stop the app first: docker compose stop app');
+  console.error('backup stay erased. Replaying them applies pending migrations and needs APP_DB_PASSWORD.');
+  console.error('Stop the app first: docker compose stop app');
   if (values['skip-key-check'])
     console.error('--skip-key-check: the master key will not be verified; provider and connector secrets may stay unreadable.');
   if (!values.yes) {
