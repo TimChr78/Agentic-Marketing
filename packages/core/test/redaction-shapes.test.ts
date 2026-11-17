@@ -168,6 +168,11 @@ describe('an authorization value behind a key or an arrow (#989 round 4)', () =>
     // it are a credential far more often than a sentence. 0.14.25 kept `expired`; it now goes with
     // the value, and this expectation is the record of that choice.
     expect(idempotent('token: Token expired at noon')).toBe('token: [redacted] at noon');
+    // The same reading at a line end: a scheme word followed by a token-like word on the next line
+    // is taken with it (#1019 round 5). Nothing is exposed; the following line is lost with the value.
+    expect(idempotent('token: Bearer Token\nstatus=ok')).toBe('token: [redacted]');
+    // A two-word value at the very end keeps the released shape.
+    expect(idempotent('token: Bearer Token')).toBe('token: Bearer [redacted]');
   });
 
   it('leaves prose and an ordinary key alone', () => {
