@@ -706,6 +706,8 @@ export const DEMO_ALERTS: Out<'alerts.list'> = {
       firingSince: daysBefore(2, 7),
     },
   ] as AlertRule[],
+  // The demo workspace is healthy: the scheduler has published every message event it reads.
+  publication: { outstanding: 0, failed: 0, oldestPendingAgeMs: null },
 };
 
 export function demoAlertHistory(ruleId?: string): Out<'alerts.history'> {

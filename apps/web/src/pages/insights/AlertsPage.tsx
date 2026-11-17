@@ -25,6 +25,7 @@ import {
   THead,
   Th,
   Tr,
+  timeAgo,
   useConfirm,
   useToast,
 } from '../../ui';
@@ -206,6 +207,7 @@ export default function AlertsPage() {
   };
 
   const rows = rules.data?.rules ?? [];
+  const publication = rules.data?.publication;
   const valueText = (ruleId: string, value: number) => {
     const kind = rows.find((r) => r.id === ruleId)?.kind;
     return kind === 'deliverability' ? pct(value) : num(value);
@@ -316,6 +318,17 @@ export default function AlertsPage() {
         “Not firing” means the condition was not met at the last scheduled check. It does not by itself show healthy traffic when little or
         no volume was evaluated. The scheduler checks every five minutes.
       </p>
+      {publication && (publication.outstanding > 0 || publication.failed > 0) ? (
+        <Alert tone="warn" title="Publication is behind, so “not firing” may describe incomplete data" className="mt-3">
+          {publication.outstanding > 0
+            ? `${num(publication.outstanding)} message event${publication.outstanding === 1 ? '' : 's'} from recent sends ${publication.outstanding === 1 ? 'has' : 'have'} not reached the metric layer yet (the oldest ${publication.oldestPendingAgeMs === null ? 'just now' : timeAgo(new Date(Date.now() - publication.oldestPendingAgeMs).toISOString())}). `
+            : ''}
+          {publication.failed > 0
+            ? `${num(publication.failed)} message event${publication.failed === 1 ? ' was' : 's were'} dead-lettered and will not arrive until someone requeues them with \`am outbox\`. `
+            : ''}
+          Rules keep evaluating published data; treat a quiet result as unknown until publication catches up.
+        </Alert>
+      ) : null}
 
       <section aria-labelledby="alert-history" className="mt-6">
         <h2 id="alert-history" className="mb-2 text-[14px] font-semibold">

@@ -1,6 +1,6 @@
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
-import { type AlertChannel, schema, type Tx } from '@agentic-marketing/db';
+import { type AlertChannel, outboxLagMs, outboxPublicationLag, schema, type Tx } from '@agentic-marketing/db';
 import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import type { AlertDirectory, NotifyDeps } from './deps';
@@ -52,6 +52,16 @@ const Event = z.object({
   firedAt: z.string(),
   resolvedAt: z.string().nullable(),
   notified: z.array(z.record(z.string(), z.unknown())),
+});
+
+const Publication = z.object({
+  outstanding: z.number().int().describe('Message events committed but not published to ClickHouse yet'),
+  failed: z.number().int().describe('Message events dead-lettered; they need a requeue (am outbox)'),
+  oldestPendingAgeMs: z
+    .number()
+    .int()
+    .nullable()
+    .describe('How long the oldest unpublished message event has waited, in milliseconds; null when none is waiting'),
 });
 
 type RuleRow = typeof schema.alertRules.$inferSelect;
@@ -136,16 +146,20 @@ export const listAlerts = defineCommand({
   name: 'alerts.list',
   title: 'List alert rules',
   description:
-    'Threshold rules over the analytics metric layer, with their channels and whether each is currently firing (and since when). Rules are workspace-scoped; history is in alerts.history.',
+    'Threshold rules over the analytics metric layer, with their channels and whether each is currently firing (and since when). Rules are workspace-scoped; history is in alerts.history. `publication` says how far the message events the rules read are behind: while it is not empty, a rule that is not firing may be describing incomplete data.',
   input: z.object({}),
-  output: z.object({ rules: z.array(Rule) }),
+  output: z.object({ rules: z.array(Rule), publication: Publication }),
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (_input, ctx) => {
     const rules = await ctx.tx.select().from(schema.alertRules).orderBy(desc(schema.alertRules.createdAt));
     const open = await ctx.tx.select().from(schema.alertEvents).where(isNull(schema.alertEvents.resolvedAt));
     const byRule = new Map(open.map((e) => [e.ruleId, e]));
-    return { rules: rules.map((r) => ruleOut(r, byRule.get(r.id))) };
+    const lag = await outboxPublicationLag(ctx.tx, ctx.principal.workspaceId, { kind: 'message_event' });
+    return {
+      rules: rules.map((r) => ruleOut(r, byRule.get(r.id))),
+      publication: { outstanding: lag.outstanding, failed: lag.failed, oldestPendingAgeMs: outboxLagMs(lag) },
+    };
   },
 });
 
