@@ -237,6 +237,8 @@ read-only, then start the previous release. Backup and restore run with the **0.
 that one diagnostic on a 16 target. Only after the restore does `AM_VERSION` go back to the
 previous release.
 
+This rollback only works while the schema stays compatible with PostgreSQL 16. PostgreSQL does not guarantee that a dump loads into an older major version. Agentic Marketing's own migrations use no 18-only features, but objects added by hand can break the restore. Examples are a `uuidv7()` default or a virtual generated column. Rehearse the restore with the actual archive into a scratch 16 database first. If `am restore` reports any error other than the single `transaction_timeout` diagnostic, stop and keep running on 18.
+
 1. Drain every writer: `docker compose stop app` (and every other app/role container). Keep the 18
    database, ClickHouse, NATS and Valkey up; traffic stays isolated for the rest of the procedure.
 2. Take and verify the final rollback backup with the 0.16 image (`AM_VERSION` is still 0.16.0):
@@ -383,7 +385,7 @@ same decision as Compose, done with the operator's tooling:
      migration hook may migrate the empty 16 cluster first; the restore replaces it.) Verify
      read-only with a 0.16 `am doctor` Job while the roles stay at zero (brand rows expected to
      fail), then set `image.tag` to the previous release, scale up, and run `am doctor`/`am smoke`
-     again. Keep the old 18 cluster and the backup until the 16 install is verified.
+     again. Keep the old 18 cluster and the backup until the 16 install is verified. The same condition applies as for Compose: the schema must still be 16-compatible. Rehearse the restore first, and stop on any restore error other than `transaction_timeout`.
 
 `POSTGRES_IMAGE` and `postgres-check` are Compose-only. On Kubernetes the guard is the operator's
 major-version upgrade, and `am doctor`'s version check catches a `DATABASE_URL` that still points
