@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { createShutdown, runShutdownSteps, type ShutdownLog } from '../src/shutdown';
+import { createShutdown, drainWorkers, runShutdownSteps, type ShutdownLog } from '../src/shutdown';
 
 const recorder = () => {
   const infos: string[] = [];
-  const errors: { err: unknown; step: string; message: string }[] = [];
+  const errors: Record<string, unknown>[] = [];
   const log: ShutdownLog = {
     info: (message) => infos.push(message),
     error: (fields, message) => errors.push({ ...fields, message }),
@@ -135,5 +135,44 @@ describe('shutdown sequencing (#1014)', () => {
     controller.onSignal();
     await controller.done();
     expect(exits).toEqual([1]);
+  });
+
+  it('logs only the step name, never the error text (#1021 review)', async () => {
+    const { log, errors } = recorder();
+    const code = await runShutdownSteps(
+      [
+        {
+          name: 'database',
+          close: async () => {
+            throw new Error('connect to postgres://am:hunter2@db/am failed for alice@example.test');
+          },
+        },
+      ],
+      log,
+    );
+    expect(code).toBe(1);
+    expect(errors).toEqual([{ step: 'database', message: 'shutdown step failed' }]);
+    expect(JSON.stringify(errors)).not.toMatch(/hunter2|alice@example/);
+  });
+
+  it('fails the workers step when a worker rejects, after every worker settles (#1021 review)', async () => {
+    const { log, errors } = recorder();
+    const late = deferred();
+    let lateSettled = false;
+    const workers = [
+      Promise.reject(new Error('worker loop crashed')),
+      late.promise.then(() => {
+        lateSettled = true;
+      }),
+    ];
+    const run = runShutdownSteps([{ name: 'workers', close: () => drainWorkers(workers) }], log);
+    late.resolve();
+    expect(await run).toBe(1);
+    expect(lateSettled).toBe(true);
+    expect(errors).toEqual([{ step: 'workers', message: 'shutdown step failed' }]);
+  });
+
+  it('drains cleanly when every worker resolves', async () => {
+    await expect(drainWorkers([Promise.resolve(), Promise.resolve(undefined)])).resolves.toBeUndefined();
   });
 });

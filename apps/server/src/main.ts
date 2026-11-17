@@ -9,7 +9,7 @@ import { prefixOf } from './domains';
 import { publicOnly } from './http/public-only';
 import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
 import { offlineChecks } from './ops/checks';
-import { createShutdown } from './shutdown';
+import { createShutdown, drainWorkers } from './shutdown';
 import { COMMIT, VERSION } from './version';
 import { startScheduler, startWorkers } from './workers';
 
@@ -89,7 +89,7 @@ const shutdown = createShutdown({
       name: 'workers',
       close: () => {
         stopWorkers.abort();
-        return Promise.allSettled(workers);
+        return drainWorkers(workers);
       },
     },
     { name: 'bus', close: () => srv.bus.close() },

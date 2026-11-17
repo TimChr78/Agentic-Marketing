@@ -160,9 +160,14 @@ export function expectUnordered<T>(actual: readonly T[], expected: readonly T[])
  * request never gets a response and the test that called the fake waits for one (#1014).
  */
 export function failFakeServer(res: ServerResponse, body: unknown = { error: 'fake server failed' }): void {
-  if (!res.headersSent) {
-    res.statusCode = 500;
-    res.setHeader('content-type', 'application/json');
+  if (res.writableEnded || res.destroyed) return;
+  if (res.headersSent) {
+    // A success status already went out: cut the response so the caller sees a failure, not a
+    // truncated body that still reads as 200.
+    res.destroy();
+    return;
   }
+  res.statusCode = 500;
+  res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify(body));
 }
