@@ -138,27 +138,36 @@ describe('the segment builder’s message engagement condition', () => {
   it('picks an actual broadcast, then an actual journey, and clears the send again', async () => {
     renderEditor({ all: [{ message: 'opened' }, { trait: 'city', op: 'eq', value: 'Aarhus' }] });
     const row = () => (lastCondition() as { all: [Record<string, unknown>] }).all[0];
+    const source = () => screen.getByRole('combobox', { name: 'Sent from, condition 1' });
 
-    // The kind alone keeps the picker on screen and says what is missing.
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sent from, condition 1' }), { target: { value: 'broadcast' } });
-    expect(row()).toEqual({ message: 'opened' });
+    // The kind alone is not a change: it keeps the picker on screen and says what is missing.
+    fireEvent.change(source(), { target: { value: 'broadcast' } });
+    expect(h.changed).toEqual([]);
     const broadcast = await screen.findByRole('combobox', { name: 'Broadcast, condition 1' });
     expect(broadcast.getAttribute('aria-invalid')).toBe('true');
-    expect(screen.getByText('Choose a broadcast.')).toBeTruthy();
+    expect(screen.getAllByText('Choose a broadcast for condition 1.').length).toBeGreaterThan(0);
 
     fireEvent.change(broadcast, { target: { value: BCT } });
     expect(row()).toEqual({ message: 'opened', broadcast: BCT });
 
-    // A journey replaces the broadcast: both are one `sentBy` value in the message log.
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sent from, condition 1' }), { target: { value: 'journey' } });
-    expect(row()).toEqual({ message: 'opened' });
-    const journey = await screen.findByRole('combobox', { name: 'Journey, condition 1' });
-    expect(screen.getByText('Choose a journey.')).toBeTruthy();
-    fireEvent.change(journey, { target: { value: JRN } });
+    // A journey replaces the broadcast, but only once one is picked: while the picker waits, the
+    // condition still counts the broadcast and nothing is emitted.
+    fireEvent.change(source(), { target: { value: 'journey' } });
+    expect(h.changed).toHaveLength(1);
+    expect(row()).toEqual({ message: 'opened', broadcast: BCT });
+    await screen.findByRole('combobox', { name: 'Journey, condition 1' });
+    expect(screen.getAllByText('Choose a journey for condition 1.').length).toBeGreaterThan(0);
+    // Going back to the saved kind drops the pending pick without touching the condition.
+    fireEvent.change(source(), { target: { value: 'broadcast' } });
+    expect(screen.queryByRole('combobox', { name: 'Journey, condition 1' })).toBeNull();
+    expect(h.changed).toHaveLength(1);
+
+    fireEvent.change(source(), { target: { value: 'journey' } });
+    fireEvent.change(await screen.findByRole('combobox', { name: 'Journey, condition 1' }), { target: { value: JRN } });
     expect(row()).toEqual({ message: 'opened', journey: JRN });
 
-    // Any send removes the last chosen one; the picker goes away and nothing is left behind.
-    fireEvent.change(screen.getByRole('combobox', { name: 'Sent from, condition 1' }), { target: { value: 'any' } });
+    // Any send is an explicit choice that removes the send; the picker goes away.
+    fireEvent.change(source(), { target: { value: 'any' } });
     expect(row()).toEqual({ message: 'opened' });
     expect(screen.queryByRole('combobox', { name: 'Journey, condition 1' })).toBeNull();
   });

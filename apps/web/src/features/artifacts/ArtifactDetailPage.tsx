@@ -72,6 +72,12 @@ export interface EditorProps<C = any> {
   errors: Record<string, string>;
   /** Settings to fill in before publishing (draft warnings). */
   warnings: DraftWarning[];
+  /**
+   * Problems only the editor can see (a row that is picked but not finished). While any are
+   * reported the page refuses to save or publish and lists them; an editor reports the current set
+   * whenever it changes and clears it when it unmounts.
+   */
+  reportProblems?: (problems: string[]) => void;
 }
 
 /** The pending-approval read a detail slot may inspect; absent for families that do not read it. */
@@ -97,8 +103,10 @@ export interface ArtifactDetailActionContext {
   dirty: boolean;
   saving: boolean;
   readOnly: boolean;
-  /** artifacts:publish, a draft and no unsaved changes (the existing publish gate). */
+  /** artifacts:publish, a draft, no unsaved changes and no editor problem (the existing publish gate). */
   canPublish: boolean;
+  /** The editor reported a problem that must be fixed before saving or publishing. */
+  blocked: boolean;
   canApprove: boolean;
   directPublish: boolean;
   pending: Out<'approvals.list'>['approvals'][number] | undefined;
@@ -211,6 +219,7 @@ export function ArtifactDetailPage({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<DraftWarning[]>([]);
+  const [editorProblems, setEditorProblems] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -254,6 +263,7 @@ export function ArtifactDetailPage({
     setSaveError(null);
     setErrors({});
     setWarnings([]);
+    setEditorProblems([]);
     setSavedAt(null);
     setLastSave(null);
   }, [id]);
@@ -284,6 +294,9 @@ export function ArtifactDetailPage({
 
   const dirty = draft !== undefined && JSON.stringify(draft) !== JSON.stringify(savedContent);
   const readOnly = !can('artifacts:write');
+  // A problem only the editor can see (a row picked but not finished): saving or publishing now
+  // would store something other than what the person is looking at.
+  const blocked = editorProblems.length > 0;
 
   useEffect(() => {
     if (!dirty) return;
@@ -299,6 +312,9 @@ export function ArtifactDetailPage({
   const save = useCallback(
     async (opts: { name?: string; quiet?: boolean } = {}) => {
       if (!a) return false;
+      // An unfinished row (a send picked but not chosen) is not what the draft says: refuse until
+      // the editor reports it finished.
+      if (blocked) return false;
       // One save at a time: a response that lands after a newer attempt must not move the draft back.
       if (savingRef.current) return false;
       const artifactId = a.id;
@@ -352,7 +368,7 @@ export function ArtifactDetailPage({
         setSaving(false);
       }
     },
-    [a, art, toast, workspace.id],
+    [a, art, blocked, toast, workspace.id],
   );
 
   // Autosave: a moment after the last change; retried on the next change after an error, but never
@@ -362,6 +378,7 @@ export function ArtifactDetailPage({
   useEffect(() => {
     const snapshot = draftJson(draft);
     if (
+      blocked ||
       !shouldScheduleAutosave({
         autosave: !!autosave,
         dirty,
@@ -375,19 +392,19 @@ export function ArtifactDetailPage({
       return;
     const t = setTimeout(() => void save({ quiet: true }), 1200);
     return () => clearTimeout(t);
-  }, [autosave, dirty, readOnly, saving, conflict, draft]);
+  }, [autosave, blocked, dirty, readOnly, saving, conflict, draft]);
 
   // Ctrl/Cmd+S saves.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 's' && (e.metaKey || e.ctrlKey) && dirty && !readOnly) {
+      if (e.key === 's' && (e.metaKey || e.ctrlKey) && dirty && !readOnly && !blocked) {
         e.preventDefault();
         void save();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [dirty, readOnly, save]);
+  }, [blocked, dirty, readOnly, save]);
 
   if (restricted) {
     return (
@@ -468,7 +485,7 @@ export function ArtifactDetailPage({
   };
   const directPublish =
     workspace.approvalPolicy === 'none' || (workspace.approvalPolicy === 'agent_changes' && latest.author.type === 'user');
-  const canPublish = can('artifacts:publish') && latest.state === 'draft' && !dirty;
+  const canPublish = can('artifacts:publish') && latest.state === 'draft' && !dirty && !blocked;
 
   const discardDraft = async () => {
     setDiscarding(true);
@@ -561,6 +578,15 @@ export function ArtifactDetailPage({
           {saveError}
         </Alert>
       )}
+      {editorProblems.length > 0 && (
+        <Alert tone="warn" title="Finish this before saving or publishing" className="mb-4">
+          <ul className="list-disc pl-4">
+            {editorProblems.map((problem) => (
+              <li key={problem}>{problem}</li>
+            ))}
+          </ul>
+        </Alert>
+      )}
       {warnings.length > 0 && !dirty && (
         <Alert tone="warn" title="Fill these in before publishing" className="mb-4">
           <ul className="list-disc pl-4">
@@ -588,7 +614,15 @@ export function ArtifactDetailPage({
             {draft !== undefined &&
               (pageEditor ? (
                 <Suspense fallback={<EditorSkeleton label="Loading the editor" />}>
-                  {pageEditor({ artifact: a, content: draft, onChange: updateDraft, readOnly, errors, warnings })}
+                  {pageEditor({
+                    artifact: a,
+                    content: draft,
+                    onChange: updateDraft,
+                    readOnly,
+                    errors,
+                    warnings,
+                    reportProblems: setEditorProblems,
+                  })}
                 </Suspense>
               ) : (
                 <div className={wide ? '' : 'max-w-[900px]'}>
@@ -723,6 +757,7 @@ export function ArtifactDetailPage({
       saving,
       readOnly,
       canPublish,
+      blocked,
       canApprove: can('artifacts:approve'),
       directPublish,
       pending,
@@ -768,7 +803,7 @@ export function ArtifactDetailPage({
                     <Button variant="ghost" onClick={resetToSaved}>
                       Discard changes
                     </Button>
-                    <Button variant="primary" mutation loading={saving} onClick={() => void save()}>
+                    <Button variant="primary" mutation loading={saving} onClick={() => void save()} disabled={blocked}>
                       Save draft
                     </Button>
                   </>
@@ -834,7 +869,7 @@ export function ArtifactDetailPage({
                 <Button variant="ghost" onClick={resetToSaved}>
                   Discard changes
                 </Button>
-                <Button variant="primary" mutation loading={saving} onClick={() => void save()}>
+                <Button variant="primary" mutation loading={saving} onClick={() => void save()} disabled={blocked}>
                   Save draft
                 </Button>
               </>

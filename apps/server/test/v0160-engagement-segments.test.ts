@@ -221,10 +221,17 @@ describe('through the production refresh path', () => {
       content: { description: 'Message engagement', condition: { message: 'opened', within: 'P30D' } },
     });
     await api.call('artifacts.requestPublish', { artifactId, note: 'First version' });
-    expect(await api.call('segments.refresh', { artifactId })).toMatchObject({ members: 2, entered: 2, exited: 0 });
+    // Publishing schedules a recompute, so the membership can already be there before the explicit
+    // refresh below. Wait for it, then a manual refresh is an idempotent no-op.
+    await eventually(
+      () => api.call('segments.members', { artifactId }),
+      (r) => people(r.members.map((m) => m.profileId)).join() === [ids.ada!, ids.bo!].sort().join(),
+      15_000,
+    );
     expect(people((await api.call('segments.members', { artifactId })).members.map((m) => m.profileId))).toEqual(
       [ids.ada!, ids.bo!].sort(),
     );
+    expect(await api.call('segments.refresh', { artifactId })).toMatchObject({ members: 2, entered: 0, exited: 0 });
 
     // Dee opens this week's issue: the next refresh moves her in and announces it.
     await t.srv.events.insertMessageEvents([msg(ids.dee!, 'opened', daysAgo(0))]);

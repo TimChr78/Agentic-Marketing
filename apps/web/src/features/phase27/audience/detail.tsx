@@ -37,7 +37,7 @@ export function audienceActions(ctx: ArtifactDetailActionContext): ArtifactDetai
   if (ctx.dirty && !ctx.readOnly) {
     return {
       primary: (
-        <Button variant="primary" mutation loading={ctx.saving} onClick={() => void ctx.save()}>
+        <Button variant="primary" mutation loading={ctx.saving} onClick={() => void ctx.save()} disabled={ctx.blocked}>
           Save draft
         </Button>
       ),

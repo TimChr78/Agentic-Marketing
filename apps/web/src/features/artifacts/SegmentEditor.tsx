@@ -1,5 +1,5 @@
 import { List, Plus, Trash2, Users } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -70,6 +70,12 @@ type Kind = 'trait' | 'event' | 'message' | 'consent' | 'segment' | 'not' | 'gro
 /** Where the counted messages came from: any send, or one broadcast or journey. */
 type SendSource = 'any' | 'broadcast' | 'journey';
 
+/**
+ * A row reports what it still needs (a send picked but not chosen) so the page can refuse to save
+ * or publish and show the row's message. Rows unregister on unmount.
+ */
+const RowProblemContext = createContext<(id: string, problem: string | null) => void>(() => {});
+
 interface PurposeOption {
   key: string;
   name: string;
@@ -124,7 +130,7 @@ const MESSAGE_EVENTS: { value: MessageEvent; label: string }[] = [
   { value: 'unsubscribed', label: 'Unsubscribed' },
 ];
 
-export function SegmentEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<SegmentContent>) {
+export function SegmentEditor({ artifact, content, onChange, readOnly, errors, reportProblems }: EditorProps<SegmentContent>) {
   const set = (patch: Partial<SegmentContent>) => onChange({ ...content, ...patch });
   const group = useMemo(() => groupOf(content.condition), [content.condition]);
   const condition = useMemo(() => buildTopCondition(group.mode, group.rows), [group]);
@@ -137,6 +143,28 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
     error: purposesRead.error,
     purposes: (purposesRead.data?.purposes ?? []).map((p) => ({ key: p.key, name: p.name })),
   };
+  // Rows that still need something (a send picked but not chosen) report it here, and the page
+  // refuses to save or publish while the set is not empty. The callback lives in a ref so a caller
+  // passing an inline function cannot re-run the effect.
+  const [rowProblems, setRowProblems] = useState<Record<string, string>>({});
+  const reportRowProblem = useCallback((id: string, problem: string | null) => {
+    setRowProblems((prev) => {
+      if (problem === null) {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      }
+      return prev[id] === problem ? prev : { ...prev, [id]: problem };
+    });
+  }, []);
+  const reportProblemsRef = useRef(reportProblems);
+  reportProblemsRef.current = reportProblems;
+  useEffect(() => {
+    reportProblemsRef.current?.([...new Set(Object.values(rowProblems))]);
+  }, [rowProblems]);
+  // Leaving the editor (a tab switch, a caught error) must not leave the page blocked.
+  useEffect(() => () => reportProblemsRef.current?.([]), []);
 
   const emit = (mode: Mode, rows: Condition[]) => set({ condition: buildTopCondition(mode, rows) });
 
@@ -170,42 +198,44 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
   }
 
   return (
-    <div className="max-w-[900px] space-y-5">
-      <Field label="Description" hint="For the team; people in the segment never see it." error={errors.description}>
-        <Textarea
-          rows={2}
-          maxLength={1000}
-          value={content.description ?? ''}
-          readOnly={readOnly}
-          onChange={(e) => set({ description: e.target.value })}
-        />
-      </Field>
+    <RowProblemContext.Provider value={reportRowProblem}>
+      <div className="max-w-[900px] space-y-5">
+        <Field label="Description" hint="For the team; people in the segment never see it." error={errors.description}>
+          <Textarea
+            rows={2}
+            maxLength={1000}
+            value={content.description ?? ''}
+            readOnly={readOnly}
+            onChange={(e) => set({ description: e.target.value })}
+          />
+        </Field>
 
-      <section aria-label="Condition" className="space-y-2">
-        <h2 className="text-[13px] font-medium text-fg">Who is in it</h2>
-        {(errors.condition ?? errors['condition.all'] ?? errors['condition.any']) && (
-          <p className="text-[12px] text-bad">{errors.condition ?? errors['condition.all'] ?? errors['condition.any']}</p>
-        )}
-        <GroupEditor
-          mode={group.mode}
-          rows={group.rows}
-          onChange={emit}
-          depth={1}
-          readOnly={readOnly}
-          artifactId={artifact.id}
-          purposes={purposes}
-        />
-      </section>
+        <section aria-label="Condition" className="space-y-2">
+          <h2 className="text-[13px] font-medium text-fg">Who is in it</h2>
+          {(errors.condition ?? errors['condition.all'] ?? errors['condition.any']) && (
+            <p className="text-[12px] text-bad">{errors.condition ?? errors['condition.all'] ?? errors['condition.any']}</p>
+          )}
+          <GroupEditor
+            mode={group.mode}
+            rows={group.rows}
+            onChange={emit}
+            depth={1}
+            readOnly={readOnly}
+            artifactId={artifact.id}
+            purposes={purposes}
+          />
+        </section>
 
-      <EstimatedSize condition={condition} />
+        <EstimatedSize condition={condition} />
 
-      <details className="rounded-md border border-line">
-        <summary className="cursor-pointer px-3 py-2 text-[12px] font-medium text-fg-2 select-none">Advanced condition view</summary>
-        <div className="border-t border-line p-3">
-          <JsonView value={condition} maxHeight={320} />
-        </div>
-      </details>
-    </div>
+        <details className="rounded-md border border-line">
+          <summary className="cursor-pointer px-3 py-2 text-[12px] font-medium text-fg-2 select-none">Advanced condition view</summary>
+          <div className="border-t border-line p-3">
+            <JsonView value={condition} maxHeight={320} />
+          </div>
+        </details>
+      </div>
+    </RowProblemContext.Provider>
   );
 }
 
@@ -604,30 +634,54 @@ function MessageRow({
   };
   // The selected send comes from the condition's own property, so a saved `broadcast` (or a cleared
   // one) is always shown as it is. A kind picked before any id exists lives here only: an empty id
-  // would fail the DSL's id validation and read as "any send" anyway (empty is falsy).
+  // would fail the DSL's id validation, read as "any send" anyway (empty is falsy) and let a save
+  // silently drop the send the condition really has.
   const savedSource: SendSource = 'broadcast' in c ? 'broadcast' : 'journey' in c ? 'journey' : 'any';
   const [pendingSource, setPendingSource] = useState<Exclude<SendSource, 'any'> | null>(null);
-  const source: SendSource = savedSource === 'any' ? (pendingSource ?? 'any') : savedSource;
-  const sendId = savedSource === 'any' ? '' : (c[savedSource] ?? '');
+  const source: SendSource = pendingSource ?? savedSource;
+  // An id only ever comes from the condition: a pending kind has none until one is picked.
+  const sendId = savedSource === source && savedSource !== 'any' ? (c[savedSource] ?? '') : '';
   const chooseSource = (kind: SendSource) => {
-    const next: MessageCondition = { ...c };
-    delete next.broadcast;
-    delete next.journey;
-    setPendingSource(kind === 'any' ? null : kind);
-    onChange(next);
+    if (kind === savedSource) {
+      // Back to what the condition already says: drop the pending kind and change nothing.
+      setPendingSource(null);
+      return;
+    }
+    if (kind === 'any') {
+      // "Any send" is an explicit choice, and the only one that makes the row unrestricted.
+      setPendingSource(null);
+      const next: MessageCondition = { ...c };
+      delete next.broadcast;
+      delete next.journey;
+      onChange(next);
+      return;
+    }
+    // Picking a kind of send is not a change yet: the condition keeps the send it has (if any) and
+    // the row reports itself incomplete, so nothing invalid or accidentally unrestricted is saved.
+    setPendingSource(kind);
   };
   const chooseSend = (id: string) => {
+    if (!id) {
+      setPendingSource(source === 'any' ? null : source);
+      return;
+    }
     const next: MessageCondition = { ...c };
     delete next.broadcast;
     delete next.journey;
-    if (id) {
-      if (source === 'broadcast') next.broadcast = id;
-      else if (source === 'journey') next.journey = id;
-    }
-    setPendingSource(id || source === 'any' ? null : source);
+    if (source === 'broadcast') next.broadcast = id;
+    else if (source === 'journey') next.journey = id;
+    setPendingSource(null);
     onChange(next);
   };
   const missingPurpose = c.purpose && !purposes.purposes.some((p) => p.key === c.purpose);
+  // The page must refuse to save or publish until this row is finished.
+  const rowId = useId();
+  const reportRowProblem = useContext(RowProblemContext);
+  const problem = source !== 'any' && !sendId ? `Choose a ${source} for condition ${index}.` : null;
+  useEffect(() => {
+    reportRowProblem(rowId, problem);
+    return () => reportRowProblem(rowId, null);
+  }, [rowId, problem, reportRowProblem]);
 
   return (
     <div className="space-y-2">
@@ -720,7 +774,7 @@ function MessageRow({
             <option value="journey">From a journey</option>
           </Select>
         </Field>
-        {source !== 'any' && <SendSourcePicker type={source} value={sendId} onChange={chooseSend} disabled={readOnly} index={index} />}
+        {source !== 'any' && <SendSourcePicker type={source} value={sendId} onPick={chooseSend} disabled={readOnly} index={index} />}
       </div>
       <p className="text-[12px] text-muted">
         Opens are counted only where the provider or the workspace tracks them, and a mailbox that pre-fetches the pixel can open a message
@@ -734,13 +788,13 @@ function MessageRow({
 function SendSourcePicker({
   type,
   value,
-  onChange,
+  onPick,
   disabled,
   index,
 }: {
   type: Exclude<SendSource, 'any'>;
   value: string;
-  onChange: (id: string) => void;
+  onPick: (id: string) => void;
   disabled?: boolean;
   index: number;
 }) {
@@ -749,8 +803,8 @@ function SendSourcePicker({
   const known = !value || items.some((a) => a.id === value);
   const label = type === 'broadcast' ? `Broadcast, condition ${index}` : `Journey, condition ${index}`;
   return (
-    <Field label={label} hideLabel error={value ? undefined : `Choose a ${type}.`}>
-      <Select value={value} disabled={disabled || list.loading} aria-label={label} onChange={(e) => onChange(e.target.value)}>
+    <Field label={label} hideLabel error={value ? undefined : `Choose a ${type} for condition ${index}.`}>
+      <Select value={value} disabled={disabled || list.loading} aria-label={label} onChange={(e) => onPick(e.target.value)}>
         <option value="">{list.loading ? `Loading ${type}s…` : list.error ? `Couldn't load: ${list.error}` : `Choose a ${type}…`}</option>
         {!known && value && <option value={value}>{value} (not found)</option>}
         {items.map((a) => (
