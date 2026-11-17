@@ -2,6 +2,22 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.14.28] - 2026-11-17
+
+### Security
+
+- An error's structured `details` — object keys and values alike — are now redacted and length-bounded like its message, so a credential a command echoes back (for example a parameter name passed to `recipes.preview`) no longer reaches REST, MCP or the copilot client through `details`.
+
+### Upgrading from 0.14.27
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** error `details` returned by REST, MCP and the copilot are now redacted like the message: string values and object keys that look like credentials read `[redacted]` and are bounded, with at most 1,000 elements in total. Machine-readable fields and the `details.reason` codes clients switch on are unchanged.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.14.28.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.14.28 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.14.28` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.14.28). Run `docker compose exec app am doctor`.
+
+<!-- issues: 996 -->
+
 ## [0.14.27] - 2026-11-16
 
 ### Changed
