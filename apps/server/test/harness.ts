@@ -1,9 +1,10 @@
+import { appendFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { migrateAuth } from '@agentic-marketing/auth';
 import { type ApiError, createClient } from '@agentic-marketing/client';
 import { newUuid } from '@agentic-marketing/core';
 import { createDb, migrate } from '@agentic-marketing/db';
-import { migrateClickHouse, resetClickHouse, resetNatsNamespace, resetNatsPrefix } from '@agentic-marketing/events';
+import { consumerPhases, migrateClickHouse, resetClickHouse, resetNatsNamespace, resetNatsPrefix } from '@agentic-marketing/events';
 import { serve } from '@hono/node-server';
 import { Client, type OAuthClientProvider, StreamableHTTPClientTransport, UnauthorizedError } from '@modelcontextprotocol/client';
 import pg from 'pg';
@@ -63,11 +64,17 @@ export interface CloseStage {
   inspect?: () => string | Promise<string>;
 }
 
-/** How long a test server's close may take before it reports what is still open (#1028). */
-const CLOSE_BUDGET_MS = Math.max(1_000, Number(process.env.AM_TEST_CLOSE_MS ?? 20_000));
+/**
+ * How long a test server's close may take in total before it reports what is still open (#1028).
+ * Measured: a healthy close is under a second idle; the heaviest file (`v0145-campaign-identity`,
+ * which leaves bus events for all 16 profile shards) took 4.6-7.4 s with the machine saturated,
+ * because a worker finishes its in-flight batch and those batches serialize on the workspace
+ * identity lock. 40 s stays under vitest's 60 s hook timeout with room for the diagnostics.
+ */
+const CLOSE_BUDGET_MS = Math.max(1_000, Number(process.env.AM_TEST_CLOSE_MS ?? 40_000));
 
-/** How long one close step may take. A step that hangs must not spend every later step's time. */
-const CLOSE_STAGE_MS = Math.max(100, Number(process.env.AM_TEST_CLOSE_STAGE_MS ?? 5_000));
+/** How long one close step may take, so a step that hangs leaves the later ones a turn. */
+const CLOSE_STAGE_MS = Math.max(100, Number(process.env.AM_TEST_CLOSE_STAGE_MS ?? 20_000));
 
 type SettleOutcome = 'done' | 'failed' | 'timeout';
 
@@ -105,6 +112,12 @@ async function diagnose(stage: CloseStage): Promise<string> {
   }
 }
 
+/** One line per close step in `AM_TEST_CLOSE_TRACE`, so the bounds can be chosen from timings. */
+function traceSettle(worker: WorkerLoop, ms: number): void {
+  const file = process.env.AM_TEST_CLOSE_TRACE;
+  if (file) appendFileSync(file, `worker\t${worker.worker}\t${ms}\n`);
+}
+
 /** The handle kinds the process still holds, so a report names a socket, timer or file. */
 function openHandles(): string {
   const info = process.getActiveResourcesInfo?.() ?? [];
@@ -136,6 +149,9 @@ export async function closeBounded(stages: readonly CloseStage[], limits: { budg
       Promise.resolve().then(() => stage.close()),
       Math.min(left, stageMs),
     );
+    // AM_TEST_CLOSE_TRACE=<file> appends one line per step, so the bounds can be chosen from timings.
+    if (process.env.AM_TEST_CLOSE_TRACE)
+      appendFileSync(process.env.AM_TEST_CLOSE_TRACE, `${stage.name}\t${outcome}\t${Date.now() - stageStarted}\n`);
     if (outcome === 'timeout') open.push(`${stage.name} (no close after ${Date.now() - stageStarted}ms${await diagnose(stage)})`);
     else if (outcome === 'failed') failed.push(stage.name);
   }
@@ -521,14 +537,25 @@ export async function startTestServer(
       }
       const workersDone = Promise.allSettled(workers);
       const running = new Set<Promise<unknown>>(workers);
+      const closeStarted = Date.now();
       for (const w of workers)
         void w.then(
-          () => running.delete(w),
-          () => running.delete(w),
+          () => {
+            running.delete(w);
+            traceSettle(w, Date.now() - closeStarted);
+          },
+          () => {
+            running.delete(w);
+            traceSettle(w, Date.now() - closeStarted);
+          },
         );
       const workerReport = () => {
         if (!running.size) return '';
-        const names = workers.filter((w) => running.has(w)).map((w) => w.worker);
+        // Consumers know their own phase; a scheduler loop only has a name.
+        const where = new Map(consumerPhases().map((p) => [p.name, `${p.phase} ${(p.forMs / 1000).toFixed(1)}s`]));
+        const names = workers
+          .filter((w) => running.has(w))
+          .map((w) => (where.has(w.worker) ? `${w.worker} (${where.get(w.worker)})` : w.worker));
         return `${names.length} still running: ${names.join(', ')}`;
       };
       // Bounded, in order, and reported: a worker loop, the bus, ClickHouse, Valkey or a pool that

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { classifyFetchError, consumeLoop, type FetchedMessage, MAX_FETCH_FAILURES, type MessageBatch, type PullConsumer } from '../src/bus';
+import {
+  classifyFetchError,
+  consumeLoop,
+  consumerPhases,
+  type FetchedMessage,
+  MAX_FETCH_FAILURES,
+  type MessageBatch,
+  type PullConsumer,
+} from '../src/bus';
 import type { BusEvent } from '../src/schema';
 
 // The consume loop keeps a worker alive through transient pull errors, recreates a missing
@@ -189,6 +197,43 @@ describe('consumeLoop (#307)', () => {
     stop.abort();
     await expect(loop).resolves.toBeUndefined();
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('stops while it is still creating its consumer', async () => {
+    // The consumer setup is a NATS API call; on a reconnecting connection it may not complete.
+    const stop = new AbortController();
+    const started = Date.now();
+    const loop = consumeLoop(
+      () => new Promise<PullConsumer>(() => {}),
+      opts,
+      decode,
+      async () => {},
+      stop.signal,
+      { retryMs: 1 },
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    stop.abort();
+    await expect(loop).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it('reports the phase it is in, so a shutdown can say what it waits on', async () => {
+    const batch = quietBatch();
+    const consumer: PullConsumer = { fetch: async () => batch.iterable };
+    const stop = new AbortController();
+    const loop = consumeLoop(
+      async () => consumer,
+      { ...opts, maxWaitMs: 60_000 },
+      decode,
+      async () => {},
+      stop.signal,
+      { retryMs: 1 },
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    expect(consumerPhases().find((p) => p.name === 'test')?.phase).toBe('waiting');
+    stop.abort();
+    await expect(loop).resolves.toBeUndefined();
+    expect(consumerPhases().find((p) => p.name === 'test')?.phase).toBe('stopped');
   });
 
   it('rejects after too many failures in a row, so the worker restarts', async () => {
