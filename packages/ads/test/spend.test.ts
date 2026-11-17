@@ -2,6 +2,7 @@ import type { CommandContext } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { describe, expect, it } from 'vitest';
+import { failFakeServer } from '../../../test-support/index';
 import { adPerformance, googleSpend, metaSpend, SPEND_INSERT_CHUNK_ROWS, SPEND_LIMITS, storeSpendPages } from '../src/spend';
 
 // #786: ads.performance used to read conversion events with a raw `LIMIT 100000` and no order,
@@ -231,13 +232,17 @@ describe('spend read truncation (#917)', () => {
     const { createServer } = await import('node:http');
     let hits = 0;
     const server = createServer(async (req, res) => {
-      let body = '';
-      for await (const chunk of req) body += chunk;
-      hits += 1;
-      const payload = respond(req.url ?? '', body, hits);
-      res.statusCode = 200;
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify(payload));
+      try {
+        let body = '';
+        for await (const chunk of req) body += chunk;
+        hits += 1;
+        const payload = respond(req.url ?? '', body, hits);
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify(payload));
+      } catch {
+        failFakeServer(res);
+      }
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const port = (server.address() as { port: number }).port;
@@ -484,19 +489,23 @@ describe('chunked spend import (#962)', () => {
     const { createServer } = await import('node:http');
     let hits = 0;
     const server = createServer(async (req, res) => {
-      for await (const _chunk of req) {
-        // Drain the request body; the query itself does not matter to the fake provider.
+      try {
+        for await (const _chunk of req) {
+          // Drain the request body; the query itself does not matter to the fake provider.
+        }
+        hits += 1;
+        const results = Array.from({ length: rowsPerPage }, (_, i) => ({
+          campaign: { id: String(hits * 100 + i), name: `Campaign ${hits}-${i}` },
+          segments: { date: '2026-01-02' },
+          metrics: { costMicros: '1000000', impressions: '5', clicks: '2', conversions: 1 },
+          customer: { currencyCode: 'DKK' },
+        }));
+        res.statusCode = 200;
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ results, ...(hits < pages ? { nextPageToken: `page-${hits + 1}` } : {}) }));
+      } catch {
+        failFakeServer(res);
       }
-      hits += 1;
-      const results = Array.from({ length: rowsPerPage }, (_, i) => ({
-        campaign: { id: String(hits * 100 + i), name: `Campaign ${hits}-${i}` },
-        segments: { date: '2026-01-02' },
-        metrics: { costMicros: '1000000', impressions: '5', clicks: '2', conversions: 1 },
-        customer: { currencyCode: 'DKK' },
-      }));
-      res.statusCode = 200;
-      res.setHeader('content-type', 'application/json');
-      res.end(JSON.stringify({ results, ...(hits < pages ? { nextPageToken: `page-${hits + 1}` } : {}) }));
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const port = (server.address() as { port: number }).port;

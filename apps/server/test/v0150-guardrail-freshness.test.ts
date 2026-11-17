@@ -268,6 +268,25 @@ describe('guardrails read unpublished message events (#1008)', () => {
     expect(refused.body.message).toMatch(/bounce rate of 33\.33%, above its mandate’s guardrail of 10%/);
   }, 90_000);
 
+  it('records a send’s outcome and its event in one transaction, so a decision cannot miss the send', async () => {
+    const s = await setup({ bounceRate: 0.1 });
+    await holdPublication(s.ws);
+    const sent = await sendDirect(s);
+
+    // The delivery worker writes the `sent` event in the transaction that sets the status (#1008):
+    // a decision that runs before the dispatcher published it still counts every send. A delivery
+    // path that inserted the event into ClickHouse after its status committed left a window in
+    // which neither the published rows nor the queue named a send, so the rate was read over fewer
+    // sends than there were (50% instead of 33.33% with one bounce in three).
+    for (const m of sent) expect(await outboxRowOf(s.ws, m.id, 'sent')).toMatchObject({ state: 'pending' });
+    expect((await t.srv.events.messageStats(s.ws, { since: new Date(Date.now() - 3_600_000) })).sent ?? 0).toBe(0);
+
+    await deliveryEvent(s, sent[0].id, 'soft_bounce', 'mailbox full');
+    const refused = await agentCall(s.token, 'messages.sendEmail', { profileId: s.profiles[2], templateId: s.templateId });
+    expect(refused.status).toBe(403);
+    expect(refused.body.message).toMatch(/bounce rate of 33\.33%, above its mandate’s guardrail of 10%/);
+  }, 90_000);
+
   it('uses the metric denominator for a broadcast, not the number of messages', async () => {
     const s = await setup({ complaintRate: 0.1 });
     await holdPublication(s.ws);

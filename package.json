@@ -1,7 +1,7 @@
 {
   "name": "agentic-marketing",
   "private": true,
-  "version": "0.15.0",
+  "version": "0.15.1",
   "license": "MIT",
   "packageManager": "pnpm@10.28.0",
   "engines": {
@@ -46,7 +46,8 @@
     },
     "auditConfig": {
       "ignoreGhsas": [
-        "GHSA-w5hq-g745-h8pq"
+        "GHSA-w5hq-g745-h8pq",
+        "GHSA-fc5q-39xc-vjpf"
       ]
     }
   },

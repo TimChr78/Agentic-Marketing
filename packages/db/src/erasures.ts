@@ -219,6 +219,11 @@ async function eraseFamily(client: pg.Client, workspaceId: string, profileIds: s
   // keys and consent state cascade from profiles; messages have no foreign key, so they go first.
   if (!profileIds.length) return 0;
   const params = [workspaceId, profileIds];
+  // Profile rows before the participant rows deleted below, the shared order
+  // (packages/profiles/src/identity.ts, #1011 review): a score finalisation or a journey step takes
+  // the same profile lock first, so neither can hold a participant row this deletion wants while
+  // waiting for a profile row it holds.
+  await client.query('SELECT id FROM profiles WHERE workspace_id = $1 AND id = ANY($2) ORDER BY id FOR NO KEY UPDATE', params);
   // Keep the e-mail and phone suppression hashes so the person is never contacted again. Their
   // identifiers are still in the restored snapshot at this point.
   await client.query(
@@ -248,6 +253,9 @@ async function eraseFamily(client: pg.Client, workspaceId: string, profileIds: s
       params,
     );
   await client.query('DELETE FROM journey_participants WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
+  // The journey hook's per-event markers name the person too (an event id can carry an address), and
+  // a restored snapshot brings them back with the person (#1011 review).
+  await client.query('DELETE FROM journey_processed_events WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM segment_memberships WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM consent_records WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM profile_merges WHERE workspace_id = $1 AND (from_id = ANY($2) OR into_id = ANY($2))', params);

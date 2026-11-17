@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, type PushTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
 import { newId, newUuid } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore, MessageEvent } from '@agentic-marketing/events';
+import type { EventStore } from '@agentic-marketing/events';
 import { consentStateOf, currentConsent, profileForMessage, purposeAllowed } from '@agentic-marketing/profiles';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -180,7 +180,10 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
     const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
     const finish = async (status: 'suppressed' | 'failed', reason: string) => {
       await tx.update(schema.messages).set({ status, reason, updatedAt: new Date() }).where(eq(schema.messages.id, id));
-      return { kind: 'done' as const, event: decisionEvent(m, status, reason) };
+      // The status and its event commit together (#1008): a decision sees the event either
+      // published or queued, never missing.
+      await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason)]);
+      return { kind: 'done' as const };
     };
     const tpl = m.templateId ? await publishedPushTemplate(tx, m.templateId, m.templateVersion) : null;
     if (!tpl?.template) return finish('failed', 'no_template: the template version is gone');
@@ -193,7 +196,11 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
       await purposesOf(tx),
     );
     if (hold.ok === false) return finish('suppressed', hold.reason);
-    if (hold.ok === 'later') return defer(tx, m, hold.until, hold.reason);
+    if (hold.ok === 'later') {
+      const held = await defer(tx, m, hold.until, hold.reason);
+      await enqueueMessageEvents(tx, ws, [held.event]);
+      return { kind: 'done' as const };
+    }
     let text: Awaited<ReturnType<typeof renderPush>>;
     try {
       text = await renderPush(tpl.template, { ...m.data, profile: v.vars });
@@ -243,10 +250,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
     };
   });
 
-  if (prepared.kind === 'done') {
-    await deps.events.insertMessageEvents([prepared.event]);
-    return;
-  }
+  if (prepared.kind === 'done') return;
   const { m, sends, out, stream } = prepared;
   const delivered: { device: string; id: string | null; provider: string; adapter: string }[] = [];
   const gone: string[] = [];
@@ -288,7 +292,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
         : null;
   if (errors.length) logger.warn({ messageId: id, retry, errors }, 'push send failed');
   const data = status === 'queued' ? { ...m.data, [DELIVERED_DEVICES]: reachedDevices } : withoutDeliveredDevices(m.data);
-  const event = await db.withWorkspace(ws, async (tx): Promise<MessageEvent> => {
+  await db.withWorkspace(ws, async (tx) => {
     const s = schema.pushSubscriptions;
     if (gone.length) await tx.delete(s).where(inArray(s.id, gone));
     if (delivered.length)
@@ -314,7 +318,7 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
         updatedAt: new Date(),
       })
       .where(eq(schema.messages.id, id));
-    return decisionEvent(m, status, reason ?? '', delivered[0]?.adapter ?? '');
+    // The outcome and its event commit together (#1008).
+    await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason ?? '', delivered[0]?.adapter ?? '')]);
   });
-  await deps.events.insertMessageEvents([event]);
 }

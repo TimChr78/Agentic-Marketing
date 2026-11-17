@@ -2,6 +2,41 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.15.1] - 2026-11-17
+
+### Changed
+
+- Development: `pnpm lint` now runs oxlint's type-aware `no-floating-promises`, `no-misused-promises` and `await-thenable` rules over the backend source, so a promise that is started and forgotten, or an async callback handed to an API that expects a synchronous one, fails before it ships.
+
+### Fixed
+
+- A holdout send and its report now resolve a person's merge family the same way. A chain longer than the old 20-hop forward walk, or a merge cycle, can no longer hold someone out of a send while the report counts them as two people.
+- A campaign's identity resolution now reads only the campaign's own merge family and stops as soon as its mapping bound is passed, instead of loading every merge and identifier in the workspace first. A large workspace no longer spends memory on unrelated merges before the campaign summary or the holdout report can run.
+- An agent's mandate guardrails and the guardian see the bounce, complaint or unsubscribe the agent's own transaction just recorded, even while the outbox has not published it to ClickHouse yet: a check snapshots the agent's queued message events before reading the metric layer and hands them to the same query, so soft bounces, broadcast reach counted in people, the measurement window and the event de-duplication all mean exactly what they will mean after publication. A dead-lettered row is counted too (its events are facts, even when it will never publish), and a verdict whose evidence needs more queued events than one check reads refuses the send with the reason instead of deciding on part of it.
+- `alerts.list` and every evaluation sweep report how far message-event publication is behind — the number of events still waiting, the number dead-lettered and the age of the oldest — so a rule that is not firing during an outbox or ClickHouse outage reads as unknown rather than healthy. The Alerts page shows the same note while it is behind.
+- A send's outcome and its message event are written in one transaction, so a mandate guardrail, the guardian or a report that reads the metric layer right after a send counts it: before, the delivery worker inserted the event into the event store after committing the status, and a decision in that window judged the agent on fewer sends than it made (a bounce in three reports 50% instead of 33.33%, and a minimum sample could pass a rate it should have held). Every message event now travels through the transactional outbox, which also retries a delivery event that the event store was unavailable for instead of losing it (#1008).
+- `broadcasts.status` says that its `messages` event statistics can trail `delivery` by a moment, because message events reach the event store through the outbox (#1025).
+- Journey steps keep a person's traits consistent with a profile merge. A participant is entered on the surviving profile, a "set trait" step writes to the surviving profile and reports a skip instead of success when the person is gone, and a merge can no longer overwrite a trait a journey wrote while the merge was running. A journey sweep and an SDK batch that merges a person no longer deadlock, an AI decision step that finishes at the same moment no longer deadlocks either, and a journey step is skipped once when a person is mid-merge instead of stalling.
+- A person is entered into a journey once per event, even when the event is delivered again: an `after_exit` journey no longer creates a second participant for the same event, and an event cannot wake the wait it just created. The record that makes this stick is removed with the person on erasure and expires with the event replay window.
+- Server shutdown now attempts every close step even when an earlier one fails, logs each failure by step name (never the error text) and exits non-zero; a worker that fails while draining counts too, so a supervisor can tell a clean stop from a worker or pool that was left behind. A second SIGTERM/SIGINT during shutdown no longer starts a second shutdown: it exits immediately.
+- The fake LLM server used by the AI tests answers malformed JSON with an error instead of leaving the request hanging, and the fake ad, secret, edge and rollout servers answer 500 when their handler throws, so a failing test fails instead of timing out.
+- A worker stops promptly when its event-bus connection is reconnecting: it ends the batch it is waiting on, no longer waits for a consumer setup that cannot complete, and the messages it had not acked are redelivered. A back-off after a failed pull is cut short by the same signal (#1028).
+
+### Security
+
+- Credential redaction now decides three value shapes from the original text, so a value the rules could only see in part is replaced whole: a PEM private-key block (standalone, under a credential key, or after an arrow, with the header at the start of a line and a footer label that matches it; an encrypted block's `Proc-Type`/`DEK-Info` preamble is part of the block), a typographic-quoted value (`token: “short pw”`), and a value after an arrow (`'password' => 'x'`, `apiSecret => secret`, and an authorization value there: `token => Bearer abc`). The released rules and passes still run first, on the whole message, and only the value is taken away: an unterminated PEM block is redacted as far as its base64 body reaches, a quoted value ends at its own closing quote, prose with an apostrophe or a mid-line mention keeps its text, and a second pass changes nothing. An authorization value is read by its first scheme word, so a message that uses one of those words as ordinary prose directly after a credential key loses the next word too (`token: Token expired at noon` reads `token: [redacted] at noon`, where the previous release kept `expired`, and `token: Bearer Token` followed by a line break loses that next line, e.g. `status=ok`); after a credential key a scheme and its token are the likelier reading, and every other sentence keeps its text. Text glued to a redaction marker is still removed as it was, because the original text says who wrote the marker, never that what follows is harmless.
+- The redaction keeps a frozen copy of the previous release's function and compares its own pass with it on every message: a disagreement (or a span that stops being monotone) returns the release's output untouched, and `/metrics` counts it as `am_redaction_fallbacks_total`, which should stay `0`.
+
+### Upgrading from 0.15.0
+
+- **Migrations:** `packages/db/migrations/0109_journey_processed_events.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none. Changes a caller may notice: `alerts.list` gains a `publication` field (additive); the server exits non-zero when a shutdown step fails, so a supervisor sees an unclean stop; and credential redaction removes more in a few value shapes (PEM blocks, typographic quotes, `=>` values and authorization schemes after a credential key), so a scheme word used as prose right after a key now takes the next word with it.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.15.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.15.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.15.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.15.1). Run `docker compose exec app am doctor`.
+
+<!-- issues: 985, 986, 989, 1002, 1008, 1011, 1014, 1025, 1028 -->
+
 ## [0.15.0] - 2026-11-17
 
 ### Changed

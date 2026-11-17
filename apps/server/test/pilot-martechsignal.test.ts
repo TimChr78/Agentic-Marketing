@@ -1,3 +1,4 @@
+import { dispatchOutboxOnce } from '@agentic-marketing/audience';
 import { outbox } from '@agentic-marketing/email';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
@@ -8,6 +9,7 @@ import { eventually, rejects, startTestServer, testPort, type User } from './har
 
 let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
+let ws = '';
 const ids = { form: '', confirm: '', newsletter: '', segment: '' };
 const SITE = 'https://martechsignal.com';
 
@@ -22,10 +24,33 @@ const post = (formId: string, fields: Record<string, string>, headers: Record<st
   });
 const mailTo = (to: string) => outbox.filter((m) => m.to === to);
 
+/**
+ * Publishes this broadcast's queued message events before a report counts them. Since 0.15.0 they
+ * reach ClickHouse through the transactional outbox, so `messages` (the event statistics) can lag
+ * the send by a dispatcher round; `delivery` is the live status and needs no wait.
+ */
+const flushOutbox = async (artifactId: string) => {
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await eventually(
+    async () =>
+      Number(
+        (
+          await t.srv.db.admin.query<{ n: string }>(
+            `SELECT count(*)::text AS n FROM outbox
+              WHERE workspace_id = $1 AND subject_ref = $2 AND state IN ('pending', 'delivering')`,
+            [ws, artifactId],
+          )
+        ).rows[0]?.n ?? 0,
+      ),
+    (n) => n === 0,
+    10_000,
+  );
+};
+
 beforeAll(async () => {
   t = await startTestServer('test_pilot', testPort(3297));
   owner = await t.signUp(`tim-${Date.now()}@example.com`);
-  await t.workspaceWith([[owner, 'owner']], 'none');
+  ws = await t.workspaceWith([[owner, 'owner']], 'none');
   await t.api(owner).call('emailProviders.create', {
     name: 'Relay',
     adapter: 'log',
@@ -223,7 +248,11 @@ describe('weekly newsletter as a broadcast', () => {
       15_000,
     );
     expect((sentNow.delivery?.sent ?? 0) + (sentNow.delivery?.delivered ?? 0)).toBe(2);
-    expect(sentNow.messages.queued ?? 0).toBeGreaterThanOrEqual(2);
+    // The event statistics in `messages` count what ClickHouse has: publish this broadcast's queue
+    // first, so the read describes the send instead of racing the dispatcher.
+    await flushOutbox(ids.newsletter);
+    const reported = await api.call('broadcasts.status', { artifactId: ids.newsletter });
+    expect(reported.messages.queued ?? 0).toBeGreaterThanOrEqual(2);
     await t.srv.db.admin.query(`UPDATE messages SET status = 'suppressed' WHERE journey_id = $1 AND status IN ('sent', 'delivered')`, [
       ids.newsletter,
     ]);
