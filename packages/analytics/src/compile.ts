@@ -94,7 +94,8 @@ export interface CompiledQuery {
 }
 
 // The two non-person sources. Person-linked sources come from `personReadSource`: the protected
-// view for a workspace that has ever allocated an erasure, the base table otherwise (#1037 part 2).
+// view for a workspace whose durable `erasure_keys` ledger has a row, the base table otherwise
+// (#1037 part 2).
 // The `${table} FINAL` below is therefore `FROM events_protected(ws={ws:UUID}) FINAL` or
 // `FROM events FINAL`.
 const SOURCE_TABLE: Record<SourceId, string> = {

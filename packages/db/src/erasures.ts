@@ -543,7 +543,9 @@ export async function replayErasures(
           // for them after a restore (#1037 part 2).
           if (cleanupJobsTable) {
             const job = jobsByErasure.get(`${workspaceId}:${erasure.id}`);
-            if (job || entries.keys.length) {
+            // Only this erasure's own ledger rows justify a job: another erasure's keys in the same
+            // workspace must not re-open work for this one.
+            if (job || entries.keys.some((key) => key.erasureId === erasure.id)) {
               const inserted = await client.query(
                 `INSERT INTO erasure_cleanup_jobs
                    (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek)

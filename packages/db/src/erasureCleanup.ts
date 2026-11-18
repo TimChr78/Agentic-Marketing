@@ -513,8 +513,13 @@ export function erasureLedgerChecker(
  * Re-enqueues every erasure whose ledger has publishable rows but no recorded publication (#1037
  * part 2). Erasures whose cleanup completed before this release, or that predate durable jobs, have
  * committed `erasure_keys` (so reads already fail closed to the protected path) but no
- * `erased_subjects` rows. Idempotent: a job that already published is left alone, and a running job
- * keeps its lease. One statement across tenants, like the claim itself.
+ * `erased_subjects` rows. Idempotent: a job that already published is left alone, a job that is
+ * still running keeps its claim token, lease and checkpoints, and a queued job stays queued. One
+ * statement across tenants, like the claim itself.
+ *
+ * Only `full`-coverage rows are publishable, while the read-layer check protects on **any** ledger
+ * row. A workspace whose only rows are `unavailable` therefore stays on the protected path with an
+ * empty published set: fail closed, and nothing to publish. That asymmetry is deliberate.
  */
 export async function enqueueUnpublishedErasures(db: Db): Promise<number> {
   const { rowCount } = await db.admin.query(
@@ -535,7 +540,13 @@ export async function enqueueUnpublishedErasures(db: Db): Promise<number> {
            claim_token = NULL,
            lease_until = NULL,
            updated_at = now()
-       WHERE erasure_cleanup_jobs.published_at IS NULL`,
+       -- Only a finished job may be re-opened. A running job has a live claim token and its
+       -- checkpoints, and a scheduler start on another replica must not reset it underneath the
+       -- worker; a pending_external job is already queued, so the pass leaves it alone (a
+       -- repeated pass is a no-op). published_at stays the second condition: a job that already
+       -- published must never run again.
+       WHERE erasure_cleanup_jobs.published_at IS NULL
+         AND erasure_cleanup_jobs.state IN ('complete', 'failed')`,
   );
   return rowCount ?? 0;
 }

@@ -133,7 +133,7 @@ async function* chBatches(events: EventStore, ws: string, query: string, params:
 
 /**
  * The same streamed read, through the workspace's protected source (#1037 part 2): the protected
- * view when it has ever allocated an erasure, the base table otherwise.
+ * view when its durable `erasure_keys` ledger has a row, the base table otherwise.
  */
 async function* protectedChBatches(
   events: EventStore,

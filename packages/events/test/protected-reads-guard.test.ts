@@ -3,6 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { PROTECTED_VIEWS, personReadSource, PERSON_TABLES as TABLES } from '../src/protected';
+import { SUBJECT_KEY_BACKFILL_TABLES } from '../src/subjectKeys';
 
 // #1037 part 2: read-time exclusion is only a contract if every reader goes through the protected
 // views. A new query that names `events`, `message_events` or `journey_events` directly would
@@ -136,6 +137,32 @@ describe('protected reads (#1037 part 2)', () => {
     // A base table can also arrive through a variable; a new one must be a helper call or listed
     // above, so a bypass is reviewable rather than invisible to the literal scan.
     expect((await interpolatedSources()).map((entry) => `${entry.file}:${entry.line}: ${entry.expression}`)).toEqual([]);
+  });
+
+  it('message events carry only the profile subject key', async () => {
+    // The id-scoped message read tests only the profile key, because `message_events` has no other
+    // subject source: its writer hashes the profile alone and the backfill spec names only that
+    // column. If either grows another kind, the bounded read would under-exclude silently, so a
+    // change must update the read with it.
+    const backfill = SUBJECT_KEY_BACKFILL_TABLES.find((spec) => spec.table === 'message_events');
+    expect(backfill?.sources.map((source) => source.kind)).toEqual(['profile']);
+    expect(backfill?.clickIds).toBe(false);
+
+    const sources: { path: string; text: string }[] = [];
+    for (const root of SOURCE_ROOTS) {
+      for (const path of await sourceFiles(join(ROOT, root))) {
+        sources.push({ path: relative(ROOT, path), text: await readFile(path, 'utf8') });
+      }
+    }
+    // One writer: the shutdown-safe insert that hashes `profileSubjectSources`. A second one would
+    // need the same guard, and the count is what makes it reviewable.
+    // `client.insert({ … table: 'message_events' … })` is the writer; the backfill spec's table
+    // name is not an insert.
+    const writers = sources.filter((source) => /client\.insert\(\{[\s\S]{0,400}?table:\s*'message_events'/.test(source.text));
+    expect(writers.map((writer) => writer.path)).toEqual(['packages/events/src/clickhouse.ts']);
+    expect(writers[0]!.text).toMatch(/profileSubjectSources/);
+    const messageEventBackfill = sources.find((source) => source.path === 'packages/events/src/subjectKeys.ts');
+    expect(messageEventBackfill!.text).toMatch(/sources:\s*\[\{ kind: 'profile', column: 'profile_id' \}\]/);
   });
 
   it('every protected view is created by the ClickHouse migrations and filters erased subjects', async () => {

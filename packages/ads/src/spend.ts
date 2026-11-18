@@ -519,8 +519,8 @@ export const adPerformance = defineCommand({
     const incompleteSpend = incompleteSpendFor(gaps, { since, until, ...(input.platform ? { platform: input.platform } : {}) }, accounts);
     const spendTruncated = incompleteSpend.length > 0;
     const ch = ctx.services.events.client;
-    // The shared read-layer decision (#1037 part 2): only a workspace that has ever allocated an
-    // erasure pays for the protected view's ledger scan.
+    // The shared read-layer decision (#1037 part 2): only a workspace with a durable
+    // `erasure_keys` ledger row pays for the protected view's ledger scan.
     const protectedRead = (await ctx.services.events.hasErasures?.(ws)) ?? true;
     const clickhouse_settings = await ctx.services.events.settingsFor(ws);
     const spend = await (

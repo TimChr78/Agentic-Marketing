@@ -6,8 +6,8 @@ import { clickHouseStore, type EventStore, migrateClickHouse, resetClickHouse } 
 // read shape that materialises it once per row eventually fails for ordinary queries: with 100,000
 // exclusion hashes a filtered count over a workspace exhausted a 10 GiB allocation. The protected
 // views build the workspace's ledger as one set per query and test the row's subject keys against
-// it; the shared read layer skips the view entirely for a workspace that never allocated an
-// erasure. This test pins both: 1.2M events over 12 workspaces, a 100,000-row ledger in one, and a
+// it; the shared read layer skips the view entirely for a workspace whose durable `erasure_keys`
+// ledger has no row. This test pins both: 1.2M events over 12 workspaces, a 100,000-row ledger in one, and a
 // 1 GiB per-query limit.
 
 const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';

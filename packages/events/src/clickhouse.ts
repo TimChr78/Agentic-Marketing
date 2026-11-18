@@ -129,10 +129,10 @@ export interface EventStore {
   erasedSubjectKeys(workspaceId: string): Promise<Set<string>>;
   /**
    * Whether a read of this workspace must use the protected views (#1037 part 2). False only when
-   * the workspace has never allocated an erasure generation, so nothing has ever been excluded.
-   * Never cached as a stale "no": the allocation counter is read per request (or a positive-only
-   * cache is used), so a read after an allocation always takes the protected path, even before its
-   * publication is confirmed.
+   * the durable `erasure_keys` ledger has no row for the workspace, so nothing has ever been
+   * recorded to exclude. Never cached as a stale "no": the ledger is read per request (or through
+   * a positive-only cache), so a read after an erasure's SQL commit always takes the protected
+   * path, even before its publication reaches ClickHouse.
    */
   hasErasures(workspaceId: string): Promise<boolean>;
   /**
@@ -670,7 +670,7 @@ export function clickHouseStore(opts: {
   database: string;
   subjectKeys?: SubjectKeyHasherFactory;
   /**
-   * The workspace erasure-allocation check the fast path uses. Without one every read is protected:
+   * The workspace durable-ledger check the fast path uses. Without one every read is protected:
    * fail closed rather than guess that a workspace has nothing to exclude.
    */
   hasErasures?: (workspaceId: string) => Promise<boolean>;
@@ -740,7 +740,7 @@ export function clickHouseStore(opts: {
     count: Number(r.c),
   });
   const messageCountRow = (r: { profile_id: string; c: number | string }) => ({ profileId: r.profile_id, count: Number(r.c) });
-  /** This request's protected-read decision; `false` only for a workspace with no allocation. */
+  /** This request's protected-read decision; `false` only for a workspace with no ledger row. */
   const protectedReadFor = async (workspaceId: string): Promise<boolean> => (opts.hasErasures ? opts.hasErasures(workspaceId) : true);
   /** The workspace's published exclusion hashes. FINAL so a republished exclusion counts once. */
   const readErasedSubjectKeys = async (workspaceId: string): Promise<Set<string>> => {

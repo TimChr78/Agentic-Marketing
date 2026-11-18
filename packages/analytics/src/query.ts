@@ -820,8 +820,8 @@ export async function runAnalyticsQuery(deps: Deps, input: QueryInput, options: 
   const raw = options.raw === true;
   // The workspace's confirmed-publication epoch, part of the cache key.
   const epoch = await erasureVisibilityEpoch(deps.tx, deps.workspaceId);
-  // The shared read-layer decision (#1037 part 2): a workspace that never allocated an erasure
-  // reads the base tables, so the protected view's ledger scan is not paid for nothing.
+  // The shared read-layer decision (#1037 part 2): a workspace with no durable `erasure_keys`
+  // ledger row reads the base tables, so the protected view's ledger scan is not paid for nothing.
   const protectedRead = (await deps.events.hasErasures?.(deps.workspaceId)) ?? true;
   // The snapshot half of a pending union never reaches ClickHouse before publication, so its
   // profiles are checked against the workspace's published exclusions here (#1037 part 2); the

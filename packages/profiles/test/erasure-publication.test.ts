@@ -314,8 +314,8 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
         [workspace, hash(`backlog-${eraser}`), eraser],
       );
     // (1) a job that completed before publication existed, (2) an erasure with no job at all,
-    // (3) an erasure that already published and must be left alone.
-    for (const id of ['era_backlog_old', 'era_backlog_none', 'era_backlog_done']) {
+    // (3) an already-published job, (4) a running job with a live lease, (5) a queued job.
+    for (const id of ['era_backlog_old', 'era_backlog_none', 'era_backlog_done', 'era_backlog_running', 'era_backlog_pending']) {
       await insertErasure(id);
       await insertKey(id);
     }
@@ -329,24 +329,88 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
        VALUES ($1, 'era_backlog_done', '{}', 'complete', now(), 3, now())`,
       [workspace],
     );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, claim_token, lease_until, clickhouse_done, hotstate_done, attempts)
+       VALUES ($1, 'era_backlog_running', '{}', 'running', 'claim-live', now() + interval '5 minutes', true, true, 2)`,
+      [workspace],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, next_attempt_at)
+       VALUES ($1, 'era_backlog_pending', '{}', 'pending_external', now() + interval '1 hour')`,
+      [workspace],
+    );
 
+    // The pass is cross-tenant by design, so other workspaces' leftovers may be re-opened too;
+    // this workspace's rows are what the test pins.
     expect(await enqueueUnpublishedErasures(d.db)).toBeGreaterThanOrEqual(2);
-    const rows = await d.db.admin.query<{ erasure_id: string; state: string; published_at: Date | null }>(
-      'SELECT erasure_id, state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1 ORDER BY erasure_id',
+    const rows = await d.db.admin.query<{
+      erasure_id: string;
+      state: string;
+      published_at: Date | null;
+      claim_token: string | null;
+      lease_until: Date | null;
+      clickhouse_done: boolean;
+    }>(
+      `SELECT erasure_id, state, published_at, claim_token, lease_until, clickhouse_done
+         FROM erasure_cleanup_jobs WHERE workspace_id = $1 ORDER BY erasure_id`,
       [workspace],
     );
     expect(rows.rows).toEqual([
-      { erasure_id: 'era_backlog_done', state: 'complete', published_at: expect.any(Date) },
-      { erasure_id: 'era_backlog_none', state: 'pending_external', published_at: null },
-      { erasure_id: 'era_backlog_old', state: 'pending_external', published_at: null },
+      {
+        erasure_id: 'era_backlog_done',
+        state: 'complete',
+        published_at: expect.any(Date),
+        claim_token: null,
+        lease_until: null,
+        clickhouse_done: false,
+      },
+      {
+        erasure_id: 'era_backlog_none',
+        state: 'pending_external',
+        published_at: null,
+        claim_token: null,
+        lease_until: null,
+        clickhouse_done: false,
+      },
+      {
+        erasure_id: 'era_backlog_old',
+        state: 'pending_external',
+        published_at: null,
+        claim_token: null,
+        lease_until: null,
+        clickhouse_done: false,
+      },
+      {
+        erasure_id: 'era_backlog_pending',
+        state: 'pending_external',
+        published_at: null,
+        claim_token: null,
+        lease_until: null,
+        clickhouse_done: false,
+      },
+      {
+        erasure_id: 'era_backlog_running',
+        state: 'running',
+        published_at: null,
+        claim_token: 'claim-live',
+        lease_until: expect.any(Date),
+        clickhouse_done: true,
+      },
     ]);
-    // Idempotent: a second pass has nothing to change.
+    // Idempotent: a second pass re-opens nothing and does not disturb the running job.
     await enqueueUnpublishedErasures(d.db);
-    const again = await d.db.admin.query<{ state: string }>(
-      "SELECT state FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = 'era_backlog_done'",
+    const again = await d.db.admin.query<{ erasure_id: string; state: string; claim_token: string | null }>(
+      'SELECT erasure_id, state, claim_token FROM erasure_cleanup_jobs WHERE workspace_id = $1 ORDER BY erasure_id',
       [workspace],
     );
-    expect(again.rows).toEqual([{ state: 'complete' }]);
+    expect(again.rows).toEqual([
+      { erasure_id: 'era_backlog_done', state: 'complete', claim_token: null },
+      { erasure_id: 'era_backlog_none', state: 'pending_external', claim_token: null },
+      { erasure_id: 'era_backlog_old', state: 'pending_external', claim_token: null },
+      { erasure_id: 'era_backlog_pending', state: 'pending_external', claim_token: null },
+      { erasure_id: 'era_backlog_running', state: 'running', claim_token: 'claim-live' },
+    ]);
   }, 60_000);
 
   it('keeps a restored workspace on the protected path with ledger rows but no generation row', async () => {
@@ -357,11 +421,13 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
     try {
       const workspace = newUuid();
       await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restore source', 'none')", [workspace]);
-      await d.db.admin.query(
-        `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
-         VALUES ($1, 'era_restore_ledger', '{}', 'user_test', 'restore test', '{}')`,
-        [workspace],
-      );
+      for (const id of ['era_restore_ledger', 'era_restore_no_keys']) {
+        await d.db.admin.query(
+          `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+           VALUES ($1, $2, '{}', 'user_test', 'restore test', '{}')`,
+          [workspace, id],
+        );
+      }
       const anonymousId = `restore-anon-${newUuid()}`;
       const hasher = await subjectKeyHasher({ db: d.db, kp: keyProvider })(workspace);
       const key = await hasher.hash('anonymous_id', anonymousId);
@@ -417,7 +483,8 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
       await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [workspace]);
       const replayed = await replayErasures(restored.url.toString(), log);
       expect(replayed.keys).toBe(1);
-      // The erasure had no captured job; the ledger row still enqueues one so it publishes again.
+      // The erasure had no captured job; its own ledger row still enqueues one so it publishes
+      // again. The workspace's other erasure has no keys of its own, so it gets no job.
       expect(replayed.cleanupJobs).toBe(1);
       expect(await restored.db.admin.query('SELECT 1 FROM erasure_generations WHERE workspace_id = $1', [workspace])).toMatchObject({
         rowCount: 0,

@@ -6,8 +6,8 @@ import { freshness } from '../src/query';
 import { MEASURES } from '../src/registry';
 
 // #1037 part 2 latency. Two review findings shaped the read path and both are pinned here:
-//   1. a workspace that never allocated an erasure reads the base table (the shared read layer's
-//      fast path), so it pays nothing for the protected view;
+//   1. a workspace with no durable `erasure_keys` ledger row reads the base table (the shared read
+//      layer's fast path), so it pays nothing for the protected view;
 //   2. a workspace with exclusions builds the ledger as one set per query instead of sixteen joins.
 // The ratios, not absolute milliseconds, are the contract: a CI machine is slower than a laptop.
 
