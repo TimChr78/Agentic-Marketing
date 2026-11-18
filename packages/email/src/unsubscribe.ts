@@ -301,7 +301,7 @@ export function unsubscribeLinkProblem(html: string, url: string): UnsubscribeLi
  * (the parse stops there).
  */
 function styleText(html: string, overBudget: () => boolean): string | null {
-  let css = '';
+  const chunks: string[] = [];
   let inStyle = 0;
   let depth = 0;
   let tooDeep = false;
@@ -315,7 +315,7 @@ function styleText(html: string, overBudget: () => boolean): string | null {
         }
       },
       ontext(text) {
-        if (inStyle > 0) css += text;
+        if (inStyle > 0) chunks.push(text);
       },
       onclosetag(name) {
         if (name === 'style' && inStyle > 0) inStyle--;
@@ -327,7 +327,9 @@ function styleText(html: string, overBudget: () => boolean): string | null {
   parser.write(html);
   if (tooDeep) return null;
   parser.end();
-  return css;
+  // Joined flat, not built as a rope: both passes index the result character by character, and a
+  // deeply nested cons string makes that quadratic on a large stylesheet (#872).
+  return chunks.join('');
 }
 
 function element(name: string, attribs: Record<string, string>): ElementInfo {
@@ -956,6 +958,622 @@ function stripCssComments(css: string): string {
     const end = css.indexOf('*/', start + 2);
     if (end < 0) return out;
     i = end + 2;
+  }
+}
+
+/**
+ * The most construct names one warning lists; the rest are dropped so a stylesheet with many
+ * unsupported features still produces one short sentence (#872).
+ */
+const MAX_CSS_CONSTRUCTS = 4;
+
+/**
+ * The properties whose unsupported value can decide whether the link is visible. A rule that sets
+ * only a layout property the check ignores (margin, text-align) cannot hide the link, so it must
+ * not produce a warning.
+ */
+const CSS_VISIBILITY_PROPERTIES = new Set([
+  'display',
+  'visibility',
+  'opacity',
+  'font-size',
+  'color',
+  'background',
+  'background-image',
+  'left',
+  'right',
+  'top',
+  'bottom',
+  'text-indent',
+  'height',
+  'max-height',
+  'width',
+  'max-width',
+  'mso-hide',
+  'transform',
+  '-webkit-transform',
+  'clip',
+  'clip-path',
+]);
+
+/** The properties the refusal models, so only these have a per-kind cap to report. */
+const MODELLED_PROPERTIES = new Set(['display', 'visibility', 'background', 'opacity', 'font-size', 'color']);
+
+/** Offsets the check only understands in pixels; a relative unit is a stated limit. */
+const OFFSET_PROPERTIES = new Set(['left', 'right', 'top', 'bottom', 'text-indent']);
+
+/** Colour functions the check does not convert, beyond hex, rgb()/rgba() and the named few. */
+const OTHER_COLOUR_FUNCTIONS = ['hwb', 'lab', 'lch', 'oklab', 'oklch', 'color', 'color-mix', 'device-cmyk'];
+
+/** Length units the check does not convert for offsets (percent is handled separately). */
+const RELATIVE_UNITS = new Set([
+  'em',
+  'rem',
+  'vw',
+  'vh',
+  'vmin',
+  'vmax',
+  'ch',
+  'ex',
+  'cap',
+  'ic',
+  'lh',
+  'rlh',
+  'vi',
+  'vb',
+  'svw',
+  'svh',
+  'lvw',
+  'lvh',
+  'dvw',
+  'dvh',
+  'cqw',
+  'cqh',
+  'cqi',
+  'cqb',
+  'cqmin',
+  'cqmax',
+]);
+
+/**
+ * The constructs in the CSS that can reach the unsubscribe link but that the static check does not
+ * evaluate (#872). Distinct from `unsubscribeLinkProblem`: a non-empty list is a warning, never a
+ * refusal, because the link may still be visible. Empty when the CSS only uses what the check
+ * models, or when no CSS can reach the link.
+ *
+ * Only the link and its ancestors count. Every anchor to the URL is considered — a first anchor
+ * hidden by the modelled CSS must not mask a later usable one. A rule reaches them when its simple
+ * selector matches one of them, or — for a selector the check cannot parse — when its subject (the
+ * rightmost compound) could match one. Selectors whose subject plainly names another element stay
+ * silent, so unrelated footer or sidebar CSS does not warn. Inline styles on that same path count
+ * too, with CSS comments stripped first as in a stylesheet.
+ */
+export function unsubscribeCssConstructs(html: string, url: string): string[] {
+  const wanted = url.trim();
+  if (!wanted) return [];
+  const elements = unsubscribeLinkElements(html, wanted);
+  if (elements.length === 0) return [];
+  const index = elementIndex(elements);
+  const constructs = new Set<string>();
+  const css = styleText(html, () => false);
+  if (css !== null) collectCssConstructs(css, index, constructs);
+  for (const el of elements) {
+    const style = el.attribs.style;
+    if (style !== undefined) inspectDeclarations(parseDeclarations(stripCssComments(style)), constructs);
+  }
+  return [...constructs].slice(0, MAX_CSS_CONSTRUCTS);
+}
+
+/** The tags, ids and classes of every element a rule may have to reach, for constant-time tests. */
+interface ElementIndex {
+  tags: Set<string>;
+  ids: Set<string>;
+  classes: Set<string>;
+}
+
+function elementIndex(elements: ElementInfo[]): ElementIndex {
+  const index: ElementIndex = { tags: new Set(), ids: new Set(), classes: new Set() };
+  for (const el of elements) {
+    index.tags.add(el.name);
+    if (el.id !== null) index.ids.add(el.id);
+    for (const name of el.classes) index.classes.add(name);
+  }
+  return index;
+}
+
+/** The author-facing warning for constructs `unsubscribeCssConstructs` found. */
+export function unsubscribeCssWarningMessage(constructs: readonly string[]): string {
+  const list = constructs.map((c) => `\`${c}\``).join(', ');
+  return `The unsubscribe link's visibility depends on CSS we can't evaluate (${list}): check it in a client preview.`;
+}
+
+/**
+ * The link and the ancestors of every anchor to the unsubscribe URL, deduplicated. A shared parent
+ * is visited once: walking up from each anchor stops at an element already collected, whose own
+ * ancestors are already there, so many matching anchors stay linear in the document.
+ */
+function unsubscribeLinkElements(html: string, wanted: string): ElementInfo[] {
+  const stack: ElementInfo[] = [];
+  const included = new Set<ElementInfo>();
+  const elements: ElementInfo[] = [];
+  const parser = new Parser(
+    {
+      onopentag(name, attribs) {
+        stack.push(element(name, attribs));
+        if (name !== 'a' || attribs.href === undefined || attribs.href.trim() !== wanted) return;
+        for (let i = stack.length - 1; i >= 0; i--) {
+          const el = stack[i]!;
+          if (included.has(el)) break;
+          included.add(el);
+          elements.push(el);
+        }
+      },
+      onclosetag(name) {
+        let i = stack.length - 1;
+        while (i >= 0 && stack[i]!.name !== name) i--;
+        if (i >= 0) stack.length = i;
+      },
+    },
+    { decodeEntities: true, lowerCaseTags: true, lowerCaseAttributeNames: true },
+  );
+  parser.write(html);
+  parser.end();
+  return elements;
+}
+
+/**
+ * Linear scan of a stylesheet: each style rule is judged by whether its selector can reach the
+ * link, and at-rule blocks are descended (not skipped) so a rule inside `@media` still counts.
+ * Style-rule bodies are skipped after one pass, so nested at-rules stay linear. A statement at-rule
+ * such as `@import` is not a rule we can attribute to one element, and imported font styles are
+ * ordinary in e-mail, so it is left to the stated external-stylesheet limit rather than warned on.
+ */
+function collectCssConstructs(css: string, index: ElementIndex, out: Set<string>): void {
+  const text = stripCssComments(css);
+  const atRules: string[] = [];
+  const compoundCount = new Map<string, number>();
+  let i = 0;
+  let start = 0;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === '{') {
+      const prelude = text.slice(start, i).trim();
+      if (prelude.startsWith('@')) {
+        atRules.push(atRuleName(prelude));
+        i++;
+        start = i;
+        continue;
+      }
+      const end = blockEnd(text, i);
+      const body = text.slice(i + 1, text[end - 1] === '}' ? end - 1 : end);
+      const declarations = parseDeclarations(body);
+      const relevant = [...declarations].filter(([name]) => CSS_VISIBILITY_PROPERTIES.has(name));
+      if (relevant.length > 0) {
+        const selectors = splitTopLevel(prelude, ',');
+        const reaches = selectors.map((selector) => selectorReaches(selector, index));
+        if (reaches.some(Boolean)) {
+          // An at-rule or a selector the check cannot parse only matters when the rule could hide
+          // the link. MJML's own responsive CSS sets `max-width:100%` inside @media on a column
+          // ancestor, which must not warn on every template.
+          if ([...declarations].some(([name, declaration]) => declarationCouldHide(name, declaration.value))) {
+            if (atRules.length > 0) {
+              out.add(atRules[0]!);
+              const innermost = atRules[atRules.length - 1]!;
+              if (innermost !== atRules[0]) out.add(innermost);
+            }
+            selectors.forEach((selector, index) => {
+              if (reaches[index]) addSelectorConstructs(selector, out);
+            });
+          }
+          for (const [name, declaration] of relevant) addValueConstructs(name, declaration.value, out);
+        }
+        // Mirror the refusal's per-kind cap: a compound selector past it is dropped, so if it could
+        // have matched the link the check cannot say what the cascade would do. Rules inside an
+        // at-rule never reach the refusal's buckets, so they do not consume a slot.
+        if (atRules.length === 0) {
+          for (const [name] of declarations) {
+            if (!MODELLED_PROPERTIES.has(name)) continue;
+            selectors.forEach((selector, index) => {
+              const simple = parseSimpleSelector(selector);
+              if (simple === null || !isCompoundSelector(simple)) return;
+              const count = compoundCount.get(name) ?? 0;
+              if (count < MAX_COMPOUND_RULES) compoundCount.set(name, count + 1);
+              else if (reaches[index]) out.add('rule cap');
+            });
+          }
+        }
+      }
+      i = end;
+      start = i;
+      continue;
+    }
+    if (ch === '}') {
+      if (atRules.length > 0) atRules.pop();
+      i++;
+      start = i;
+      continue;
+    }
+    if (ch === ';') {
+      i++;
+      start = i;
+      continue;
+    }
+    i++;
+  }
+}
+
+/** The index just past the `}` that closes the block opened at `open`. */
+function blockEnd(text: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < text.length; i++) {
+    if (text[i] === '{') depth++;
+    else if (text[i] === '}') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return text.length;
+}
+
+/** The at-keyword of a prelude: `@media screen` and `@media(max-width:…` both give `@media`. */
+function atRuleName(prelude: string): string {
+  if (!prelude.startsWith('@')) return '';
+  let i = 1;
+  while (i < prelude.length) {
+    const ch = prelude[i]!;
+    if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch === '-') i++;
+    else break;
+  }
+  return prelude.slice(0, i).toLowerCase();
+}
+
+/** Split a selector list on commas that are not inside brackets, parentheses or quotes. */
+function splitTopLevel(value: string, separator: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]!;
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '[' || ch === '(') depth++;
+    else if ((ch === ']' || ch === ')') && depth > 0) depth--;
+    else if (depth === 0 && ch === separator) {
+      parts.push(value.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+/** The compounds of one complex selector, in order; the last one is the subject. */
+function selectorCompounds(selector: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < selector.length; i++) {
+    const ch = selector[i]!;
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '[' || ch === '(') depth++;
+    else if ((ch === ']' || ch === ')') && depth > 0) depth--;
+    else if (depth === 0 && (ch === '>' || ch === '+' || ch === '~' || isSpace(ch))) {
+      if (i > start) parts.push(selector.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  if (selector.length > start) parts.push(selector.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+/**
+ * Whether a rule's selector could select the link or one of its ancestors. A selector the check
+ * models is matched against the element index. Otherwise the subject decides: a
+ * `.unrelated .promo` rule cannot reach the link, while `a:hover` (subject `a`) can. When the
+ * subject names nothing at all (`:hover`, `*`, `[data-x]`), it could match, so it counts.
+ *
+ * CSS escapes are decoded first (`.foot\65 r` is `.footer`), because the selector's real subject
+ * decides whether it can reach. Only a selector whose escapes cannot be decoded falls back to
+ * "could reach".
+ */
+function selectorReaches(selector: string, index: ElementIndex): boolean {
+  const decoded = decodeCssEscapes(selector);
+  if (decoded === null) return true;
+  const simple = parseSimpleSelector(decoded);
+  if (simple !== null) return simpleMatchesIndex(simple, index);
+  const compounds = selectorCompounds(decoded);
+  const subject = compounds[compounds.length - 1];
+  if (subject === undefined) return true;
+  const { tag, id, classes } = compoundTokens(subject);
+  if (tag === null && id === null && classes.length === 0) return true;
+  return compoundMatchesIndex(tag, id, classes, index);
+}
+
+/** Whether a parsed simple selector names only tags, ids and classes the link path contains. */
+function simpleMatchesIndex(selector: HideSelector, index: ElementIndex): boolean {
+  return compoundMatchesIndex(selector.tag, selector.id, selector.classes, index);
+}
+
+/** The index test for a tag/id/class compound; null fields are unconstrained. */
+function compoundMatchesIndex(tag: string | null, id: string | null, classes: string[], index: ElementIndex): boolean {
+  if (tag !== null && !index.tags.has(tag)) return false;
+  if (id !== null && !index.ids.has(id)) return false;
+  return classes.every((name) => index.classes.has(name));
+}
+
+/**
+ * Decode CSS escapes in a selector, or null when one is malformed. A hex escape takes up to six
+ * digits and one optional whitespace terminator; `\` before another character quotes it; an escaped
+ * newline is a continuation. Hand-written so the scan is linear and no regex sees attacker input.
+ */
+function decodeCssEscapes(value: string): string | null {
+  if (!value.includes('\\')) return value;
+  let out = '';
+  let i = 0;
+  while (i < value.length) {
+    const ch = value[i]!;
+    if (ch !== '\\') {
+      out += ch;
+      i++;
+      continue;
+    }
+    i++;
+    if (i >= value.length) return null;
+    const next = value[i]!;
+    if (next === '\n' || next === '\f' || next === '\r') {
+      i++;
+      if (next === '\r' && value[i] === '\n') i++;
+      continue;
+    }
+    let hex = '';
+    while (hex.length < 6 && i < value.length && isHexDigit(value[i]!)) {
+      hex += value[i]!;
+      i++;
+    }
+    if (hex.length === 0) {
+      out += next;
+      i++;
+      continue;
+    }
+    if (i < value.length && isSpace(value[i]!)) i++;
+    const code = Number.parseInt(hex, 16);
+    out += code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff) ? '\uFFFD' : String.fromCodePoint(code);
+  }
+  return out;
+}
+
+function isHexDigit(ch: string): boolean {
+  return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+}
+
+/** A compound selector's tag, id and classes, ignoring attributes and pseudo-classes. */
+function compoundTokens(compound: string): { tag: string | null; id: string | null; classes: string[] } {
+  let tag: string | null = null;
+  let id: string | null = null;
+  const classes: string[] = [];
+  let i = 0;
+  if (compound[0] !== '*' && compound[0] !== '.' && compound[0] !== '#' && compound[0] !== ':' && compound[0] !== '[') {
+    let j = 0;
+    while (j < compound.length && isSelectorName(compound[j]!)) j++;
+    if (j > 0) tag = compound.slice(0, j).toLowerCase();
+    i = j;
+  }
+  while (i < compound.length) {
+    const ch = compound[i]!;
+    if (ch === '.' || ch === '#') {
+      let j = i + 1;
+      while (j < compound.length && isSelectorName(compound[j]!)) j++;
+      const name = compound.slice(i + 1, j);
+      if (name) {
+        if (ch === '.') classes.push(name);
+        else id = name;
+      }
+      i = j;
+      continue;
+    }
+    if (ch === '[') {
+      i = skipBalanced(compound, i, '[', ']');
+      continue;
+    }
+    if (ch === ':') {
+      i++;
+      if (compound[i] === ':') i++;
+      while (i < compound.length && isSelectorName(compound[i]!)) i++;
+      if (compound[i] === '(') i = skipBalanced(compound, i, '(', ')');
+      continue;
+    }
+    i++;
+  }
+  return { tag, id, classes };
+}
+
+function isSelectorName(ch: string): boolean {
+  return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch === '-' || ch === '_';
+}
+
+/** The index just past the closer matching the opener at `open`. */
+function skipBalanced(value: string, open: number, opener: string, closer: string): number {
+  let depth = 0;
+  for (let i = open; i < value.length; i++) {
+    const ch = value[i]!;
+    if (ch === opener) depth++;
+    else if (ch === closer) {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+  }
+  return value.length;
+}
+
+/** Whether a complex selector has a top-level combinator (descendant, child, sibling). */
+function hasTopLevelCombinator(selector: string): boolean {
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < selector.length; i++) {
+    const ch = selector[i]!;
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === '[' || ch === '(') depth++;
+    else if ((ch === ']' || ch === ')') && depth > 0) depth--;
+    else if (depth === 0 && (ch === '>' || ch === '+' || ch === '~' || isSpace(ch))) return true;
+  }
+  return false;
+}
+
+/** Names the selector features the check does not model; a simple selector adds nothing. */
+function addSelectorConstructs(selector: string, out: Set<string>): void {
+  const decoded = decodeCssEscapes(selector);
+  const subject = decoded ?? selector;
+  let named = false;
+  if (selector.includes('\\')) {
+    out.add('escaped selector');
+    named = true;
+  }
+  if (decoded !== null && parseSimpleSelector(decoded) !== null) return;
+  if (decoded === null) return;
+  if (hasTopLevelCombinator(subject)) {
+    out.add('combinator');
+    named = true;
+  }
+  if (subject.includes('[')) {
+    out.add('attribute selector');
+    named = true;
+  }
+  if (subject.includes(':')) {
+    out.add('pseudo-class');
+    named = true;
+  }
+  if (!named) out.add('complex selector');
+}
+
+/** Whether one declaration could take the link out of view on its own (or through an unsupported value). */
+function declarationCouldHide(property: string, raw: string): boolean {
+  const value = raw.trim().toLowerCase();
+  if (hasValueConstruct(property, value)) return true;
+  switch (property) {
+    case 'display':
+      return value === 'none';
+    case 'visibility':
+      return value === 'hidden' || value === 'collapse';
+    case 'opacity':
+    case 'font-size':
+    case 'width':
+    case 'height':
+    case 'max-height':
+    case 'max-width':
+      return isZero(value);
+    case 'mso-hide':
+      return value === 'all';
+    case 'color':
+    case 'background':
+    case 'background-image':
+      return true;
+    case 'clip':
+      return value !== 'auto';
+    case 'clip-path':
+      return value !== 'none';
+    case 'left':
+    case 'right':
+    case 'top':
+    case 'bottom':
+    case 'text-indent': {
+      const px = lengthPx(value);
+      return px !== null && px <= -1000;
+    }
+    default:
+      return false;
+  }
+}
+
+/** Whether a value contains a construct `addValueConstructs` reports. */
+function hasValueConstruct(property: string, value: string): boolean {
+  const found = new Set<string>();
+  addValueConstructs(property, value, found);
+  return found.size > 0;
+}
+
+/** One declaration's unsupported construct, when it can decide the link's visibility. */
+function addValueConstructs(property: string, raw: string, out: Set<string>): void {
+  const value = raw.toLowerCase();
+  if (hasCssFunction(value, 'hsl') || hasCssFunction(value, 'hsla')) out.add('hsl()');
+  for (const name of OTHER_COLOUR_FUNCTIONS) {
+    if (hasCssFunction(value, name)) out.add(`${name}()`);
+  }
+  if (property === 'background' || property === 'background-image') {
+    if (value.includes('gradient(')) out.add('gradient');
+    if (hasCssFunction(value, 'url') || hasCssFunction(value, 'image') || hasCssFunction(value, 'image-set')) out.add('image');
+  }
+  if (property === 'transform' || property === '-webkit-transform') out.add('transform');
+  if (OFFSET_PROPERTIES.has(property) && hasRelativeLength(value)) out.add('relative offset');
+  if (hasCssFunction(value, 'calc') || hasCssFunction(value, 'clamp') || hasCssFunction(value, 'min') || hasCssFunction(value, 'max'))
+    out.add('calc()');
+  if (property === 'clip') {
+    const clip = value.trim();
+    if (clip !== 'auto' && !zeroRect(clip)) out.add('clip');
+  }
+  if (property === 'clip-path') {
+    const clip = value.trim();
+    if (clip !== 'none' && !zeroClipPath(clip)) out.add('clip-path');
+  }
+}
+
+/** A CSS function call by name, with a boundary so `hsl` does not match inside another word. */
+function hasCssFunction(value: string, name: string): boolean {
+  const needle = `${name}(`;
+  let from = 0;
+  for (;;) {
+    const at = value.indexOf(needle, from);
+    if (at < 0) return false;
+    const before = at === 0 ? '' : value[at - 1]!;
+    if (!((before >= 'a' && before <= 'z') || (before >= '0' && before <= '9') || before === '-' || before === '_')) return true;
+    from = at + needle.length;
+  }
+}
+
+/** Whether a value contains a number with a percent or font-relative unit. */
+function hasRelativeLength(value: string): boolean {
+  let i = 0;
+  while (i < value.length) {
+    const ch = value[i]!;
+    if (ch === '.' || (ch >= '0' && ch <= '9')) {
+      while (i < value.length && ((value[i]! >= '0' && value[i]! <= '9') || value[i] === '.')) i++;
+      if (value[i] === '%') return true;
+      let j = i;
+      while (j < value.length && value[j]! >= 'a' && value[j]! <= 'z') j++;
+      if (j > i && RELATIVE_UNITS.has(value.slice(i, j))) return true;
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+
+/** Whether a parsed simple selector is a compound (not one of the single tag/id/class buckets). */
+function isCompoundSelector(selector: HideSelector): boolean {
+  if (selector.tag === null && selector.id === null && selector.classes.length === 1) return false;
+  if (selector.tag === null && selector.id !== null && selector.idCount === 1 && selector.classes.length === 0) return false;
+  if (selector.tag !== null && selector.id === null && selector.classes.length === 0) return false;
+  return true;
+}
+
+/** The constructs of one element's inline declarations. */
+function inspectDeclarations(declarations: Map<string, Declaration>, out: Set<string>): void {
+  for (const [name, declaration] of declarations) {
+    if (!CSS_VISIBILITY_PROPERTIES.has(name)) continue;
+    addValueConstructs(name, declaration.value, out);
   }
 }
 

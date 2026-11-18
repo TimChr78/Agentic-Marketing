@@ -2,6 +2,7 @@ import { Eye, FileText, Monitor, Moon, Smartphone } from 'lucide-react';
 import { useState } from 'react';
 import { api } from '../../app/api';
 import { Alert, CodeView, Meta, Segmented, Skeleton, SkeletonRegion } from '../../ui';
+import { ChecksPanel } from '../previews/ChecksPanel';
 import { emailDoc, useDraftEmail } from '../previews/EmailPreview';
 import { PreviewLabel } from '../previews/PreviewLabel';
 import { useSharedRead } from '../previews/previewRead';
@@ -190,6 +191,7 @@ export function EditorPreview({
               ? 'Rendered locally from the unsaved draft with the template’s sample data.'
               : `Rendered from Saved v${version} with the template's sample data.`}
           </p>
+          {(!dirty || readOnly) && <ChecksPanel artifactId={artifactId} version={version} />}
         </>
       ) : null}
     </div>

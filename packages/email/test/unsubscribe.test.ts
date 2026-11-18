@@ -4,7 +4,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { expectLinear } from '../../../test-support/linear';
 import { emailPublishProblems } from '../src/checks';
 import { validateTemplate } from '../src/render';
-import { MAX_UNSUBSCRIBE_CHECK_MS, MAX_UNSUBSCRIBE_NESTING, unsubscribeLinkProblem } from '../src/unsubscribe';
+import {
+  MAX_UNSUBSCRIBE_CHECK_MS,
+  MAX_UNSUBSCRIBE_NESTING,
+  unsubscribeCssConstructs,
+  unsubscribeCssWarningMessage,
+  unsubscribeLinkProblem,
+} from '../src/unsubscribe';
 
 // Review of #637 (P2): the gate only checked that an <a href> with the unsubscribe URL existed.
 // A link nobody can see or click — inline display:none, an ancestor style, a <template>, or an
@@ -804,5 +810,272 @@ describe('the gate refuses an unusable unsubscribe link at save and at publish (
     await expect(
       emailPublishProblems(t, { marketing: true, render: { blocks: (id) => (id === footer.id ? footer : null) } }),
     ).resolves.toEqual([]);
+  });
+});
+
+// #872: a footer can pass the static check while its visibility depends on CSS the check does not
+// model. That is not a refusal — the link may well be visible — but the author should hear about
+// it. Only CSS that can reach the link counts: a rule on an unrelated element must stay silent.
+describe('CSS the unsubscribe-link check cannot evaluate is a warning (#872)', () => {
+  const withCss = (css: string, body: string) => `<html><head><style>${css}</style></head><body>${body}</body></html>`;
+
+  const cases: { name: string; css: string; body: string; construct: string }[] = [
+    {
+      name: 'an @media rule that can reach the footer',
+      css: '@media (max-width: 600px) { .footer { display: none; } }',
+      body: link(' class="footer"'),
+      construct: '@media',
+    },
+    {
+      name: 'an @supports rule that can reach the footer',
+      css: '@supports (display: grid) { .footer { display: none; } }',
+      body: link(' class="footer"'),
+      construct: '@supports',
+    },
+    {
+      name: 'a descendant combinator',
+      css: '.wrap .footer { display: none; }',
+      body: `<div class="wrap">${link(' class="footer"')}</div>`,
+      construct: 'combinator',
+    },
+    {
+      name: 'a child combinator',
+      css: 'div > a { display: none; }',
+      body: `<div>${link()}</div>`,
+      construct: 'combinator',
+    },
+    {
+      name: 'an attribute selector',
+      css: 'a[href] { display: none; }',
+      body: link(),
+      construct: 'attribute selector',
+    },
+    {
+      name: 'a pseudo-class',
+      css: 'a:hover { display: none; }',
+      body: link(),
+      construct: 'pseudo-class',
+    },
+    {
+      name: 'hsl()',
+      css: '.footer { color: hsl(0, 0%, 100%); }',
+      body: link(' class="footer"'),
+      construct: 'hsl()',
+    },
+    {
+      name: 'hsla()',
+      css: '.footer { background: hsla(0, 0%, 100%, 0.5); }',
+      body: link(' class="footer"'),
+      construct: 'hsl()',
+    },
+    {
+      name: 'oklch()',
+      css: '.footer { color: oklch(0.5 0.1 20); }',
+      body: link(' class="footer"'),
+      construct: 'oklch()',
+    },
+    {
+      name: 'a gradient background',
+      css: '.footer { background: linear-gradient(#fff, #fff) #fff; }',
+      body: link(' class="footer"'),
+      construct: 'gradient',
+    },
+    {
+      name: 'an image background',
+      css: '.footer { background: url(bg.png) #fff; }',
+      body: link(' class="footer"'),
+      construct: 'image',
+    },
+    {
+      name: 'a transform',
+      css: '.footer { transform: translateX(-9999px); }',
+      body: link(' class="footer"'),
+      construct: 'transform',
+    },
+    {
+      name: 'an em offset',
+      css: '.footer { text-indent: -999em; }',
+      body: link(' class="footer"'),
+      construct: 'relative offset',
+    },
+    {
+      name: 'a rem offset',
+      css: '.footer { left: -100rem; }',
+      body: link(' class="footer"'),
+      construct: 'relative offset',
+    },
+    {
+      name: 'a percent offset',
+      css: '.footer { left: -100%; }',
+      body: link(' class="footer"'),
+      construct: 'relative offset',
+    },
+    {
+      name: 'clip',
+      css: '.footer { clip: rect(1px, 1px, 1px, 1px); }',
+      body: link(' class="footer"'),
+      construct: 'clip',
+    },
+    {
+      name: 'clip-path',
+      css: '.footer { clip-path: polygon(0 0, 0 0, 0 0); }',
+      body: link(' class="footer"'),
+      construct: 'clip-path',
+    },
+    {
+      name: 'calc()',
+      css: '.footer { opacity: calc(0); }',
+      body: link(' class="footer"'),
+      construct: 'calc()',
+    },
+  ];
+
+  it.each(cases)('warns about $name', ({ css, body, construct }) => {
+    expect(unsubscribeCssConstructs(withCss(css, body), URL)).toContain(construct);
+  });
+
+  it('names @media and the colour function together, in document order', () => {
+    const html = withCss('@media (max-width: 600px) { .footer { color: hsl(0 0% 100%); } }', link(' class="footer"'));
+    expect(unsubscribeCssConstructs(html, URL).slice(0, 2)).toEqual(['@media', 'hsl()']);
+  });
+
+  it('warns about rules past the per-kind cap that would have matched the link', () => {
+    const css = 'a.footer { opacity: 1; }'.repeat(70);
+    expect(unsubscribeCssConstructs(withCss(css, link(' class="footer"')), URL)).toContain('rule cap');
+  });
+
+  it('warns about constructs in an inline style on the link', () => {
+    expect(unsubscribeCssConstructs(link(' style="color:hsl(0 0% 100%)"'), URL)).toEqual(['hsl()']);
+  });
+
+  it('warns about constructs in an inline style on an ancestor', () => {
+    const html = `<div style="transform:translateX(-9999px)">${link()}</div>`;
+    expect(unsubscribeCssConstructs(html, URL)).toEqual(['transform']);
+  });
+
+  it('does not warn about unrelated CSS elsewhere in the template', () => {
+    const html = withCss(
+      '@media (max-width: 600px) { .other { display: none; } }' +
+        '.other { color: hsl(0 0% 100%); background: linear-gradient(#fff, #fff); transform: translateX(-9999px); }' +
+        '.sidebar > .promo { clip-path: polygon(0 0, 0 0, 0 0); }' +
+        'p > span { color: hsl(0 0% 50%); }',
+      `<p>${link()}</p><div class="other" style="transform:translateX(-9999px)"></div>`,
+    );
+    expect(unsubscribeCssConstructs(html, URL)).toEqual([]);
+  });
+
+  it('does not warn when no link to the URL exists', () => {
+    expect(unsubscribeCssConstructs(`<style>a{color:hsl(0 0% 100%)}</style><p>No link</p>`, URL)).toEqual([]);
+    expect(unsubscribeCssConstructs('', URL)).toEqual([]);
+  });
+
+  it('deduplicates and caps the construct list', () => {
+    const css =
+      '.footer { color: hsl(0 0% 100%); background: linear-gradient(#fff, #fff); ' +
+      'transform: translateX(1em); clip-path: polygon(0 0, 0 0, 0 0); }' +
+      '.footer { color: hsl(0 0% 100%); }';
+    const found = unsubscribeCssConstructs(withCss(css, link(' class="footer"')), URL);
+    expect(new Set(found).size).toBe(found.length);
+    expect(found.length).toBeLessThanOrEqual(4);
+    expect(found).toContain('hsl()');
+  });
+
+  it('builds the author-facing message', () => {
+    expect(unsubscribeCssWarningMessage(['@media', 'hsl()'])).toBe(
+      "The unsubscribe link's visibility depends on CSS we can't evaluate (`@media`, `hsl()`): check it in a client preview.",
+    );
+  });
+
+  // Review of #872 (B1): an escape can spell any tag, class or id (`.foot\65 r` is `.footer`). The
+  // warning scan does not decode escapes, so an escaped selector must be treated as able to reach.
+  it('warns about an escaped selector that spells the link class', () => {
+    const html = `<style>.foot\\65 r{display:none}</style><a href="/unsubscribe" class="footer">Unsubscribe</a>`;
+    expect(unsubscribeLinkProblem(html, '/unsubscribe')).toBeNull();
+    expect(unsubscribeCssConstructs(html, '/unsubscribe')).toContain('escaped selector');
+  });
+
+  // Review round 2 (C): decoding the escape first shows the subject is `img`, which cannot be the
+  // link or an ancestor, so the rule is unrelated even though the raw selector has an escape.
+  it('does not warn about an escaped selector whose decoded subject cannot reach the link', () => {
+    const html = `<style>.pro\\6d o img{display:none}</style><a href="/unsubscribe">Unsubscribe</a>`;
+    expect(unsubscribeCssConstructs(html, '/unsubscribe')).toEqual([]);
+  });
+
+  // Review of #872 (B2): a CSS comment before the first declaration hid the unsupported value.
+  it('strips comments from an inline style before reading its declarations', () => {
+    const html = `<a href="/unsubscribe" style="/* comment */transform:translateX(-9999px)">Unsubscribe</a>`;
+    expect(unsubscribeCssConstructs(html, '/unsubscribe')).toEqual(['transform']);
+  });
+
+  // Review of #872 (B3): a hidden first anchor must not mask warnings about a later usable one.
+  it('inspects every anchor to the URL, not only the first', () => {
+    const html =
+      '<style>.footer{transform:translateX(-9999px)}</style>' +
+      '<a href="/unsubscribe" style="display:none">Unsubscribe</a>' +
+      '<a href="/unsubscribe" class="footer">Unsubscribe</a>';
+    expect(unsubscribeLinkProblem(html, '/unsubscribe')).toBeNull();
+    expect(unsubscribeCssConstructs(html, '/unsubscribe')).toEqual(['transform']);
+  });
+
+  it('stays linear with many anchors to the URL', () => {
+    expectLinear(
+      (n) => `<style>.footer{transform:translateX(-1em)}</style>${`<a href="${URL}" class="footer">Unsubscribe</a>`.repeat(n)}`,
+      (html) => unsubscribeCssConstructs(html, URL),
+      2_000,
+    );
+  });
+
+  // Review round 2 (B): every selector used to scan every matching anchor. Unrelated rules and
+  // anchors growing together is the shape that made the scan quadratic.
+  it('stays linear when unrelated rules and matching anchors grow together', () => {
+    expectLinear(
+      (n) => {
+        const rules = Array.from({ length: n }, (_, i) => `.unrelated${i}{display:none}`).join('');
+        const anchors = `<a href="${URL}">Unsubscribe</a>`.repeat(n);
+        return `<html><head><style>${rules}</style></head><body>${anchors}</body></html>`;
+      },
+      (html) => unsubscribeCssConstructs(html, URL),
+      1_000,
+    );
+  });
+
+  // The refusal is unchanged: CSS the check models still refuses, and CSS it cannot evaluate still
+  // passes the blocking check — it only gains a warning.
+  it('leaves the refusal exactly as it was', () => {
+    expect(unsubscribeLinkProblem(withCss('.footer { display: none; }', link(' class="footer"')), URL)).toBe('hidden');
+    expect(unsubscribeCssConstructs(withCss('.footer { display: none; }', link(' class="footer"')), URL)).toEqual([]);
+    const media = withCss('@media (max-width: 600px) { .footer { display: none; } }', link(' class="footer"'));
+    expect(unsubscribeLinkProblem(media, URL)).toBeNull();
+    expect(unsubscribeCssConstructs(media, URL)).toEqual(['@media']);
+  });
+
+  it('keeps save and publish allowed for a link behind @media (#872)', async () => {
+    const t = template(
+      '<mj-text><a class="footer" href="{{ unsubscribe_url }}">Unsubscribe</a></mj-text>',
+      '<mj-style>@media (max-width: 600px) { .footer { display: none; } }</mj-style>',
+    );
+    await expect(validateTemplate(t)).resolves.toEqual([]);
+    await expect(emailPublishProblems(t, { marketing: true })).resolves.toEqual([]);
+  });
+
+  it('stays linear with many rules, nested at-rules and long selectors (#872)', () => {
+    expectLinear(
+      (n) =>
+        `<html><head><style>${
+          '@media (max-width: 600px) { .x.footer { display: none; } }'.repeat(n) +
+          `.x${'0'.repeat(n)}, .y${'1'.repeat(n)} { color: hsl(0 0% 100%); }`
+        }</style></head><body>${'<div class="x">x</div>'.repeat(n)}${link(' class="x footer"')}</body></html>`,
+      (html) => unsubscribeCssConstructs(html, URL),
+      2_000,
+    );
+    expectLinear(
+      (n) => {
+        const depth = Math.max(1, Math.floor(n / 50));
+        const rule = `.footer { color: hsl(0 0% 100%); }`.repeat(n);
+        return `<html><head><style>${'@media (max-width: 600px) {'.repeat(depth)}${rule}${'}'.repeat(depth)}</style></head><body>${link(' class="footer"')}</body></html>`;
+      },
+      (html) => unsubscribeCssConstructs(html, URL),
+      2_000,
+    );
   });
 });
