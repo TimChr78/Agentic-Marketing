@@ -104,6 +104,43 @@ const flushOutbox = async (artifactId: string) => {
   );
 };
 
+/**
+ * Holds every outbox row this workspace inserts, so a dispatcher round cannot publish it: the state
+ * a ClickHouse or dispatcher outage leaves behind, without sleeping. A `BEFORE INSERT` trigger is
+ * the only deterministic hold: a row written by the test is publishable from the moment its
+ * transaction commits, and the background dispatcher can claim it in the milliseconds before the
+ * test's own next statement runs. Holding after the fact with an `UPDATE` therefore races (the
+ * 0.15.2 release CI flake: the clicks were published, so the run decided instead of deferring).
+ */
+const holdPublication = async () => {
+  await t.srv.db.admin.query(`CREATE OR REPLACE FUNCTION am_test_hold_outbox() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.workspace_id = '${ws}'::uuid THEN NEW.next_attempt_at := now() + interval '1 hour'; END IF;
+      RETURN NEW;
+    END $$`);
+  await t.srv.db.admin.query('DROP TRIGGER IF EXISTS am_test_hold_outbox ON outbox');
+  await t.srv.db.admin.query(
+    'CREATE TRIGGER am_test_hold_outbox BEFORE INSERT ON outbox FOR EACH ROW EXECUTE FUNCTION am_test_hold_outbox()',
+  );
+};
+
+/** Removes the hold and makes the rows due, so the dispatcher can publish them. */
+const releasePublication = async () => {
+  await t.srv.db.admin.query('DROP TRIGGER IF EXISTS am_test_hold_outbox ON outbox');
+  await t.srv.db.admin.query('DROP FUNCTION IF EXISTS am_test_hold_outbox()');
+  await t.srv.db.admin.query('UPDATE outbox SET next_attempt_at = now() WHERE workspace_id = $1 AND state = $2', [ws, 'pending']);
+};
+
+/** The click events ClickHouse holds for these messages, i.e. the ones the outbox has published. */
+const clicksPublished = async (artifactId: string, messages: { id: string }[]) =>
+  (
+    await t.srv.events.messageStats(ws, {
+      since: new Date(Date.now() - 3_600_000),
+      journeyId: artifactId,
+      messageIds: messages.map((m) => m.id),
+    })
+  ).clicked ?? 0;
+
 const localClock = (at: Date, zone: string) => {
   const parts = new Intl.DateTimeFormat('en-GB', { timeZone: zone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(
     at,
@@ -258,6 +295,10 @@ describe('subject A/B test', () => {
     const expectedWinner = Math.min(a.length, sampleMessages.length - a.length) >= 20 ? 'B' : 'A';
     const b = sampleMessages.filter((m) => m.variant === 'B');
     await t.srv.events.insertMessageEvents(b.map((m, i) => click(m, winnerId, i)));
+    // Publish the sample's own `sent` rows first: the decision defers while its broadcast still has
+    // queued events, and the 2 s -> 60 s backoff can outlast this test's wait under load (CI saw
+    // three deferrals, about 14 s of the 20 s below). The sibling tests drain for the same reason.
+    await flushOutbox(winnerId);
     await decideNow(winnerId);
 
     const done = await eventually(
@@ -327,45 +368,51 @@ describe('subject A/B test', () => {
     const expected = Math.min(a.length, b.length) >= 20 ? 'B' : 'A';
     // The clicks are committed through the outbox, so ClickHouse has not seen them yet.
     const clicked = expected === 'B' ? b : a;
-    await t.srv.db.withWorkspace(ws, (tx) =>
-      enqueueMessageEvents(
-        tx,
-        ws,
-        clicked.map((m, i) => click(m, id, i)),
-      ),
-    );
-    // Hold the rows out of the dispatcher's claim window, so the deferral is observed rather than
-    // raced.
-    await t.srv.db.admin.query(
-      `UPDATE outbox SET next_attempt_at = now() + interval '1 hour'
-        WHERE workspace_id = $1 AND subject_ref = $2 AND state = 'pending'`,
-      [ws, id],
-    );
+    // Drain the sample's own `sent` rows first (#1029 writes one per send): the deferral observed
+    // below must be about the clicks under test, not about a send event still in the queue.
+    await flushOutbox(id);
+    // Hold the click row from the moment it is inserted, so the dispatcher cannot publish it before
+    // the run looks. A hold applied after the commit races the background dispatcher; that race is
+    // what failed the 0.15.2 release CI, not the barrier.
+    await holdPublication();
+    try {
+      await t.srv.db.withWorkspace(ws, (tx) =>
+        enqueueMessageEvents(
+          tx,
+          ws,
+          clicked.map((m, i) => click(m, id, i)),
+        ),
+      );
+      // The clicks exist only as an outbox row: ClickHouse has not seen them.
+      expect(await clicksPublished(id, clicked)).toBe(0);
 
-    await decideNow(id);
-    // Deferred: the run parks on a future lease and no winner is recorded.
-    await eventually(
-      async () => {
-        const { rows } = await t.srv.db.admin.query<{ lease_until: Date | null }>(
-          'SELECT lease_until FROM broadcast_runs WHERE workspace_id = $1 AND broadcast_id = $2',
-          [ws, id],
-        );
-        return rows[0]?.lease_until && rows[0].lease_until.getTime() > Date.now();
-      },
-      Boolean,
-      20_000,
-    );
-    const waiting = await status(id);
-    expect(waiting.test?.state).toBe('deciding');
-    expect(waiting.test?.winner).toBeNull();
+      await decideNow(id);
+      // Deferred: the run parks on a future lease, records no winner and counts the deferral.
+      const deferred = await eventually(
+        async () => {
+          const { rows } = await t.srv.db.admin.query<{ lease_until: Date | null; defer_count: number }>(
+            'SELECT lease_until, defer_count FROM broadcast_runs WHERE workspace_id = $1 AND broadcast_id = $2',
+            [ws, id],
+          );
+          return rows[0];
+        },
+        (row) => !!row?.lease_until && row.lease_until.getTime() > Date.now(),
+        20_000,
+      );
+      expect(deferred.defer_count).toBeGreaterThanOrEqual(1);
+      const waiting = await status(id);
+      expect(waiting.test?.state).toBe('deciding');
+      expect(waiting.test?.winner).toBeNull();
+      // The deferral is the barrier's: the clicks are still undelivered while the run waits.
+      expect(await clicksPublished(id, clicked)).toBe(0);
+    } finally {
+      await releasePublication();
+    }
 
-    await t.srv.db.admin.query(
-      `UPDATE outbox SET next_attempt_at = now() - interval '1 second'
-        WHERE workspace_id = $1 AND subject_ref = $2`,
-      [ws, id],
-    );
     await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
     await flushOutbox(id);
+    // The winner is picked from the clicks now that they are published.
+    expect(await clicksPublished(id, clicked)).toBeGreaterThan(0);
     await decideNow(id);
     const decided = await eventually(
       () => status(id),

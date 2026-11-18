@@ -1,12 +1,13 @@
 import { createExecutor, userPrincipal } from '@agentic-marketing/commands';
 import { claimErasureCleanupJobs } from '@agentic-marketing/db';
-import type { EventStore } from '@agentic-marketing/events';
+import type { BusEvent, EventStore } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { assertNoProviderCalls, localKeyProvider, recordingKeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import { eraseProfile, erasureStatus } from '../src/commands';
+import { dropErasedProfileRows, erasedEventFilter } from '../src/erasedEvents';
 import { disposeErasure, eraseProfileStage, prepareErasure } from '../src/erasure';
 import { runErasureCleanupOnce } from '../src/erasureCleanup';
 
@@ -107,6 +108,8 @@ const job = async (erasureId: string) => {
     attempts: number;
     clickhouse_done: boolean;
     hotstate_done: boolean;
+    final_sweep_at: Date | null;
+    first_sweep_done_at: Date | null;
     selectors: Buffer | null;
     selector_key: Buffer | null;
     selector_kek: string | null;
@@ -115,6 +118,9 @@ const job = async (erasureId: string) => {
   }>('SELECT * FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2', [d.workspace, erasureId]);
   return rows[0] ?? null;
 };
+
+/** Makes every job of this workspace due now, so a test never waits on the retry schedule. */
+const makeDue = () => d.db.admin.query('UPDATE erasure_cleanup_jobs SET next_attempt_at = now() WHERE workspace_id = $1', [d.workspace]);
 
 describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', () => {
   it('removes the whole merged family in one stage and writes the job in the same transaction', async () => {
@@ -261,17 +267,21 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     const pending = await executor.execute(erasureStatus, { erasureId: erased.erasureId }, principal, { surface: 'rest' });
     expect(pending).toMatchObject({ status: 'pending', checkpoints: { clickhouse: false, hotState: false }, attempts: 0 });
 
-    const result = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot });
+    const first = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
+    // The first successful sweep records its checkpoint and defers; a distinct final pass completes.
+    expect(first).toMatchObject({ claimed: 1, deferred: 1, completed: 0 });
+    await makeDue();
+    const result = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
     expect(result).toMatchObject({ claimed: 1, completed: 1 });
-    expect(eventCalls).toEqual([
-      {
-        workspaceId: d.workspace,
-        anonymousIds: [`${profile}-anon`],
-        userIds: [`${profile}-user`],
-        profileIds: [profile],
-      },
-    ]);
-    expect(hotCalls).toEqual([{ workspaceId: d.workspace, anonymousIds: [`${profile}-anon`], userIds: [`${profile}-user`] }]);
+    expect(eventCalls).toHaveLength(2);
+    expect(eventCalls[0]).toEqual({
+      workspaceId: d.workspace,
+      anonymousIds: [`${profile}-anon`],
+      userIds: [`${profile}-user`],
+      profileIds: [profile],
+    });
+    expect(hotCalls).toHaveLength(2);
+    expect(hotCalls[0]).toEqual({ workspaceId: d.workspace, anonymousIds: [`${profile}-anon`], userIds: [`${profile}-user`] });
 
     const complete = await executor.execute(erasureStatus, { erasureId: erased.erasureId }, principal, { surface: 'rest' });
     expect(complete).toMatchObject({ status: 'complete', checkpoints: { clickhouse: true, hotState: true } });
@@ -318,12 +328,17 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     } finally {
       disposeErasure(prepared);
     }
-    // Nothing ran in that process; a later worker claims the committed job.
+    // Nothing ran in that process; a later worker claims the committed job, records the first
+    // successful sweep and waits for the distinct final pass.
     const { events, calls } = fakeEvents();
     const { hot } = fakeHot();
-    const result = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot });
-    expect(result.completed).toBe(1);
+    const first = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
+    expect(first).toMatchObject({ claimed: 1, deferred: 1, completed: 0 });
     expect(calls).toHaveLength(1);
+    await makeDue();
+    const second = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
+    expect(second).toMatchObject({ claimed: 1, completed: 1 });
+    expect(calls).toHaveLength(2);
     expect((await job(erasedId))?.state).toBe('complete');
   });
 
@@ -354,21 +369,292 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     );
     const { events, calls } = fakeEvents();
     const { hot } = fakeHot();
-    const first = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { outboxWaitSeconds: 0 });
+    const first = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0, outboxWaitSeconds: 0 });
     expect(first).toMatchObject({ claimed: 1, deferred: 1, completed: 0 });
     expect(calls).toHaveLength(0);
     expect((await job(erasedId))?.state).toBe('pending_external');
 
-    // The publisher commits its event; the next claim sweeps it and completes.
+    // The publisher commits its event. The next claim makes the first successful sweep and records
+    // its checkpoint, but it must not complete: no final pass has run yet.
     await d.db.admin.query("UPDATE outbox SET state = 'delivered' WHERE operation_key = 'erasure-inflight'");
+    await makeDue();
+    const second = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0, outboxWaitSeconds: 0 });
+    expect(second).toMatchObject({ claimed: 1, deferred: 1, completed: 0 });
+    expect(calls).toHaveLength(1);
+    expect(await job(erasedId)).toMatchObject({
+      state: 'pending_external',
+      clickhouse_done: true,
+      first_sweep_done_at: expect.any(Date),
+    });
+
+    // The distinct final pass, at least the sweep interval later, completes it.
+    await makeDue();
+    const third = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0, outboxWaitSeconds: 0 });
+    expect(third).toMatchObject({ claimed: 1, completed: 1 });
+    expect(calls).toHaveLength(2);
+    expect((await job(erasedId))?.state).toBe('complete');
+  });
+
+  it('sweeps twice: the first pass deletes now, the final pass after the bound completes', async () => {
+    const profile = 'prf_0000000000000000000000000000f101';
+    await seedPerson(profile);
+    const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+    let erasedId = '';
+    try {
+      erasedId = (
+        await d.db.withWorkspace(d.workspace, (tx) =>
+          eraseProfileStage(tx, {
+            workspaceId: d.workspace,
+            profileId: profile,
+            requestedBy: 'user_test',
+            reason: 'two-phase sweep test',
+            prepared,
+          }),
+        )
+      ).erasureId;
+    } finally {
+      disposeErasure(prepared);
+    }
+    const { events, calls } = fakeEvents();
+    const { hot } = fakeHot();
+    const first = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 60_000, outboxWaitSeconds: 0 });
+    // The first pass removes what is in the store now, then the job waits for the final bound
+    // without spending an attempt.
+    expect(first).toMatchObject({ claimed: 1, deferred: 1, completed: 0 });
+    expect(calls).toHaveLength(1);
+    expect(await job(erasedId)).toMatchObject({
+      state: 'pending_external',
+      attempts: 0,
+      clickhouse_done: true,
+      hotstate_done: true,
+      // The first claim, which is necessarily after the erasure committed, anchored the final sweep.
+      final_sweep_at: expect.any(Date),
+      // The successful first pass is the checkpoint the final pass must follow.
+      first_sweep_done_at: expect.any(Date),
+    });
+
+    // A write that started before the erasure can land after the first pass. The final pass runs
+    // even though the checkpoint is set, which is what makes `complete` truthful.
     await d.db.admin.query('UPDATE erasure_cleanup_jobs SET next_attempt_at = now() WHERE workspace_id = $1 AND erasure_id = $2', [
       d.workspace,
       erasedId,
     ]);
-    const second = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { outboxWaitSeconds: 0 });
+    const second = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0, outboxWaitSeconds: 0 });
     expect(second).toMatchObject({ claimed: 1, completed: 1 });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect((await job(erasedId))?.state).toBe('complete');
+  });
+
+  it('does not complete on the first successful delete after an earlier failure', async () => {
+    const profile = 'prf_0000000000000000000000000000f301';
+    await seedPerson(profile);
+    const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+    let erasedId = '';
+    try {
+      erasedId = (
+        await d.db.withWorkspace(d.workspace, (tx) =>
+          eraseProfileStage(tx, {
+            workspaceId: d.workspace,
+            profileId: profile,
+            requestedBy: 'user_test',
+            reason: 'failed first sweep test',
+            prepared,
+          }),
+        )
+      ).erasureId;
+    } finally {
+      disposeErasure(prepared);
+    }
+    let attempts = 0;
+    const events = {
+      async deleteEventsOf() {
+        attempts += 1;
+        if (attempts === 1) throw new Error('the first delete failed');
+      },
+    } as unknown as EventStore;
+    const { hot } = fakeHot();
+
+    const first = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
+    expect(first).toMatchObject({ claimed: 1, retried: 1, completed: 0 });
+    expect(attempts).toBe(1);
+    expect(await job(erasedId)).toMatchObject({ state: 'pending_external', first_sweep_done_at: null });
+
+    // The next delete succeeds, but it is the first successful pass: it checkpoints and defers,
+    // rather than completing on one sweep after a failure (#1037 review).
+    await makeDue();
+    const second = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
+    expect(second).toMatchObject({ claimed: 1, deferred: 1, completed: 0 });
+    expect(attempts).toBe(2);
+    expect(await job(erasedId)).toMatchObject({ state: 'pending_external', first_sweep_done_at: expect.any(Date) });
+
+    await makeDue();
+    const third = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
+    expect(third).toMatchObject({ claimed: 1, completed: 1 });
+    expect(attempts).toBe(3);
+    expect((await job(erasedId))?.state).toBe('complete');
+  });
+
+  it('never stores an event that names an erased person inside the grace window', async () => {
+    const profile = 'prf_0000000000000000000000000000f201';
+    await seedPerson(profile);
+    const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+    try {
+      await d.db.withWorkspace(d.workspace, (tx) =>
+        eraseProfileStage(tx, {
+          workspaceId: d.workspace,
+          profileId: profile,
+          requestedBy: 'user_test',
+          reason: 'sink filter test',
+          prepared,
+        }),
+      );
+    } finally {
+      disposeErasure(prepared);
+    }
+    const event = (anonymousId: string, timestamp: string, over: Partial<BusEvent> = {}): BusEvent => ({
+      workspaceId: d.workspace,
+      sourceId: 'src_test',
+      messageId: `m-${anonymousId}-${timestamp}`,
+      type: 'track' as const,
+      name: 'Page Viewed',
+      anonymousId,
+      userId: '',
+      timestamp,
+      receivedAt: timestamp,
+      properties: {},
+      traits: {},
+      piiTraits: {},
+      context: {},
+      consent: {},
+      ...over,
+    });
+    // A live person on the same device id as the erased person: the resolver accepts the event
+    // because the user id belongs to a live profile, so the sink must not drop it (#1037 B1).
+    const live = 'prf_0000000000000000000000000000f202';
+    await seedPerson(live);
+    const before = new Date(Date.now() - 60_000).toISOString();
+    const afterGrace = new Date(Date.now() + 48 * 3_600_000).toISOString();
+    const person = event(`${profile}-anon`, before);
+    const late = event(`${profile}-anon`, afterGrace);
+    const other = event('someone-else', before);
+    const livePerson = event(`${profile}-anon`, before, { userId: `${live}-user` });
+    const unknownUser = event(`${profile}-anon`, before, { userId: 'u-unknown' });
+    const filter = erasedEventFilter({ db: d.db, kp: keyProvider });
+    expect(await filter([person, late, other, livePerson, unknownUser])).toEqual([late, other, livePerson]);
+  });
+
+  it('drops an alias whose erased previous anonymous id has no live identity', async () => {
+    const erasedProfile = 'prf_0000000000000000000000000000f203';
+    const liveProfile = 'prf_0000000000000000000000000000f204';
+    await seedPerson(erasedProfile);
+    await seedPerson(liveProfile);
+    const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+    try {
+      await d.db.withWorkspace(d.workspace, (tx) =>
+        eraseProfileStage(tx, {
+          workspaceId: d.workspace,
+          profileId: erasedProfile,
+          requestedBy: 'user_test',
+          reason: 'alias filter test',
+          prepared,
+        }),
+      );
+    } finally {
+      disposeErasure(prepared);
+    }
+    const base = (previousId: string): BusEvent => ({
+      workspaceId: d.workspace,
+      sourceId: 'src_test',
+      messageId: `alias-${previousId}`,
+      type: 'alias',
+      name: 'alias',
+      anonymousId: 'new-device',
+      userId: 'new-user',
+      previousId,
+      timestamp: new Date(Date.now() - 60_000).toISOString(),
+      receivedAt: new Date().toISOString(),
+      properties: {},
+      traits: {},
+      piiTraits: {},
+      context: {},
+      consent: {},
+    });
+    const filter = erasedEventFilter({ db: d.db, kp: keyProvider });
+    const erasedAlias = base(`${erasedProfile}-anon`);
+    const liveAlias = base(`${liveProfile}-anon`);
+    // The resolver expands an unknown previous id to `anonymous_id` and applies the tombstone; a
+    // previous id that still has an anonymous/user identifier row belongs to the live profile.
+    expect(await filter([erasedAlias, liveAlias])).toEqual([liveAlias]);
+  });
+
+  it('handles a full 10,000-event sink batch without a parameter or stack limit', async () => {
+    const profile = 'prf_0000000000000000000000000000f205';
+    await seedPerson(profile);
+    const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+    try {
+      await d.db.withWorkspace(d.workspace, (tx) =>
+        eraseProfileStage(tx, {
+          workspaceId: d.workspace,
+          profileId: profile,
+          requestedBy: 'user_test',
+          reason: 'bulk filter test',
+          prepared,
+        }),
+      );
+    } finally {
+      disposeErasure(prepared);
+    }
+    const timestamp = new Date(Date.now() - 60_000).toISOString();
+    const events: BusEvent[] = Array.from({ length: 10_000 }, (_, index) => ({
+      workspaceId: d.workspace,
+      sourceId: 'src_test',
+      messageId: `bulk-${index}`,
+      type: 'track',
+      name: 'Page Viewed',
+      anonymousId: `bulk-anon-${index}`,
+      userId: `bulk-user-${index}`,
+      timestamp,
+      receivedAt: timestamp,
+      properties: {},
+      traits: {},
+      piiTraits: { email: `bulk-${index}@example.com`, phone: `+1555${index}` },
+      context: {},
+      consent: {},
+    }));
+    const filter = erasedEventFilter({ db: d.db, kp: keyProvider });
+    // 10,000 events × four identifiers is the sink's supported maximum; the per-pair query list
+    // used to hit PostgreSQL's parameter and stack limits here.
+    expect(await filter(events)).toHaveLength(10_000);
+  }, 120_000);
+
+  it('drops only rows whose profile has an erasure record, never missing or profile-less rows', async () => {
+    const erasedProfile = 'prf_0000000000000000000000000000f206';
+    const liveProfile = 'prf_0000000000000000000000000000f207';
+    await seedPerson(erasedProfile);
+    await seedPerson(liveProfile);
+    const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+    try {
+      await d.db.withWorkspace(d.workspace, (tx) =>
+        eraseProfileStage(tx, {
+          workspaceId: d.workspace,
+          profileId: erasedProfile,
+          requestedBy: 'user_test',
+          reason: 'direct writer guard test',
+          prepared,
+        }),
+      );
+    } finally {
+      disposeErasure(prepared);
+    }
+    const kept = await dropErasedProfileRows(d.db, d.workspace, [
+      { profileId: erasedProfile },
+      { profileId: liveProfile },
+      { profileId: 'prf_missing' },
+      { profileId: null },
+      { profileId: '' },
+    ]);
+    // A missing profile row is not proof of erasure: only the erasure record drops the row.
+    expect(kept).toEqual([{ profileId: liveProfile }, { profileId: 'prf_missing' }, { profileId: null }, { profileId: '' }]);
   });
 
   it('reruns the external deletion after a crash before the checkpoint, and it is idempotent', async () => {
@@ -406,10 +692,17 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
       [d.workspace, erasedId],
     );
 
-    const result = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot });
-    expect(result.completed).toBe(1);
-    // The rerun repeated the same idempotent deletion, then checkpointed and completed.
+    const first = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
+    // The rerun repeated the same idempotent deletion and recorded the first-sweep checkpoint, but
+    // it still waits for a distinct final pass.
+    expect(first).toMatchObject({ claimed: 1, deferred: 1, completed: 0 });
     expect(calls).toHaveLength(2);
+    expect(await job(erasedId)).toMatchObject({ state: 'pending_external', first_sweep_done_at: expect.any(Date) });
+
+    await makeDue();
+    const second = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
+    expect(second.completed).toBe(1);
+    expect(calls).toHaveLength(3);
     expect((await job(erasedId))?.state).toBe('complete');
   });
 
@@ -442,7 +735,7 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     const { hot } = fakeHot();
     const spy = vi.spyOn(logger, 'warn');
     try {
-      const result = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot });
+      const result = await runErasureCleanupOnce({ db: d.db, kp: keyProvider, events, hot }, { finalSweepMs: 0 });
       expect(result).toMatchObject({ claimed: 1, retried: 1 });
       const stored = (await job(erasedId))!;
       expect(stored.last_error).toMatch(/^clickhouse_error/);

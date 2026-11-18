@@ -7,6 +7,7 @@ import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { consentStateOf, currentConsent, recomputeConsentState, recordConsentEvidence } from './consent';
 import { type PersonCrypto, personCrypto } from './crypto';
+import { DEFAULT_ERASURE_GRACE_HOURS } from './erasedEvents';
 import { lockProfileRows, withIdentityLock } from './identity';
 
 // Deterministic identity resolution (data-platform.md §3). Each event's identifiers are looked up;
@@ -43,9 +44,6 @@ const hasProfileData = (e: BusEvent) =>
 
 /** Events the platform publishes about existing people (packages/segments uses the same id). */
 const SYSTEM_SOURCE = 'system';
-
-/** Default window after an erasure in which its identifiers are blocked (#210). */
-const DEFAULT_ERASURE_GRACE_HOURS = 24;
 
 export interface ResolveDeps {
   /** Keys unwrapped before the batch transaction; nothing here may reach the key provider. */

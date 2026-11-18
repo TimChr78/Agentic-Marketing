@@ -81,6 +81,12 @@ export interface ErasureCleanupClaim {
   profileIds: string[];
   /** Already incremented by the claim: this is the attempt being run. */
   attempts: number;
+  /** Set from the first claim, which is necessarily after the erasure transaction committed. */
+  finalSweepAt: Date;
+  /** Set when the first ClickHouse delete succeeded; null until then. */
+  firstSweepDoneAt: Date | null;
+  /** Whether a distinct final pass is due: at least `finalSweepSeconds` after `firstSweepDoneAt`. */
+  finalDue: boolean;
   /** Fences completion and checkpoints: only the claim holding this token may write them. */
   claimToken: string;
   clickhouseDone: boolean;
@@ -119,14 +125,21 @@ export async function enqueueErasureCleanupJob(tx: Tx, workspaceId: string, entr
  * again. Every claim writes a fresh `claim_token`, so a completion or checkpoint from an expired
  * claim is a no-op rather than overwriting the new owner's result.
  */
-export async function claimErasureCleanupJobs(db: Db, opts: { limit?: number; leaseMs?: number } = {}): Promise<ErasureCleanupClaim[]> {
+export async function claimErasureCleanupJobs(
+  db: Db,
+  opts: { limit?: number; leaseMs?: number; finalSweepSeconds?: number } = {},
+): Promise<ErasureCleanupClaim[]> {
   const limit = opts.limit ?? 10;
   const leaseMs = opts.leaseMs ?? ERASURE_CLEANUP_LEASE_MS;
+  const finalSweepSeconds = opts.finalSweepSeconds ?? 35;
   const { rows } = await db.admin.query<{
     workspace_id: string;
     erasure_id: string;
     profile_ids: string[];
     attempts: number;
+    final_sweep_at: Date;
+    first_sweep_done_at: Date | null;
+    final_due: boolean;
     claim_token: string;
     clickhouse_done: boolean;
     hotstate_done: boolean;
@@ -145,21 +158,30 @@ export async function claimErasureCleanupJobs(db: Db, opts: { limit?: number; le
      UPDATE erasure_cleanup_jobs j
      SET state = 'running',
          attempts = j.attempts + 1,
+         final_sweep_at = COALESCE(j.final_sweep_at, now()),
          lease_until = now() + make_interval(secs => $2),
          claim_token = gen_random_uuid()::text,
          last_error = NULL,
          updated_at = now()
      FROM ready
      WHERE j.workspace_id = ready.workspace_id AND j.erasure_id = ready.erasure_id
-     RETURNING j.workspace_id, j.erasure_id, j.profile_ids, j.attempts, j.claim_token,
-               j.clickhouse_done, j.hotstate_done, j.selectors, j.selector_key, j.selector_kek`,
-    [limit, leaseMs / 1000],
+     RETURNING j.workspace_id, j.erasure_id, j.profile_ids, j.attempts,
+               COALESCE(j.final_sweep_at, now()) AS final_sweep_at,
+               j.first_sweep_done_at,
+               (j.first_sweep_done_at IS NOT NULL
+                AND GREATEST(COALESCE(j.final_sweep_at, now()), j.first_sweep_done_at)
+                    + make_interval(secs => $3::double precision) <= now()) AS final_due,
+               j.claim_token, j.clickhouse_done, j.hotstate_done, j.selectors, j.selector_key, j.selector_kek`,
+    [limit, leaseMs / 1000, finalSweepSeconds],
   );
   return rows.map((r) => ({
     workspaceId: r.workspace_id,
     erasureId: r.erasure_id,
     profileIds: r.profile_ids,
     attempts: r.attempts,
+    finalSweepAt: r.final_sweep_at,
+    firstSweepDoneAt: r.first_sweep_done_at,
+    finalDue: r.final_due,
     claimToken: r.claim_token,
     clickhouseDone: r.clickhouse_done,
     hotstateDone: r.hotstate_done,
@@ -185,7 +207,9 @@ export async function renewErasureCleanupLease(
 
 /**
  * Records that one external store is clean. A stale claim's checkpoint is refused: the reclaimer
- * will make the same deletion, which is idempotent, and owns the row's checkpoints.
+ * will make the same deletion, which is idempotent, and owns the row's checkpoints. The ClickHouse
+ * checkpoint also records when the first successful delete happened; the final pass is scheduled
+ * from that timestamp, so a failed first delete cannot be completed by one later success (#1037).
  */
 export async function markErasureCleanupCheckpoint(
   db: Db,
@@ -194,8 +218,9 @@ export async function markErasureCleanupCheckpoint(
 ): Promise<boolean> {
   // A fixed column name from the union, never caller text.
   const column = store === 'clickhouse' ? 'clickhouse_done' : 'hotstate_done';
+  const firstSweep = store === 'clickhouse' ? ', first_sweep_done_at = COALESCE(first_sweep_done_at, now())' : '';
   const { rowCount } = await db.admin.query(
-    `UPDATE erasure_cleanup_jobs SET ${column} = true, updated_at = now()
+    `UPDATE erasure_cleanup_jobs SET ${column} = true${firstSweep}, updated_at = now()
      WHERE workspace_id = $1 AND erasure_id = $2 AND claim_token = $3 AND state = 'running'`,
     [claim.workspaceId, claim.erasureId, claim.claimToken],
   );

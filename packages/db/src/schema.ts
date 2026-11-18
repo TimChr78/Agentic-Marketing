@@ -588,6 +588,10 @@ export const erasureCleanupJobs = pgTable(
     claimToken: text('claim_token'),
     clickhouseDone: boolean('clickhouse_done').notNull().default(false),
     hotstateDone: boolean('hotstate_done').notNull().default(false),
+    /** When the first cleanup claim observed the committed erasure; anchors the final re-sweep. */
+    finalSweepAt: ts('final_sweep_at'),
+    /** When the first ClickHouse delete succeeded; the final pass is scheduled from here. */
+    firstSweepDoneAt: ts('first_sweep_done_at'),
     selectors: bytea('selectors'),
     selectorKey: bytea('selector_key'),
     selectorKek: text('selector_kek'),

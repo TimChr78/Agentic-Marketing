@@ -11,7 +11,7 @@ import { runSink } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runEnrollmentJobs, runSweeper } from '@agentic-marketing/journeys';
 import { refreshSnapshots, runEdgeSync, snapshotHook } from '@agentic-marketing/personalize';
-import { runErasureCleanup, runProfileWorkers } from '@agentic-marketing/profiles';
+import { erasedEventFilter, runErasureCleanup, runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
@@ -93,6 +93,10 @@ export function startScheduler(
     enrollmentTickMs?: number;
     rolloutTickMs?: number;
     idempotencyCleanupTickMs?: number;
+    /** How long the erasure cleanup waits before its final ClickHouse re-sweep. */
+    erasureFinalSweepMs?: number;
+    /** False keeps the erasure cleanup loop out of the way; a test drives its rounds itself. */
+    erasureCleanup?: boolean;
   } = {},
 ): WorkerLoop[] {
   logger.info(
@@ -162,9 +166,20 @@ export function startScheduler(
       'retention',
       runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention, erasureGraceHours: srv.erasureGraceHours }, signal),
     ),
-    // External erasure cleanup (#978 part 2b): ClickHouse and hot state, after the erasure's SQL
-    // transaction committed. It waits for an in-flight outbox publisher of the erased person.
-    loop('erasure-cleanup', runErasureCleanup({ db: srv.db, kp: srv.keyProvider, events: srv.events, hot: srv.hot }, signal)),
+    ...(opts.erasureCleanup === false
+      ? []
+      : [
+          // External erasure cleanup (#978 part 2b): ClickHouse and hot state, after the erasure's SQL
+          // transaction committed. It waits for an in-flight outbox publisher of the erased person, then
+          // sweeps ClickHouse immediately and again after the ClickHouse request-timeout bound before
+          // completing.
+          loop(
+            'erasure-cleanup',
+            runErasureCleanup({ db: srv.db, kp: srv.keyProvider, events: srv.events, hot: srv.hot }, signal, {
+              ...(opts.erasureFinalSweepMs === undefined ? {} : { finalSweepMs: opts.erasureFinalSweepMs }),
+            }),
+          ),
+        ]),
     loop('oauth-token-refresh', runTokenRefresher({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal)),
     loop('audience-syncs', runAudienceSyncs({ db: srv.db, kp: srv.keyProvider, egress: srv.egress }, signal)),
     loop('spend-import', runSpendImport({ db: srv.db, events: srv.events, kp: srv.keyProvider, egress: srv.egress }, signal)),
@@ -271,7 +286,14 @@ export function startWorkers(
     );
   logger.info('worker role: ClickHouse sink, profile workers, journeys, AI steps, e-mail, webhooks and actions');
   return [
-    run('clickhouse-sink', runSink(srv.bus, srv.events, signal)),
+    run(
+      'clickhouse-sink',
+      runSink(srv.bus, srv.events, signal, {
+        // An event still on the bus when its person is erased, or one that arrives inside the
+        // grace window, must not be stored. This is the mitigation's new-write guard (#1037).
+        filter: erasedEventFilter({ db: srv.db, kp: srv.keyProvider, graceHours: srv.erasureGraceHours }),
+      }),
+    ),
     run('journey-sweeper', runSweeper(srv.db, { kp: srv.keyProvider, events: srv.events }, signal)),
     run('ai-steps', runAiWorker(srv.db, { kp: srv.keyProvider, events: srv.events, egress: srv.egress }, signal)),
     run('deliveries', runDeliveries(srv.db, { kp: srv.keyProvider, egress: srv.egress, hot: srv.hot, ...opts.deliveries }, signal)),

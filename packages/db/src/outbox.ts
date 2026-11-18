@@ -1,5 +1,5 @@
 import { newId } from '@agentic-marketing/core';
-import { and, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Db, Tx } from './pool';
 import * as schema from './schema';
 
@@ -210,9 +210,28 @@ export async function failOutbox(
 }
 
 /**
+ * Whether the payload names this broadcast or journey in one of its events. A mixed batch written
+ * before 0.15.3 carried no `subject_ref`, and it can still be in the queue right after an upgrade.
+ * Only live rows are scanned, so parsing the payload stays bounded by the queue, never by the
+ * delivered history.
+ */
+function payloadNamesSubject(subjectRef: string) {
+  return sql`EXISTS (
+    SELECT 1 FROM jsonb_array_elements(
+      CASE WHEN jsonb_typeof(${schema.outbox.payload}->'events') = 'array' THEN ${schema.outbox.payload}->'events' ELSE '[]'::jsonb END
+    ) AS e
+    WHERE e->>'journeyId' = ${subjectRef}
+  )`;
+}
+
+/**
  * Whether publication for one broadcast or journey is complete. A decision that depends on
  * ClickHouse events (the canary check, the subject-test winner) must wait while a row is pending or
  * being delivered; a failed row must not block it forever, so the caller proceeds but can warn.
+ *
+ * Rows written by 0.15.2 for a batch that spanned several subjects have no `subject_ref`: they are
+ * matched by the broadcast or journey their payload names, so an upgrade cannot hide a click or
+ * unsubscribe that is still queued (#1038).
  */
 export async function outboxPublicationBarrier(
   tx: Tx,
@@ -238,7 +257,39 @@ export async function outboxPublicationBarrier(
     .from(schema.outbox)
     .where(and(eq(schema.outbox.workspaceId, workspaceId), eq(schema.outbox.subjectRef, subjectRef), eq(schema.outbox.state, 'failed')))
     .limit(1);
-  return { outstanding: outstanding.length, failed: failed.length };
+  // The same two state classes for an unsubjected row. `subject_ref IS NULL` is part of the partial
+  // index's key range (PostgreSQL indexes NULLs), and `limit 1` stops at the first match, so the
+  // payload is only parsed for the unsubjected rows that are still live.
+  const unsubjectedOutstanding = await tx
+    .select({ one: sql<number>`1` })
+    .from(schema.outbox)
+    .where(
+      and(
+        eq(schema.outbox.workspaceId, workspaceId),
+        isNull(schema.outbox.subjectRef),
+        eq(schema.outbox.kind, 'message_event'),
+        inArray(schema.outbox.state, ['pending', 'delivering']),
+        payloadNamesSubject(subjectRef),
+      ),
+    )
+    .limit(1);
+  const unsubjectedFailed = await tx
+    .select({ one: sql<number>`1` })
+    .from(schema.outbox)
+    .where(
+      and(
+        eq(schema.outbox.workspaceId, workspaceId),
+        isNull(schema.outbox.subjectRef),
+        eq(schema.outbox.kind, 'message_event'),
+        eq(schema.outbox.state, 'failed'),
+        payloadNamesSubject(subjectRef),
+      ),
+    )
+    .limit(1);
+  return {
+    outstanding: outstanding.length + unsubjectedOutstanding.length,
+    failed: failed.length + unsubjectedFailed.length,
+  };
 }
 
 export interface PendingOutboxBatch {
