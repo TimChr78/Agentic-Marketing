@@ -10,14 +10,17 @@ import {
   type ErasureCleanupClaim,
   type ErasureCleanupFailureCategory,
   erasureCleanupFailure,
+  erasureLedgerKeys,
   erasureOutboxOutstanding,
   failErasureCleanup,
   formatErasureCleanupFailure,
   markErasureCleanupCheckpoint,
+  markErasureCleanupPublished,
+  nextErasureGeneration,
   renewErasureCleanupLease,
   resetErasureCleanupCheckpoints,
 } from '@agentic-marketing/db';
-import type { EventStore } from '@agentic-marketing/events';
+import type { EventStore, SubjectKeyKind } from '@agentic-marketing/events';
 import { CLICKHOUSE_REQUEST_TIMEOUT_MS } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
 import type { KeyProvider } from '@agentic-marketing/secrets';
@@ -39,7 +42,7 @@ import { type ErasureSelectors, openSelectors } from './erasure';
 export interface ErasureCleanupDeps {
   db: Db;
   kp: KeyProvider;
-  events: Pick<EventStore, 'deleteEventsOf'>;
+  events: Pick<EventStore, 'deleteEventsOf' | 'publishErasedSubjects' | 'erasedSubjectsVisible'>;
   hot?: Pick<HotState, 'deleteSnapshot'>;
 }
 
@@ -107,6 +110,44 @@ async function selectorsFor(deps: ErasureCleanupDeps, claim: ErasureCleanupClaim
 }
 
 /**
+ * Publishes one claim's committed ledger to ClickHouse's `erased_subjects` (#1037 part 2), before
+ * any sweep. The rows were written in the erasure's SQL transaction, so this runs only after that
+ * commit. Publication is idempotent (the table replaces on (workspace, kind, key, key_version)) and
+ * a retry takes a new, higher generation; the job records the generation only after a FINAL read
+ * shows every key, so neither a bounded client timeout nor a partial insert can be mistaken for a
+ * durable exclusion.
+ */
+async function publishErasedSubjects(deps: ErasureCleanupDeps, claim: ErasureCleanupClaim): Promise<void> {
+  const keys = await erasureLedgerKeys(deps.db, claim.workspaceId, claim.erasureId);
+  // A ledger with no full-coverage row has nothing that could match a stored subject key. Record
+  // generation 0 so the job does not ask again on every attempt.
+  const generation = keys.length ? await nextErasureGeneration(deps.db, claim.workspaceId) : 0;
+  if (keys.length) {
+    const recordedAt = new Date().toISOString();
+    await deps.events.publishErasedSubjects(
+      keys.map((key) => ({
+        workspaceId: claim.workspaceId,
+        kind: key.kind as SubjectKeyKind,
+        key: key.keyValue,
+        keyVersion: key.keyVersion,
+        erasureId: claim.erasureId,
+        generation,
+        recordedAt,
+      })),
+    );
+    if (
+      !(await deps.events.erasedSubjectsVisible(
+        claim.workspaceId,
+        keys.map((key) => key.keyValue),
+      ))
+    )
+      throw new Error('the published erased subjects are not visible in a FINAL read');
+  }
+  if (!(await markErasureCleanupPublished(deps.db, claim, generation)))
+    logger.debug({ erasureId: claim.erasureId }, 'erasure publication record was stale; another claim owns the job');
+}
+
+/**
  * One round: claim a small batch, run each cleanup outside any transaction, checkpoint each store,
  * and complete or back off. Returns counts so a test (and the loop's idle pause) needs no clock.
  */
@@ -125,6 +166,28 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
     if (!(await renewErasureCleanupLease(deps.db, claim, leaseMs))) {
       logger.debug({ erasureId: claim.erasureId }, 'erasure cleanup claim was taken over; skipping');
       continue;
+    }
+    // Publish the committed exclusions before touching anything: read-time exclusion is the
+    // contract (#1037), and the first sweep below reduces what is retained. A later failure at any
+    // stage leaves published_at set, so a retry does not publish again.
+    if (claim.publishedAt === null) {
+      try {
+        await publishErasedSubjects(deps, claim);
+      } catch (err) {
+        const failure = erasureCleanupFailure(err, 'clickhouse_error');
+        const state = await failErasureCleanup(deps.db, claim, failure, {
+          maxAttempts: opts.maxAttempts ?? ERASURE_CLEANUP_MAX_ATTEMPTS,
+        });
+        if (state !== 'stale') {
+          if (state === 'failed') result.failed++;
+          else result.retried++;
+          logger.warn(
+            { erasureId: claim.erasureId, attempts: claim.attempts, error: formatErasureCleanupFailure(failure) },
+            'erasure exclusion publication failed',
+          );
+        }
+        continue;
+      }
     }
     let stage: ErasureCleanupFailureCategory = 'barrier_wait';
     try {

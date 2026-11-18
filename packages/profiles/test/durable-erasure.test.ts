@@ -73,12 +73,21 @@ async function seedPerson(profileId: string, opts: { mergedFrom?: string[] } = {
 
 const fakeEvents = () => {
   const calls: { workspaceId: string; anonymousIds: string[]; userIds: string[]; profileIds?: string[] }[] = [];
+  const published: { workspaceId: string; kind: string; key: string; generation: number }[] = [];
   const events = {
     async deleteEventsOf(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[]; profileIds?: string[] }) {
       calls.push({ workspaceId, ...ids });
     },
+    // Publication (#1037 part 2) now runs before every sweep; the fake records it so a test can
+    // still assert what the sweep itself did.
+    async publishErasedSubjects(rows: { workspaceId: string; kind: string; key: string; generation: number }[]) {
+      published.push(...rows);
+    },
+    async erasedSubjectsVisible() {
+      return true;
+    },
   } as unknown as EventStore;
-  return { events, calls };
+  return { events, calls, published };
 };
 
 const fakeHot = () => {
@@ -471,6 +480,10 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
         attempts += 1;
         if (attempts === 1) throw new Error('the first delete failed');
       },
+      async publishErasedSubjects() {},
+      async erasedSubjectsVisible() {
+        return true;
+      },
     } as unknown as EventStore;
     const { hot } = fakeHot();
 
@@ -730,6 +743,10 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     const events = {
       async deleteEventsOf() {
         throw new Error(`ClickHouse rejected the delete for ${secret}`);
+      },
+      async publishErasedSubjects() {},
+      async erasedSubjectsVisible() {
+        return true;
       },
     } as unknown as EventStore;
     const { hot } = fakeHot();

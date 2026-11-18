@@ -282,7 +282,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
         arrayElement({campaign_map_ids:Array(String)}, indexOf({campaign_map_members:Array(String)}, m.journey_id)) AS campaign_id,
         coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id,
         m.at AS send_at
-      FROM message_events m FINAL
+      FROM message_events_protected m FINAL
       LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
       WHERE m.workspace_id = {ws:UUID}
         AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}
@@ -325,7 +325,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
         nullIf(by_profile.profile_id, ''),
         e.profile_id
       ) AS profile_id
-    FROM events e FINAL
+    FROM events_protected e FINAL
     LEFT JOIN identity by_user ON by_user.identity_key = e.user_id AND by_user.kind = 'user_id'
     LEFT JOIN identity by_anonymous ON by_anonymous.identity_key = e.anonymous_id AND by_anonymous.kind = 'anonymous_id'
     LEFT JOIN identity by_profile ON by_profile.identity_key = e.profile_id AND by_profile.kind = 'profile'

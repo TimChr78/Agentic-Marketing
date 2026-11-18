@@ -1080,6 +1080,8 @@ async function writeRestoreCapture(path: string, binding: RestoreCaptureBinding,
       keys: log.keys ?? [],
       // The wrapped exclusion keys the ledger references; the bytes are already KEK-sealed.
       exclusionKeys: (log.exclusionKeys ?? []).map((key) => ({ ...key, wrappedKey: encodeBytes(key.wrappedKey) })),
+      // The per-workspace publication generation; ClickHouse's exclusion state is not in this dump.
+      generations: log.generations ?? [],
     },
   };
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
@@ -1118,6 +1120,7 @@ async function readRestoreCapture(path: string): Promise<RestoreCapture | null> 
       erasures?: ErasureLog['erasures'];
       tombstones?: ErasureLog['tombstones'];
       keys?: ErasureLog['keys'];
+      generations?: { workspaceId: string; generation: unknown }[];
       exclusionKeys?: { workspaceId: string; id: string; kekId: string; wrappedKey: unknown; active: unknown; createdAt: string }[];
       cleanupJobs?: {
         workspaceId: string;
@@ -1150,6 +1153,10 @@ async function readRestoreCapture(path: string): Promise<RestoreCapture | null> 
       erasures: stored.log?.erasures ?? [],
       tombstones: stored.log?.tombstones ?? [],
       keys: stored.log?.keys ?? [],
+      generations: (stored.log?.generations ?? []).map((entry) => ({
+        workspaceId: entry.workspaceId,
+        generation: Number(entry.generation) || 0,
+      })),
       exclusionKeys: (stored.log?.exclusionKeys ?? []).map((key) => ({
         workspaceId: key.workspaceId,
         id: key.id,
@@ -1211,12 +1218,19 @@ export function unionErasureLogs(captured: ErasureLog | null, live: ErasureLog):
   const exclusionKeys = new Map<string, NonNullable<ErasureLog['exclusionKeys']>[number]>();
   for (const key of captured?.exclusionKeys ?? []) exclusionKeys.set(`${key.workspaceId}:${key.id}`, key);
   for (const key of live.exclusionKeys ?? []) exclusionKeys.set(`${key.workspaceId}:${key.id}`, key);
+  // Publication generations are monotonic: the larger of the two copies wins, never the later one.
+  const generations = new Map<string, NonNullable<ErasureLog['generations']>[number]>();
+  for (const entry of [...(captured?.generations ?? []), ...(live.generations ?? [])]) {
+    const earlier = generations.get(entry.workspaceId);
+    if (!earlier || entry.generation > earlier.generation) generations.set(entry.workspaceId, entry);
+  }
   return {
     erasures: [...erasures.values()],
     tombstones: [...tombstones.values()],
     cleanupJobs: [...jobs.values()],
     keys: [...keys.values()],
     exclusionKeys: [...exclusionKeys.values()],
+    generations: [...generations.values()],
   };
 }
 
@@ -1376,6 +1390,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
           `${replayed.tombstones} tombstone(s) restored` +
           (replayed.keys ? `, ${replayed.keys} erasure key(s) restored` : '') +
           (replayed.exclusionKeys ? `, ${replayed.exclusionKeys} exclusion key(s) restored` : '') +
+          (replayed.generations ? `, ${replayed.generations} exclusion generation(s) replayed` : '') +
           (replayed.skipped ? `, ${replayed.skipped} entr(ies) skipped for workspaces the snapshot does not have` : ''),
       );
       // Only a successful replay retires this attempt's capture, and only after checking that the

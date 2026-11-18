@@ -167,7 +167,7 @@ async function firstSendAt(deps: Deps, memberIds: string[]): Promise<string | nu
   // No FINAL: duplicate rows cannot change a minimum, and FINAL would merge the members' whole
   // history before aggregating.
   const result = await deps.events.client.query({
-    query: `SELECT formatDateTime(min(at), '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS first, count() AS n FROM message_events
+    query: `SELECT formatDateTime(min(at), '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS first, count() AS n FROM message_events_protected
             WHERE workspace_id = {ws:UUID} AND journey_id IN {members:Array(String)}
               AND type IN ('sent', 'delivered')`,
     query_params: { ws: deps.workspaceId, members: memberIds },
@@ -241,7 +241,7 @@ async function memberBreakdown(
             m.journey_id AS member_id,
             coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id,
             m.at AS first_at
-          FROM message_events m FINAL
+          FROM message_events_protected m FINAL
           LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
           WHERE m.workspace_id = {ws:UUID} AND m.journey_id IN {members:Array(String)}
             AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}
@@ -259,7 +259,7 @@ async function memberBreakdown(
             nullIf(by_profile.profile_id, ''),
             e.profile_id
           ) AS profile_id
-        FROM events e FINAL
+        FROM events_protected e FINAL
         LEFT JOIN identity by_user ON by_user.identity_key = e.user_id AND by_user.kind = 'user_id'
         LEFT JOIN identity by_anonymous ON by_anonymous.identity_key = e.anonymous_id AND by_anonymous.kind = 'anonymous_id'
         LEFT JOIN identity by_profile ON by_profile.identity_key = e.profile_id AND by_profile.kind = 'profile'
@@ -280,7 +280,7 @@ async function memberBreakdown(
             m.type AS event_type,
             m.channel AS channel,
             coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id
-          FROM message_events m FINAL
+          FROM message_events_protected m FINAL
           LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
           WHERE m.workspace_id = {ws:UUID} AND m.journey_id IN {members:Array(String)}
             AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}

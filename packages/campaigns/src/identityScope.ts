@@ -41,7 +41,7 @@ async function sentProfileIds(deps: Deps, scope: CampaignIdentityWindow, limit: 
     `profile_id != ''`,
   ];
   const result = await deps.events.client.query({
-    query: `SELECT DISTINCT profile_id FROM message_events FINAL
+    query: `SELECT DISTINCT profile_id FROM message_events_protected FINAL
             WHERE ${conditions.join(' AND ')}
             LIMIT {limit:UInt32}`,
     query_params: {

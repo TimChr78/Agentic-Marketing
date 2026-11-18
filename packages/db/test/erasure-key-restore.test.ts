@@ -163,6 +163,42 @@ describe.skipIf(!hasTestDatabase())('restore recreates the erasure-key ledger (#
     ]);
   }, 60_000);
 
+  it('replays the publication generation and never lets a snapshot lower it (#1037 part 2)', async () => {
+    const live = await createDisposableDb('erasure_generation_live');
+    const restored = await createDisposableDb('erasure_generation_restored');
+    open.push(live, restored);
+    const workspace = live.workspace;
+    await live.db.admin.query(
+      `INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, 7)
+       ON CONFLICT (workspace_id) DO UPDATE SET generation = 7`,
+      [workspace],
+    );
+    const log = await readErasureLog(live.url.toString());
+    expect(log.generations).toEqual([{ workspaceId: workspace, generation: 7 }]);
+
+    await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [workspace]);
+    // The snapshot was taken after three publications; ClickHouse already saw seven.
+    await restored.db.admin.query('INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, 3)', [workspace]);
+    const replayed = await replayErasures(restored.url.toString(), log);
+    expect(replayed.generations).toBe(1);
+    let current = await restored.db.admin.query<{ generation: string }>(
+      'SELECT generation FROM erasure_generations WHERE workspace_id = $1',
+      [workspace],
+    );
+    expect(Number(current.rows[0]?.generation)).toBe(7);
+
+    // A stale log (an older attempt's capture) must not move it back.
+    await replayErasures(restored.url.toString(), {
+      erasures: [],
+      tombstones: [],
+      generations: [{ workspaceId: workspace, generation: 3 }],
+    });
+    current = await restored.db.admin.query<{ generation: string }>('SELECT generation FROM erasure_generations WHERE workspace_id = $1', [
+      workspace,
+    ]);
+    expect(Number(current.rows[0]?.generation)).toBe(7);
+  }, 60_000);
+
   it('skips keys of a workspace the restored snapshot does not contain', async () => {
     const live = await createDisposableDb('erasure_keys_skip_live');
     const restored = await createDisposableDb('erasure_keys_skip_restored');

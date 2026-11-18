@@ -1,4 +1,4 @@
-import { type MessageEvent, messageEventsWithPending } from '@agentic-marketing/events';
+import { type MessageEvent, messageEventsWithPending, PROTECTED_VIEWS } from '@agentic-marketing/events';
 import type { DimensionId, MeasureDef, SourceId, Unit } from './registry';
 import { MEASURES } from './registry';
 
@@ -91,10 +91,13 @@ export interface CompiledQuery {
   revenue: boolean;
 }
 
+// Person-linked sources read their protected view (#1037 part 2), which applies FINAL's logical
+// row, the workspace row policy and the erased-subject exclusion before any aggregation. The
+// `${table} FINAL` below is therefore `FROM events_protected FINAL`.
 const SOURCE_TABLE: Record<SourceId, string> = {
-  message_events: 'message_events',
-  journey_events: 'journey_events',
-  events: 'events',
+  message_events: PROTECTED_VIEWS.message_events,
+  journey_events: PROTECTED_VIEWS.journey_events,
+  events: PROTECTED_VIEWS.events,
   segment_memberships: 'segment_memberships',
   // Campaign measures need a join between message_events and events; campaign.ts compiles them.
   campaign: '',

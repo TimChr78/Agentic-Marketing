@@ -83,6 +83,17 @@ export interface ExclusionDataKeyRecord {
   createdAt: string;
 }
 
+/**
+ * One workspace's publication generation for ClickHouse's erased subjects (#1037 part 2). It is
+ * carried through a restore because the ClickHouse table is not part of the Postgres snapshot: a
+ * snapshot's counter can be older than what was published, and reusing a generation would make a
+ * republished exclusion look older than the row it must replace.
+ */
+export interface ErasureGenerationRecord {
+  workspaceId: string;
+  generation: number;
+}
+
 export interface ErasureLog {
   erasures: ErasureRecord[];
   tombstones: ErasureTombstoneRecord[];
@@ -92,6 +103,8 @@ export interface ErasureLog {
   keys?: ErasureKeyRecord[];
   /** Every exclusion data key (wrapped only) so a restore keeps the ids the ledger references. */
   exclusionKeys?: ExclusionDataKeyRecord[];
+  /** Per-workspace publication generations; absent from a database older than 0.17.0. */
+  generations?: ErasureGenerationRecord[];
 }
 
 export interface ReplayErasuresResult {
@@ -109,6 +122,8 @@ export interface ReplayErasuresResult {
   keys: number;
   /** Wrapped exclusion data keys re-inserted into the restored database. */
   exclusionKeys: number;
+  /** Publication generations replayed (or advanced) in the restored database. */
+  generations: number;
   /** Entries for workspaces the restored snapshot no longer has; nothing to erase there. */
   skipped: number;
 }
@@ -297,7 +312,17 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
             createdAt: iso(row.created_at),
           }))
         : [];
-    return { erasures, tombstones, cleanupJobs, keys, exclusionKeys };
+    // The publication generations (#1037 part 2): the ClickHouse exclusion state is not in the
+    // Postgres snapshot, so the counter must come from the live log or the next publication could
+    // reuse a generation that is already visible.
+    const generations = (await hasTable(client, 'erasure_generations'))
+      ? (
+          await client.query<{ workspace_id: string; generation: number | string }>(
+            'SELECT workspace_id, generation FROM erasure_generations',
+          )
+        ).rows.map((row) => ({ workspaceId: row.workspace_id, generation: Number(row.generation) }))
+      : [];
+    return { erasures, tombstones, cleanupJobs, keys, exclusionKeys, generations };
   });
 }
 
@@ -397,9 +422,11 @@ export async function replayErasures(
     cleanupJobs: 0,
     keys: 0,
     exclusionKeys: 0,
+    generations: 0,
     skipped: 0,
   };
-  if (!log.erasures.length && !log.tombstones.length && !log.keys?.length && !log.exclusionKeys?.length) return result;
+  if (!log.erasures.length && !log.tombstones.length && !log.keys?.length && !log.exclusionKeys?.length && !log.generations?.length)
+    return result;
 
   return withClient(databaseUrl, async (client) => {
     const workspaces = new Set((await client.query<{ id: string }>('SELECT id FROM workspaces')).rows.map((row) => row.id));
@@ -408,6 +435,7 @@ export async function replayErasures(
     const erasureKeysTable = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
     const tombstonesTable = await hasTable(client, 'erasure_tombstones');
     const cleanupJobsTable = await hasTable(client, 'erasure_cleanup_jobs');
+    const generationsTable = await hasTable(client, 'erasure_generations');
     const ledgerTable = await hasTable(client, 'erasure_keys');
     const dataKeysTable = (await hasTable(client, 'data_keys')) && (await hasColumn(client, 'data_keys', 'purpose'));
     const jobsByErasure = new Map((log.cleanupJobs ?? []).map((job) => [`${job.workspaceId}:${job.erasureId}`, job]));
@@ -441,6 +469,7 @@ export async function replayErasures(
     // A workspace can have exclusion keys and hashed event rows without any erasure yet (a probe
     // caught exactly that). Its key must still be replayed, or every stored hash loses its key.
     for (const key of log.exclusionKeys ?? []) bucket(key.workspaceId);
+    for (const generation of log.generations ?? []) bucket(generation.workspaceId);
 
     for (const [workspaceId, entries] of byWorkspace) {
       if (!workspaces.has(workspaceId)) {
@@ -448,7 +477,8 @@ export async function replayErasures(
           entries.erasures.length +
           entries.tombstones.length +
           entries.keys.length +
-          (log.exclusionKeys ?? []).filter((key) => key.workspaceId === workspaceId).length;
+          (log.exclusionKeys ?? []).filter((key) => key.workspaceId === workspaceId).length +
+          (log.generations ?? []).filter((generation) => generation.workspaceId === workspaceId).length;
         continue;
       }
       await client.query('BEGIN');
@@ -595,6 +625,21 @@ export async function replayErasures(
               await client.query(`UPDATE data_keys SET active = true WHERE workspace_id = $1 AND id = $2`, [workspaceId, active]);
             }
           }
+        }
+        // The workspace's publication generation (#1037 part 2). ClickHouse keeps the exclusions
+        // across a Postgres restore, so the counter may only move forward: a snapshot's lower
+        // value must never make a later publication reuse a visible generation.
+        const capturedGenerations = (log.generations ?? []).filter((entry) => entry.workspaceId === workspaceId);
+        if (generationsTable && capturedGenerations.length) {
+          const highest = Math.max(...capturedGenerations.map((entry) => entry.generation));
+          const applied = await client.query(
+            `INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, $2)
+             ON CONFLICT (workspace_id) DO UPDATE
+               SET generation = GREATEST(erasure_generations.generation, EXCLUDED.generation), updated_at = now()
+             RETURNING generation`,
+            [workspaceId, highest],
+          );
+          if (applied.rowCount) result.generations += 1;
         }
         await client.query('COMMIT');
         result.workspaces += 1;

@@ -189,7 +189,7 @@ export function readDataset(
           ws,
           `SELECT event_id, type, name, timestamp, received_at, anonymous_id, user_id,
                   toJSONString(properties) AS properties, toJSONString(context) AS context
-           FROM events FINAL
+           FROM events_protected FINAL
            WHERE workspace_id = {ws:UUID} AND received_at > {since:DateTime64(3, 'UTC')} AND received_at <= {until:DateTime64(3, 'UTC')}
            ORDER BY received_at, event_id`,
           { since: chTime(since), until: chTime(until) },
@@ -208,7 +208,7 @@ export function readDataset(
           deps.events,
           ws,
           `SELECT message_id, event_id, type, at, profile_id, channel, purpose, template_id, journey_id, reason, url
-           FROM message_events FINAL
+           FROM message_events_protected FINAL
            WHERE workspace_id = {ws:UUID} AND at > {since:DateTime64(3, 'UTC')} AND at <= {until:DateTime64(3, 'UTC')}
            ORDER BY at, message_id, event_id`,
           { since: chTime(since), until: chTime(until) },

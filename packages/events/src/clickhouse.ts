@@ -124,6 +124,20 @@ export interface EventStore {
    * replaces on (workspace, kind, key), so republishing the committed ledger changes nothing.
    */
   publishErasedSubjects(rows: ErasedSubjectRow[]): Promise<void>;
+  /** The workspace's published exclusion hashes, as one FINAL read (never the raw identifiers). */
+  erasedSubjectKeys(workspaceId: string): Promise<Set<string>>;
+  /**
+   * Confirms a publication is visible: every key in `keys` must be present in a FINAL read. Used
+   * by the erasure cleanup before it records the published generation (#1037 part 2).
+   */
+  erasedSubjectsVisible(workspaceId: string, keys: readonly string[]): Promise<boolean>;
+  /**
+   * Drops pending message events whose profile is an erased subject (#1037 part 2). The union half
+   * of a metric snapshot never reaches ClickHouse before publication, so it is checked here with
+   * the same keyed hash a writer stores. Without an exclusion-key hasher the call fails closed
+   * when the workspace actually has erasures; with none there is nothing to exclude.
+   */
+  withoutErasedSubjects(workspaceId: string, events: readonly MessageEvent[]): Promise<MessageEvent[]>;
   /**
    * One step of the historical subject-key backfill (#1037 part 1): reads each workspace's next
    * batch of unprocessed rows, hashes their identifiers in the app and writes them back. Resumable
@@ -480,7 +494,7 @@ export function messageEventCountQuery(workspaceId: string, q: MessageEventCount
   if (q.sentBy !== undefined) params.sentBy = q.sentBy;
   if (q.profileIds) params.profiles = q.profileIds;
   return {
-    query: `SELECT profile_id, count() AS c FROM message_events FINAL
+    query: `SELECT profile_id, count() AS c FROM message_events_protected FINAL
             WHERE workspace_id = {ws:UUID} AND type = {msgType:String} AND profile_id != ''
             ${q.sinceSeconds !== undefined ? 'AND at >= now64(3) - toIntervalSecond({since:UInt32})' : ''}
             ${q.channel !== undefined ? 'AND channel = {channel:String}' : ''}
@@ -622,7 +636,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     if (q.sinceSeconds) params.since = q.sinceSeconds;
     if (q.ids) Object.assign(params, { anon: q.ids.anonymousIds, users: q.ids.userIds });
     return {
-      query: `SELECT anonymous_id, user_id, count() AS c FROM events FINAL
+      query: `SELECT anonymous_id, user_id, count() AS c FROM events_protected FINAL
               WHERE workspace_id = {ws:UUID} AND name = {name:String}
               ${q.sinceSeconds ? 'AND timestamp >= now64(3) - toIntervalSecond({since:UInt32})' : ''}
               ${q.ids ? 'AND (anonymous_id IN {anon:Array(String)} OR user_id IN {users:Array(String)})' : ''}
@@ -639,6 +653,43 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     count: Number(r.c),
   });
   const messageCountRow = (r: { profile_id: string; c: number | string }) => ({ profileId: r.profile_id, count: Number(r.c) });
+  /** The workspace's published exclusion hashes. FINAL so a republished exclusion counts once. */
+  const readErasedSubjectKeys = async (workspaceId: string): Promise<Set<string>> => {
+    const rs = await query(workspaceId, {
+      query: `SELECT key FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID}`,
+      query_params: { ws: workspaceId },
+      format: 'JSONEachRow',
+    });
+    return new Set((await rs.json<{ key: string }>()).map((row) => row.key));
+  };
+  /**
+   * Pending message events a metric snapshot may count: the ones whose profile is not an erased
+   * subject. The published half of a union is filtered by the protected view; this is the half that
+   * has not reached ClickHouse yet.
+   */
+  const withoutErased = async (workspaceId: string, events: readonly MessageEvent[]): Promise<MessageEvent[]> => {
+    if (!events.length) return [];
+    const erased = await readErasedSubjectKeys(workspaceId);
+    if (!erased.size) return [...events];
+    if (!opts.subjectKeys)
+      throw new Error(
+        'the event store has no exclusion-key hasher, so pending message events cannot be checked against the erasure ledger',
+      );
+    const hasher = await opts.subjectKeys(workspaceId);
+    try {
+      const kept: MessageEvent[] = [];
+      for (const event of events) {
+        if (!event.profileId) {
+          kept.push(event);
+          continue;
+        }
+        if (!erased.has(await hasher.hash('profile', event.profileId))) kept.push(event);
+      }
+      return kept;
+    } finally {
+      hasher.dispose();
+    }
+  };
   return {
     client,
     settingsFor,
@@ -681,7 +732,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
             : "AND (timestamp, name, anonymous_id) <= ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String})";
       const rs = await query(workspaceId, {
         query: `SELECT event_id, source_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
-                FROM events FINAL
+                FROM events_protected FINAL
                 WHERE ${idFilter} ${after}
                 ORDER BY timestamp DESC, name DESC, anonymous_id DESC, event_id DESC LIMIT {limit:UInt32}`,
         query_params: {
@@ -712,7 +763,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       if (!anonymousIds.length) return [];
       const rs = await query(workspaceId, {
         query: `SELECT event_id, source_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
-                FROM events FINAL
+                FROM events_protected FINAL
                 WHERE workspace_id = {ws:UUID} AND anonymous_id IN {anon:Array(String)}
                 ORDER BY timestamp DESC, event_id DESC
                 LIMIT {perId:UInt32} BY anonymous_id`,
@@ -787,14 +838,14 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
         query: `WITH
             exposures AS (
               SELECT anonymous_id AS visitor, argMin(toString(properties.variant_id), timestamp) AS variant, min(timestamp) AS first
-              FROM events FINAL
+              FROM events_protected FINAL
               WHERE workspace_id = {ws:UUID} AND name = 'Experience Viewed' AND toString(properties.experience_id) = {exp:String}
                 AND toString(properties.version) = {version:String}
                 AND anonymous_id != '' AND timestamp >= {since:DateTime64(3, 'UTC')}
               GROUP BY anonymous_id),
             goals AS (
               SELECT anonymous_id AS visitor, max(timestamp) AS last
-              FROM events FINAL
+              FROM events_protected FINAL
               WHERE workspace_id = {ws:UUID} AND name = {goal:String} AND anonymous_id != '' AND timestamp >= {since:DateTime64(3, 'UTC')}
               GROUP BY anonymous_id)
           SELECT e.variant AS variant, count() AS exposed, countIf(g.visitor != '' AND g.last >= e.first) AS converted
@@ -820,7 +871,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       // so results can say how many were excluded instead of leaving them unexplained (#758).
       const unversionedRs = await query(workspaceId, {
         query: `SELECT count() AS n FROM (
-                  SELECT anonymous_id FROM events FINAL
+                  SELECT anonymous_id FROM events_protected FINAL
                   WHERE workspace_id = {ws:UUID} AND name = 'Experience Viewed'
                     AND toString(properties.experience_id) = {exp:String}
                     AND coalesce(toString(properties.version), '') = ''
@@ -912,6 +963,26 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
           recorded_at: row.recordedAt.replace('Z', ''),
         })),
       });
+    },
+    async erasedSubjectKeys(workspaceId) {
+      return readErasedSubjectKeys(workspaceId);
+    },
+    async erasedSubjectsVisible(workspaceId, keys) {
+      if (!keys.length) return true;
+      const rs = await query(workspaceId, {
+        // A key is the HMAC of one identifier under one exclusion key version, so counting distinct
+        // values present is the same as counting the exact rows. FINAL is the visibility check:
+        // it reads the merged state a later query will see, not the insert's acknowledgement.
+        query: `SELECT countDistinct(key) AS n FROM erased_subjects FINAL
+                WHERE workspace_id = {ws:UUID} AND key IN {keys:Array(String)}`,
+        query_params: { ws: workspaceId, keys: [...new Set(keys)] },
+        format: 'JSONEachRow',
+      });
+      const [row] = await rs.json<{ n: number | string }>();
+      return Number(row?.n ?? 0) === new Set(keys).size;
+    },
+    async withoutErasedSubjects(workspaceId, events) {
+      return withoutErased(workspaceId, events);
     },
     async backfillSubjectKeys(o) {
       if (!opts.subjectKeys) throw new Error('the subject-key backfill needs an exclusion key hasher');
@@ -1005,6 +1076,9 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       return { pending: tables.reduce((sum, table) => sum + table.pending, 0), tables };
     },
     async messageStats(workspaceId, q) {
+      // The snapshot half of the union has not reached ClickHouse, so the protected view cannot
+      // exclude it; check its profiles against the published ledger here (#1037 part 2).
+      const pending = q.pendingEvents?.length ? await withoutErased(workspaceId, q.pendingEvents) : [];
       const params: Record<string, unknown> = {
         ws: workspaceId,
         since: q.since.toISOString().replace('Z', ''),
@@ -1015,7 +1089,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       };
       const rs = await query(workspaceId, {
         query: `SELECT type, uniqExact(message_id) AS c FROM ${
-          q.pendingEvents?.length ? messageEventsWithPending(q.pendingEvents, params) : 'message_events FINAL'
+          pending.length ? messageEventsWithPending(pending, params) : 'message_events_protected FINAL'
         }
                 WHERE workspace_id = {ws:UUID} AND at >= {since:DateTime64(3, 'UTC')}
                 ${q.until ? "AND at < {until:DateTime64(3, 'UTC')}" : ''}
@@ -1029,7 +1103,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     },
     async journeyCounts(workspaceId, journeyId) {
       const rs = await query(workspaceId, {
-        query: `SELECT node, type, uniqExact(participant_id) AS c FROM journey_events FINAL
+        query: `SELECT node, type, uniqExact(participant_id) AS c FROM journey_events_protected FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} GROUP BY node, type`,
         query_params: { ws: workspaceId, j: journeyId },
         format: 'JSONEachRow',
@@ -1044,7 +1118,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       // cannot be counted twice or attributed to two arms (#369).
       const rows = await query(workspaceId, {
         query: `SELECT participant_id, profile_id, variant, at FROM (
-                  SELECT participant_id, profile_id, detail AS variant, at FROM journey_events FINAL
+                  SELECT participant_id, profile_id, detail AS variant, at FROM journey_events_protected FINAL
                   WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
                     AND startsWith(detail, 'variant ')
                   ORDER BY at ASC, seq ASC, detail ASC LIMIT 1 BY participant_id
@@ -1067,7 +1141,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');
       const converted = await query(workspaceId, {
-        query: `SELECT DISTINCT profile_id, participant_id, at FROM journey_events FINAL
+        query: `SELECT DISTINCT profile_id, participant_id, at FROM journey_events_protected FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'converted'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
                 ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
@@ -1075,7 +1149,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
         format: 'JSONEachRow',
       });
       const unsubscribed = await query(workspaceId, {
-        query: `SELECT DISTINCT profile_id, at FROM message_events FINAL
+        query: `SELECT DISTINCT profile_id, at FROM message_events_protected FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'unsubscribed' AND channel = 'email'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
                 ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
@@ -1144,7 +1218,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       let after: { timestamp: string; name: string; anonymousId: string; eventId: string } | undefined;
       for (;;) {
         const rs = await query(workspaceId, {
-          query: `SELECT event_id, profile_id, anonymous_id, user_id, name, timestamp, properties FROM events FINAL
+          query: `SELECT event_id, profile_id, anonymous_id, user_id, name, timestamp, properties FROM events_protected FINAL
                   WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)}
                     AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
                     ${scope}
@@ -1223,7 +1297,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');
       const rs = await query(workspaceId, {
-        query: `SELECT DISTINCT profile_id FROM message_events FINAL
+        query: `SELECT DISTINCT profile_id FROM message_events_protected FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id IN {ids:Array(String)}
                   AND type = 'unsubscribed' AND channel = 'email'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
@@ -1242,7 +1316,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     },
     async messageEventsOf(workspaceId, filter, limit = 200) {
       const rs = await query(workspaceId, {
-        query: `SELECT * FROM message_events FINAL WHERE workspace_id = {ws:UUID}
+        query: `SELECT * FROM message_events_protected FINAL WHERE workspace_id = {ws:UUID}
                 ${filter.messageIds ? 'AND message_id IN {ids:Array(String)}' : ''}
                 ${filter.profileId ? 'AND profile_id = {profile:String}' : ''}
                 ORDER BY at DESC LIMIT {limit:UInt32}`,

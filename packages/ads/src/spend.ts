@@ -21,7 +21,7 @@ import { incompleteSpendFor, incompleteSpendNote, type SpendKey } from './spendS
 const TOUCHES_SQL = `SELECT anonymous_id, timestamp, event_id,
          coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS touch_campaign,
          coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS touch_source
-  FROM events FINAL
+  FROM events_protected FINAL
   WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
     AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}`;
 

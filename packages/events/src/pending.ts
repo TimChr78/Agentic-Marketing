@@ -79,8 +79,8 @@ const arrayString = (name: string) => `{${name}:Array(String)}`;
  * A `FROM` source that reads published message events plus the events still queued for
  * publication, so a metric query sees what it will see once the outbox catches up.
  *
- * The published half stays `message_events FINAL` (the replacing table, its row policy and its
- * dedupe unchanged). The snapshot half is built from parallel `Array(String)` parameters over
+ * The published half reads `message_events_protected FINAL`: the protected view (#1037 part 2)
+ * dedupes the replacing table and excludes erased subjects, and its row policy is unchanged. The snapshot half is built from parallel `Array(String)` parameters over
  * `numbers()` — no per-row SQL text — and a `LEFT ANTI JOIN` drops any snapshot event that is
  * already published: a dispatcher that publishes between the snapshot and the read must leave the
  * event counted once, not twice. The caller applies its own WHERE to the result exactly as it would
@@ -90,7 +90,7 @@ const arrayString = (name: string) => `{${name}:Array(String)}`;
  * entries. Bounded by the caller: every row costs a parameter slot.
  */
 export function messageEventsWithPending(rows: readonly MessageEvent[], params: Record<string, unknown>): string {
-  if (!rows.length) return 'message_events FINAL';
+  if (!rows.length) return 'message_events_protected FINAL';
   const at = rows.map((e) => e.at.replace('Z', ''));
   params.pending_n = rows.length;
   params.pending_at = at;
@@ -106,7 +106,7 @@ export function messageEventsWithPending(rows: readonly MessageEvent[], params: 
   params.pending_message_ids = [...new Set(rows.map((e) => e.messageId))];
 
   const element = (name: string) => `arrayElement(${arrayString(name)}, number + 1)`;
-  return `(SELECT ${columnList} FROM message_events FINAL
+  return `(SELECT ${columnList} FROM message_events_protected FINAL
     UNION ALL
     SELECT ${columnList} FROM (
       SELECT
@@ -125,7 +125,7 @@ export function messageEventsWithPending(rows: readonly MessageEvent[], params: 
     ) AS queued
     LEFT ANTI JOIN (
       SELECT toString(message_id) AS message_id, toString(type) AS type, toString(event_id) AS event_id
-      FROM message_events FINAL
+      FROM message_events_protected FINAL
       WHERE workspace_id = {ws:UUID} AND message_id IN {pending_message_ids:Array(String)}
     ) AS published
     ON queued.message_id = published.message_id AND queued.type = published.type AND queued.event_id = published.event_id)`;

@@ -2,8 +2,8 @@ import { complementarySuppression, K, planComplementarySuppression, publishedSin
 import { campaignIdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
-import { schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore, MessageEvent } from '@agentic-marketing/events';
+import { erasureGeneration, schema, type Tx } from '@agentic-marketing/db';
+import { type EventStore, type MessageEvent, PROTECTED_VIEWS } from '@agentic-marketing/events';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -224,7 +224,7 @@ async function workspaceTimeZone(tx: Tx, workspaceId: string): Promise<string> {
   return w?.timeZone ?? 'UTC';
 }
 
-function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFilters): string {
+function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFilters, generation: number): string {
   const sortedFilters = Object.fromEntries(
     Object.entries(filters)
       .sort(([a], [b]) => a.localeCompare(b))
@@ -232,6 +232,9 @@ function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFil
   );
   return JSON.stringify({
     workspaceId,
+    // A publication changes which rows exist for this workspace (#1037 part 2); a result from an
+    // older generation must not be served after it.
+    generation,
     measures: input.measures,
     dimensions: input.dimensions,
     from: input.from,
@@ -257,7 +260,12 @@ async function conversionInput(tx: Tx, filters: NormalizedFilters): Promise<{ ru
 
 export async function freshness(deps: Deps, input: FreshnessInput): Promise<string | null> {
   const { source, from, to, filters, names = [], scope, campaignMap, journeyVersion } = input;
-  const table = source === 'events' ? 'events' : source;
+  const table =
+    source === 'events'
+      ? PROTECTED_VIEWS.events
+      : source === 'message_events'
+        ? PROTECTED_VIEWS.message_events
+        : PROTECTED_VIEWS.journey_events;
   const column = source === 'events' ? 'received_at' : 'at';
   const params: Record<string, unknown> = { ws: deps.workspaceId, from: from.replace('Z', ''), to: to.replace('Z', '') };
   const where = ['workspace_id = {ws:UUID}', `${column} >= {from:DateTime64(3, 'UTC')}`, `${column} <= {to:DateTime64(3, 'UTC')}`];
@@ -806,8 +814,15 @@ export async function runAnalyticsQuery(deps: Deps, input: QueryInput, options: 
   // would otherwise be served unsuppressed rows (#917 review round 6). Neither may a result that
   // carries a caller's pending-event snapshot (#1008).
   const raw = options.raw === true;
-  const pendingMessageEvents = options.pendingMessageEvents ?? [];
-  const key = raw || pendingMessageEvents.length ? null : cacheKey(deps.workspaceId, input, filters);
+  // The workspace's exclusion publication generation, part of the cache key.
+  const generation = await erasureGeneration(deps.tx, deps.workspaceId);
+  // The snapshot half of a pending union never reaches ClickHouse before publication, so its
+  // profiles are checked against the workspace's published exclusions here (#1037 part 2); the
+  // published half is excluded by the protected view the query reads.
+  const pendingMessageEvents = options.pendingMessageEvents?.length
+    ? await deps.events.withoutErasedSubjects(deps.workspaceId, options.pendingMessageEvents)
+    : [];
+  const key = raw || pendingMessageEvents.length ? null : cacheKey(deps.workspaceId, input, filters, generation);
   const now = Date.now();
   const hit = key === null ? undefined : cache.get(key);
   if (hit && hit.expires > now) {
