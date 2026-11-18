@@ -7,11 +7,11 @@ import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } fr
 import { runContentFetches } from '@agentic-marketing/content';
 import { type Db, runIdempotencyKeyCleanup, runSentAtBackfill } from '@agentic-marketing/db';
 import { runDeliveryWorker } from '@agentic-marketing/email';
-import { runSink } from '@agentic-marketing/events';
+import { runSink, runSubjectKeyBackfill } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runEnrollmentJobs, runSweeper } from '@agentic-marketing/journeys';
 import { refreshSnapshots, runEdgeSync, snapshotHook } from '@agentic-marketing/personalize';
-import { erasedEventFilter, runErasureCleanup, runProfileWorkers } from '@agentic-marketing/profiles';
+import { ensureExclusionKeys, erasedEventFilter, runErasureCleanup, runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
@@ -100,7 +100,7 @@ export function startScheduler(
   } = {},
 ): WorkerLoop[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, the transactional outbox, erasure cleanup, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices, expired idempotency keys',
+    'scheduler role: segment recomputation, broadcasts, the transactional outbox, erasure cleanup, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, subject-key backfill, expired OAuth choices, expired idempotency keys',
   );
   return [
     // One pass at start: an abandoned consent choice is short-lived, and nothing in the request
@@ -114,6 +114,33 @@ export function startScheduler(
         log: (message) => logger.info(message),
         onError: (err) => logger.error({ err }, 'sent_at backfill failed'),
       }),
+    ),
+    // One pass at start: every workspace gets its exclusion key before the first erasure or event
+    // write, so a snapshot taken before first use can never lose it (#1037 review round 3).
+    loop(
+      'exclusion-key-provision',
+      ensureExclusionKeys({ db: srv.db, kp: srv.keyProvider })
+        .then((count) => logger.info({ workspaces: count }, 'exclusion keys provisioned'))
+        .catch((err) => logger.error({ err }, 'exclusion key provisioning failed')),
+    ),
+    // One pass at start: fills the subject-key columns of rows written before #1037 part 1, one
+    // ClickHouse partition at a time. Nothing reads the columns yet, but the contract's later part
+    // needs them for every historical row.
+    loop(
+      'subject-key-backfill',
+      runSubjectKeyBackfill(
+        {
+          events: srv.events,
+          // The person tables are behind workspace row policies, so the backfill reads one
+          // workspace at a time instead of asking for a cross-tenant view (#1037).
+          workspaces: async () => (await srv.db.admin.query<{ id: string }>('SELECT id FROM workspaces')).rows.map((row) => row.id),
+        },
+        signal,
+        {
+          log: (message) => logger.info(message),
+          onError: (err) => logger.error({ err }, 'subject-key backfill failed'),
+        },
+      ),
     ),
     // The idempotency-key retention pass (#976): one pass at start, then periodically. It runs as
     // the owner in bounded batches with SKIP LOCKED, so several schedulers can share the work.

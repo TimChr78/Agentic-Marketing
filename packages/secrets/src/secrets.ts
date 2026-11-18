@@ -12,7 +12,12 @@ declare module '@agentic-marketing/commands' {
   }
 }
 
-export type DataKeyPurpose = 'secrets' | 'identity' | 'matching';
+/**
+ * A data key's purpose. `exclusion` is the domain-separated HMAC key for erasure subject keys
+ * (#1037): it is never sent to ClickHouse, and it is not the matching key, so rotating one does
+ * not invalidate the other.
+ */
+export type DataKeyPurpose = 'secrets' | 'identity' | 'matching' | 'exclusion';
 
 /** The workspace's active data key for a purpose, created (and wrapped by the KEK) on first use. */
 export async function activeDataKey(

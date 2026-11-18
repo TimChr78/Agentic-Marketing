@@ -4,6 +4,20 @@ import type {} from '@agentic-marketing/commands';
 import { type ClickHouseClient, createClient } from '@clickhouse/client';
 import { messageEventsWithPending } from './pending';
 import type { BusEvent } from './schema';
+import {
+  type ErasedSubjectRow,
+  eventClickIds,
+  noteSubjectKeyFailure,
+  SUBJECT_KEY_BACKFILL_TABLES,
+  SUBJECT_KEY_COLUMNS,
+  type SubjectCoverage,
+  type SubjectKeyBackfillOptions,
+  type SubjectKeyBackfillResult,
+  type SubjectKeyCoverageResult,
+  type SubjectKeyHasherFactory,
+  type SubjectKeyHashes,
+  type SubjectKeyKind,
+} from './subjectKeys';
 
 // ClickHouse is the event store. This module is the only place that talks to it, and every
 // query it offers is scoped to one workspace. Row policies (see applyRowPolicies) enforce that
@@ -106,6 +120,19 @@ export interface EventStore {
   insertMessageEvents(events: MessageEvent[]): Promise<void>;
   insertJourneyEvents(events: JourneyEvent[]): Promise<void>;
   /**
+   * Publishes erasure exclusions into `erased_subjects` (#1037 part 1). Idempotent: the table
+   * replaces on (workspace, kind, key), so republishing the committed ledger changes nothing.
+   */
+  publishErasedSubjects(rows: ErasedSubjectRow[]): Promise<void>;
+  /**
+   * One step of the historical subject-key backfill (#1037 part 1): reads each workspace's next
+   * batch of unprocessed rows, hashes their identifiers in the app and writes them back. Resumable
+   * and idempotent; `done` only when a FINAL count of unprocessed rows is zero.
+   */
+  backfillSubjectKeys(opts: SubjectKeyBackfillOptions): Promise<SubjectKeyBackfillResult>;
+  /** Historical rows that still lack subject coverage (the `am doctor` and PR 3 activation count). */
+  subjectKeyCoverage(workspaceIds: readonly string[]): Promise<SubjectKeyCoverageResult>;
+  /**
    * Unique messages per event type since a time, optionally for one template or journey. A caller
    * that must decide before the outbox published can pass the queued events: the same aggregation
    * then reads published rows plus that snapshot (#1008).
@@ -189,7 +216,7 @@ export const CLICKHOUSE_REQUEST_TIMEOUT_MS = 30_000;
  */
 const SYNC_INSERT = { async_insert: 0, wait_for_async_insert: 1 } as const;
 
-const SCOPED_TABLES = ['events', 'message_events', 'journey_events', 'ad_spend'];
+const SCOPED_TABLES = ['events', 'message_events', 'journey_events', 'ad_spend', 'erased_subjects', 'subject_key_backfill'];
 
 /**
  * Row policies: every table with a workspace_id returns only the rows of the workspace named in
@@ -305,7 +332,15 @@ export interface StoredEvent {
   context: Record<string, unknown>;
 }
 
-const toRow = (e: BusEvent) => ({
+/** Every subject column starts empty; the hashes fill the ones the row applies to. */
+function subjectColumns(hashes: SubjectKeyHashes | null, coverage: SubjectCoverage): Record<string, string> {
+  const out: Record<string, string> = { subject_key_version: hashes?.version ?? '', subject_coverage: coverage };
+  for (const column of Object.values(SUBJECT_KEY_COLUMNS)) out[column] = '';
+  if (hashes) for (const [kind, value] of Object.entries(hashes.hashes)) out[SUBJECT_KEY_COLUMNS[kind as SubjectKeyKind]] = value as string;
+  return out;
+}
+
+const toRow = (e: BusEvent, subject: SubjectKeyHashes | null) => ({
   workspace_id: e.workspaceId,
   event_id: e.messageId,
   source_id: e.sourceId,
@@ -320,7 +355,74 @@ const toRow = (e: BusEvent) => ({
   traits: e.traits,
   context: e.context,
   consent: e.consent,
+  // The durable subject keys (#1037 part 1): HMAC_exclusion of every id and click id this event
+  // names, and of its e-mail/phone traits while they are still in memory. `subject_coverage` says
+  // whether the writer saw everything (`full`) or wrote nothing (`none`), so a reader never treats
+  // a partial row as complete.
+  ...subjectColumns(subject, subject ? 'full' : 'none'),
 });
+
+/** The subject values an event names, in the order they are hashed. */
+function eventSubjectSources(e: BusEvent): [SubjectKeyKind, string][] {
+  const out: [SubjectKeyKind, string][] = [];
+  if (e.profileId) out.push(['profile', e.profileId]);
+  if (e.anonymousId) out.push(['anonymous_id', e.anonymousId]);
+  if (e.userId) out.push(['user_id', e.userId]);
+  if (e.previousId) out.push(['alias_previous_id', e.previousId]);
+  const email = e.piiTraits.email;
+  if (typeof email === 'string' && email.trim()) out.push(['email', email]);
+  const phone = e.piiTraits.phone;
+  if (typeof phone === 'string' && phone.trim()) out.push(['phone', phone]);
+  // The click-id hook turns these same context ids into identifiers of the person.
+  out.push(...eventClickIds(e.context, e.timestamp));
+  return out;
+}
+
+function profileSubjectSources(e: { profileId: string }): [SubjectKeyKind, string][] {
+  return e.profileId ? [['profile', e.profileId]] : [];
+}
+
+/**
+ * Hashes each row's subject values with its workspace's exclusion key. A failure is thrown, never
+ * turned into an empty hash: the caller must retry rather than mark the row complete.
+ */
+async function subjectHashesFor<T extends { workspaceId: string }>(
+  rows: readonly T[],
+  factory: SubjectKeyHasherFactory | undefined,
+  sources: (row: T) => [SubjectKeyKind, string][],
+): Promise<(SubjectKeyHashes | null)[]> {
+  const out: (SubjectKeyHashes | null)[] = rows.map(() => null);
+  if (!factory || !rows.length) return out;
+  const byWorkspace = new Map<string, number[]>();
+  for (const [index, row] of rows.entries()) {
+    const indexes = byWorkspace.get(row.workspaceId) ?? [];
+    indexes.push(index);
+    byWorkspace.set(row.workspaceId, indexes);
+  }
+  for (const [workspaceId, indexes] of byWorkspace) {
+    const hasher = await factory(workspaceId);
+    try {
+      const cache = new Map<string, Promise<string>>();
+      const hashOf = (kind: SubjectKeyKind, value: string) => {
+        const key = `${kind}\u0000${value}`;
+        let pending = cache.get(key);
+        if (!pending) {
+          pending = hasher.hash(kind, value);
+          cache.set(key, pending);
+        }
+        return pending;
+      };
+      for (const index of indexes) {
+        const hashes: Partial<Record<SubjectKeyKind, string>> = {};
+        for (const [kind, value] of sources(rows[index] as T)) hashes[kind] = await hashOf(kind, value);
+        out[index] = { version: hasher.version, hashes };
+      }
+    } finally {
+      hasher.dispose();
+    }
+  }
+  return out;
+}
 
 /** Applies the SQL files in packages/events/clickhouse once each, in order. */
 export async function migrateClickHouse(
@@ -391,7 +493,88 @@ export function messageEventCountQuery(workspaceId: string, q: MessageEventCount
   };
 }
 
-export function clickHouseStore(opts: { url: string; database: string }): EventStore {
+/** A table's backfill cursor for one workspace. It is reset when a pass completes. */
+interface BackfillCursor {
+  cursor: string;
+  revision: number;
+}
+
+const EMPTY_CURSOR: BackfillCursor = { cursor: '', revision: 0 };
+
+async function readBackfillCursor(client: ClickHouseClient, table: string, workspaceId: string): Promise<BackfillCursor> {
+  const rs = await client.query({
+    query: `SELECT cursor, revision FROM subject_key_backfill_cursors FINAL
+            WHERE table_name = {table:String} AND workspace_id = {ws:UUID} LIMIT 1`,
+    query_params: { table, ws: workspaceId },
+    format: 'JSONEachRow',
+  });
+  const [row] = await rs.json<{ cursor: string; revision: number | string }>();
+  if (!row) return EMPTY_CURSOR;
+  return { cursor: row.cursor ?? '', revision: Number(row.revision ?? 0) };
+}
+
+async function writeBackfillCursor(client: ClickHouseClient, table: string, workspaceId: string, next: BackfillCursor): Promise<void> {
+  await client.insert({
+    table: 'subject_key_backfill_cursors',
+    values: [{ table_name: table, workspace_id: workspaceId, cursor: next.cursor, revision: next.revision }],
+    format: 'JSONEachRow',
+  });
+}
+
+/** The keyset predicate after the last processed primary-key tuple, typed per sort column. */
+function cursorPredicate(
+  spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number],
+  cursor: string,
+): { sql: string; params: Record<string, unknown> } {
+  if (!cursor) return { sql: '', params: {} };
+  const values = JSON.parse(cursor) as Record<string, unknown>;
+  const params: Record<string, unknown> = {};
+  const typed = spec.sortColumns.map((column, index) => {
+    params[`c${index}`] = values[column.name];
+    return `{c${index}:${column.type}}`;
+  });
+  return {
+    sql: `AND (${spec.sortColumns.map((column) => `t.${column.name}`).join(', ')}) > (${typed.join(', ')})`,
+    params,
+  };
+}
+
+/** The join from a person table to its side-table identity, and the values to store there. */
+function identityJoin(spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number]): string {
+  return spec.identity.map((identity) => `s.${identity.key} = toString(t.${identity.column})`).join(' AND ');
+}
+
+function identityValues(spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number], row: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = { key1: '', key2: '', key3: '', key4: '' };
+  for (const identity of spec.identity) out[identity.key] = String(row[identity.column] ?? '');
+  return out;
+}
+
+/**
+ * Logical rows that still lack coverage: their own writer did not fill the subject columns and the
+ * side table has no result for their identity. FINAL is deliberate — it sees one logical row per
+ * replacing key, so a complete concurrent redelivery is never counted as missing.
+ */
+async function uncoveredRows(
+  client: ClickHouseClient,
+  spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number],
+  workspaceId: string,
+  settings: Record<string, string>,
+): Promise<number> {
+  const rs = await client.query({
+    query: `SELECT count() AS n FROM ${spec.table} AS t FINAL
+            LEFT JOIN subject_key_backfill AS s FINAL
+              ON s.workspace_id = t.workspace_id AND s.table_name = {table:String} AND ${identityJoin(spec)}
+            WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full' AND s.table_name = ''`,
+    query_params: { table: spec.table, ws: workspaceId },
+    format: 'JSONEachRow',
+    clickhouse_settings: settings,
+  });
+  const [row] = await rs.json<{ n: number | string }>();
+  return Number(row?.n ?? 0);
+}
+
+export function clickHouseStore(opts: { url: string; database: string; subjectKeys?: SubjectKeyHasherFactory }): EventStore {
   const client = createClient({
     ...clientOptions(opts.url),
     database: opts.database,
@@ -460,8 +643,23 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     client,
     settingsFor,
     async insert(events) {
-      if (events.length)
-        await client.insert({ table: 'events', values: events.map(toRow), format: 'JSONEachRow', clickhouse_settings: SYNC_INSERT });
+      if (!events.length) return;
+      // Hashes are computed before the insert, while the event's PII traits and click ids are
+      // still in memory. A key failure throws, so the sink redelivers instead of storing a row
+      // marked complete with missing keys.
+      let subject: (SubjectKeyHashes | null)[];
+      try {
+        subject = await subjectHashesFor(events, opts.subjectKeys, eventSubjectSources);
+      } catch (err) {
+        noteSubjectKeyFailure();
+        throw err;
+      }
+      await client.insert({
+        table: 'events',
+        values: events.map((event, index) => toRow(event, subject[index] ?? null)),
+        format: 'JSONEachRow',
+        clickhouse_settings: SYNC_INSERT,
+      });
     },
     async eventsOf(workspaceId, ids, o = {}) {
       if (!ids.anonymousIds.length && !ids.userIds.length) return [];
@@ -643,11 +841,15 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     },
     async insertMessageEvents(events) {
       if (!events.length) return;
+      const subject = await subjectHashesFor(events, opts.subjectKeys, profileSubjectSources).catch((err) => {
+        noteSubjectKeyFailure();
+        throw err;
+      });
       await client.insert({
         table: 'message_events',
         format: 'JSONEachRow',
         clickhouse_settings: SYNC_INSERT,
-        values: events.map((e) => ({
+        values: events.map((e, index) => ({
           workspace_id: e.workspaceId,
           message_id: e.messageId,
           event_id: e.eventId,
@@ -663,16 +865,22 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
           variant: e.variant ?? '',
           reason: e.reason,
           url: e.url,
+          // Message events carry a profile id and no anonymous/user id or address.
+          ...subjectColumns(subject[index] ?? null, subject[index] ? 'full' : 'none'),
         })),
       });
     },
     async insertJourneyEvents(events) {
       if (!events.length) return;
+      const subject = await subjectHashesFor(events, opts.subjectKeys, profileSubjectSources).catch((err) => {
+        noteSubjectKeyFailure();
+        throw err;
+      });
       await client.insert({
         table: 'journey_events',
         format: 'JSONEachRow',
         clickhouse_settings: SYNC_INSERT,
-        values: events.map((e) => ({
+        values: events.map((e, index) => ({
           workspace_id: e.workspaceId,
           journey_id: e.journeyId,
           version: e.version,
@@ -683,8 +891,118 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
           seq: e.seq,
           at: e.at.replace('Z', ''),
           detail: e.detail,
+          // Journey events carry a profile id and no anonymous/user id or address.
+          ...subjectColumns(subject[index] ?? null, subject[index] ? 'full' : 'none'),
         })),
       });
+    },
+    async publishErasedSubjects(rows) {
+      if (!rows.length) return;
+      await client.insert({
+        table: 'erased_subjects',
+        format: 'JSONEachRow',
+        clickhouse_settings: SYNC_INSERT,
+        values: rows.map((row) => ({
+          workspace_id: row.workspaceId,
+          kind: row.kind,
+          key: row.key,
+          key_version: row.keyVersion,
+          erasure_id: row.erasureId,
+          generation: row.generation,
+          recorded_at: row.recordedAt.replace('Z', ''),
+        })),
+      });
+    },
+    async backfillSubjectKeys(o) {
+      if (!opts.subjectKeys) throw new Error('the subject-key backfill needs an exclusion key hasher');
+      const batchSize = Math.max(1, Math.trunc(o.batchSize ?? 5_000));
+      const tables: SubjectKeyBackfillResult['tables'] = [];
+      for (const workspaceId of o.workspaceIds) {
+        const settings = await settingsFor(workspaceId);
+        for (const spec of SUBJECT_KEY_BACKFILL_TABLES) {
+          const state = await readBackfillCursor(client, spec.table, workspaceId);
+          const after = cursorPredicate(spec, state.cursor);
+          const rs = await client.query({
+            // FINAL sees one logical row per replacing key, so a complete concurrent redelivery
+            // hides an older incomplete copy. The side join skips identities already backfilled.
+            query: `SELECT t.* FROM ${spec.table} AS t FINAL
+                    LEFT JOIN subject_key_backfill AS s FINAL
+                      ON s.workspace_id = t.workspace_id AND s.table_name = {table:String} AND ${identityJoin(spec)}
+                    WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full' AND s.table_name = '' ${after.sql}
+                    ORDER BY ${spec.sortColumns.map((column) => `t.${column.name}`).join(', ')}
+                    LIMIT {limit:UInt32}`,
+            query_params: { table: spec.table, ws: workspaceId, ...after.params, limit: batchSize },
+            format: 'JSONEachRow',
+            clickhouse_settings: settings,
+          });
+          const rows = await rs.json<Record<string, unknown>>();
+          if (!rows.length) {
+            const remaining = await uncoveredRows(client, spec, workspaceId, settings);
+            const done = remaining === 0;
+            // Reset the cursor whenever the forward scan is exhausted, even if the count is still
+            // positive: an uncovered row behind the cursor can only be found by scanning again.
+            await writeBackfillCursor(client, spec.table, workspaceId, {
+              cursor: '',
+              revision: state.revision + 1,
+            });
+            tables.push({ table: spec.table, workspaceId, advanced: false, remaining: !done, done });
+            continue;
+          }
+
+          const hasher = await opts.subjectKeys(workspaceId);
+          try {
+            const version = Date.now();
+            const values = await Promise.all(
+              rows.map(async (row) => {
+                const hashes: Partial<Record<SubjectKeyKind, string>> = {};
+                for (const source of spec.sources) {
+                  const value = row[source.column];
+                  if (typeof value === 'string' && value) hashes[source.kind] = await hasher.hash(source.kind, value);
+                }
+                if (spec.clickIds) {
+                  const context = (row.context ?? {}) as Record<string, unknown>;
+                  for (const [kind, value] of eventClickIds(context, String(row.timestamp ?? '')))
+                    hashes[kind] = await hasher.hash(kind, value);
+                }
+                const out: Record<string, unknown> = {
+                  workspace_id: workspaceId,
+                  table_name: spec.table,
+                  ...identityValues(spec, row),
+                  subject_key_version: hasher.version,
+                  subject_coverage: Object.keys(hashes).length ? 'ids_only' : 'none',
+                  version,
+                  recorded_at: new Date().toISOString().replace('Z', ''),
+                };
+                for (const column of Object.values(SUBJECT_KEY_COLUMNS)) out[column] = '';
+                for (const [kind, value] of Object.entries(hashes)) out[SUBJECT_KEY_COLUMNS[kind as SubjectKeyKind]] = value as string;
+                return out;
+              }),
+            );
+            // A side-table insert, never a rewrite of the person row: a stale copy cannot
+            // supersede a complete concurrent redelivery, and a timeout simply resumes from the
+            // same cursor (the replacement key makes the retry idempotent).
+            await client.insert({ table: 'subject_key_backfill', values, format: 'JSONEachRow', clickhouse_settings: SYNC_INSERT });
+          } finally {
+            hasher.dispose();
+          }
+
+          const lastRow = rows[rows.length - 1] as Record<string, unknown>;
+          const nextCursor = JSON.stringify(Object.fromEntries(spec.sortColumns.map((column) => [column.name, lastRow[column.name]])));
+          await writeBackfillCursor(client, spec.table, workspaceId, { cursor: nextCursor, revision: state.revision + 1 });
+          tables.push({ table: spec.table, workspaceId, advanced: true, remaining: true, done: false });
+        }
+      }
+      return { tables, done: tables.every((table) => table.done) };
+    },
+    async subjectKeyCoverage(workspaceIds) {
+      const tables: SubjectKeyCoverageResult['tables'] = [];
+      for (const workspaceId of workspaceIds) {
+        const settings = await settingsFor(workspaceId);
+        for (const spec of SUBJECT_KEY_BACKFILL_TABLES) {
+          tables.push({ table: spec.table, workspaceId, pending: await uncoveredRows(client, spec, workspaceId, settings) });
+        }
+      }
+      return { pending: tables.reduce((sum, table) => sum + table.pending, 0), tables };
     },
     async messageStats(workspaceId, q) {
       const params: Record<string, unknown> = {

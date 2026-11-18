@@ -36,6 +36,8 @@ export type {
   ContentTopicSignal,
   ContentTopicStatus,
   DeliveryStatus,
+  ErasureKeyCoverage,
+  ErasureKeyKind,
   HostedAgentRunStatus,
   IdentifierType,
   InputWarningPrincipal,

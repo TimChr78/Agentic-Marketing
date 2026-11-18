@@ -27,6 +27,7 @@ import { bodyLimit, ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '@agentic-marketing/integrations';
 import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
+import { subjectKeyHasher } from '@agentic-marketing/profiles';
 import { refreshPeople } from '@agentic-marketing/segments';
 import { endpointLocation, logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
@@ -117,8 +118,20 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const keyProvider = keyProviderFor(config);
   const directory = authDirectory(db);
   const bus = lazyNatsBus(config.nats);
-  // E-mail delivery events also become customer events (segments, journeys, webhooks).
-  const events = withEmailProfileEvents(withResolvedEventProfiles(clickHouseStore(config.clickhouse), db), { db, bus });
+  // E-mail delivery events also become customer events (segments, journeys, webhooks). The store
+  // computes the keyed e-mail/phone subject hashes before an event is written, while its PII traits
+  // are still in memory (#1037 part 1); read paths are unchanged.
+  const events = withEmailProfileEvents(
+    withResolvedEventProfiles(
+      clickHouseStore({
+        url: config.clickhouse.url,
+        database: config.clickhouse.database,
+        subjectKeys: subjectKeyHasher({ db, kp: keyProvider }),
+      }),
+      db,
+    ),
+    { db, bus },
+  );
   // Snapshot writes also queue for the edge (Workers KV) where a workspace turned it on.
   const hot = edgeMirror(valkeyHotState(config.valkey), db);
   const inputWarnings = createInputWarningRecorder(db);

@@ -211,6 +211,8 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'agent_actions',
         'broadcast_runs',
         'erasure_cleanup_jobs',
+        'erasure_keys',
+        'data_keys',
         'journey_processed_events',
       ])
         await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
