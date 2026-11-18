@@ -83,6 +83,18 @@ export interface EventStore {
     batchSize?: number,
   ): AsyncIterable<{ anonymousId: string; userId: string; count: number }[]>;
   /**
+   * Per-profile counts of what happened to the messages the platform sent (#441): a segment counts
+   * opens and clicks here, because those are message events, not customer events. Rows carry the
+   * profile id the send recorded; the caller resolves merges.
+   */
+  countMessageEvents(workspaceId: string, q: MessageEventCountQuery): Promise<{ profileId: string; count: number }[]>;
+  /** The same counts for a whole workspace, streamed in batches (segment refreshes over millions of people). */
+  countMessageEventsBatches(
+    workspaceId: string,
+    q: MessageEventCountQuery,
+    batchSize?: number,
+  ): AsyncIterable<{ profileId: string; count: number }[]>;
+  /**
    * Per variant: visitors exposed to an experience, and how many did the goal event after their
    * first exposure. `unversioned` is the number of distinct visitors whose exposure carries no
    * version, which the per-version counts exclude (#758).
@@ -252,6 +264,21 @@ export interface MessageEvent {
   url: string;
 }
 
+/** Which message events to count, and how to narrow them (a segment's message condition, #441). */
+export interface MessageEventCountQuery {
+  type: MessageEvent['type'];
+  sinceSeconds?: number;
+  channel?: string;
+  purpose?: string;
+  /**
+   * The broadcast or journey that sent the messages. Both are stored in the same `journey_id`
+   * column, distinguished by their id prefix, as the analytics layer reads them.
+   */
+  sentBy?: string;
+  /** Restrict to these profiles (a streaming or on-demand check for a few people). */
+  profileIds?: string[];
+}
+
 export interface JourneyEvent {
   workspaceId: string;
   journeyId: string;
@@ -337,6 +364,33 @@ export async function migrateClickHouse(
   await ch.close();
 }
 
+/**
+ * The SQL a message-event count runs (#441): the analytics layer's shape — `message_events FINAL`
+ * over the workspace's own parts (the primary key starts with `workspace_id`), aggregated in
+ * ClickHouse so only one row per person crosses the wire. Exported so the plan guard in the tests
+ * follows the real query rather than a copy.
+ */
+export function messageEventCountQuery(workspaceId: string, q: MessageEventCountQuery) {
+  const params: Record<string, unknown> = { ws: workspaceId, msgType: q.type };
+  if (q.sinceSeconds !== undefined) params.since = q.sinceSeconds;
+  if (q.channel !== undefined) params.channel = q.channel;
+  if (q.purpose !== undefined) params.purpose = q.purpose;
+  if (q.sentBy !== undefined) params.sentBy = q.sentBy;
+  if (q.profileIds) params.profiles = q.profileIds;
+  return {
+    query: `SELECT profile_id, count() AS c FROM message_events FINAL
+            WHERE workspace_id = {ws:UUID} AND type = {msgType:String} AND profile_id != ''
+            ${q.sinceSeconds !== undefined ? 'AND at >= now64(3) - toIntervalSecond({since:UInt32})' : ''}
+            ${q.channel !== undefined ? 'AND channel = {channel:String}' : ''}
+            ${q.purpose !== undefined ? 'AND purpose = {purpose:String}' : ''}
+            ${q.sentBy !== undefined ? 'AND journey_id = {sentBy:String}' : ''}
+            ${q.profileIds ? 'AND profile_id IN {profiles:Array(String)}' : ''}
+            GROUP BY profile_id`,
+    query_params: params,
+    format: 'JSONEachRow' as const,
+  };
+}
+
 export function clickHouseStore(opts: { url: string; database: string }): EventStore {
   const client = createClient({
     ...clientOptions(opts.url),
@@ -401,6 +455,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     userId: r.user_id,
     count: Number(r.c),
   });
+  const messageCountRow = (r: { profile_id: string; c: number | string }) => ({ profileId: r.profile_id, count: Number(r.c) });
   return {
     client,
     settingsFor,
@@ -501,6 +556,26 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       for await (const rows of rs.stream<{ anonymous_id: string; user_id: string; c: number }>()) {
         for (const row of rows) {
           batch.push(countRow(row.json()));
+          if (batch.length >= batchSize) {
+            yield batch;
+            batch = [];
+          }
+        }
+      }
+      if (batch.length) yield batch;
+    },
+    async countMessageEvents(workspaceId, q) {
+      // An empty scope means nobody: do not fall through to a workspace-wide read.
+      if (q.profileIds && !q.profileIds.length) return [];
+      const rs = await query(workspaceId, messageEventCountQuery(workspaceId, q));
+      return (await rs.json<{ profile_id: string; c: number | string }>()).map(messageCountRow);
+    },
+    async *countMessageEventsBatches(workspaceId, q, batchSize = 10_000) {
+      const rs = await query(workspaceId, messageEventCountQuery(workspaceId, q));
+      let batch: { profileId: string; count: number }[] = [];
+      for await (const rows of rs.stream<{ profile_id: string; c: number | string }>()) {
+        for (const row of rows) {
+          batch.push(messageCountRow(row.json()));
           if (batch.length >= batchSize) {
             yield batch;
             batch = [];

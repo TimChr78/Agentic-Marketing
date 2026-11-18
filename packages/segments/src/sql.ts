@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
-import { DEFAULT_PURPOSES, publishedSingleton, type SegmentCondition } from '@agentic-marketing/artifacts';
+import { mergeComponentCtes, type SegmentCondition } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { consentStatusSql, findTopic, purposeAllowedSql, topicSubscribedSql } from '@agentic-marketing/profiles';
 import { type SQL, sql } from 'drizzle-orm';
-import { durationSeconds, type EvalContext, traitPredicate } from './evaluate';
+import { assertPurpose, durationSeconds, type EvalContext, purposesOf, traitPredicate } from './evaluate';
 
 // Whole-workspace evaluation (refreshes, previews): the condition becomes one SQL predicate over
 // profiles, so no list of ids is held in memory. Event conditions are counted in ClickHouse,
@@ -31,6 +31,7 @@ export async function compile(cond: SegmentCondition, ctx: SqlContext): Promise<
   if ('not' in cond) return sql`NOT (${await compile(cond.not, ctx)})`;
   if ('trait' in cond) return traitPredicate(cond, ctx);
   if ('event' in cond) return eventPredicate(cond, ctx);
+  if ('message' in cond) return messagePredicate(cond, ctx);
   if ('consent' in cond) return consentPredicate(cond.consent, ctx);
   if ('topic' in cond) return topicPredicate(cond.topic, ctx);
   if ('score' in cond) return scorePredicate(cond.score, ctx);
@@ -52,16 +53,14 @@ export async function compile(cond: SegmentCondition, ctx: SqlContext): Promise<
 }
 
 async function consentPredicate(purpose: string, ctx: SqlContext): Promise<SQL> {
-  ctx._purposes ??= publishedSingleton(ctx.tx, 'purposes').then((p) => p?.purposes ?? DEFAULT_PURPOSES);
-  const p = (await ctx._purposes).find((x) => x.key === purpose);
+  const p = (await purposesOf(ctx)).find((x) => x.key === purpose);
   if (!p) throw new AppError('invalid_input', `Unknown purpose "${purpose}" in a consent condition. See purposes.list.`);
   // The same rule as consentSet in evaluate.ts (currentConsent and purposeAllowed).
   return purposeAllowedSql(p.basis, consentStatusSql(sql`${schema.profiles.id}`, purpose));
 }
 
 async function topicPredicate(topic: string, ctx: SqlContext): Promise<SQL> {
-  ctx._purposes ??= publishedSingleton(ctx.tx, 'purposes').then((p) => p?.purposes ?? DEFAULT_PURPOSES);
-  const found = findTopic(await ctx._purposes, topic);
+  const found = findTopic(await purposesOf(ctx), topic);
   if (!found) throw new AppError('invalid_input', `Unknown topic "${topic}" in a segment condition. See purposes.list.`);
   // The same rule as topicSet in evaluate.ts, including the topic's default.
   return topicSubscribedSql(sql`${schema.profiles.id}`, topic, found.topic.default);
@@ -94,6 +93,44 @@ async function eventPredicate(c: Extract<SegmentCondition, { event: string }>, c
     LEFT JOIN identifiers u ON r.user_id <> '' AND u.workspace_id = ${ctx.workspaceId} AND u.type = 'user_id' AND u.value = r.user_id
     LEFT JOIN identifiers a ON r.anonymous_id <> '' AND a.workspace_id = ${ctx.workspaceId} AND a.type = 'anonymous_id' AND a.value = r.anonymous_id
     WHERE coalesce(u.profile_id, a.profile_id) IS NOT NULL
+    GROUP BY 1`);
+  await ctx.tx.execute(sql.raw(`CREATE UNIQUE INDEX ON ${counts} (profile_id); ANALYZE ${counts}`));
+  const min = c.count?.gte ?? (c.count?.lte === undefined ? 1 : 0);
+  const max = c.count?.lte;
+  const n = sql`COALESCE((SELECT e.n FROM ${sql.raw(counts)} e WHERE e.profile_id = ${schema.profiles.id}), 0)`;
+  return max === undefined ? sql`(${n} >= ${min})` : sql`(${n} BETWEEN ${min} AND ${max})`;
+}
+
+/**
+ * A message condition (#441): counts the message events the send recorded, joined to profiles the
+ * same way an event condition is, and resolves merges so a person keeps what was recorded under an
+ * alias before the merge. `message_events` keys its primary index on the workspace, so the read is
+ * the workspace's own parts; the aggregation happens in ClickHouse and is streamed into a
+ * temporary table, so only one row per person is ever held.
+ */
+async function messagePredicate(c: Extract<SegmentCondition, { message: string }>, ctx: SqlContext): Promise<SQL> {
+  await assertPurpose(c.purpose, ctx);
+  const raw = tempName('seg_msg');
+  const counts = tempName('seg_msg_n');
+  await ctx.tx.execute(sql.raw(`CREATE TEMP TABLE ${raw} (profile_id text, n integer) ON COMMIT DROP`));
+  for await (const batch of ctx.events.countMessageEventsBatches(ctx.workspaceId, {
+    type: c.message,
+    sinceSeconds: c.within ? durationSeconds(c.within) : undefined,
+    channel: c.channel,
+    purpose: c.purpose,
+    sentBy: c.broadcast ?? c.journey,
+  }))
+    await ctx.tx.execute(sql`INSERT INTO ${sql.raw(raw)}
+      SELECT x.p, x.n FROM jsonb_to_recordset(${JSON.stringify(batch.map((r) => ({ p: r.profileId, n: r.count })))}::jsonb)
+        AS x(p text, n integer)`);
+  // A merged-away profile is part of the person it became: sum both under the representative.
+  await ctx.tx.execute(sql`CREATE TEMP TABLE ${sql.raw(counts)} ON COMMIT DROP AS
+    WITH RECURSIVE ${mergeComponentCtes(ctx.workspaceId, {
+      seeds: sql`SELECT DISTINCT profile_id AS id FROM ${sql.raw(raw)}`,
+    })}
+    SELECT merge_representative.representative COLLATE "default" AS profile_id, sum(r.n)::integer AS n
+    FROM ${sql.raw(raw)} r
+    JOIN merge_representative ON merge_representative.origin = r.profile_id
     GROUP BY 1`);
   await ctx.tx.execute(sql.raw(`CREATE UNIQUE INDEX ON ${counts} (profile_id); ANALYZE ${counts}`));
   const min = c.count?.gte ?? (c.count?.lte === undefined ? 1 : 0);

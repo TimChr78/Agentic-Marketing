@@ -12,7 +12,7 @@ export default function SegmentsPage() {
     <ArtifactListPage<CreateState>
       type="segment"
       title="Segments"
-      description="Groups of people by traits, events and consent. Broadcasts, journeys and experiences target them. A static list is imported or curated; a snapshot freezes another segment."
+      description="Groups of people by traits, events, message engagement and consent. Broadcasts, journeys and experiences target them. A static list is imported or curated; a snapshot freezes another segment."
       emptyTitle="No segments yet"
       emptyText="Create a segment such as “Newsletter subscribers” (everyone who allows marketing e-mail), or import a static list, then use it in a broadcast."
       create={{

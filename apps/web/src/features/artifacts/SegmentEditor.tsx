@@ -1,5 +1,5 @@
 import { List, Plus, Trash2, Users } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
@@ -13,7 +13,8 @@ import { usePickerIndex } from './pickerIndex';
 import { type LiveReference, mergeObservation, mergeReferenceSnapshots, type ReferenceSnapshot } from './referenceSnapshots';
 
 // Segment condition builder: the same tree agents read and write, edited as rows instead of JSON.
-// A condition is a group ({all}/{any}) or one leaf: trait, event, consent, segment or not.
+// A condition is a group ({all}/{any}) or one leaf: trait, event, message engagement, consent,
+// segment or not.
 
 type Op = 'eq' | 'neq' | 'in' | 'gt' | 'gte' | 'lt' | 'lte' | 'exists' | 'not_exists' | 'contains';
 type Scalar = string | number | boolean;
@@ -30,6 +31,16 @@ interface EventCondition {
   count?: { gte?: number; lte?: number };
   within?: string;
 }
+type MessageEvent = 'delivered' | 'opened' | 'clicked' | 'bounced' | 'complained' | 'unsubscribed';
+interface MessageCondition {
+  message: MessageEvent;
+  count?: { gte?: number; lte?: number };
+  within?: string;
+  channel?: 'email' | 'sms' | 'push';
+  purpose?: string;
+  broadcast?: string;
+  journey?: string;
+}
 interface ConsentCondition {
   consent: string;
 }
@@ -45,9 +56,25 @@ interface GroupCondition {
 interface AnyCondition {
   any: Condition[];
 }
-type Condition = GroupCondition | AnyCondition | NotCondition | TraitCondition | EventCondition | ConsentCondition | SegmentRefCondition;
+type Condition =
+  | GroupCondition
+  | AnyCondition
+  | NotCondition
+  | TraitCondition
+  | EventCondition
+  | MessageCondition
+  | ConsentCondition
+  | SegmentRefCondition;
 type Mode = 'all' | 'any';
-type Kind = 'trait' | 'event' | 'consent' | 'segment' | 'not' | 'group';
+type Kind = 'trait' | 'event' | 'message' | 'consent' | 'segment' | 'not' | 'group';
+/** Where the counted messages came from: any send, or one broadcast or journey. */
+type SendSource = 'any' | 'broadcast' | 'journey';
+
+/**
+ * A row reports what it still needs (a send picked but not chosen) so the page can refuse to save
+ * or publish and show the row's message. Rows unregister on unmount.
+ */
+const RowProblemContext = createContext<(id: string, problem: string | null) => void>(() => {});
 
 interface PurposeOption {
   key: string;
@@ -94,7 +121,16 @@ const DURATIONS = [
 
 const NUM_RE = /^-?(?:\d+|\d*\.\d+)$/;
 
-export function SegmentEditor({ artifact, content, onChange, readOnly, errors }: EditorProps<SegmentContent>) {
+const MESSAGE_EVENTS: { value: MessageEvent; label: string }[] = [
+  { value: 'delivered', label: 'Was delivered' },
+  { value: 'opened', label: 'Opened' },
+  { value: 'clicked', label: 'Clicked' },
+  { value: 'bounced', label: 'Bounced' },
+  { value: 'complained', label: 'Marked as spam' },
+  { value: 'unsubscribed', label: 'Unsubscribed' },
+];
+
+export function SegmentEditor({ artifact, content, onChange, readOnly, errors, reportProblems }: EditorProps<SegmentContent>) {
   const set = (patch: Partial<SegmentContent>) => onChange({ ...content, ...patch });
   const group = useMemo(() => groupOf(content.condition), [content.condition]);
   const condition = useMemo(() => buildTopCondition(group.mode, group.rows), [group]);
@@ -107,6 +143,28 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
     error: purposesRead.error,
     purposes: (purposesRead.data?.purposes ?? []).map((p) => ({ key: p.key, name: p.name })),
   };
+  // Rows that still need something (a send picked but not chosen) report it here, and the page
+  // refuses to save or publish while the set is not empty. The callback lives in a ref so a caller
+  // passing an inline function cannot re-run the effect.
+  const [rowProblems, setRowProblems] = useState<Record<string, string>>({});
+  const reportRowProblem = useCallback((id: string, problem: string | null) => {
+    setRowProblems((prev) => {
+      if (problem === null) {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      }
+      return prev[id] === problem ? prev : { ...prev, [id]: problem };
+    });
+  }, []);
+  const reportProblemsRef = useRef(reportProblems);
+  reportProblemsRef.current = reportProblems;
+  useEffect(() => {
+    reportProblemsRef.current?.([...new Set(Object.values(rowProblems))]);
+  }, [rowProblems]);
+  // Leaving the editor (a tab switch, a caught error) must not leave the page blocked.
+  useEffect(() => () => reportProblemsRef.current?.([]), []);
 
   const emit = (mode: Mode, rows: Condition[]) => set({ condition: buildTopCondition(mode, rows) });
 
@@ -140,42 +198,44 @@ export function SegmentEditor({ artifact, content, onChange, readOnly, errors }:
   }
 
   return (
-    <div className="max-w-[900px] space-y-5">
-      <Field label="Description" hint="For the team; people in the segment never see it." error={errors.description}>
-        <Textarea
-          rows={2}
-          maxLength={1000}
-          value={content.description ?? ''}
-          readOnly={readOnly}
-          onChange={(e) => set({ description: e.target.value })}
-        />
-      </Field>
+    <RowProblemContext.Provider value={reportRowProblem}>
+      <div className="max-w-[900px] space-y-5">
+        <Field label="Description" hint="For the team; people in the segment never see it." error={errors.description}>
+          <Textarea
+            rows={2}
+            maxLength={1000}
+            value={content.description ?? ''}
+            readOnly={readOnly}
+            onChange={(e) => set({ description: e.target.value })}
+          />
+        </Field>
 
-      <section aria-label="Condition" className="space-y-2">
-        <h2 className="text-[13px] font-medium text-fg">Who is in it</h2>
-        {(errors.condition ?? errors['condition.all'] ?? errors['condition.any']) && (
-          <p className="text-[12px] text-bad">{errors.condition ?? errors['condition.all'] ?? errors['condition.any']}</p>
-        )}
-        <GroupEditor
-          mode={group.mode}
-          rows={group.rows}
-          onChange={emit}
-          depth={1}
-          readOnly={readOnly}
-          artifactId={artifact.id}
-          purposes={purposes}
-        />
-      </section>
+        <section aria-label="Condition" className="space-y-2">
+          <h2 className="text-[13px] font-medium text-fg">Who is in it</h2>
+          {(errors.condition ?? errors['condition.all'] ?? errors['condition.any']) && (
+            <p className="text-[12px] text-bad">{errors.condition ?? errors['condition.all'] ?? errors['condition.any']}</p>
+          )}
+          <GroupEditor
+            mode={group.mode}
+            rows={group.rows}
+            onChange={emit}
+            depth={1}
+            readOnly={readOnly}
+            artifactId={artifact.id}
+            purposes={purposes}
+          />
+        </section>
 
-      <EstimatedSize condition={condition} />
+        <EstimatedSize condition={condition} />
 
-      <details className="rounded-md border border-line">
-        <summary className="cursor-pointer px-3 py-2 text-[12px] font-medium text-fg-2 select-none">Advanced condition view</summary>
-        <div className="border-t border-line p-3">
-          <JsonView value={condition} maxHeight={320} />
-        </div>
-      </details>
-    </div>
+        <details className="rounded-md border border-line">
+          <summary className="cursor-pointer px-3 py-2 text-[12px] font-medium text-fg-2 select-none">Advanced condition view</summary>
+          <div className="border-t border-line p-3">
+            <JsonView value={condition} maxHeight={320} />
+          </div>
+        </details>
+      </div>
+    </RowProblemContext.Provider>
   );
 }
 
@@ -300,6 +360,7 @@ function RowEditor({
         >
           <option value="trait">Trait</option>
           <option value="event">Did event</option>
+          <option value="message">Message engagement</option>
           <option value="consent">Allows purpose</option>
           <option value="segment">In segment</option>
           <option value="not">Not</option>
@@ -321,6 +382,9 @@ function RowEditor({
 
       {kind === 'trait' && <TraitRow c={condition as TraitCondition} onChange={onChange} index={n} readOnly={readOnly} />}
       {kind === 'event' && <EventRow c={condition as EventCondition} onChange={onChange} index={n} readOnly={readOnly} />}
+      {kind === 'message' && (
+        <MessageRow c={condition as MessageCondition} onChange={onChange} index={n} readOnly={readOnly} purposes={purposes} />
+      )}
       {kind === 'consent' && (
         <ConsentRow c={condition as ConsentCondition} onChange={onChange} index={n} readOnly={readOnly} purposes={purposes} />
       )}
@@ -530,6 +594,227 @@ function EventRow({
         </Select>
       </Field>
     </div>
+  );
+}
+
+/**
+ * Message engagement (#441): what happened to the messages the platform sent. Opens and clicks
+ * live in the message log, not the customer event stream, so this row is how "opened in the last
+ * 30 days" is built. The send, channel and purpose narrow it; `not` around the row is "never".
+ */
+function MessageRow({
+  c,
+  onChange,
+  index,
+  readOnly,
+  purposes,
+}: {
+  c: MessageCondition;
+  onChange: (c: Condition) => void;
+  index: number;
+  readOnly: boolean;
+  purposes: PurposesRead;
+}) {
+  const set = (patch: Partial<MessageCondition>) => {
+    const next: MessageCondition = { ...c, ...patch };
+    for (const [key, value] of Object.entries(patch)) if (value === undefined) delete (next as unknown as Record<string, unknown>)[key];
+    onChange(next);
+  };
+  const setCount = (raw: string) => {
+    if (raw.trim() === '') {
+      const next: MessageCondition = { ...c };
+      if (next.count) {
+        const count = { ...next.count };
+        delete count.gte;
+        if (count.lte === undefined) delete next.count;
+        else next.count = count;
+      }
+      onChange(next);
+    } else set({ count: { ...c.count, gte: Math.max(0, Math.floor(Number(raw) || 0)) } });
+  };
+  // The selected send comes from the condition's own property, so a saved `broadcast` (or a cleared
+  // one) is always shown as it is. A kind picked before any id exists lives here only: an empty id
+  // would fail the DSL's id validation, read as "any send" anyway (empty is falsy) and let a save
+  // silently drop the send the condition really has.
+  const savedSource: SendSource = 'broadcast' in c ? 'broadcast' : 'journey' in c ? 'journey' : 'any';
+  const [pendingSource, setPendingSource] = useState<Exclude<SendSource, 'any'> | null>(null);
+  const source: SendSource = pendingSource ?? savedSource;
+  // An id only ever comes from the condition: a pending kind has none until one is picked.
+  const sendId = savedSource === source && savedSource !== 'any' ? (c[savedSource] ?? '') : '';
+  const chooseSource = (kind: SendSource) => {
+    if (kind === savedSource) {
+      // Back to what the condition already says: drop the pending kind and change nothing.
+      setPendingSource(null);
+      return;
+    }
+    if (kind === 'any') {
+      // "Any send" is an explicit choice, and the only one that makes the row unrestricted.
+      setPendingSource(null);
+      const next: MessageCondition = { ...c };
+      delete next.broadcast;
+      delete next.journey;
+      onChange(next);
+      return;
+    }
+    // Picking a kind of send is not a change yet: the condition keeps the send it has (if any) and
+    // the row reports itself incomplete, so nothing invalid or accidentally unrestricted is saved.
+    setPendingSource(kind);
+  };
+  const chooseSend = (id: string) => {
+    if (!id) {
+      setPendingSource(source === 'any' ? null : source);
+      return;
+    }
+    const next: MessageCondition = { ...c };
+    delete next.broadcast;
+    delete next.journey;
+    if (source === 'broadcast') next.broadcast = id;
+    else if (source === 'journey') next.journey = id;
+    setPendingSource(null);
+    onChange(next);
+  };
+  const missingPurpose = c.purpose && !purposes.purposes.some((p) => p.key === c.purpose);
+  // The page must refuse to save or publish until this row is finished.
+  const rowId = useId();
+  const reportRowProblem = useContext(RowProblemContext);
+  const problem = source !== 'any' && !sendId ? `Choose a ${source} for condition ${index}.` : null;
+  useEffect(() => {
+    reportRowProblem(rowId, problem);
+    return () => reportRowProblem(rowId, null);
+  }, [rowId, problem, reportRowProblem]);
+
+  return (
+    <div className="space-y-2">
+      <div className="grid gap-2 sm:grid-cols-[180px_150px_170px]">
+        <Field label={`Message event, condition ${index}`} hideLabel>
+          <Select
+            value={c.message}
+            disabled={readOnly}
+            aria-label={`Message event, condition ${index}`}
+            onChange={(e) => set({ message: e.target.value as MessageEvent })}
+          >
+            {MESSAGE_EVENTS.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        <Field label={`At least how many messages, condition ${index}`} hideLabel unit="messages">
+          <Input
+            type="number"
+            min={0}
+            step={1}
+            inputMode="numeric"
+            value={c.count?.gte ?? ''}
+            readOnly={readOnly}
+            onChange={(e) => setCount(e.target.value)}
+          />
+        </Field>
+        <Field label={`In the last, condition ${index}`} hideLabel>
+          <Select
+            value={c.within ?? ''}
+            disabled={readOnly}
+            aria-label={`In the last, condition ${index}`}
+            onChange={(e) => set({ within: e.target.value || undefined })}
+          >
+            <option value="">Any time</option>
+            {DURATIONS.map((d) => (
+              <option key={d.value} value={d.value}>
+                {d.label}
+              </option>
+            ))}
+            {c.within && !DURATIONS.some((d) => d.value === c.within) && <option value={c.within}>{c.within}</option>}
+          </Select>
+        </Field>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label={`Channel, condition ${index}`} hideLabel>
+          <Select
+            value={c.channel ?? ''}
+            disabled={readOnly}
+            aria-label={`Channel, condition ${index}`}
+            onChange={(e) => set({ channel: (e.target.value || undefined) as MessageCondition['channel'] })}
+          >
+            <option value="">Any channel</option>
+            <option value="email">E-mail</option>
+            <option value="sms">SMS</option>
+            <option value="push">Push</option>
+          </Select>
+        </Field>
+        <Field label={`Purpose, condition ${index}`} hideLabel>
+          <Select
+            value={c.purpose ?? ''}
+            disabled={readOnly || purposes.loading}
+            aria-label={`Purpose, condition ${index}`}
+            onChange={(e) => set({ purpose: e.target.value || undefined })}
+          >
+            <option value="">
+              {purposes.loading ? 'Loading purposes…' : purposes.error ? `Couldn't load: ${purposes.error}` : 'Any purpose'}
+            </option>
+            {purposes.purposes.map((p) => (
+              <option key={p.key} value={p.key}>
+                {p.name}
+              </option>
+            ))}
+            {missingPurpose && c.purpose && <option value={c.purpose}>Unavailable purpose ({c.purpose})</option>}
+          </Select>
+        </Field>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <Field label={`Sent from, condition ${index}`} hideLabel>
+          <Select
+            value={source}
+            disabled={readOnly}
+            aria-label={`Sent from, condition ${index}`}
+            onChange={(e) => chooseSource(e.target.value as SendSource)}
+          >
+            <option value="any">Any send</option>
+            <option value="broadcast">From a broadcast</option>
+            <option value="journey">From a journey</option>
+          </Select>
+        </Field>
+        {source !== 'any' && <SendSourcePicker type={source} value={sendId} onPick={chooseSend} disabled={readOnly} index={index} />}
+      </div>
+      <p className="text-[12px] text-muted">
+        Opens are counted only where the provider or the workspace tracks them, and a mailbox that pre-fetches the pixel can open a message
+        before the person does: treat opens as a hint and clicks as a signal.
+      </p>
+    </div>
+  );
+}
+
+/** One picker for the broadcast or journey the counted messages came from. */
+function SendSourcePicker({
+  type,
+  value,
+  onPick,
+  disabled,
+  index,
+}: {
+  type: Exclude<SendSource, 'any'>;
+  value: string;
+  onPick: (id: string) => void;
+  disabled?: boolean;
+  index: number;
+}) {
+  const list = usePickerIndex(type);
+  const items = list.data?.artifacts ?? [];
+  const known = !value || items.some((a) => a.id === value);
+  const label = type === 'broadcast' ? `Broadcast, condition ${index}` : `Journey, condition ${index}`;
+  return (
+    <Field label={label} hideLabel error={value ? undefined : `Choose a ${type} for condition ${index}.`}>
+      <Select value={value} disabled={disabled || list.loading} aria-label={label} onChange={(e) => onPick(e.target.value)}>
+        <option value="">{list.loading ? `Loading ${type}s…` : list.error ? `Couldn't load: ${list.error}` : `Choose a ${type}…`}</option>
+        {!known && value && <option value={value}>{value} (not found)</option>}
+        {items.map((a) => (
+          <option key={a.id} value={a.id}>
+            {a.name}
+            {a.publishedVersion ? ` · live v${a.publishedVersion}` : ' · not live yet'}
+          </option>
+        ))}
+      </Select>
+    </Field>
   );
 }
 
@@ -908,6 +1193,7 @@ function kindOf(c: Condition): Kind {
   if ('not' in c) return 'not';
   if ('trait' in c) return 'trait';
   if ('event' in c) return 'event';
+  if ('message' in c) return 'message';
   if ('consent' in c) return 'consent';
   if ('segment' in c) return 'segment';
   return 'trait';
@@ -917,6 +1203,8 @@ function blank(kind: Kind): Condition {
   switch (kind) {
     case 'event':
       return { event: '' };
+    case 'message':
+      return { message: 'opened' };
     case 'consent':
       return { consent: '' };
     case 'segment':
