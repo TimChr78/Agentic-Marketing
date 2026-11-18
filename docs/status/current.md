@@ -56,7 +56,8 @@ _Last updated: 2026-11-18_
   - **0.15.1** (the five bugs from the 0.15.0 wave and promise-safety follow-ups: #985, #986, #989, #1008, #1011, #1014, #1025, #1028; oxlint type-aware rules #1002) was tagged but not published (its release run failed on redaction wall-clock budgets).
   - **0.15.2** (everything in 0.15.1, plus growth-only redaction timing checks #1033) is released and verified.
   - **0.15.3** (erasure mitigation for events reappearing in ClickHouse, #1034 — full read-time exclusion in 0.17.0, #1037; the outbox barrier sees mixed-subject batches, #1038) is released and verified.
-  - **0.16.0** (PostgreSQL 18 for new installs with an upgrade path from 16, #1001; message-engagement segment conditions, #441; unsubscribe CSS warning, #872) is released. Next: 0.17.0, the erasure completion contract (#1037).
+  - **0.16.0** (PostgreSQL 18 for new installs with an upgrade path from 16, #1001; message-engagement segment conditions, #441; unsubscribe CSS warning, #872) is released and verified.
+  - **0.16.1** (every worker and scheduler loop stops promptly on shutdown without cancelling provider calls already sent, a 45 s shutdown grace in Compose and Helm, #1028/#1043; deterministic close-budget test, #1041) is released. Next: 0.17.0, the erasure completion contract (#1037).
   - Follow-ups filed: #936 (an unchanged-status signup leaves no ledger row) and #937 (redaction value shapes the rules do not consume).
   - Decisions taken with the recommended options: #906 documents the same-key retry rule and adds an optional key to MCP tools; #904 documents the header-copying limit; #917 keeps `unattributed` and adds `unmatched` and `spendTruncated`; #911 archives the older of two active mandates; #900 hides archived artifacts from `artifacts.list` unless `includeArchived` is set.
   - **Follow-ups filed (S3):** #671, #672 and #673.
@@ -104,4 +105,4 @@ The Wave 5 epic #439 is closed (complete in code); these checks are tracked in #
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.16.0, released from `main`; v0.15.3 is verified (v0.15.1 was tagged but never published).
+- The last release is v0.16.1, released from `main`; v0.16.0 is verified (v0.15.1 was tagged but never published).

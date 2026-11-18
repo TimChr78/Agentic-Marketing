@@ -2,6 +2,32 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.16.1] - 2026-11-18
+
+### Fixed
+
+- The server stops promptly on `SIGTERM`/`SIGINT` even while a scheduler job is waiting between
+  rounds or a provider call is still answering. Every scheduler and worker loop now sleeps through a
+  cancellation-aware helper, so a stop that lands mid-round no longer waits out a whole tick — an
+  hour for retention, six for the ad spend import, thirty seconds for the segment scheduler — and the
+  ad audience, spend-import and OAuth token-refresh jobs stop between items instead of mid-flight.
+- A stop no longer cancels work whose answer must be stored: an OAuth token exchange already sent
+  finishes and keeps its rotated refresh token instead of leaving the dead one behind, and an ad
+  spend import finishes its pages instead of marking the window incomplete. A cancelled content feed
+  is no longer retried or counted as a failure, so a healthy feed keeps its normal interval after a
+  restart rather than waiting up to sixteen times longer (#1028).
+- The Compose `app` service sets `stop_grace_period: 45s` and the Helm chart sets `terminationGracePeriodSeconds: 45` (configurable), so a stop can drain the workers and let a provider call already sent finish within its 10 s deadline and be stored, instead of being killed at Docker's default 10 s.
+
+### Upgrading from 0.16.0
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none. The Compose `app` service now waits up to 45 s (`stop_grace_period`) and Helm pods 45 s (`terminationGracePeriodSeconds`, configurable) before a stop is forced, so a shutdown can take longer than before while in-flight work finishes.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.16.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.16.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.16.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.16.1). Run `docker compose exec app am doctor`.
+
+<!-- issues: 1028 -->
+
 ## [0.16.0] - 2026-11-18
 
 ### Added
