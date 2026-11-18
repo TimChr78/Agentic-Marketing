@@ -12,3 +12,4 @@ issues: [1028]
   spend import finishes its pages instead of marking the window incomplete. A cancelled content feed
   is no longer retried or counted as a failure, so a healthy feed keeps its normal interval after a
   restart rather than waiting up to sixteen times longer (#1028).
+- The Compose `app` service sets `stop_grace_period: 45s` and the Helm chart sets `terminationGracePeriodSeconds: 45` (configurable), so a stop can drain the workers and let a provider call already sent finish within its 10 s deadline and be stored, instead of being killed at Docker's default 10 s.

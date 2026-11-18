@@ -155,6 +155,10 @@ securityContext:
   readOnlyRootFilesystem: false
   capabilities: { drop: [ALL] }
 
+# Time a pod gets to drain its workers and store an in-flight provider call's result (an OAuth token
+# exchange can rotate the refresh token) before SIGKILL. Keep it well above the 10 s request deadline.
+terminationGracePeriodSeconds: 45
+
 nodeSelector: {}
 tolerations: []
 affinity: {}
