@@ -554,6 +554,13 @@ export type ErasureKeyKind = 'profile' | 'anonymous_id' | 'user_id' | 'alias_pre
  * independently of the grace-window tombstones. Read-time exclusion matches stored rows' subject
  * keys against these rows; nothing prunes them while the erasure stands.
  */
+/**
+ * Whether a ledger row's key is the value's exclusion hash, or the value could no longer be
+ * recovered (a legacy e-mail/phone identifier without sealed plaintext). An `unavailable` row is
+ * kept so activation can refuse instead of silently matching nothing.
+ */
+export type ErasureKeyCoverage = 'full' | 'unavailable';
+
 export const erasureKeys = pgTable(
   'erasure_keys',
   {
@@ -563,6 +570,7 @@ export const erasureKeys = pgTable(
     /** The exclusion data key id behind a hashed value; never empty for a ledger row. */
     keyVersion: text('key_version').notNull(),
     erasureId: text('erasure_id').notNull(),
+    coverage: text('coverage').$type<ErasureKeyCoverage>().notNull().default('full'),
     recordedAt: ts('recorded_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.kind, t.keyValue, t.keyVersion] })],

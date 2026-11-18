@@ -1,15 +1,14 @@
 -- Subject keys on person-linked rows (#1037, 0.17.0 part 1).
 --
 -- Every stored row keeps, next to its existing columns, HMAC_exclusion(kind, value) for each
--- identifier it knows: the profile, anonymous and user ids it was written with, an alias
--- previousId, the workspace matching key's raw e-mail/phone traits (hashed with the exclusion key,
--- never the matching key), and the supported ad click ids from its context. The exclusion key
--- never reaches ClickHouse. Read-time exclusion (the next part of #1037) can then match any row
--- against `erased_subjects` without reading personal data and without changing today's reads.
---
--- `subject_keys_set` is 1 only when every applicable key was hashed. Older rows default to 0 and
--- are filled by the scheduler's backfill; a row that could not be keyed stays 0 and is retried, so
--- it is never mistaken for a complete row.
+-- identifier its writer saw: the profile, anonymous and user ids, an alias previousId, the raw
+-- e-mail/phone traits, and the supported ad click ids from its context. The exclusion key never
+-- reaches ClickHouse. `subject_coverage` is the provenance of those hashes:
+--   full     — the writer saw every applicable identifier (including a previousId/traits);
+--   ids_only — only the ids a historical row still stores (set in the side table);
+--   none     — no subject key was written.
+-- A reader falls back to the side table only when the row's coverage is not `full`, so a writer's
+-- complete row is never overridden by a backfill.
 ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_profile String DEFAULT '';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_anonymous String DEFAULT '';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_user String DEFAULT '';
@@ -27,8 +26,8 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_ttclid String DEFAULT '';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_ttp String DEFAULT '';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_epik String DEFAULT '';
 ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_key_version String DEFAULT '';
-ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_keys_set UInt8 DEFAULT 0;
-ALTER TABLE events ADD INDEX IF NOT EXISTS idx_subject_keys_set subject_keys_set TYPE set(2) GRANULARITY 4;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS subject_coverage LowCardinality(String) DEFAULT 'none';
+ALTER TABLE events ADD INDEX IF NOT EXISTS idx_subject_coverage subject_coverage TYPE set(3) GRANULARITY 4;
 
 ALTER TABLE message_events ADD COLUMN IF NOT EXISTS subject_profile String DEFAULT '';
 ALTER TABLE message_events ADD COLUMN IF NOT EXISTS subject_anonymous String DEFAULT '';
@@ -47,8 +46,8 @@ ALTER TABLE message_events ADD COLUMN IF NOT EXISTS subject_ttclid String DEFAUL
 ALTER TABLE message_events ADD COLUMN IF NOT EXISTS subject_ttp String DEFAULT '';
 ALTER TABLE message_events ADD COLUMN IF NOT EXISTS subject_epik String DEFAULT '';
 ALTER TABLE message_events ADD COLUMN IF NOT EXISTS subject_key_version String DEFAULT '';
-ALTER TABLE message_events ADD COLUMN IF NOT EXISTS subject_keys_set UInt8 DEFAULT 0;
-ALTER TABLE message_events ADD INDEX IF NOT EXISTS idx_subject_keys_set subject_keys_set TYPE set(2) GRANULARITY 4;
+ALTER TABLE message_events ADD COLUMN IF NOT EXISTS subject_coverage LowCardinality(String) DEFAULT 'none';
+ALTER TABLE message_events ADD INDEX IF NOT EXISTS idx_subject_coverage subject_coverage TYPE set(3) GRANULARITY 4;
 
 ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_profile String DEFAULT '';
 ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_anonymous String DEFAULT '';
@@ -67,20 +66,53 @@ ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_ttclid String DEFAUL
 ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_ttp String DEFAULT '';
 ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_epik String DEFAULT '';
 ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_key_version String DEFAULT '';
-ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_keys_set UInt8 DEFAULT 0;
-ALTER TABLE journey_events ADD INDEX IF NOT EXISTS idx_subject_keys_set subject_keys_set TYPE set(2) GRANULARITY 4;
+ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_coverage LowCardinality(String) DEFAULT 'none';
+ALTER TABLE journey_events ADD INDEX IF NOT EXISTS idx_subject_coverage subject_coverage TYPE set(3) GRANULARITY 4;
 
--- The backfill's checkpoint, per table and workspace. `cursor` is the last processed primary-key
--- tuple as JSON (the tables are read per workspace, so a global cursor cannot skip another
--- tenant's rows). `final` means the next pass reads with FINAL, which is how a delayed legacy row
--- that sorts before the cursor is revisited. `done` is written only after a FINAL count of
--- `subject_keys_set = 0` rows for the workspace is zero. `revision` is the replacement version.
+-- The backfill's results live here, keyed by each row's stable identity (events: event_id;
+-- message_events: message_id, type, event_id; journey_events: journey_id, participant_id, seq,
+-- type). A backfill never rewrites a person-linked row: a stale physical copy could otherwise
+-- supersede a complete concurrent redelivery. Protected reads (PR 2) use
+-- coalesce(row.subject_*, side.subject_*) when the row's coverage is not `full`.
+CREATE TABLE IF NOT EXISTS subject_key_backfill (
+  workspace_id UUID,
+  table_name LowCardinality(String),
+  key1 String,
+  key2 String DEFAULT '',
+  key3 String DEFAULT '',
+  key4 String DEFAULT '',
+  subject_profile String DEFAULT '',
+  subject_anonymous String DEFAULT '',
+  subject_user String DEFAULT '',
+  subject_previous String DEFAULT '',
+  subject_email String DEFAULT '',
+  subject_phone String DEFAULT '',
+  subject_gclid String DEFAULT '',
+  subject_gbraid String DEFAULT '',
+  subject_wbraid String DEFAULT '',
+  subject_fbc String DEFAULT '',
+  subject_fbp String DEFAULT '',
+  subject_msclkid String DEFAULT '',
+  subject_li_fat_id String DEFAULT '',
+  subject_ttclid String DEFAULT '',
+  subject_ttp String DEFAULT '',
+  subject_epik String DEFAULT '',
+  subject_key_version String DEFAULT '',
+  -- ids_only (stored ids were hashable) or none (nothing to key, recorded so it is not retried).
+  subject_coverage LowCardinality(String) DEFAULT 'none',
+  -- Monotonic replacement version: a later result for the same identity wins.
+  version UInt64,
+  recorded_at DateTime64(3, 'UTC') DEFAULT now64(3)
+) ENGINE = ReplacingMergeTree(version)
+ORDER BY (workspace_id, table_name, key1, key2, key3, key4);
+
+-- Where the next batch starts, per table and workspace. The cursor is the last processed identity
+-- tuple as JSON. It is reset at the end of a complete pass, because a low-frequency revalidation
+-- must find legacy rows that landed behind an earlier cursor.
 CREATE TABLE IF NOT EXISTS subject_key_backfill_cursors (
   table_name LowCardinality(String),
   workspace_id UUID,
   cursor String DEFAULT '',
-  final UInt8 DEFAULT 0,
-  done UInt8 DEFAULT 0,
   revision UInt64 DEFAULT 0,
   updated_at DateTime64(3, 'UTC') DEFAULT now64(3)
 ) ENGINE = ReplacingMergeTree(revision)

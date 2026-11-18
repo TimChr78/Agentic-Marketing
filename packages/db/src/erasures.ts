@@ -63,7 +63,24 @@ export interface ErasureKeyRecord {
   kind: string;
   keyValue: string;
   keyVersion: string;
+  /** `full`, or `unavailable` when the identifier plaintext could not be recovered. */
+  coverage: string;
   recordedAt: string;
+}
+
+/**
+ * A wrapped exclusion data key (#1037). The restore capture carries these because the ledger's
+ * hashes are useless without the key that produced them: a snapshot from before the key existed
+ * would otherwise restore ledger rows and lazily create a different key, so no value would match.
+ * The wrapped bytes are already KEK-sealed; the replay never unwraps them.
+ */
+export interface ExclusionDataKeyRecord {
+  workspaceId: string;
+  id: string;
+  kekId: string;
+  wrappedKey: Buffer;
+  active: boolean;
+  createdAt: string;
 }
 
 export interface ErasureLog {
@@ -73,6 +90,8 @@ export interface ErasureLog {
   cleanupJobs?: ErasureCleanupJobRecord[];
   /** The durable erasure-key ledger; absent from a database older than 0.17.0. */
   keys?: ErasureKeyRecord[];
+  /** Every exclusion data key (wrapped only) so a restore keeps the ids the ledger references. */
+  exclusionKeys?: ExclusionDataKeyRecord[];
 }
 
 export interface ReplayErasuresResult {
@@ -88,6 +107,8 @@ export interface ReplayErasuresResult {
   cleanupJobs: number;
   /** Erasure-key ledger rows re-inserted into the restored database. */
   keys: number;
+  /** Wrapped exclusion data keys re-inserted into the restored database. */
+  exclusionKeys: number;
   /** Entries for workspaces the restored snapshot no longer has; nothing to erase there. */
   skipped: number;
 }
@@ -239,18 +260,44 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
             kind: string;
             key_value: string;
             key_version: string;
+            coverage: string;
             recorded_at: Date | string;
-          }>('SELECT workspace_id, erasure_id, kind, key_value, key_version, recorded_at FROM erasure_keys')
+          }>('SELECT workspace_id, erasure_id, kind, key_value, key_version, coverage, recorded_at FROM erasure_keys')
         ).rows.map((row) => ({
           workspaceId: row.workspace_id,
           erasureId: row.erasure_id,
           kind: row.kind,
           keyValue: row.key_value,
           keyVersion: row.key_version,
+          coverage: row.coverage,
           recordedAt: iso(row.recorded_at),
         }))
       : [];
-    return { erasures, tombstones, cleanupJobs, keys };
+    // The wrapped exclusion data keys (#1037): the ledger's hashes cannot be matched without them.
+    const exclusionKeys =
+      (await hasTable(client, 'data_keys')) && (await hasColumn(client, 'data_keys', 'purpose'))
+        ? (
+            await client.query<{
+              workspace_id: string;
+              id: string;
+              kek_id: string;
+              wrapped_key: Buffer;
+              active: boolean;
+              created_at: Date | string;
+            }>(
+              `SELECT workspace_id, id, kek_id, wrapped_key, active, created_at
+                 FROM data_keys WHERE purpose = 'exclusion' ORDER BY workspace_id, created_at`,
+            )
+          ).rows.map((row) => ({
+            workspaceId: row.workspace_id,
+            id: row.id,
+            kekId: row.kek_id,
+            wrappedKey: row.wrapped_key,
+            active: row.active,
+            createdAt: iso(row.created_at),
+          }))
+        : [];
+    return { erasures, tombstones, cleanupJobs, keys, exclusionKeys };
   });
 }
 
@@ -349,9 +396,10 @@ export async function replayErasures(
     tombstones: 0,
     cleanupJobs: 0,
     keys: 0,
+    exclusionKeys: 0,
     skipped: 0,
   };
-  if (!log.erasures.length && !log.tombstones.length && !log.keys?.length) return result;
+  if (!log.erasures.length && !log.tombstones.length && !log.keys?.length && !log.exclusionKeys?.length) return result;
 
   return withClient(databaseUrl, async (client) => {
     const workspaces = new Set((await client.query<{ id: string }>('SELECT id FROM workspaces')).rows.map((row) => row.id));
@@ -361,6 +409,7 @@ export async function replayErasures(
     const tombstonesTable = await hasTable(client, 'erasure_tombstones');
     const cleanupJobsTable = await hasTable(client, 'erasure_cleanup_jobs');
     const ledgerTable = await hasTable(client, 'erasure_keys');
+    const dataKeysTable = (await hasTable(client, 'data_keys')) && (await hasColumn(client, 'data_keys', 'purpose'));
     const jobsByErasure = new Map((log.cleanupJobs ?? []).map((job) => [`${job.workspaceId}:${job.erasureId}`, job]));
     if (log.erasures.length && !cleanupJobsTable)
       opts.log?.(
@@ -371,6 +420,10 @@ export async function replayErasures(
     if (log.keys?.length && !ledgerTable)
       opts.log?.(
         'warning: the restored database predates erasure_keys; the durable erasure-key ledger is replayed only after the app migrates, so run the migration before serving reads',
+      );
+    if (log.exclusionKeys?.length && !dataKeysTable)
+      opts.log?.(
+        'warning: the restored database predates data key purposes; exclusion keys cannot be replayed, so run the migration before serving reads',
       );
 
     const byWorkspace = new Map<string, { erasures: ErasureRecord[]; tombstones: ErasureTombstoneRecord[]; keys: ErasureKeyRecord[] }>();
@@ -388,7 +441,11 @@ export async function replayErasures(
 
     for (const [workspaceId, entries] of byWorkspace) {
       if (!workspaces.has(workspaceId)) {
-        result.skipped += entries.erasures.length + entries.tombstones.length + entries.keys.length;
+        result.skipped +=
+          entries.erasures.length +
+          entries.tombstones.length +
+          entries.keys.length +
+          (log.exclusionKeys ?? []).filter((key) => key.workspaceId === workspaceId).length;
         continue;
       }
       await client.query('BEGIN');
@@ -475,12 +532,66 @@ export async function replayErasures(
         for (const key of entries.keys) {
           if (!ledgerTable) break;
           const inserted = await client.query(
-            `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, recorded_at)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage, recorded_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (workspace_id, kind, key_value, key_version) DO NOTHING`,
-            [workspaceId, key.kind, key.keyValue, key.keyVersion, key.erasureId, key.recordedAt],
+            [workspaceId, key.kind, key.keyValue, key.keyVersion, key.erasureId, key.coverage, key.recordedAt],
           );
           result.keys += inserted.rowCount ?? 0;
+        }
+        // The wrapped exclusion keys the ledger references. A snapshot taken before the key existed
+        // would otherwise lazily create a different one and no ledger value would ever match.
+        const capturedKeys = (log.exclusionKeys ?? []).filter((key) => key.workspaceId === workspaceId);
+        if (dataKeysTable && capturedKeys.length) {
+          for (const key of capturedKeys) {
+            const inserted = await client.query(
+              `INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key, active, purpose, created_at)
+               VALUES ($1, $2, $3, $4, false, 'exclusion', $5)
+               ON CONFLICT (workspace_id, id) DO NOTHING`,
+              [workspaceId, key.id, key.kekId, key.wrappedKey, key.createdAt],
+            );
+            result.exclusionKeys += inserted.rowCount ?? 0;
+          }
+        }
+        if (dataKeysTable) {
+          // The key the ledger rows reference wins. Never leave a second active exclusion key for a
+          // workspace that has ledger rows: its next write would hash with the wrong key.
+          const referenced = [...new Set(entries.keys.map((key) => key.keyVersion).filter(Boolean))];
+          let target: string | undefined;
+          if (referenced.length) {
+            target = capturedKeys.find((key) => key.active && referenced.includes(key.id))?.id;
+            if (!target) {
+              const existing = await client.query<{ id: string }>(
+                `SELECT id FROM data_keys WHERE workspace_id = $1 AND purpose = 'exclusion' AND id = ANY($2)
+                 ORDER BY created_at DESC`,
+                [workspaceId, referenced],
+              );
+              target = existing.rows[0]?.id;
+            }
+            if (target) {
+              await client.query(
+                `UPDATE data_keys SET active = false WHERE workspace_id = $1 AND purpose = 'exclusion' AND active AND id <> $2`,
+                [workspaceId, target],
+              );
+              await client.query(`UPDATE data_keys SET active = true WHERE workspace_id = $1 AND id = $2`, [workspaceId, target]);
+            } else {
+              await client.query(`UPDATE data_keys SET active = false WHERE workspace_id = $1 AND purpose = 'exclusion' AND active`, [
+                workspaceId,
+              ]);
+              opts.log?.(
+                'warning: the ledger references an exclusion key the restore did not capture; writes will refuse until that key is restored',
+              );
+            }
+          } else {
+            const active = capturedKeys.find((key) => key.active)?.id;
+            if (active) {
+              await client.query(
+                `UPDATE data_keys SET active = false WHERE workspace_id = $1 AND purpose = 'exclusion' AND active AND id <> $2`,
+                [workspaceId, active],
+              );
+              await client.query(`UPDATE data_keys SET active = true WHERE workspace_id = $1 AND id = $2`, [workspaceId, active]);
+            }
+          }
         }
         await client.query('COMMIT');
         result.workspaces += 1;

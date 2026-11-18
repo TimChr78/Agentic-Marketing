@@ -13,11 +13,12 @@ import {
   resetClickHouse,
   type SubjectKeyHasher,
   type SubjectKeyKind,
+  subjectKeyFailureCount,
 } from '../src';
 
 // #1037 part 1: person-linked ClickHouse rows keep HMAC_exclusion of every identifier, the
-// erased-subjects table is generation-versioned, and the historical backfill reads rows, hashes
-// their identifiers in the app and writes them back — it never lets the key reach ClickHouse.
+// erased-subjects table is generation-versioned, and the historical backfill writes side-table
+// rows keyed by identity — it never rewrites a person row and never lets the key reach ClickHouse.
 
 const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 const CH_DB = runScoped('am_test_subject_keys');
@@ -108,7 +109,7 @@ afterAll(async () => {
 });
 
 describe('subject keys on stored rows (#1037 part 1)', () => {
-  it('fills every new event’s subject columns with keyed hashes, including traits and click ids', async () => {
+  it('fills every new event’s subject columns with keyed hashes and coverage full', async () => {
     const timestamp = new Date(Date.UTC(2026, 8, 11, 12, 0, 0)).toISOString();
     const fresh = clickHouseStore({ url: CH_URL, database: CH_DB, subjectKeys: factory });
     try {
@@ -127,7 +128,7 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
     }
     const stored = await rows<Record<string, string | number>>(
       `SELECT event_id, subject_profile, subject_anonymous, subject_user, subject_previous, subject_email,
-              subject_phone, subject_gclid, subject_fbc, subject_key_version, subject_keys_set
+              subject_phone, subject_gclid, subject_fbc, subject_key_version, subject_coverage
          FROM events FINAL WHERE workspace_id = {ws:UUID} ORDER BY event_id`,
     );
     const first = stored.find((r) => r.event_id === 'subject-1')!;
@@ -141,14 +142,11 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
       subject_gclid: hmac('gclid', 'gclid-abc123'),
       subject_fbc: hmac('fbc', 'fb.1.1700000000000.abcdef'),
       subject_key_version: 'dk_exclusion_test',
-      subject_keys_set: 1,
+      subject_coverage: 'full',
     });
-    // The click-id list is the same one the ads package uses.
     expect(Object.keys(clickIdsOfEvent({ clickIds: { gclid: 'abcd' } }, 0))).toEqual(['gclid']);
     // No raw identifier in the subject columns (the legacy id columns are unchanged).
-    const serialised = JSON.stringify(
-      stored.map((r) => ({ ...r, subject_email: r.subject_email, subject_user: r.subject_user, subject_phone: r.subject_phone })),
-    );
+    const serialised = JSON.stringify(stored);
     for (const raw of ['Person@Example.test', 'person@example.test', '5550100300', 'user-1', 'anon-previous-1', 'gclid-abc123'])
       expect(serialised).not.toContain(raw);
   });
@@ -157,13 +155,13 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
     await store.insertMessageEvents([messageEvent(1)]);
     await store.insertJourneyEvents([journeyEvent(1)]);
     const [message] = await rows<Record<string, string | number>>(
-      `SELECT subject_profile, subject_key_version, subject_keys_set FROM message_events FINAL
+      `SELECT subject_profile, subject_key_version, subject_coverage FROM message_events FINAL
         WHERE workspace_id = {ws:UUID} AND message_id = {id:String}`,
       ws,
       { id: 'msg-1' },
     );
     const [journey] = await rows<Record<string, string | number>>(
-      `SELECT subject_profile, subject_key_version, subject_keys_set FROM journey_events FINAL
+      `SELECT subject_profile, subject_key_version, subject_coverage FROM journey_events FINAL
         WHERE workspace_id = {ws:UUID} AND journey_id = {id:String}`,
       ws,
       { id: 'jrn_test' },
@@ -171,12 +169,12 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
     expect(message).toMatchObject({
       subject_profile: hmac('profile', 'prf-msg-1'),
       subject_key_version: 'dk_exclusion_test',
-      subject_keys_set: 1,
+      subject_coverage: 'full',
     });
     expect(journey).toMatchObject({
       subject_profile: hmac('profile', 'prf-jrn-1'),
       subject_key_version: 'dk_exclusion_test',
-      subject_keys_set: 1,
+      subject_coverage: 'full',
     });
   });
 
@@ -197,11 +195,10 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
     const kept = await rows<{ generation: number | string }>(
       `SELECT generation FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID} AND kind = 'profile' AND key = 'hash-profile-pub'`,
     );
-    // The older generation, published later and in another month, must not win or create a second row.
     expect(kept).toEqual([{ generation: 2 }]);
   });
 
-  it('backfills historical rows in the app, revisiting a delayed row behind the cursor', async () => {
+  it('backfills into a side table without rewriting rows, and revalidates later legacy rows', async () => {
     const legacyWs = newUuid();
     const legacy = (name: string, day: number, over: Record<string, unknown> = {}) => ({
       workspace_id: legacyWs,
@@ -266,65 +263,100 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
       format: 'JSONEachRow',
     });
 
-    // One row per table and workspace per call: the first call advances without finishing.
     const first = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
     expect(first.done).toBe(false);
-    expect(first.tables.filter((t) => t.workspaceId === legacyWs).every((t) => t.advanced || t.done)).toBe(true);
 
-    // A legacy row that sorts before the cursor lands after it passed. The FINAL count catches it
-    // and the dirty pass revisits it.
-    await store.client.insert({ table: 'events', values: [legacy('Alpha', 1)], format: 'JSONEachRow' });
+    // A complete concurrent writer row for an identity the backfill has not reached yet: its own
+    // subject columns must never be touched by the backfill.
+    const complete = clickHouseStore({ url: CH_URL, database: CH_DB, subjectKeys: factory });
+    try {
+      await complete.insert([
+        event(50, {
+          workspaceId: legacyWs,
+          messageId: 'legacy-Delta',
+          name: 'Delta',
+          anonymousId: 'legacy-anon-Delta',
+          userId: 'legacy-user-Delta',
+          profileId: 'prf-legacy-Delta',
+          piiTraits: { email: 'delta@example.test' },
+          context: {},
+          timestamp: '2026-07-25T12:00:00.000Z',
+          receivedAt: '2026-07-25T12:00:00.000Z',
+        }),
+      ]);
+    } finally {
+      await complete.close();
+    }
 
-    // A fresh store (a restart) resumes from the persisted cursor and finishes the job.
+    // A legacy row that sorts before the cursor lands later. A low-frequency revalidation pass
+    // (the store resets the cursor when a pass completes) still finds it.
     const restarted = clickHouseStore({ url: CH_URL, database: CH_DB, subjectKeys: factory });
     try {
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < 8; i++) {
         const step = await restarted.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
         if (step.done) break;
       }
     } finally {
       await restarted.close();
     }
+    const late = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
+    expect(late.done).toBe(true);
+    await store.client.insert({ table: 'events', values: [legacy('Alpha', 1)], format: 'JSONEachRow' });
+    let again = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 5 });
+    for (let i = 0; i < 4 && !again.done; i++) again = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 5 });
+    expect(again.done).toBe(true);
+    expect(await store.subjectKeyCoverage([legacyWs])).toMatchObject({ pending: 0 });
 
     const settings = await store.settingsFor(legacyWs);
-    const rs = await store.client.query({
-      query: `SELECT event_id, subject_profile, subject_anonymous, subject_user, subject_gclid, subject_key_version, subject_keys_set
-              FROM events FINAL WHERE workspace_id = {ws:UUID} ORDER BY event_id`,
+    const sideRs = await store.client.query({
+      query: `SELECT key1, subject_profile, subject_anonymous, subject_user, subject_gclid, subject_key_version, subject_coverage
+              FROM subject_key_backfill FINAL WHERE workspace_id = {ws:UUID} AND table_name = 'events' ORDER BY key1`,
       query_params: { ws: legacyWs },
       format: 'JSONEachRow',
       clickhouse_settings: settings,
     });
-    const backfilled = await rs.json<Record<string, string | number>>();
-    expect(backfilled.map((r) => r.event_id)).toEqual(['legacy-Alpha', 'legacy-Bravo', 'legacy-Charlie', 'legacy-Delta']);
-    for (const row of backfilled) {
-      const name = String(row.event_id).replace('legacy-', '');
+    const side = await sideRs.json<Record<string, string | number>>();
+    expect(side.map((r) => r.key1)).toEqual(['legacy-Alpha', 'legacy-Bravo', 'legacy-Charlie']);
+    for (const row of side) {
+      const name = String(row.key1).replace('legacy-', '');
       expect(row).toMatchObject({
         subject_profile: hmac('profile', `prf-legacy-${name}`),
         subject_anonymous: hmac('anonymous_id', `legacy-anon-${name}`),
         subject_user: hmac('user_id', `legacy-user-${name}`),
-        subject_gclid: hmac('gclid', `gclid-${name}-1234`),
         subject_key_version: 'dk_exclusion_test',
-        subject_keys_set: 1,
+        subject_coverage: 'ids_only',
       });
     }
+    // Delta also has a writer row: the backfill leaves it alone (coverage full) and its own e-mail
+    // hash is still there, so a stale copy can never supersede the complete redelivery.
+    const delta = await rows<Record<string, string | number>>(
+      `SELECT subject_email, subject_coverage FROM events FINAL WHERE workspace_id = {ws:UUID} AND event_id = 'legacy-Delta'`,
+      legacyWs,
+    );
+    expect(delta[0]).toMatchObject({ subject_email: hmac('email', 'delta@example.test'), subject_coverage: 'full' });
+    // Legacy rows themselves were never rewritten.
+    const legacyRow = await rows<Record<string, string | number>>(
+      `SELECT subject_profile, subject_coverage FROM events FINAL WHERE workspace_id = {ws:UUID} AND event_id = 'legacy-Bravo'`,
+      legacyWs,
+    );
+    expect(legacyRow[0]).toMatchObject({ subject_profile: '', subject_coverage: 'none' });
+
     const [message] = await rows<Record<string, string | number>>(
-      `SELECT subject_profile, subject_keys_set FROM message_events FINAL WHERE workspace_id = {ws:UUID} AND message_id = 'legacy-msg'`,
+      `SELECT key1, subject_profile, subject_coverage FROM subject_key_backfill FINAL
+        WHERE workspace_id = {ws:UUID} AND table_name = 'message_events'`,
       legacyWs,
     );
     const [journey] = await rows<Record<string, string | number>>(
-      `SELECT subject_profile, subject_keys_set FROM journey_events FINAL WHERE workspace_id = {ws:UUID} AND journey_id = 'jrn_legacy'`,
+      `SELECT key1, subject_profile, subject_coverage FROM subject_key_backfill FINAL
+        WHERE workspace_id = {ws:UUID} AND table_name = 'journey_events'`,
       legacyWs,
     );
-    expect(message).toMatchObject({ subject_profile: hmac('profile', 'prf-legacy-msg'), subject_keys_set: 1 });
-    expect(journey).toMatchObject({ subject_profile: hmac('profile', 'prf-legacy-jrn'), subject_keys_set: 1 });
-
-    // Idempotent: a completed backfill reports done and writes nothing.
-    const again = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
-    expect(again.done).toBe(true);
-    expect(again.tables.every((t) => !t.advanced && t.done)).toBe(true);
+    expect(message).toMatchObject({ key1: 'legacy-msg', subject_profile: hmac('profile', 'prf-legacy-msg'), subject_coverage: 'ids_only' });
+    expect(journey).toMatchObject({ key1: 'jrn_legacy', subject_profile: hmac('profile', 'prf-legacy-jrn'), subject_coverage: 'ids_only' });
   }, 120_000);
 
-  it('fails the write when the exclusion key cannot be resolved', async () => {
+  it('fails the write when the exclusion key cannot be resolved, and counts the failure', async () => {
+    const before = subjectKeyFailureCount();
     const broken = clickHouseStore({
       url: CH_URL,
       database: CH_DB,
@@ -334,10 +366,10 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
     });
     try {
       await expect(broken.insert([event(9)])).rejects.toThrow('exclusion key unavailable');
+      expect(subjectKeyFailureCount()).toBe(before + 1);
     } finally {
       await broken.close();
     }
-    // Nothing was stored for the failed row.
     const stored = await rows<{ event_id: string }>(`SELECT event_id FROM events FINAL WHERE event_id = 'subject-9'`);
     expect(stored).toEqual([]);
   });

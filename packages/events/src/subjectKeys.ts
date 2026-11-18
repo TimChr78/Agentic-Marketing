@@ -47,6 +47,14 @@ export const SUBJECT_KEY_COLUMNS: Readonly<Record<SubjectKeyKind, string>> = {
   epik: 'subject_epik',
 };
 
+/**
+ * How complete a row's subject hashes are. `full` is a writer that saw every identifier it could
+ * (including an alias previousId and e-mail/phone traits); `ids_only` is a historical row whose
+ * stored columns still supply profile/anonymous/user/click ids but not the rest; `none` is a row
+ * with nothing to key, recorded so it is not retried.
+ */
+export type SubjectCoverage = 'full' | 'ids_only' | 'none';
+
 /** The exclusion hashes for one row, and the exclusion key version that produced them. */
 export interface SubjectKeyHashes {
   version: string;
@@ -55,11 +63,10 @@ export interface SubjectKeyHashes {
 
 /**
  * Hashes one workspace's subject values with its exclusion key. Implemented next to the key
- * provider (packages/profiles); an event store without one writes no subject hashes and leaves
- * `subject_keys_set` at 0.
+ * provider (packages/profiles); a store without one writes coverage `none`.
  */
 export interface SubjectKeyHasher {
-  /** The exclusion data key id; recorded on every value so a planned re-key is interpretable. */
+  /** The exclusion data key id; recorded on every value while that key is retained. */
   readonly version: string;
   hash(kind: SubjectKeyKind, value: string): Promise<string>;
   /** Zeroes the unwrapped key. Idempotent. */
@@ -81,22 +88,23 @@ export interface ErasedSubjectRow {
   recordedAt: string;
 }
 
-/** How one historical table's raw columns map onto subject kinds. */
+/** How one historical table's raw columns map onto subject kinds and its stable identity. */
 export interface SubjectKeyBackfillTable {
   table: 'events' | 'message_events' | 'journey_events';
   /** The table's full replacing/order key, used for the keyset cursor and ORDER BY. */
   sortColumns: readonly { name: string; type: string }[];
+  /**
+   * The stable identity under which the side table keeps this row (PR 2 joins on it). `events`
+   * uses event_id; message events use message_id/type/event_id; journey events use
+   * journey_id/participant_id/seq/type.
+   */
+  identity: readonly { column: string; key: string }[];
   /** Raw columns whose values are hashed; click ids come from `context` for events. */
   sources: readonly { kind: SubjectKeyKind; column: string }[];
   /** Whether the row's `context` carries ad click ids. */
   clickIds: boolean;
 }
 
-/**
- * The person-linked ClickHouse tables and the historical rows' raw sources. E-mail and phone are
- * absent: the event store never kept those traits, so a historical event can only be matched by
- * its ids and click ids (documented in security-and-privacy.md).
- */
 export const SUBJECT_KEY_BACKFILL_TABLES: readonly SubjectKeyBackfillTable[] = [
   {
     table: 'events',
@@ -107,6 +115,7 @@ export const SUBJECT_KEY_BACKFILL_TABLES: readonly SubjectKeyBackfillTable[] = [
       { name: 'timestamp', type: "DateTime64(3, 'UTC')" },
       { name: 'event_id', type: 'String' },
     ],
+    identity: [{ column: 'event_id', key: 'key1' }],
     sources: [
       { kind: 'profile', column: 'profile_id' },
       { kind: 'anonymous_id', column: 'anonymous_id' },
@@ -122,6 +131,11 @@ export const SUBJECT_KEY_BACKFILL_TABLES: readonly SubjectKeyBackfillTable[] = [
       { name: 'type', type: 'String' },
       { name: 'event_id', type: 'String' },
     ],
+    identity: [
+      { column: 'message_id', key: 'key1' },
+      { column: 'type', key: 'key2' },
+      { column: 'event_id', key: 'key3' },
+    ],
     sources: [{ kind: 'profile', column: 'profile_id' }],
     clickIds: false,
   },
@@ -134,6 +148,12 @@ export const SUBJECT_KEY_BACKFILL_TABLES: readonly SubjectKeyBackfillTable[] = [
       { name: 'seq', type: 'UInt32' },
       { name: 'type', type: 'String' },
     ],
+    identity: [
+      { column: 'journey_id', key: 'key1' },
+      { column: 'participant_id', key: 'key2' },
+      { column: 'seq', key: 'key3' },
+      { column: 'type', key: 'key4' },
+    ],
     sources: [{ kind: 'profile', column: 'profile_id' }],
     clickIds: false,
   },
@@ -142,28 +162,42 @@ export const SUBJECT_KEY_BACKFILL_TABLES: readonly SubjectKeyBackfillTable[] = [
 export interface SubjectKeyBackfillTableResult {
   table: string;
   workspaceId: string;
-  /** This call wrote a batch back with its subject hashes. */
+  /** This call wrote a side-table batch. */
   advanced: boolean;
-  /** This call left unprocessed rows for a later batch or dirty pass. */
+  /** This call left historically uncovered rows for later. */
   remaining: boolean;
-  /** The workspace's backfill is finished (a FINAL count of unprocessed rows was zero). */
+  /** This pass found no uncovered rows for the pair (the next revalidation checks again). */
   done: boolean;
 }
 
 export interface SubjectKeyBackfillResult {
   tables: SubjectKeyBackfillTableResult[];
-  /** Every workspace and table is finished. */
+  /** Every workspace and table is finished for this pass. */
   done: boolean;
 }
 
 export interface SubjectKeyBackfillOptions {
   /** Workspaces to backfill; the person tables are behind workspace row policies. */
   workspaceIds: readonly string[];
-  /** Rows written back per call per table and workspace. */
+  /** Rows written to the side table per call per table and workspace. */
   batchSize?: number;
 }
 
+/** How many historical rows still lack coverage, per table and workspace. */
+export interface SubjectKeyCoverageRow {
+  table: string;
+  workspaceId: string;
+  pending: number;
+}
+
+export interface SubjectKeyCoverageResult {
+  pending: number;
+  tables: SubjectKeyCoverageRow[];
+}
+
 export interface RunSubjectKeyBackfillOptions extends Omit<SubjectKeyBackfillOptions, 'workspaceIds'> {
+  /** Re-check interval once a pass finishes, so later legacy rows are not missed. */
+  revalidateMs?: number;
   /** Calls per turn before yielding, so a large install does not hold the event loop. */
   callsPerTurn?: number;
   pauseMs?: number;
@@ -172,12 +206,13 @@ export interface RunSubjectKeyBackfillOptions extends Omit<SubjectKeyBackfillOpt
 }
 
 /**
- * The scheduler job for historical rows (#1037 part 1): reads each workspace's unprocessed rows,
- * hashes their identifiers with the exclusion key in the app, writes the rows back with the hash
- * columns and `subject_keys_set = 1`, and only reports done when a FINAL count of unprocessed rows
- * is zero. A delayed legacy row that sorts before the cursor is caught by that count and revisited
- * in a FINAL pass. Re-inserting a row is idempotent (same replacing key), so a timeout is retried
- * from the persisted cursor rather than guessed at. The exclusion key never leaves the app.
+ * The scheduler job for historical rows (#1037 part 1). It reads each workspace's uncovered rows,
+ * hashes the ids it still stores with the exclusion key in the app, and writes the result to the
+ * `subject_key_backfill` side table keyed by the row's stable identity. It never rewrites a
+ * person-linked row, so a complete concurrent redelivery can never be superseded by a stale copy.
+ * A pass is done only when the uncovered count is zero; the job then revalidates at a low frequency
+ * instead of ever treating the backfill as permanently finished. The exclusion key never leaves
+ * the app.
  */
 export async function runSubjectKeyBackfill(
   deps: { events: Pick<EventStore, 'backfillSubjectKeys'>; workspaces: () => Promise<string[]> },
@@ -186,7 +221,9 @@ export async function runSubjectKeyBackfill(
 ): Promise<void> {
   const callsPerTurn = opts.callsPerTurn ?? 4;
   const pauseMs = opts.pauseMs ?? 1_000;
-  while (!signal.aborted) {
+  const revalidateMs = opts.revalidateMs ?? 60 * 60 * 1_000;
+  for (;;) {
+    if (signal.aborted) return;
     let result: SubjectKeyBackfillResult | undefined;
     try {
       const workspaceIds = await deps.workspaces();
@@ -195,8 +232,7 @@ export async function runSubjectKeyBackfill(
           workspaceIds,
           ...(opts.batchSize === undefined ? {} : { batchSize: opts.batchSize }),
         });
-        const progressed = result.tables.some((t) => t.advanced);
-        if (result.done || !progressed) break;
+        if (result.done || !result.tables.some((table) => table.advanced)) break;
         if (signal.aborted) return;
       }
     } catch (err) {
@@ -204,12 +240,14 @@ export async function runSubjectKeyBackfill(
       opts.onError?.(err);
       return;
     }
-    if (!result || result.done) {
-      if (result) opts.log?.(`subject-key backfill complete (${result.tables.length} table/workspace pair(s))`);
+    if (result?.done)
+      opts.log?.(`subject-key backfill pass complete (${result.tables.length} table/workspace pair(s)); revalidating later`);
+    if (signal.aborted) return;
+    try {
+      await sleep(result?.done ? revalidateMs : pauseMs, signal);
+    } catch {
       return;
     }
-    if (signal.aborted) return;
-    await sleep(pauseMs, signal);
   }
 }
 
@@ -218,4 +256,18 @@ export function eventClickIds(context: Record<string, unknown>, timestamp: strin
   const iso = timestamp.includes('T') ? timestamp : `${timestamp.replace(' ', 'T')}Z`;
   const seenAt = Date.parse(iso) || Date.now();
   return Object.entries(clickIdsOfEvent(context, seenAt)).map(([kind, value]) => [kind as SubjectKeyKind, value as string]);
+}
+
+/**
+ * Process-wide count of writes that failed because subject keys could not be hashed. The sink
+ * retries on its own; a steadily rising count is the operator signal (`am_subject_key_failures_total`).
+ */
+let subjectKeyFailures = 0;
+
+export function noteSubjectKeyFailure(): void {
+  subjectKeyFailures += 1;
+}
+
+export function subjectKeyFailureCount(): number {
+  return subjectKeyFailures;
 }

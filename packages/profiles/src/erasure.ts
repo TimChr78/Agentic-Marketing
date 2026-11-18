@@ -4,7 +4,7 @@ import { type KeyProvider, newDataKey, open, type PreparedKeys, prepareKeys, sea
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { mergedFamily } from './consent';
 import { personCrypto } from './crypto';
-import { exclusionHasher } from './exclusion';
+import { exclusionHasher, prepareExclusionKey } from './exclusion';
 import { lockProfileRows, withIdentityLock } from './identity';
 
 // Durable erasure (#978 part 2b). The SQL stage and the external stores used to be mixed in one
@@ -39,6 +39,9 @@ export interface PreparedErasure {
 
 /** Prepares the keys an erasure needs. Runs before the command's transaction. */
 export async function prepareErasure(db: Pick<Db, 'withWorkspace'>, workspaceId: string, kp: KeyProvider): Promise<PreparedErasure> {
+  // Resolve the referenced exclusion key first: if the ledger names an inactive key, that key must
+  // win before preparation provisions anything new (#1037 review round 3).
+  await prepareExclusionKey(db, workspaceId, kp);
   // The matching key keeps the resolver's tombstone hashes valid; the exclusion key is what the
   // durable ledger (#1037) hashes every identifier with. They are separate purposes, so rotating
   // one never invalidates the other. Identity keys (including rotated-out ones) are prepared so
@@ -210,21 +213,40 @@ async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promis
   // and the stored row keeps that hash in its own column.
   const exclusion = await exclusionHasher(tx, workspaceId, prepared.matching.provider);
   const keys = new Map<string, typeof schema.erasureKeys.$inferInsert>();
-  const addKey = (kind: ErasureKeyKind, value: string) => {
+  const addKey = (kind: ErasureKeyKind, value: string, coverage: 'full' | 'unavailable') => {
     const keyValue = exclusion.hash(kind, value);
-    keys.set(`${kind}\u0000${keyValue}`, { workspaceId, kind, keyValue, keyVersion: exclusion.version, erasureId });
+    keys.set(`${kind}\u0000${keyValue}`, { workspaceId, kind, keyValue, keyVersion: exclusion.version, erasureId, coverage });
   };
-  for (const profileId of family) addKey('profile', profileId);
+  for (const profileId of family) addKey('profile', profileId, 'full');
   for (const identifier of identifiers) {
     if (identifier.type === 'email' || identifier.type === 'phone') {
-      // A legacy identifier without sealed plaintext can only be hashed from its match hash; it is
-      // still a keyed value, never the raw address.
-      const plain = identifier.valueEnc ? await crypto.open<string>(identifier.profileId, identifier.valueEnc) : undefined;
-      addKey(identifier.type, plain ?? identifier.value);
+      // Hash the sealed plaintext, exactly as a write hashes the raw trait. Without it the value
+      // cannot be reconstructed (the stored value is a matching-key HMAC), so record the gap as
+      // coverage `unavailable` instead of publishing a hash that could never match.
+      let plain: string | undefined;
+      if (identifier.valueEnc) {
+        try {
+          plain = await crypto.open<string>(identifier.profileId, identifier.valueEnc);
+        } catch {
+          plain = undefined;
+        }
+      }
+      if (plain === undefined) {
+        // Keep the stored matching-key value only as an explanatory placeholder, never hashed as
+        // if it could match a write-time exclusion value.
+        keys.set(`${identifier.type}\u0000${identifier.value}`, {
+          workspaceId,
+          kind: identifier.type,
+          keyValue: identifier.value,
+          keyVersion: exclusion.version,
+          erasureId,
+          coverage: 'unavailable',
+        });
+      } else addKey(identifier.type, plain, 'full');
       continue;
     }
-    addKey(identifier.type, identifier.value);
-    if (identifier.type === 'anonymous_id' || identifier.type === 'user_id') addKey('alias_previous_id', identifier.value);
+    addKey(identifier.type, identifier.value, 'full');
+    if (identifier.type === 'anonymous_id' || identifier.type === 'user_id') addKey('alias_previous_id', identifier.value, 'full');
   }
   if (keys.size)
     await tx
@@ -232,7 +254,7 @@ async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promis
       .values([...keys.values()])
       .onConflictDoUpdate({
         target: [schema.erasureKeys.workspaceId, schema.erasureKeys.kind, schema.erasureKeys.keyValue, schema.erasureKeys.keyVersion],
-        set: { erasureId, recordedAt: sql`now()` },
+        set: { erasureId, recordedAt: sql`now()`, coverage: sql`excluded.coverage` },
       });
 
   const selectors: ErasureSelectors = {

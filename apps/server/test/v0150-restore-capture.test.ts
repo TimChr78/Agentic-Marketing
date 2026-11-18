@@ -28,7 +28,8 @@ type Capture = {
   log: {
     erasures: { id: string }[];
     cleanupJobs: { selectors: string; selectorKey: string }[];
-    keys: { kind: string; keyValue: string; keyVersion: string }[];
+    keys: { kind: string; keyValue: string; keyVersion: string; coverage?: string }[];
+    exclusionKeys: { id: string; active: boolean; wrappedKey: string }[];
   };
 };
 
@@ -148,6 +149,9 @@ describe.skipIf(!hasTestDatabase())('restore capture binding and recovery (#1009
     const text = await readFile(capture, 'utf8');
     expect(text).toContain(hash);
     expect(text).not.toContain(emailAsUserId);
+    const saved = await readCapture(capture);
+    // The wrapped exclusion key travels with the ledger, or the restored hashes could never match.
+    expect(saved.log.exclusionKeys).toEqual([expect.objectContaining({ id: version, active: true })]);
   }, 120_000);
 
   it('refuses a capture bound to another target instead of reusing it', async () => {

@@ -102,9 +102,21 @@ async function sealAndStoreIdentifier(workspace: string, profileId: string, type
   ]);
 }
 
+/** A legacy e-mail identifier: its lookup HMAC exists, its sealed plaintext does not. */
+async function storeMatchOnlyIdentifier(workspace: string, profileId: string, type: 'email' | 'phone', plain: string): Promise<string> {
+  const value = await d.db.withWorkspace(workspace, (tx) => personCrypto(tx, workspace, keyProvider).matchHash(type, plain));
+  await d.db.admin.query('INSERT INTO identifiers (workspace_id, profile_id, type, value) VALUES ($1, $2, $3, $4)', [
+    workspace,
+    profileId,
+    type,
+    value,
+  ]);
+  return value;
+}
+
 async function ledger(workspace: string, erasureId: string) {
-  const { rows } = await d.db.admin.query<{ kind: string; key_value: string; key_version: string; erasure_id: string }>(
-    'SELECT kind, key_value, key_version, erasure_id FROM erasure_keys WHERE workspace_id = $1 AND erasure_id = $2 ORDER BY kind, key_value',
+  const { rows } = await d.db.admin.query<{ kind: string; key_value: string; key_version: string; erasure_id: string; coverage: string }>(
+    'SELECT kind, key_value, key_version, erasure_id, coverage FROM erasure_keys WHERE workspace_id = $1 AND erasure_id = $2 ORDER BY kind, key_value',
     [workspace, erasureId],
   );
   return rows;
@@ -139,15 +151,15 @@ describe.skipIf(!hasTestDatabase())('erasure-key ledger (#1037 part 1)', () => {
       const rows = await ledger(workspace, result.erasureId);
       expect(rows).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ kind: 'profile', key_value: expectedProfile, key_version: version }),
+          expect.objectContaining({ kind: 'profile', key_value: expectedProfile, key_version: version, coverage: 'full' }),
           expect.objectContaining({ kind: 'profile', key_value: expectedMerged, key_version: version }),
           expect.objectContaining({ kind: 'anonymous_id', key_value: expectedMergedAnon, key_version: version }),
-          expect.objectContaining({ kind: 'anonymous_id', key_value: expectedAnon, key_version: version }),
+          expect.objectContaining({ kind: 'anonymous_id', key_value: expectedAnon, key_version: version, coverage: 'full' }),
           expect.objectContaining({ kind: 'user_id', key_value: expectedUser, key_version: version }),
           expect.objectContaining({ kind: 'alias_previous_id', key_value: expectedPrevious, key_version: version }),
-          expect.objectContaining({ kind: 'email', key_value: expectedEmail, key_version: version }),
-          expect.objectContaining({ kind: 'phone', key_value: expectedPhone, key_version: version }),
-          expect.objectContaining({ kind: 'gclid', key_value: expectedClick, key_version: version }),
+          expect.objectContaining({ kind: 'email', key_value: expectedEmail, key_version: version, coverage: 'full' }),
+          expect.objectContaining({ kind: 'phone', key_value: expectedPhone, key_version: version, coverage: 'full' }),
+          expect.objectContaining({ kind: 'gclid', key_value: expectedClick, key_version: version, coverage: 'full' }),
         ]),
       );
       // Every row is a 64-character keyed hash, never a raw identifier.
@@ -218,6 +230,62 @@ describe.skipIf(!hasTestDatabase())('erasure-key ledger (#1037 part 1)', () => {
     } finally {
       disposeErasure(prepared);
     }
+  });
+
+  it('records unavailable coverage instead of hashing a matching-key value', async () => {
+    const workspace = await newWorkspace();
+    const profile = 'prf_00000000000000000000000000000401';
+    await seedPerson(workspace, profile);
+    const matchOnly = await storeMatchOnlyIdentifier(workspace, profile, 'email', EMAIL);
+
+    const prepared = await prepareErasure(d.db, workspace, keyProvider);
+    try {
+      const result = await d.db.withWorkspace(workspace, (tx) =>
+        eraseProfileStage(tx, { workspaceId: workspace, profileId: profile, requestedBy: 'user_ledger', reason: 'legacy', prepared }),
+      );
+      const rows = await ledger(workspace, result.erasureId);
+      const email = rows.find((r) => r.kind === 'email');
+      // The stored matching-key HMAC is kept as an explanatory placeholder, but marked
+      // unavailable; nothing pretends it can match a write-time exclusion hash.
+      expect(email).toMatchObject({ key_value: matchOnly, coverage: 'unavailable' });
+      expect(JSON.stringify(rows)).not.toContain(EMAIL);
+    } finally {
+      disposeErasure(prepared);
+    }
+  });
+
+  it('activates the exclusion key the ledger references and refuses a missing one', async () => {
+    const workspace = await newWorkspace();
+    const keyId = 'dk_0000000000000000000000000000ee01';
+    const wrapped = await keyProvider.wrap(Buffer.alloc(32, 5));
+    await d.db.admin.query(
+      `INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key, active, purpose)
+       VALUES ($1, $2, $3, $4, false, 'exclusion')`,
+      [workspace, keyId, keyProvider.id, wrapped],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id)
+       VALUES ($1, 'profile', $2, $3, 'era_keeps_key')`,
+      [workspace, 'a'.repeat(64), keyId],
+    );
+    const hasher = await subjectKeyHasher({ db: d.db, kp: keyProvider })(workspace);
+    expect(hasher.version).toBe(keyId);
+    hasher.dispose();
+    const active = await d.db.admin.query<{ id: string }>(
+      "SELECT id FROM data_keys WHERE workspace_id = $1 AND purpose = 'exclusion' AND active",
+      [workspace],
+    );
+    expect(active.rows).toEqual([{ id: keyId }]);
+
+    // A ledger row whose key was lost must not make the next call mint a different key: its
+    // hashes could never match, so the call refuses.
+    const orphan = await newWorkspace();
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id)
+       VALUES ($1, 'profile', $2, 'dk_lost', 'era_lost')`,
+      [orphan, 'b'.repeat(64)],
+    );
+    await expect(subjectKeyHasher({ db: d.db, kp: keyProvider })(orphan)).rejects.toThrow(/exclusion key referenced .* is missing/);
   });
 
   it('hashes with the workspace exclusion key and never swallows a key failure', async () => {

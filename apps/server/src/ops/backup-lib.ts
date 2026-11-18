@@ -1078,6 +1078,8 @@ async function writeRestoreCapture(path: string, binding: RestoreCaptureBinding,
       })),
       // The durable erasure-key ledger: pseudonymous ids and keyed hashes only.
       keys: log.keys ?? [],
+      // The wrapped exclusion keys the ledger references; the bytes are already KEK-sealed.
+      exclusionKeys: (log.exclusionKeys ?? []).map((key) => ({ ...key, wrappedKey: encodeBytes(key.wrappedKey) })),
     },
   };
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
@@ -1116,6 +1118,7 @@ async function readRestoreCapture(path: string): Promise<RestoreCapture | null> 
       erasures?: ErasureLog['erasures'];
       tombstones?: ErasureLog['tombstones'];
       keys?: ErasureLog['keys'];
+      exclusionKeys?: { workspaceId: string; id: string; kekId: string; wrappedKey: unknown; active: unknown; createdAt: string }[];
       cleanupJobs?: {
         workspaceId: string;
         erasureId: string;
@@ -1147,6 +1150,14 @@ async function readRestoreCapture(path: string): Promise<RestoreCapture | null> 
       erasures: stored.log?.erasures ?? [],
       tombstones: stored.log?.tombstones ?? [],
       keys: stored.log?.keys ?? [],
+      exclusionKeys: (stored.log?.exclusionKeys ?? []).map((key) => ({
+        workspaceId: key.workspaceId,
+        id: key.id,
+        kekId: key.kekId,
+        wrappedKey: decodeBytes(key.wrappedKey) as Buffer,
+        active: Boolean(key.active),
+        createdAt: key.createdAt,
+      })),
       cleanupJobs: (stored.log?.cleanupJobs ?? []).map((job) => ({
         workspaceId: job.workspaceId,
         erasureId: job.erasureId,
@@ -1196,11 +1207,16 @@ export function unionErasureLogs(captured: ErasureLog | null, live: ErasureLog):
   const keys = new Map<string, NonNullable<ErasureLog['keys']>[number]>();
   for (const key of captured?.keys ?? []) keys.set(`${key.workspaceId}:${key.kind}:${key.keyValue}:${key.keyVersion}`, key);
   for (const key of live.keys ?? []) keys.set(`${key.workspaceId}:${key.kind}:${key.keyValue}:${key.keyVersion}`, key);
+  // Exclusion keys are merged by id; the live copy wins, and its wrapped bytes are the same key.
+  const exclusionKeys = new Map<string, NonNullable<ErasureLog['exclusionKeys']>[number]>();
+  for (const key of captured?.exclusionKeys ?? []) exclusionKeys.set(`${key.workspaceId}:${key.id}`, key);
+  for (const key of live.exclusionKeys ?? []) exclusionKeys.set(`${key.workspaceId}:${key.id}`, key);
   return {
     erasures: [...erasures.values()],
     tombstones: [...tombstones.values()],
     cleanupJobs: [...jobs.values()],
     keys: [...keys.values()],
+    exclusionKeys: [...exclusionKeys.values()],
   };
 }
 
@@ -1359,6 +1375,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
         `erasures replayed: ${replayed.profiles} profile(s) removed from the restored snapshot, ` +
           `${replayed.tombstones} tombstone(s) restored` +
           (replayed.keys ? `, ${replayed.keys} erasure key(s) restored` : '') +
+          (replayed.exclusionKeys ? `, ${replayed.exclusionKeys} exclusion key(s) restored` : '') +
           (replayed.skipped ? `, ${replayed.skipped} entr(ies) skipped for workspaces the snapshot does not have` : ''),
       );
       // Only a successful replay retires this attempt's capture, and only after checking that the

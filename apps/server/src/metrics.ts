@@ -2,6 +2,7 @@ import { connect } from 'node:net';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { redactionFallbacks } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
+import { subjectKeyFailureCount } from '@agentic-marketing/events';
 import { identityLockSnapshot } from '@agentic-marketing/profiles';
 
 // A small Prometheus exposition (text format 0.0.4) built by hand: the server needs a handful of
@@ -162,6 +163,12 @@ export function createMetricsRegistry(): MetricsRegistry {
         'Texts where the redaction span pipeline disagreed with the frozen release, so the release output was used.',
       );
       sample('am_redaction_fallbacks_total', '', redactionFallbacks.count);
+
+      // Subject-key hashing failures (#1037): a person-linked write could not be keyed and will be
+      // redelivered. No label, no content; a steadily rising rate means the exclusion key is
+      // unavailable for a workspace.
+      metric('am_subject_key_failures_total', 'counter', 'Person-linked writes that failed because subject keys could not be hashed.');
+      sample('am_subject_key_failures_total', '', subjectKeyFailureCount());
 
       // The workspace identity lock (#978): how long writers waited for it and how long they held
       // it. No workspace or person label: the protocol is per-process.

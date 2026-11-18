@@ -27,6 +27,11 @@ CREATE TABLE erasure_keys (
   key_value text NOT NULL,
   key_version text NOT NULL,
   erasure_id text NOT NULL,
+  -- `full` is HMAC_exclusion of the value. `unavailable` marks an identifier whose plaintext
+  -- cannot be recovered any more (e.g. a legacy e-mail identifier with no sealed value): the row
+  -- keeps its matching hash, never a raw value, and PR 3 must refuse activation or exclude
+  -- conservatively rather than pretend it matches.
+  coverage text NOT NULL DEFAULT 'full' CHECK (coverage IN ('full', 'unavailable')),
   recorded_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, kind, key_value, key_version)
 );
@@ -53,6 +58,8 @@ COMMENT ON COLUMN erasure_keys.kind IS
 COMMENT ON COLUMN erasure_keys.key_value IS
   'HMAC_exclusion(kind, normalised value) under the workspace exclusion key; never a raw identifier.';
 COMMENT ON COLUMN erasure_keys.key_version IS
-  'The exclusion data key id that produced key_value; both versions stay valid during a planned re-key.';
+  'The exclusion data key id that produced key_value; entries stay valid while that key is retained.';
+COMMENT ON COLUMN erasure_keys.coverage IS
+  'full, or unavailable when the identifier plaintext could not be recovered; unavailable rows must not be matched.';
 COMMENT ON COLUMN erasure_keys.recorded_at IS
   'When the identifier was erased; refreshed when the same key is erased again. Never pruned by the grace window.';

@@ -11,7 +11,7 @@ import { runSink, runSubjectKeyBackfill } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runEnrollmentJobs, runSweeper } from '@agentic-marketing/journeys';
 import { refreshSnapshots, runEdgeSync, snapshotHook } from '@agentic-marketing/personalize';
-import { erasedEventFilter, runErasureCleanup, runProfileWorkers } from '@agentic-marketing/profiles';
+import { ensureExclusionKeys, erasedEventFilter, runErasureCleanup, runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
@@ -114,6 +114,14 @@ export function startScheduler(
         log: (message) => logger.info(message),
         onError: (err) => logger.error({ err }, 'sent_at backfill failed'),
       }),
+    ),
+    // One pass at start: every workspace gets its exclusion key before the first erasure or event
+    // write, so a snapshot taken before first use can never lose it (#1037 review round 3).
+    loop(
+      'exclusion-key-provision',
+      ensureExclusionKeys({ db: srv.db, kp: srv.keyProvider })
+        .then((count) => logger.info({ workspaces: count }, 'exclusion keys provisioned'))
+        .catch((err) => logger.error({ err }, 'exclusion key provisioning failed')),
     ),
     // One pass at start: fills the subject-key columns of rows written before #1037 part 1, one
     // ClickHouse partition at a time. Nothing reads the columns yet, but the contract's later part

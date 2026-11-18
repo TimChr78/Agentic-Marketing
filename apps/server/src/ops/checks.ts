@@ -5,6 +5,7 @@ import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 import { appRoleReach, createDb, type Db, normalizeHost } from '@agentic-marketing/db';
+import { clickHouseStore } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { endpointFailure, endpointOrigin, splitUrlCredentials } from '@agentic-marketing/telemetry';
 import { type Config, ENV_KEYS, loadConfig, REQUIRED_ENV_KEYS } from '../config';
@@ -1494,6 +1495,42 @@ export async function checkEgress(providers: ProviderRow[]): Promise<Check[]> {
   );
 }
 
+/**
+ * Historical subject-key coverage (#1037 part 1). The backfill reads one workspace at a time
+ * because the person tables are behind row policies, so this enumerates workspaces first. A
+ * non-zero count is what PR 3 refuses to activate over; the message carries counts only.
+ */
+export async function checkSubjectKeyCoverage(config: Config, db: Db): Promise<Check> {
+  try {
+    const workspaces = await db.admin.query<{ id: string }>('SELECT id FROM workspaces');
+    const store = clickHouseStore({ url: config.clickhouse.url, database: config.clickhouse.database });
+    try {
+      const coverage = await withTimeout(store.subjectKeyCoverage(workspaces.rows.map((row) => row.id)), 'subject-key coverage');
+      if (coverage.pending === 0)
+        return { id: 'clickhouse.subject-keys', status: 'ok', message: 'every stored row has subject-key coverage' };
+      const byTable = coverage.tables
+        .filter((table) => table.pending > 0)
+        .map((table) => `${table.table}: ${table.pending}`)
+        .join(', ');
+      return {
+        id: 'clickhouse.subject-keys',
+        status: 'warn',
+        message: `${coverage.pending} historical row(s) still lack subject-key coverage (${byTable})`,
+        hint: 'The scheduler backfills them; the read-time exclusion contract stays inactive until the count is zero.',
+      };
+    } finally {
+      await store.close().catch(() => {});
+    }
+  } catch (err) {
+    return {
+      id: 'clickhouse.subject-keys',
+      status: 'info',
+      message: `subject-key coverage could not be read: ${messageOf(err)}`,
+      hint: 'Expected before the first backfill; re-run am doctor after the scheduler has run.',
+    };
+  }
+}
+
 export async function liveChecks(config: Config): Promise<Check[]> {
   const checks: Check[] = [];
   let db: Db | undefined;
@@ -1513,6 +1550,7 @@ export async function liveChecks(config: Config): Promise<Check[]> {
     if (postgres.reachable) {
       checks.push(await checkDataKeyProvider(config, db));
       checks.push(await checkAppRole(config, db));
+      checks.push(await checkSubjectKeyCoverage(config, db));
       checks.push(...(await operationalHealthChecks(db)));
     }
 
