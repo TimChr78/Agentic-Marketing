@@ -1,6 +1,0 @@
----
-section: Added
-issues: [441]
----
-- A segment condition can count the platform's own message engagement instead of a customer event: `{ "message": "opened" | "clicked" | "delivered" | "bounced" | "complained" | "unsubscribed", within, count, channel, purpose, broadcast, journey }`, read from the message log. "Engaged readers: opened in the last 30 days" is now buildable from the platform's own data, including people whose profile was merged after a send. Opens only exist where open tracking is enabled, and some mailboxes pre-fetch the pixel, so the segment reference says how opens are measured and recommends clicks where the count must not overstate engagement. A message leaf triggers no streaming evaluation by itself: a rule containing one is re-evaluated when another part of it changes, when a consent or preference write touches the person, and on the regular recompute (`segments.refresh`).
-- The segment builder offers "Message engagement" as a kind of condition with the message event, how many, the window, channel, purpose and the broadcast or journey it counts; the review drawer and segment preview read it as a sentence. The demo seed's "Engaged readers" segment uses it, so it now has members.
