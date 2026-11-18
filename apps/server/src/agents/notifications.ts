@@ -1,5 +1,6 @@
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { activeMandate, artifactTypes } from '@agentic-marketing/artifacts';
+import { sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, asc, desc, eq, gt, inArray, isNotNull, notInArray } from 'drizzle-orm';
@@ -566,17 +567,6 @@ export async function runAgentNotifications(deps: AgentNotificationDeps, signal:
     } catch (err) {
       logger.error({ err }, 'agent notification round failed');
     }
-    if (signal.aborted) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

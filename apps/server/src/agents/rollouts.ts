@@ -1,6 +1,6 @@
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { MEASURES, runAnalyticsQuery } from '@agentic-marketing/analytics';
-import { AppError, safeErrorText } from '@agentic-marketing/core';
+import { AppError, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
@@ -485,17 +485,6 @@ export async function runExperienceRollouts(deps: RolloutDeps, signal: AbortSign
     } catch (err) {
       logger.error({ err }, 'experience rollout round failed');
     }
-    if (signal.aborted) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

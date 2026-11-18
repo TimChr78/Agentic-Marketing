@@ -1,6 +1,6 @@
 import { artifactTypes, type JourneyDefinition } from '@agentic-marketing/artifacts';
 import { campaignWithControlForMember } from '@agentic-marketing/campaigns';
-import { AppError, safeErrorText } from '@agentic-marketing/core';
+import { AppError, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
@@ -509,17 +509,6 @@ export async function runEnrollmentJobs(deps: EnrollmentDeps, signal: AbortSigna
     } catch (err) {
       logger.error({ err }, 'enrollment job round failed');
     }
-    if (signal.aborted) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

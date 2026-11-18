@@ -3,6 +3,7 @@ import { request as httpRequest } from 'node:http';
 import { connect as http2Connect } from 'node:http2';
 import { request as httpsRequest } from 'node:https';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
+import { CancelledError } from '@agentic-marketing/core';
 
 // Outbound HTTP for webhooks and connector actions, guarded against SSRF
 // (security-and-privacy.md §5): only http(s), no redirects, bounded time and response size, and
@@ -219,10 +220,19 @@ export interface SafeResponse {
  * Bounds: `maxBytes` (default 256 KiB) is a reading limit, not a retention limit: the response is
  * aborted as soon as it is crossed. `timeoutMs` (default 10 s) is a total deadline for the whole
  * request, connect, headers and body included, so a server that trickles bytes cannot keep it open.
+ * `signal` stops it earlier: a scheduler role shutting down must not wait out a provider that is
+ * still answering (#1028).
  */
 export function safeRequest(
   url: string,
-  init: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number; maxBytes?: number },
+  init: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string | Buffer;
+    timeoutMs?: number;
+    maxBytes?: number;
+    signal?: AbortSignal;
+  },
   policy: EgressPolicy,
 ): Promise<SafeResponse> {
   const problem = checkUrl(url, policy);
@@ -238,9 +248,21 @@ export function safeRequest(
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
+      init.signal?.removeEventListener('abort', onAbort);
       if (err) reject(err);
       else resolve(value!);
     };
+    // A cancellation is not a provider failure (#1043 review): callers stop quietly and keep it out
+    // of their error state.
+    const cancelled = () => new CancelledError('the request was cancelled');
+    const onAbort = () => {
+      req.destroy();
+      finish(cancelled());
+    };
+    if (init.signal?.aborted) {
+      finish(cancelled());
+      return;
+    }
     const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(
       u,
       {
@@ -281,6 +303,7 @@ export function safeRequest(
       req.destroy();
       finish(new EgressError(`timed out after ${timeoutMs} ms`));
     }, timeoutMs);
+    init.signal?.addEventListener('abort', onAbort, { once: true });
     req.on('error', (err) => finish(err));
     if (init.body !== undefined) req.write(init.body);
     req.end();
@@ -297,6 +320,7 @@ export function egressFetch(policy: EgressPolicy): typeof fetch {
     const url = req ? req.url : String(input);
     const headers = Object.fromEntries(new Headers(req ? req.headers : init?.headers).entries());
     const method = init?.method ?? req?.method ?? 'GET';
+    const signal = init?.signal ?? req?.signal ?? undefined;
     // Binary bodies (gzipped uploads) pass through as bytes; anything else as text.
     const raw = init?.body;
     const body =
@@ -307,7 +331,11 @@ export function egressFetch(policy: EgressPolicy): typeof fetch {
         : req && method !== 'GET' && method !== 'HEAD'
           ? Buffer.from(await req.arrayBuffer())
           : undefined;
-    const res = await safeRequest(url, { method, headers, body, timeoutMs: 30_000, maxBytes: 1024 * 1024 }, policy);
+    const res = await safeRequest(
+      url,
+      { method, headers, body, timeoutMs: 30_000, maxBytes: 1024 * 1024, ...(signal ? { signal } : {}) },
+      policy,
+    );
     return new Response(res.status === 204 || res.status === 304 ? null : res.body, { status: res.status, headers: res.headers });
   }) as typeof fetch;
 }

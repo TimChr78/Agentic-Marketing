@@ -1,3 +1,4 @@
+import { sleep } from '@agentic-marketing/core';
 import type pg from 'pg';
 
 // The `messages.sent_at` backfill (#453, 0.10.1 review). The 0.10.1 migration only adds the
@@ -106,16 +107,6 @@ export async function runSentAtBackfill(
       return;
     }
     if (signal.aborted) return;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, pauseMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(pauseMs, signal);
   }
 }

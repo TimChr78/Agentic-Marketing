@@ -1,3 +1,4 @@
+import { sleep } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import type { BusEvent, EventBus, EventStore } from '@agentic-marketing/events';
@@ -27,6 +28,8 @@ export async function runSegmentScheduler(
         `SELECT DISTINCT workspace_id FROM artifacts WHERE type = 'segment' AND published_version IS NOT NULL AND NOT archived`,
       );
       for (const { workspace_id: ws } of rows) {
+        // A workspace is the batch item: a stop lands between workspaces, not after the last one.
+        if (signal.aborted) break;
         await deps.db
           .withWorkspace(ws, async (tx) => {
             const all = await publishedSegments(tx);
@@ -53,6 +56,6 @@ export async function runSegmentScheduler(
     } catch (err) {
       logger.error({ err }, 'segment scheduler round failed');
     }
-    await new Promise((r) => setTimeout(r, deps.tickMs ?? 30_000));
+    await sleep(deps.tickMs ?? 30_000, signal);
   }
 }

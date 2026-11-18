@@ -16,6 +16,7 @@ import {
   decodeTimestampCursor,
   encodeTimestampCursor,
   newId,
+  sleep,
   type ZonedTime,
   zonedInstant,
   zonedParts,
@@ -1831,16 +1832,6 @@ export async function dueBroadcastRuns(db: Db, limit = 20): Promise<{ workspaceI
 export async function runBroadcasts(deps: BroadcastDeps, signal: AbortSignal, tickMs = 5000) {
   while (!signal.aborted) {
     await runBroadcastsOnce(deps).catch((err) => logger.error({ err }, 'broadcast tick failed'));
-    await new Promise<void>((r) => {
-      const timer = setTimeout(r, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          r();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

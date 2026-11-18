@@ -1,9 +1,8 @@
 import { hkdfSync } from 'node:crypto';
-import { setTimeout as delay } from 'node:timers/promises';
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { type Auth, hashedResetTokenIdentifier, inAuthTransaction, mintResetVerification } from '@agentic-marketing/auth';
 import { appendAuditEntry, type Principal } from '@agentic-marketing/commands';
-import { newId, sha256 } from '@agentic-marketing/core';
+import { newId, sha256, sleep } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { open, seal } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -666,10 +665,7 @@ export async function runPasswordResetDeliveries(
       logger.error({ err }, 'password reset delivery round failed');
     }
     if (signal.aborted) break;
-    if (!handled)
-      await delay(tickMs, undefined, { signal }).catch((err) => {
-        if (!signal.aborted) throw err;
-      });
+    if (!handled) await sleep(tickMs, signal);
   }
 }
 

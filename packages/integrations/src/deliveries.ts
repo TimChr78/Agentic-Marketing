@@ -1,5 +1,5 @@
 import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
-import { AppError, redactCredentials, safeErrorText } from '@agentic-marketing/core';
+import { AppError, redactCredentials, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { consentStateOf, currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
@@ -232,6 +232,6 @@ export async function runDeliveries(db: Db, deps: DeliveryDeps, signal: AbortSig
     } catch (err) {
       logger.error({ err }, 'delivery worker round failed');
     }
-    if (!handled) await new Promise((r) => setTimeout(r, 250));
+    if (!handled) await sleep(250, signal);
   }
 }

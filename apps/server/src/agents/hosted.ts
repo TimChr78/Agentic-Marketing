@@ -17,7 +17,7 @@ import { sendMemberEmails } from '@agentic-marketing/alerts';
 import { artifactTypes, publishedSingleton } from '@agentic-marketing/artifacts';
 import { HOSTED_CLAIM_STALE_MINUTES, nextHostedRunAt } from '@agentic-marketing/auth';
 import { agentPrincipal, type Executor, type Principal } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
+import { AppError, newId, sleep } from '@agentic-marketing/core';
 import { type Db, type Role, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
 import { Client } from '@modelcontextprotocol/client';
@@ -956,17 +956,6 @@ export async function runHostedAgents(deps: HostedAgentDeps, signal: AbortSignal
     } catch (err) {
       logger.error({ err }, 'hosted agent sweep failed');
     }
-    if (signal.aborted) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

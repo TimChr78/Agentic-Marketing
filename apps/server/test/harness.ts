@@ -133,13 +133,20 @@ function openHandles(): string {
  * stuck pool does not leave the others open too. A step that throws is named and the rest still
  * run. Throws one error naming every problem, failing the file fast and clearly.
  */
-export async function closeBounded(stages: readonly CloseStage[], limits: { budgetMs: number; stageMs?: number }): Promise<void> {
+export async function closeBounded(
+  stages: readonly CloseStage[],
+  limits: { budgetMs: number; stageMs?: number; now?: () => number },
+): Promise<void> {
   const stageMs = limits.stageMs ?? limits.budgetMs;
-  const started = Date.now();
+  // The budget is measured on this clock. Wall time leaves a step that times out at exactly the
+  // budget reported as either "spent" or not, one millisecond either way (#1041); a test that spends
+  // the budget deterministically passes its own clock.
+  const now = limits.now ?? Date.now;
+  const started = now();
   const open: string[] = [];
   const failed: string[] = [];
   for (const stage of stages) {
-    const left = limits.budgetMs - (Date.now() - started);
+    const left = limits.budgetMs - (now() - started);
     if (left <= 0) {
       open.push(`${stage.name}${await diagnose(stage)} (did not start: the budget was spent)`);
       continue;

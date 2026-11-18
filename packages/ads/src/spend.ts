@@ -1,6 +1,6 @@
 import { type ConversionMap, publishedSingleton } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, providerDiagnostic } from '@agentic-marketing/core';
+import { AppError, providerDiagnostic, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, EgressError, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
@@ -375,24 +375,20 @@ export async function runSpendImport(
         `SELECT workspace_id, id FROM connections WHERE enabled AND (
            (connector = 'meta_ads' AND settings ? 'adAccountId') OR (connector = 'google_ads' AND oauth_status = 'connected'))`,
       );
-      for (const r of rows)
-        await importSpend(deps.db, deps.events, r.workspace_id, r.id, 3, deps).catch((err) =>
-          logger.warn({ err, connection: r.id }, 'spend import failed'),
-        );
+      for (const r of rows) {
+        // Between accounts only (#1043 review): a read already started finishes and stores its
+        // pages and its completeness window, so a stop never leaves a false "incomplete" warning
+        // behind. Stopping means not starting the next account.
+        if (signal.aborted) return;
+        await importSpend(deps.db, deps.events, r.workspace_id, r.id, 3, deps).catch((err) => {
+          // A stop is not a failed import: the stored window is what a later round replaces.
+          if (!signal.aborted) logger.warn({ err, connection: r.id }, 'spend import failed');
+        });
+      }
     } catch (err) {
       logger.error({ err }, 'spend import round failed');
     }
-    await new Promise<void>((r) => {
-      const timer = setTimeout(r, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          r();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }
 

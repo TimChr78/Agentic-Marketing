@@ -1,3 +1,4 @@
+import { sleep } from '@agentic-marketing/core';
 import {
   claimErasureCleanupJobs,
   completeErasureCleanup,
@@ -243,6 +244,6 @@ export async function runErasureCleanup(
     } catch (err) {
       logger.error({ err }, 'erasure cleanup round failed');
     }
-    if (!claimed) await new Promise((r) => setTimeout(r, idleMs));
+    if (!claimed) await sleep(idleMs, signal);
   }
 }

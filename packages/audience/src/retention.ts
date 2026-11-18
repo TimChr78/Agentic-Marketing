@@ -1,3 +1,4 @@
+import { sleep } from '@agentic-marketing/core';
 import { type Db, JOURNEY_EVENT_RETENTION_DAYS } from '@agentic-marketing/db';
 import type { EventStore, StoredEvent } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
@@ -299,16 +300,7 @@ export async function runRetentionOnce(deps: RetentionDeps): Promise<{
 export async function runRetention(deps: RetentionDeps, signal: AbortSignal, tickMs = 3_600_000) {
   while (!signal.aborted) {
     await runRetentionOnce(deps).catch((err) => logger.error({ err }, 'retention round failed'));
-    await new Promise<void>((r) => {
-      const timer = setTimeout(r, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          r();
-        },
-        { once: true },
-      );
-    });
+    // Abortable: a stop that lands mid-round must not wait out an hourly tick (#1028).
+    await sleep(tickMs, signal);
   }
 }

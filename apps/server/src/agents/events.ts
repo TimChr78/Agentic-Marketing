@@ -1,5 +1,5 @@
 import { HELD_RECHECK } from '@agentic-marketing/artifacts';
-import { newId } from '@agentic-marketing/core';
+import { newId, sleep } from '@agentic-marketing/core';
 import { type AgentEventType, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lt } from 'drizzle-orm';
@@ -437,17 +437,6 @@ export async function runAgentEvents(deps: AgentEventDeps, signal: AbortSignal, 
     } catch (err) {
       logger.error({ err }, 'agent event round failed');
     }
-    if (signal.aborted) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }
