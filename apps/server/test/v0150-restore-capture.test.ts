@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { subjectKeyHasher } from '@agentic-marketing/profiles';
+import { localKeyProvider } from '@agentic-marketing/secrets';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../../packages/db/test/disposable';
 import { restoreBackup, restoreErasureLogPath, restoreLockPath, restoreTargetIdentity, retireRestoreCapture } from '../src/ops/backup-lib';
@@ -116,6 +118,36 @@ describe.skipIf(!hasTestDatabase())('restore capture binding and recovery (#1009
     const merged = await readCapture(capture);
     expect(merged.log.erasures.map((e) => e.id).sort()).toEqual([first.erasureId, second.erasureId].sort());
     expect(merged.log.keys).toHaveLength(4);
+  }, 120_000);
+
+  it('never puts a raw identifier into the saved capture (#1037)', async () => {
+    const d = await createDisposableDb('restore_capture_keys');
+    dbs.push(d);
+    const emailAsUserId = 'capture-person@example.test';
+    const kp = localKeyProvider(Buffer.alloc(32, 13).toString('base64'));
+    const hasher = await subjectKeyHasher({ db: d.db, kp })(d.workspace);
+    const hash = await hasher.hash('user_id', emailAsUserId);
+    const version = hasher.version;
+    hasher.dispose();
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, 'era_capture_key', ARRAY['prf_capture_key']::text[], 'user_test', 'capture key test', '{"profiles":1}')`,
+      [d.workspace],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id)
+       VALUES ($1, 'user_id', $2, $3, 'era_capture_key')`,
+      [d.workspace, hash, version],
+    );
+
+    const { dir } = await makeBackup();
+    const capture = restoreErasureLogPath(dir);
+    await expect(
+      restoreBackup({ dir, env: { ...envFor(d), APP_DB_PASSWORD: undefined }, skipKeyCheck: true, log: () => {} }),
+    ).rejects.toThrow(/APP_DB_PASSWORD/);
+    const text = await readFile(capture, 'utf8');
+    expect(text).toContain(hash);
+    expect(text).not.toContain(emailAsUserId);
   }, 120_000);
 
   it('refuses a capture bound to another target instead of reusing it', async () => {

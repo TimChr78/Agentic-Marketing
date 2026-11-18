@@ -120,10 +120,19 @@ export function startScheduler(
     // needs them for every historical row.
     loop(
       'subject-key-backfill',
-      runSubjectKeyBackfill({ events: srv.events }, signal, {
-        log: (message) => logger.info(message),
-        onError: (err) => logger.error({ err }, 'subject-key backfill failed'),
-      }),
+      runSubjectKeyBackfill(
+        {
+          events: srv.events,
+          // The person tables are behind workspace row policies, so the backfill reads one
+          // workspace at a time instead of asking for a cross-tenant view (#1037).
+          workspaces: async () => (await srv.db.admin.query<{ id: string }>('SELECT id FROM workspaces')).rows.map((row) => row.id),
+        },
+        signal,
+        {
+          log: (message) => logger.info(message),
+          onError: (err) => logger.error({ err }, 'subject-key backfill failed'),
+        },
+      ),
     ),
     // The idempotency-key retention pass (#976): one pass at start, then periodically. It runs as
     // the owner in bounded batches with SKIP LOCKED, so several schedulers can share the work.

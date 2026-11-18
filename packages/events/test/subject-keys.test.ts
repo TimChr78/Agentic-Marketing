@@ -1,24 +1,38 @@
+import { createHmac } from 'node:crypto';
 import { newUuid } from '@agentic-marketing/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runScoped } from '../../db/test/run';
-import type { SubjectKeyHashes } from '../src';
 import {
   type BusEvent,
   clickHouseStore,
+  clickIdsOfEvent,
   type EventStore,
   type JourneyEvent,
   type MessageEvent,
   migrateClickHouse,
   resetClickHouse,
+  type SubjectKeyHasher,
+  type SubjectKeyKind,
 } from '../src';
 
-// #1037 part 1: person-linked ClickHouse rows carry the ledger's subject keys, the erased-subjects
-// table takes idempotent publishes, and the historical backfill fills old rows in partitions. No
-// read path uses any of it yet.
+// #1037 part 1: person-linked ClickHouse rows keep HMAC_exclusion of every identifier, the
+// erased-subjects table is generation-versioned, and the historical backfill reads rows, hashes
+// their identifiers in the app and writes them back — it never lets the key reach ClickHouse.
 
 const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 const CH_DB = runScoped('am_test_subject_keys');
 const ws = newUuid();
+const KEY = Buffer.alloc(32, 9);
+
+const hmac = (kind: SubjectKeyKind, value: string) => createHmac('sha256', KEY).update(`${kind}:${value}`).digest('hex');
+const hasher: SubjectKeyHasher = {
+  version: 'dk_exclusion_test',
+  async hash(kind, value) {
+    return hmac(kind, value);
+  },
+  dispose() {},
+};
+const factory = async () => hasher;
 
 let store: EventStore;
 
@@ -86,7 +100,7 @@ async function rows<T>(query: string, workspace: string = ws, params: Record<str
 beforeAll(async () => {
   await resetClickHouse(CH_URL, CH_DB);
   await migrateClickHouse(CH_URL, CH_DB);
-  store = clickHouseStore({ url: CH_URL, database: CH_DB });
+  store = clickHouseStore({ url: CH_URL, database: CH_DB, subjectKeys: factory });
 }, 60_000);
 
 afterAll(async () => {
@@ -94,140 +108,128 @@ afterAll(async () => {
 });
 
 describe('subject keys on stored rows (#1037 part 1)', () => {
-  it('fills every new event’s subject columns, including keyed e-mail and phone hashes', async () => {
-    const hashes: SubjectKeyHashes = { emailHash: 'email-hash-1', phoneHash: 'phone-hash-1', version: 'dk_subject_1' };
-    const withKeys = clickHouseStore({
-      url: CH_URL,
-      database: CH_DB,
-      subjectKeys: async (events) => events.map((_event, i) => (i === 0 ? hashes : null)),
-    });
+  it('fills every new event’s subject columns with keyed hashes, including traits and click ids', async () => {
+    const timestamp = new Date(Date.UTC(2026, 8, 11, 12, 0, 0)).toISOString();
+    const fresh = clickHouseStore({ url: CH_URL, database: CH_DB, subjectKeys: factory });
     try {
-      await withKeys.insert([
-        event(1, { piiTraits: { email: 'person@example.test', phone: '+15550100300' } }),
+      await fresh.insert([
+        event(1, {
+          profileId: 'prf-1',
+          previousId: 'anon-previous-1',
+          timestamp,
+          piiTraits: { email: 'Person@Example.test', phone: '+1 (555) 010-0300' },
+          context: { clickIds: { gclid: 'gclid-abc123', fbc: 'fb.1.1700000000000.abcdef' } },
+        }),
         event(2, { anonymousId: 'anon-2', userId: '' }),
       ]);
     } finally {
-      await withKeys.close();
+      await fresh.close();
     }
-    const stored = await rows<{
-      event_id: string;
-      subject_profile_id: string;
-      subject_anonymous_id: string;
-      subject_user_id: string;
-      subject_email_hash: string;
-      subject_phone_hash: string;
-      subject_key_version: string;
-      subject_keys_set: number | string;
-    }>(
-      `SELECT event_id, subject_profile_id, subject_anonymous_id, subject_user_id, subject_email_hash,
-              subject_phone_hash, subject_key_version, subject_keys_set
+    const stored = await rows<Record<string, string | number>>(
+      `SELECT event_id, subject_profile, subject_anonymous, subject_user, subject_previous, subject_email,
+              subject_phone, subject_gclid, subject_fbc, subject_key_version, subject_keys_set
          FROM events FINAL WHERE workspace_id = {ws:UUID} ORDER BY event_id`,
     );
-    expect(stored.find((r) => r.event_id === 'subject-1')).toMatchObject({
-      subject_profile_id: 'prf-1',
-      subject_anonymous_id: 'anon-1',
-      subject_user_id: 'user-1',
-      subject_email_hash: 'email-hash-1',
-      subject_phone_hash: 'phone-hash-1',
-      subject_key_version: 'dk_subject_1',
+    const first = stored.find((r) => r.event_id === 'subject-1')!;
+    expect(first).toMatchObject({
+      subject_profile: hmac('profile', 'prf-1'),
+      subject_anonymous: hmac('anonymous_id', 'anon-1'),
+      subject_user: hmac('user_id', 'user-1'),
+      subject_previous: hmac('alias_previous_id', 'anon-previous-1'),
+      subject_email: hmac('email', 'Person@Example.test'),
+      subject_phone: hmac('phone', '+1 (555) 010-0300'),
+      subject_gclid: hmac('gclid', 'gclid-abc123'),
+      subject_fbc: hmac('fbc', 'fb.1.1700000000000.abcdef'),
+      subject_key_version: 'dk_exclusion_test',
       subject_keys_set: 1,
     });
-    // No e-mail/phone trait on the second event: the ids are still there, the hashes stay empty.
-    expect(stored.find((r) => r.event_id === 'subject-2')).toMatchObject({
-      subject_profile_id: 'prf-2',
-      subject_anonymous_id: 'anon-2',
-      subject_user_id: '',
-      subject_email_hash: '',
-      subject_phone_hash: '',
-      subject_key_version: '',
-      subject_keys_set: 1,
-    });
-    // Nothing stored the plaintext traits.
-    const serialised = JSON.stringify(stored);
-    expect(serialised).not.toContain('person@example.test');
-    expect(serialised).not.toContain('15550100300');
+    // The click-id list is the same one the ads package uses.
+    expect(Object.keys(clickIdsOfEvent({ clickIds: { gclid: 'abcd' } }, 0))).toEqual(['gclid']);
+    // No raw identifier in the subject columns (the legacy id columns are unchanged).
+    const serialised = JSON.stringify(
+      stored.map((r) => ({ ...r, subject_email: r.subject_email, subject_user: r.subject_user, subject_phone: r.subject_phone })),
+    );
+    for (const raw of ['Person@Example.test', 'person@example.test', '5550100300', 'user-1', 'anon-previous-1', 'gclid-abc123'])
+      expect(serialised).not.toContain(raw);
   });
 
-  it('fills the subject profile id on new message and journey events', async () => {
+  it('fills the subject profile hash on new message and journey events', async () => {
     await store.insertMessageEvents([messageEvent(1)]);
     await store.insertJourneyEvents([journeyEvent(1)]);
-    const [message] = await rows<{ subject_profile_id: string; subject_keys_set: number | string }>(
-      `SELECT subject_profile_id, subject_keys_set FROM message_events FINAL WHERE workspace_id = {ws:UUID} AND message_id = {id:String}`,
+    const [message] = await rows<Record<string, string | number>>(
+      `SELECT subject_profile, subject_key_version, subject_keys_set FROM message_events FINAL
+        WHERE workspace_id = {ws:UUID} AND message_id = {id:String}`,
       ws,
       { id: 'msg-1' },
     );
-    const [journey] = await rows<{ subject_profile_id: string; subject_keys_set: number | string }>(
-      `SELECT subject_profile_id, subject_keys_set FROM journey_events FINAL WHERE workspace_id = {ws:UUID} AND journey_id = {id:String}`,
+    const [journey] = await rows<Record<string, string | number>>(
+      `SELECT subject_profile, subject_key_version, subject_keys_set FROM journey_events FINAL
+        WHERE workspace_id = {ws:UUID} AND journey_id = {id:String}`,
       ws,
       { id: 'jrn_test' },
     );
-    expect(message).toMatchObject({ subject_profile_id: 'prf-msg-1', subject_keys_set: 1 });
-    expect(journey).toMatchObject({ subject_profile_id: 'prf-jrn-1', subject_keys_set: 1 });
+    expect(message).toMatchObject({
+      subject_profile: hmac('profile', 'prf-msg-1'),
+      subject_key_version: 'dk_exclusion_test',
+      subject_keys_set: 1,
+    });
+    expect(journey).toMatchObject({
+      subject_profile: hmac('profile', 'prf-jrn-1'),
+      subject_key_version: 'dk_exclusion_test',
+      subject_keys_set: 1,
+    });
   });
 
-  it('publishes erasure exclusions idempotently', async () => {
-    const published = [
+  it('keeps the newest exclusion generation and never partitions it by month', async () => {
+    const published = (generation: number, recordedAt: string) => [
       {
         workspaceId: ws,
         kind: 'profile' as const,
-        key: 'prf-pub',
-        keyVersion: '',
+        key: 'hash-profile-pub',
+        keyVersion: 'dk_exclusion_test',
         erasureId: 'era_pub',
-        generation: 1,
-        recordedAt: '2026-11-01T00:00:00.000Z',
-      },
-      {
-        workspaceId: ws,
-        kind: 'email' as const,
-        key: 'hash-pub',
-        keyVersion: 'dk_pub',
-        erasureId: 'era_pub',
-        generation: 1,
-        recordedAt: '2026-11-01T00:00:00.000Z',
+        generation,
+        recordedAt,
       },
     ];
-    await store.publishErasedSubjects(published);
-    await store.publishErasedSubjects(published);
-    const publishedRows = await rows<{ kind: string; key: string; key_version: string }>(
-      `SELECT kind, key, key_version FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID} ORDER BY kind, key`,
+    await store.publishErasedSubjects(published(2, '2026-11-01T00:00:00.000Z'));
+    await store.publishErasedSubjects(published(1, '2026-01-15T00:00:00.000Z'));
+    const kept = await rows<{ generation: number | string }>(
+      `SELECT generation FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID} AND kind = 'profile' AND key = 'hash-profile-pub'`,
     );
-    expect(publishedRows).toEqual([
-      { kind: 'email', key: 'hash-pub', key_version: 'dk_pub' },
-      { kind: 'profile', key: 'prf-pub', key_version: '' },
-    ]);
+    // The older generation, published later and in another month, must not win or create a second row.
+    expect(kept).toEqual([{ generation: 2 }]);
   });
 
-  it('backfills historical rows by partition, resumably and idempotently', async () => {
-    const backfillWs = newUuid();
-    // Legacy rows: written before the subject columns existed, one per month so the backfill has
-    // three partitions to walk, plus one message and one journey row.
-    const legacy = (i: number, month: number, over: Partial<Record<string, unknown>> = {}) => ({
-      workspace_id: backfillWs,
-      event_id: `legacy-${month}-${i}`,
+  it('backfills historical rows in the app, revisiting a delayed row behind the cursor', async () => {
+    const legacyWs = newUuid();
+    const legacy = (name: string, day: number, over: Record<string, unknown> = {}) => ({
+      workspace_id: legacyWs,
+      event_id: `legacy-${name}`,
       source_id: 'src_legacy',
-      received_at: `2026-0${month}-10 12:00:0${i}`,
-      timestamp: `2026-0${month}-10 12:00:0${i}`,
+      received_at: `2026-07-${String(day).padStart(2, '0')} 12:00:00`,
+      timestamp: `2026-07-${String(day).padStart(2, '0')} 12:00:00`,
       type: 'track',
-      name: 'Legacy Event',
-      anonymous_id: `legacy-anon-${month}-${i}`,
-      user_id: `legacy-user-${month}-${i}`,
-      profile_id: `prf-legacy-${month}-${i}`,
+      name,
+      anonymous_id: `legacy-anon-${name}`,
+      user_id: `legacy-user-${name}`,
+      profile_id: `prf-legacy-${name}`,
       properties: {},
       traits: {},
-      context: {},
+      context: { clickIds: { gclid: `gclid-${name}-1234` } },
       consent: {},
       ...over,
     });
     await store.client.insert({
       table: 'events',
-      values: [legacy(1, 7), legacy(2, 7), legacy(3, 8), legacy(4, 9)],
+      values: [legacy('Bravo', 10), legacy('Charlie', 20), legacy('Delta', 25)],
       format: 'JSONEachRow',
     });
     await store.client.insert({
       table: 'message_events',
       values: [
         {
-          workspace_id: backfillWs,
+          workspace_id: legacyWs,
           message_id: 'legacy-msg',
           event_id: 'legacy-evt',
           type: 'delivered',
@@ -249,7 +251,7 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
       table: 'journey_events',
       values: [
         {
-          workspace_id: backfillWs,
+          workspace_id: legacyWs,
           journey_id: 'jrn_legacy',
           version: 1,
           participant_id: 1,
@@ -264,73 +266,79 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
       format: 'JSONEachRow',
     });
 
-    // One partition per table per call: July only for events, counts still 0 elsewhere.
-    const first = await store.backfillSubjectKeys({ partitionsPerCall: 1 });
+    // One row per table and workspace per call: the first call advances without finishing.
+    const first = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
     expect(first.done).toBe(false);
-    const afterOne = await rawSubjects(backfillWs);
-    expect(afterOne).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ event_id: 'legacy-7-1', subject_profile_id: 'prf-legacy-7-1', subject_keys_set: 1 }),
-        expect.objectContaining({ event_id: 'legacy-9-4', subject_profile_id: '', subject_keys_set: 0 }),
-      ]),
-    );
-    expect(afterOne.find((r) => r.event_id === 'legacy-9-4')?.subject_profile_id).toBe('');
+    expect(first.tables.filter((t) => t.workspaceId === legacyWs).every((t) => t.advanced || t.done)).toBe(true);
 
-    // A new store instance (a restart) resumes from the cursor and finishes every partition.
-    const restarted = clickHouseStore({ url: CH_URL, database: CH_DB });
+    // A legacy row that sorts before the cursor lands after it passed. The FINAL count catches it
+    // and the dirty pass revisits it.
+    await store.client.insert({ table: 'events', values: [legacy('Alpha', 1)], format: 'JSONEachRow' });
+
+    // A fresh store (a restart) resumes from the persisted cursor and finishes the job.
+    const restarted = clickHouseStore({ url: CH_URL, database: CH_DB, subjectKeys: factory });
     try {
-      for (let i = 0; i < 10; i++) {
-        const step = await restarted.backfillSubjectKeys({ partitionsPerCall: 1 });
+      for (let i = 0; i < 20; i++) {
+        const step = await restarted.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
         if (step.done) break;
-        expect(step.tables.every((t) => t.pending === false)).toBe(true);
       }
     } finally {
       await restarted.close();
     }
-    const finished = await rawSubjects(backfillWs);
-    for (const row of finished) {
-      expect(row.subject_keys_set).toBe(1);
-    }
-    expect(finished.find((r) => r.event_id === 'legacy-8-3')).toMatchObject({
-      subject_profile_id: 'prf-legacy-8-3',
-      subject_anonymous_id: 'legacy-anon-8-3',
-      subject_user_id: 'legacy-user-8-3',
+
+    const settings = await store.settingsFor(legacyWs);
+    const rs = await store.client.query({
+      query: `SELECT event_id, subject_profile, subject_anonymous, subject_user, subject_gclid, subject_key_version, subject_keys_set
+              FROM events FINAL WHERE workspace_id = {ws:UUID} ORDER BY event_id`,
+      query_params: { ws: legacyWs },
+      format: 'JSONEachRow',
+      clickhouse_settings: settings,
     });
-    const messages = await rows<{ subject_profile_id: string; subject_keys_set: number | string }>(
-      `SELECT subject_profile_id, subject_keys_set FROM message_events FINAL WHERE workspace_id = {ws:UUID} AND message_id = 'legacy-msg'`,
-      backfillWs,
+    const backfilled = await rs.json<Record<string, string | number>>();
+    expect(backfilled.map((r) => r.event_id)).toEqual(['legacy-Alpha', 'legacy-Bravo', 'legacy-Charlie', 'legacy-Delta']);
+    for (const row of backfilled) {
+      const name = String(row.event_id).replace('legacy-', '');
+      expect(row).toMatchObject({
+        subject_profile: hmac('profile', `prf-legacy-${name}`),
+        subject_anonymous: hmac('anonymous_id', `legacy-anon-${name}`),
+        subject_user: hmac('user_id', `legacy-user-${name}`),
+        subject_gclid: hmac('gclid', `gclid-${name}-1234`),
+        subject_key_version: 'dk_exclusion_test',
+        subject_keys_set: 1,
+      });
+    }
+    const [message] = await rows<Record<string, string | number>>(
+      `SELECT subject_profile, subject_keys_set FROM message_events FINAL WHERE workspace_id = {ws:UUID} AND message_id = 'legacy-msg'`,
+      legacyWs,
     );
-    const journeys = await rows<{ subject_profile_id: string; subject_keys_set: number | string }>(
-      `SELECT subject_profile_id, subject_keys_set FROM journey_events FINAL WHERE workspace_id = {ws:UUID} AND journey_id = 'jrn_legacy'`,
-      backfillWs,
+    const [journey] = await rows<Record<string, string | number>>(
+      `SELECT subject_profile, subject_keys_set FROM journey_events FINAL WHERE workspace_id = {ws:UUID} AND journey_id = 'jrn_legacy'`,
+      legacyWs,
     );
-    expect(messages[0]).toMatchObject({ subject_profile_id: 'prf-legacy-msg', subject_keys_set: 1 });
-    expect(journeys[0]).toMatchObject({ subject_profile_id: 'prf-legacy-jrn', subject_keys_set: 1 });
+    expect(message).toMatchObject({ subject_profile: hmac('profile', 'prf-legacy-msg'), subject_keys_set: 1 });
+    expect(journey).toMatchObject({ subject_profile: hmac('profile', 'prf-legacy-jrn'), subject_keys_set: 1 });
 
-    // Idempotent: a completed backfill reports done and rewrites nothing.
-    const again = await store.backfillSubjectKeys({ partitionsPerCall: 1 });
+    // Idempotent: a completed backfill reports done and writes nothing.
+    const again = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
     expect(again.done).toBe(true);
-    expect(again.tables.every((t) => !t.advanced && !t.pending)).toBe(true);
+    expect(again.tables.every((t) => !t.advanced && t.done)).toBe(true);
   }, 120_000);
-});
 
-/** Raw subject columns of every backfilled event row, for the given workspace. */
-async function rawSubjects(backfillWs: string): Promise<
-  {
-    event_id: string;
-    subject_profile_id: string;
-    subject_anonymous_id: string;
-    subject_user_id: string;
-    subject_keys_set: number | string;
-  }[]
-> {
-  const settings = await store.settingsFor(backfillWs);
-  const rs = await store.client.query({
-    query: `SELECT event_id, subject_profile_id, subject_anonymous_id, subject_user_id, subject_keys_set
-            FROM events FINAL WHERE workspace_id = {ws:UUID} ORDER BY event_id`,
-    query_params: { ws: backfillWs },
-    format: 'JSONEachRow',
-    clickhouse_settings: settings,
+  it('fails the write when the exclusion key cannot be resolved', async () => {
+    const broken = clickHouseStore({
+      url: CH_URL,
+      database: CH_DB,
+      subjectKeys: async () => {
+        throw new Error('exclusion key unavailable');
+      },
+    });
+    try {
+      await expect(broken.insert([event(9)])).rejects.toThrow('exclusion key unavailable');
+    } finally {
+      await broken.close();
+    }
+    // Nothing was stored for the failed row.
+    const stored = await rows<{ event_id: string }>(`SELECT event_id FROM events FINAL WHERE event_id = 'subject-9'`);
+    expect(stored).toEqual([]);
   });
-  return rs.json();
-}
+});

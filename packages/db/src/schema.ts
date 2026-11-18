@@ -334,7 +334,7 @@ export const dataKeys = pgTable(
     kekId: text('kek_id').notNull(),
     wrappedKey: bytea('wrapped_key').notNull(),
     active: boolean('active').notNull().default(true),
-    purpose: text('purpose').$type<'secrets' | 'identity' | 'matching'>().notNull().default('secrets'),
+    purpose: text('purpose').$type<'secrets' | 'identity' | 'matching' | 'exclusion'>().notNull().default('secrets'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.workspaceId, t.id] })],
@@ -542,15 +542,17 @@ export const erasureTombstones = pgTable(
 
 /**
  * The kinds the durable erasure-key ledger records (#1037). `profile` covers the whole merged
- * family; `anonymous_id` and `user_id` are the values stored rows carry; `email` and `phone` are
- * the matching key's HMAC. The ClickHouse `erased_subjects.kind` uses the same strings.
+ * family; `anonymous_id`, `user_id` and `alias_previous_id` cover the ids stored rows carry; the
+ * click id types are the advertising identifiers the click-id hook attaches to a person; `email`
+ * and `phone` are the trait identifiers. Values are always HMAC_exclusion(kind, value). The
+ * ClickHouse `erased_subjects.kind` and subject columns use the same names.
  */
-export type ErasureKeyKind = 'profile' | 'anonymous_id' | 'user_id' | 'email' | 'phone';
+export type ErasureKeyKind = 'profile' | 'anonymous_id' | 'user_id' | 'alias_previous_id' | 'email' | 'phone' | ClickIdType;
 
 /**
- * The durable erasure-key ledger (#1037, 0.17.0): one pseudonymous key per erased identifier,
- * kept independently of the grace-window tombstones. Read-time exclusion matches stored rows'
- * subject keys against these rows; nothing prunes them while the erasure stands.
+ * The durable erasure-key ledger (#1037, 0.17.0): one keyed hash per erased identifier, kept
+ * independently of the grace-window tombstones. Read-time exclusion matches stored rows' subject
+ * keys against these rows; nothing prunes them while the erasure stands.
  */
 export const erasureKeys = pgTable(
   'erasure_keys',
@@ -558,8 +560,8 @@ export const erasureKeys = pgTable(
     workspaceId: uuid('workspace_id').notNull(),
     kind: text('kind').$type<ErasureKeyKind>().notNull(),
     keyValue: text('key_value').notNull(),
-    /** The matching data key id behind a hashed value; empty for values that are not hashed. */
-    keyVersion: text('key_version').notNull().default(''),
+    /** The exclusion data key id behind a hashed value; never empty for a ledger row. */
+    keyVersion: text('key_version').notNull(),
     erasureId: text('erasure_id').notNull(),
     recordedAt: ts('recorded_at').notNull().defaultNow(),
   },

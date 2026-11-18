@@ -52,6 +52,12 @@ export interface PrepareKeysOptions {
    * Identity values (e-mail, phone) need no per-value key: their match hash uses the matching key.
    */
   purposes?: readonly DataKeyPurpose[];
+  /**
+   * Older, inactive keys of these purposes to prepare too. An erasure opens the sealed plaintext of
+   * e-mail/phone identifiers, whose per-profile key may be wrapped by an identity key that has
+   * since been rotated; preparing every identity key keeps that unwrap in memory only (#1037).
+   */
+  alsoInactive?: readonly DataKeyPurpose[];
 }
 
 /** A memory-only provider whose plaintext copies can be zeroed when the protected block ends. */
@@ -123,6 +129,7 @@ export async function prepareKeys(
   // One deterministic order for every preparer: two concurrent first uses must take the same
   // purposes in the same order, or each can hold the lock the other waits for (a deadlock).
   const purposes = [...new Set(options.purposes ?? DEFAULT_PREPARED_PURPOSES)].sort();
+  const inactive = [...new Set(options.alsoInactive ?? [])].sort();
   const profileIds = [...new Set(options.profileIds ?? [])];
 
   // Provisioning is its own short transaction: first use of a purpose wraps a new data key, which
@@ -146,13 +153,25 @@ export async function prepareKeys(
             and(eq(schema.dataKeys.workspaceId, workspaceId), eq(schema.dataKeys.active, true), inArray(schema.dataKeys.purpose, purposes)),
           )
       : [];
+    const older = inactive.length
+      ? await tx
+          .select()
+          .from(schema.dataKeys)
+          .where(
+            and(
+              eq(schema.dataKeys.workspaceId, workspaceId),
+              eq(schema.dataKeys.active, false),
+              inArray(schema.dataKeys.purpose, inactive),
+            ),
+          )
+      : [];
     const profileKeys = profileIds.length
       ? await tx
           .select()
           .from(schema.profileKeys)
           .where(and(eq(schema.profileKeys.workspaceId, workspaceId), inArray(schema.profileKeys.profileId, profileIds)))
       : [];
-    const ids = [...new Set([...active.map((k) => k.id), ...profileKeys.map((k) => k.dataKeyId)])];
+    const ids = [...new Set([...active.map((k) => k.id), ...older.map((k) => k.id), ...profileKeys.map((k) => k.dataKeyId)])];
     const dataKeys = ids.length
       ? await tx
           .select()

@@ -1,21 +1,31 @@
--- The durable erasure-key ledger (#1037, 0.17.0 part 1).
+-- The durable erasure-key ledger (#1037, 0.17.0 part 1) and the exclusion key.
 --
--- One row per identifier an erasure covers: the whole merged profile family, the anonymous and
--- user ids that stored rows carry, and the keyed e-mail and phone hashes. Read-time exclusion (the
--- next part of #1037) matches ClickHouse subject keys against these rows. Unlike
--- `erasure_tombstones`, nothing prunes them after a grace window: an erased identifier stays
--- excluded permanently, and rows inserted afterwards are excluded too.
+-- One row per identifier an erasure covers. Read-time exclusion (the next part of #1037) matches
+-- ClickHouse subject keys against these rows. Unlike `erasure_tombstones`, nothing prunes them
+-- after a grace window: an erased identifier stays excluded permanently, and rows inserted
+-- afterwards are excluded too.
 --
--- `key_value` is pseudonymous by construction. Profile, anonymous and user ids are the same values
--- the event store already holds, and an e-mail or phone value is the workspace matching key's HMAC,
--- never the address or number. `key_version` names the matching data key that produced a hash
--- (empty for values that are not hashed, such as profile ids), so a row stays interpretable after a
--- key rotation. `erasure_id` ties the row to its erasure for the restore replay and operations.
+-- Every `key_value` is HMAC_exclusion(kind, normalised value): a separate, workspace-scoped
+-- exclusion key that is never sent to ClickHouse, never the matching key, and not rotated with it.
+-- Profile, anonymous and user ids, alias previous ids, click ids, e-mail and phone are therefore
+-- all stored as keyed hashes — there is no raw identifier in this table. `key_version` names the
+-- exclusion data key that produced the hash, so both versions are interpretable during a planned
+-- re-key. `erasure_id` ties the row to its erasure for the restore replay and operations.
+
+-- The exclusion key is its own purpose, separate from the matching HMAC key. Re-wrapping it with
+-- the KEK (`am rotate-keys`) is not a re-key and does not change its id or its hashes.
+ALTER TABLE data_keys DROP CONSTRAINT IF EXISTS data_keys_purpose_check;
+ALTER TABLE data_keys ADD CONSTRAINT data_keys_purpose_check
+  CHECK (purpose IN ('secrets', 'identity', 'matching', 'exclusion'));
+
 CREATE TABLE erasure_keys (
   workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
-  kind text NOT NULL CHECK (kind IN ('profile', 'anonymous_id', 'user_id', 'email', 'phone')),
+  kind text NOT NULL CHECK (kind IN (
+    'profile', 'anonymous_id', 'user_id', 'alias_previous_id', 'email', 'phone',
+    'gclid', 'gbraid', 'wbraid', 'fbc', 'fbp', 'msclkid', 'li_fat_id', 'ttclid', 'ttp', 'epik'
+  )),
   key_value text NOT NULL,
-  key_version text NOT NULL DEFAULT '',
+  key_version text NOT NULL,
   erasure_id text NOT NULL,
   recorded_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (workspace_id, kind, key_value, key_version)
@@ -37,12 +47,12 @@ CREATE POLICY tenant_isolation ON erasure_keys
 GRANT SELECT, INSERT, UPDATE ON erasure_keys TO am_app;
 
 COMMENT ON TABLE erasure_keys IS
-  'Durable erasure-key ledger (#1037): one pseudonymous key per erased identifier, never pruned by the grace window.';
+  'Durable erasure-key ledger (#1037): HMAC_exclusion of every erased identifier, never pruned by the grace window.';
 COMMENT ON COLUMN erasure_keys.kind IS
-  'profile, anonymous_id, user_id, or the keyed e-mail (email) and phone (phone) hashes.';
+  'profile, anonymous_id, user_id, alias_previous_id, email, phone, or a supported ad click id.';
 COMMENT ON COLUMN erasure_keys.key_value IS
-  'A profile, anonymous or user id (as stored in events), or the matching key HMAC for e-mail/phone.';
+  'HMAC_exclusion(kind, normalised value) under the workspace exclusion key; never a raw identifier.';
 COMMENT ON COLUMN erasure_keys.key_version IS
-  'The matching data key id that produced a hashed value; empty for values that are not hashed.';
+  'The exclusion data key id that produced key_value; both versions stay valid during a planned re-key.';
 COMMENT ON COLUMN erasure_keys.recorded_at IS
   'When the identifier was erased; refreshed when the same key is erased again. Never pruned by the grace window.';

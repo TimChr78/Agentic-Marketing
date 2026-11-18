@@ -27,7 +27,7 @@ import { bodyLimit, ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '@agentic-marketing/integrations';
 import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
-import { subjectKeyResolver } from '@agentic-marketing/profiles';
+import { subjectKeyHasher } from '@agentic-marketing/profiles';
 import { refreshPeople } from '@agentic-marketing/segments';
 import { endpointLocation, logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
@@ -126,7 +126,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       clickHouseStore({
         url: config.clickhouse.url,
         database: config.clickhouse.database,
-        subjectKeys: subjectKeyResolver({ db, kp: keyProvider }),
+        subjectKeys: subjectKeyHasher({ db, kp: keyProvider }),
       }),
       db,
     ),

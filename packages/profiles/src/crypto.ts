@@ -41,15 +41,6 @@ export function personCrypto(tx: Tx, workspaceId: string, kp: KeyProvider) {
     },
 
     /**
-     * The data key id behind `matchHash` (#1037): the erasure-key ledger records it as the key
-     * version of an e-mail or phone hash, so a row stays interpretable after the matching key is
-     * rotated. Calling it provisions the active key exactly as `matchHash` would.
-     */
-    async matchingKeyId() {
-      return (await matchingDataKey()).id;
-    },
-
-    /**
      * The keyed hash a tombstone keeps for an identifier (#210), never the value itself. E-mail and
      * phone identifiers are already stored as their match hash (`identifiers.value`), so they are
      * used as-is; other types are HMAC'd here with the same matching key, so the tombstone hash

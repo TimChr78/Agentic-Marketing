@@ -1,9 +1,10 @@
 import { AppError, newId } from '@agentic-marketing/core';
-import { type Db, enqueueErasureCleanupJob, schema, type Tx } from '@agentic-marketing/db';
+import { type Db, type ErasureKeyKind, enqueueErasureCleanupJob, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, newDataKey, open, type PreparedKeys, prepareKeys, seal } from '@agentic-marketing/secrets';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { mergedFamily } from './consent';
 import { personCrypto } from './crypto';
+import { exclusionHasher } from './exclusion';
 import { lockProfileRows, withIdentityLock } from './identity';
 
 // Durable erasure (#978 part 2b). The SQL stage and the external stores used to be mixed in one
@@ -38,7 +39,14 @@ export interface PreparedErasure {
 
 /** Prepares the keys an erasure needs. Runs before the command's transaction. */
 export async function prepareErasure(db: Pick<Db, 'withWorkspace'>, workspaceId: string, kp: KeyProvider): Promise<PreparedErasure> {
-  const matching = await prepareKeys(db, workspaceId, kp, { purposes: ['matching'] });
+  // The matching key keeps the resolver's tombstone hashes valid; the exclusion key is what the
+  // durable ledger (#1037) hashes every identifier with. They are separate purposes, so rotating
+  // one never invalidates the other. Identity keys (including rotated-out ones) are prepared so
+  // the ledger can open the sealed e-mail/phone plaintext without a KEK call under the lock.
+  const matching = await prepareKeys(db, workspaceId, kp, {
+    purposes: ['matching', 'exclusion', 'identity'],
+    alsoInactive: ['identity'],
+  });
   try {
     const selectorKey = newDataKey();
     const wrappedSelectorKey = await kp.wrap(selectorKey);
@@ -193,23 +201,30 @@ async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promis
       });
   }
 
-  // The durable erasure-key ledger (#1037): the whole merged family, the anonymous and user ids
-  // stored rows carry, and the keyed e-mail/phone hashes the identifiers already hold. It is
-  // written in this transaction, so a rollback leaves no key behind, and it is never pruned by the
-  // resolver's grace window. E-mail and phone identifiers are match hashes; their key version names
-  // the matching data key that produced them.
-  const hashed = identifiers.some((i) => i.type === 'email' || i.type === 'phone');
-  const keyVersion = hashed ? await crypto.matchingKeyId() : '';
+  // The durable erasure-key ledger (#1037): every identifier is HMAC_exclusion(kind, value) under
+  // the workspace exclusion key, written in this transaction so a rollback leaves nothing behind.
+  // It is never pruned by the resolver's grace window. E-mail and phone are hashed from the sealed
+  // plaintext the identifier carries (their lookup value is a matching-key HMAC), so the same
+  // address hashes the same way in stored rows written under any matching key. Anonymous and user
+  // ids also get an `alias_previous_id` entry: an alias event names one of them as `previousId`,
+  // and the stored row keeps that hash in its own column.
+  const exclusion = await exclusionHasher(tx, workspaceId, prepared.matching.provider);
   const keys = new Map<string, typeof schema.erasureKeys.$inferInsert>();
-  const addKey = (kind: (typeof schema.erasureKeys.$inferInsert)['kind'], keyValue: string, version: string) => {
-    keys.set(`${kind}\u0000${keyValue}\u0000${version}`, { workspaceId, kind, keyValue, keyVersion: version, erasureId });
+  const addKey = (kind: ErasureKeyKind, value: string) => {
+    const keyValue = exclusion.hash(kind, value);
+    keys.set(`${kind}\u0000${keyValue}`, { workspaceId, kind, keyValue, keyVersion: exclusion.version, erasureId });
   };
-  for (const profileId of family) addKey('profile', profileId, '');
+  for (const profileId of family) addKey('profile', profileId);
   for (const identifier of identifiers) {
-    if (identifier.type !== 'anonymous_id' && identifier.type !== 'user_id' && identifier.type !== 'email' && identifier.type !== 'phone')
+    if (identifier.type === 'email' || identifier.type === 'phone') {
+      // A legacy identifier without sealed plaintext can only be hashed from its match hash; it is
+      // still a keyed value, never the raw address.
+      const plain = identifier.valueEnc ? await crypto.open<string>(identifier.profileId, identifier.valueEnc) : undefined;
+      addKey(identifier.type, plain ?? identifier.value);
       continue;
-    const version = identifier.type === 'email' || identifier.type === 'phone' ? keyVersion : '';
-    addKey(identifier.type, identifier.value, version);
+    }
+    addKey(identifier.type, identifier.value);
+    if (identifier.type === 'anonymous_id' || identifier.type === 'user_id') addKey('alias_previous_id', identifier.value);
   }
   if (keys.size)
     await tx
