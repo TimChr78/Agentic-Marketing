@@ -179,10 +179,10 @@ async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promis
     .where(and(eq(schema.identifiers.workspaceId, workspaceId), inArray(schema.identifiers.profileId, family)));
 
   const erasureId = newId('era');
+  const crypto = personCrypto(tx, workspaceId, prepared.matching.provider);
   // Tombstones first, while the values are still in memory: keyed hashes (never raw values) let the
   // resolver drop events that were queued or arrive late (#210). The matching key came prepared.
   if (identifiers.length) {
-    const crypto = personCrypto(tx, workspaceId, prepared.matching.provider);
     const hashes = [...new Set(await Promise.all(identifiers.map((i) => crypto.tombstoneHash(i.type, i.value))))];
     await tx
       .insert(schema.erasureTombstones)
@@ -192,6 +192,33 @@ async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promis
         set: { erasedAt: sql`now()`, erasureId },
       });
   }
+
+  // The durable erasure-key ledger (#1037): the whole merged family, the anonymous and user ids
+  // stored rows carry, and the keyed e-mail/phone hashes the identifiers already hold. It is
+  // written in this transaction, so a rollback leaves no key behind, and it is never pruned by the
+  // resolver's grace window. E-mail and phone identifiers are match hashes; their key version names
+  // the matching data key that produced them.
+  const hashed = identifiers.some((i) => i.type === 'email' || i.type === 'phone');
+  const keyVersion = hashed ? await crypto.matchingKeyId() : '';
+  const keys = new Map<string, typeof schema.erasureKeys.$inferInsert>();
+  const addKey = (kind: (typeof schema.erasureKeys.$inferInsert)['kind'], keyValue: string, version: string) => {
+    keys.set(`${kind}\u0000${keyValue}\u0000${version}`, { workspaceId, kind, keyValue, keyVersion: version, erasureId });
+  };
+  for (const profileId of family) addKey('profile', profileId, '');
+  for (const identifier of identifiers) {
+    if (identifier.type !== 'anonymous_id' && identifier.type !== 'user_id' && identifier.type !== 'email' && identifier.type !== 'phone')
+      continue;
+    const version = identifier.type === 'email' || identifier.type === 'phone' ? keyVersion : '';
+    addKey(identifier.type, identifier.value, version);
+  }
+  if (keys.size)
+    await tx
+      .insert(schema.erasureKeys)
+      .values([...keys.values()])
+      .onConflictDoUpdate({
+        target: [schema.erasureKeys.workspaceId, schema.erasureKeys.kind, schema.erasureKeys.keyValue, schema.erasureKeys.keyVersion],
+        set: { erasureId, recordedAt: sql`now()` },
+      });
 
   const selectors: ErasureSelectors = {
     anonymousIds: identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value),

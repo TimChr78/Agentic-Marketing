@@ -4,9 +4,10 @@ import { migrate } from './migrate';
 // Erasures live in the database they protect, so a restore from a snapshot taken before an
 // erasure would bring the erased person back (#144). `am restore` reads this log from the live
 // database before replacing it and replays it afterwards: profiles and identifiers named by an
-// erasure are deleted again, their suppression hashes are restored and the keyed tombstones go
-// back, so late events cannot recreate the person either. Only hashes are involved; no plaintext
-// personal data is copied by the replay.
+// erasure are deleted again, their suppression hashes are restored, the keyed tombstones go back,
+// and the durable erasure-key ledger (#1037) is re-inserted, so read-time exclusion still knows the
+// erased keys. Only pseudonymous ids and hashes are involved; no plaintext personal data is copied
+// by the replay.
 
 export interface ErasureRecord {
   workspaceId: string;
@@ -51,11 +52,27 @@ export interface ErasureCleanupJobRecord {
   selectorKek: string | null;
 }
 
+/**
+ * One durable erasure-key ledger row (#1037). The keys are pseudonymous by construction: ids the
+ * event store already holds, or the matching key's HMAC for e-mail and phone. Replay copies them
+ * as they are, so no personal data is decrypted or rewritten.
+ */
+export interface ErasureKeyRecord {
+  workspaceId: string;
+  erasureId: string;
+  kind: string;
+  keyValue: string;
+  keyVersion: string;
+  recordedAt: string;
+}
+
 export interface ErasureLog {
   erasures: ErasureRecord[];
   tombstones: ErasureTombstoneRecord[];
   /** Pending cleanup jobs for the erasures above; absent from a database older than 0.15.0. */
   cleanupJobs?: ErasureCleanupJobRecord[];
+  /** The durable erasure-key ledger; absent from a database older than 0.17.0. */
+  keys?: ErasureKeyRecord[];
 }
 
 export interface ReplayErasuresResult {
@@ -69,6 +86,8 @@ export interface ReplayErasuresResult {
   tombstones: number;
   /** Pending cleanup jobs recreated for the replayed erasures. */
   cleanupJobs: number;
+  /** Erasure-key ledger rows re-inserted into the restored database. */
+  keys: number;
   /** Entries for workspaces the restored snapshot no longer has; nothing to erase there. */
   skipped: number;
 }
@@ -210,7 +229,28 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
           selectorKek: row.selector_kek,
         }))
       : [];
-    return { erasures, tombstones, cleanupJobs };
+    // The durable erasure-key ledger (#1037). A database older than 0.17.0 has no table and
+    // therefore no ledger rows to carry; an empty list here is that version's honest answer.
+    const keys = (await hasTable(client, 'erasure_keys'))
+      ? (
+          await client.query<{
+            workspace_id: string;
+            erasure_id: string;
+            kind: string;
+            key_value: string;
+            key_version: string;
+            recorded_at: Date | string;
+          }>('SELECT workspace_id, erasure_id, kind, key_value, key_version, recorded_at FROM erasure_keys')
+        ).rows.map((row) => ({
+          workspaceId: row.workspace_id,
+          erasureId: row.erasure_id,
+          kind: row.kind,
+          keyValue: row.key_value,
+          keyVersion: row.key_version,
+          recordedAt: iso(row.recorded_at),
+        }))
+      : [];
+    return { erasures, tombstones, cleanupJobs, keys };
   });
 }
 
@@ -302,8 +342,16 @@ export async function replayErasures(
   log: ErasureLog,
   opts: ReplayErasuresOptions = {},
 ): Promise<ReplayErasuresResult> {
-  const result: ReplayErasuresResult = { workspaces: 0, erasures: 0, profiles: 0, tombstones: 0, cleanupJobs: 0, skipped: 0 };
-  if (!log.erasures.length && !log.tombstones.length) return result;
+  const result: ReplayErasuresResult = {
+    workspaces: 0,
+    erasures: 0,
+    profiles: 0,
+    tombstones: 0,
+    cleanupJobs: 0,
+    keys: 0,
+    skipped: 0,
+  };
+  if (!log.erasures.length && !log.tombstones.length && !log.keys?.length) return result;
 
   return withClient(databaseUrl, async (client) => {
     const workspaces = new Set((await client.query<{ id: string }>('SELECT id FROM workspaces')).rows.map((row) => row.id));
@@ -312,6 +360,7 @@ export async function replayErasures(
     const erasureKeysTable = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
     const tombstonesTable = await hasTable(client, 'erasure_tombstones');
     const cleanupJobsTable = await hasTable(client, 'erasure_cleanup_jobs');
+    const ledgerTable = await hasTable(client, 'erasure_keys');
     const jobsByErasure = new Map((log.cleanupJobs ?? []).map((job) => [`${job.workspaceId}:${job.erasureId}`, job]));
     if (log.erasures.length && !cleanupJobsTable)
       opts.log?.(
@@ -319,22 +368,27 @@ export async function replayErasures(
       );
     if (log.tombstones.length && !tombstonesTable)
       opts.log?.('warning: the restored database predates erasure_tombstones; only profiles and suppression hashes are replayed');
+    if (log.keys?.length && !ledgerTable)
+      opts.log?.(
+        'warning: the restored database predates erasure_keys; the durable erasure-key ledger is replayed only after the app migrates, so run the migration before serving reads',
+      );
 
-    const byWorkspace = new Map<string, { erasures: ErasureRecord[]; tombstones: ErasureTombstoneRecord[] }>();
+    const byWorkspace = new Map<string, { erasures: ErasureRecord[]; tombstones: ErasureTombstoneRecord[]; keys: ErasureKeyRecord[] }>();
     const bucket = (workspaceId: string) => {
       let entry = byWorkspace.get(workspaceId);
       if (!entry) {
-        entry = { erasures: [], tombstones: [] };
+        entry = { erasures: [], tombstones: [], keys: [] };
         byWorkspace.set(workspaceId, entry);
       }
       return entry;
     };
     for (const erasure of log.erasures) bucket(erasure.workspaceId).erasures.push(erasure);
     for (const tombstone of log.tombstones) bucket(tombstone.workspaceId).tombstones.push(tombstone);
+    for (const key of log.keys ?? []) bucket(key.workspaceId).keys.push(key);
 
     for (const [workspaceId, entries] of byWorkspace) {
       if (!workspaces.has(workspaceId)) {
-        result.skipped += entries.erasures.length + entries.tombstones.length;
+        result.skipped += entries.erasures.length + entries.tombstones.length + entries.keys.length;
         continue;
       }
       await client.query('BEGIN');
@@ -414,6 +468,19 @@ export async function replayErasures(
             [workspaceId, tombstone.identHash, tombstone.erasedAt, tombstone.erasureId],
           );
           result.tombstones += 1;
+        }
+        // The durable ledger is replayed as-is: the values are already pseudonymous ids or keyed
+        // hashes. A key the restored snapshot already had is left alone, so a replay never moves
+        // its erasure or recorded time backwards.
+        for (const key of entries.keys) {
+          if (!ledgerTable) break;
+          const inserted = await client.query(
+            `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, recorded_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (workspace_id, kind, key_value, key_version) DO NOTHING`,
+            [workspaceId, key.kind, key.keyValue, key.keyVersion, key.erasureId, key.recordedAt],
+          );
+          result.keys += inserted.rowCount ?? 0;
         }
         await client.query('COMMIT');
         result.workspaces += 1;

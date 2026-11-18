@@ -7,7 +7,7 @@ import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } fr
 import { runContentFetches } from '@agentic-marketing/content';
 import { type Db, runIdempotencyKeyCleanup, runSentAtBackfill } from '@agentic-marketing/db';
 import { runDeliveryWorker } from '@agentic-marketing/email';
-import { runSink } from '@agentic-marketing/events';
+import { runSink, runSubjectKeyBackfill } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runEnrollmentJobs, runSweeper } from '@agentic-marketing/journeys';
 import { refreshSnapshots, runEdgeSync, snapshotHook } from '@agentic-marketing/personalize';
@@ -100,7 +100,7 @@ export function startScheduler(
   } = {},
 ): WorkerLoop[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, the transactional outbox, erasure cleanup, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, expired OAuth choices, expired idempotency keys',
+    'scheduler role: segment recomputation, broadcasts, the transactional outbox, erasure cleanup, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, subject-key backfill, expired OAuth choices, expired idempotency keys',
   );
   return [
     // One pass at start: an abandoned consent choice is short-lived, and nothing in the request
@@ -113,6 +113,16 @@ export function startScheduler(
       runSentAtBackfill({ db: srv.db }, signal, {
         log: (message) => logger.info(message),
         onError: (err) => logger.error({ err }, 'sent_at backfill failed'),
+      }),
+    ),
+    // One pass at start: fills the subject-key columns of rows written before #1037 part 1, one
+    // ClickHouse partition at a time. Nothing reads the columns yet, but the contract's later part
+    // needs them for every historical row.
+    loop(
+      'subject-key-backfill',
+      runSubjectKeyBackfill({ events: srv.events }, signal, {
+        log: (message) => logger.info(message),
+        onError: (err) => logger.error({ err }, 'subject-key backfill failed'),
       }),
     ),
     // The idempotency-key retention pass (#976): one pass at start, then periodically. It runs as

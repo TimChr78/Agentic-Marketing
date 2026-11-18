@@ -1076,6 +1076,8 @@ async function writeRestoreCapture(path: string, binding: RestoreCaptureBinding,
         selectors: encodeBytes(job.selectors),
         selectorKey: encodeBytes(job.selectorKey),
       })),
+      // The durable erasure-key ledger: pseudonymous ids and keyed hashes only.
+      keys: log.keys ?? [],
     },
   };
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
@@ -1113,6 +1115,7 @@ async function readRestoreCapture(path: string): Promise<RestoreCapture | null> 
     log?: {
       erasures?: ErasureLog['erasures'];
       tombstones?: ErasureLog['tombstones'];
+      keys?: ErasureLog['keys'];
       cleanupJobs?: {
         workspaceId: string;
         erasureId: string;
@@ -1143,6 +1146,7 @@ async function readRestoreCapture(path: string): Promise<RestoreCapture | null> 
     log: {
       erasures: stored.log?.erasures ?? [],
       tombstones: stored.log?.tombstones ?? [],
+      keys: stored.log?.keys ?? [],
       cleanupJobs: (stored.log?.cleanupJobs ?? []).map((job) => ({
         workspaceId: job.workspaceId,
         erasureId: job.erasureId,
@@ -1188,7 +1192,16 @@ export function unionErasureLogs(captured: ErasureLog | null, live: ErasureLog):
     const earlier = jobs.get(key);
     jobs.set(key, earlier ? mergeCleanupJobs(earlier, job) : job);
   }
-  return { erasures: [...erasures.values()], tombstones: [...tombstones.values()], cleanupJobs: [...jobs.values()] };
+  // The ledger is additive: keep every key either log knows about.
+  const keys = new Map<string, NonNullable<ErasureLog['keys']>[number]>();
+  for (const key of captured?.keys ?? []) keys.set(`${key.workspaceId}:${key.kind}:${key.keyValue}:${key.keyVersion}`, key);
+  for (const key of live.keys ?? []) keys.set(`${key.workspaceId}:${key.kind}:${key.keyValue}:${key.keyVersion}`, key);
+  return {
+    erasures: [...erasures.values()],
+    tombstones: [...tombstones.values()],
+    cleanupJobs: [...jobs.values()],
+    keys: [...keys.values()],
+  };
 }
 
 /** Removes the capture only when its binding is the one this attempt wrote or merged. */
@@ -1345,6 +1358,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       log(
         `erasures replayed: ${replayed.profiles} profile(s) removed from the restored snapshot, ` +
           `${replayed.tombstones} tombstone(s) restored` +
+          (replayed.keys ? `, ${replayed.keys} erasure key(s) restored` : '') +
           (replayed.skipped ? `, ${replayed.skipped} entr(ies) skipped for workspaces the snapshot does not have` : ''),
       );
       // Only a successful replay retires this attempt's capture, and only after checking that the

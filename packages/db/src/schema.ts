@@ -540,6 +540,32 @@ export const erasureTombstones = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.identHash] })],
 );
 
+/**
+ * The kinds the durable erasure-key ledger records (#1037). `profile` covers the whole merged
+ * family; `anonymous_id` and `user_id` are the values stored rows carry; `email` and `phone` are
+ * the matching key's HMAC. The ClickHouse `erased_subjects.kind` uses the same strings.
+ */
+export type ErasureKeyKind = 'profile' | 'anonymous_id' | 'user_id' | 'email' | 'phone';
+
+/**
+ * The durable erasure-key ledger (#1037, 0.17.0): one pseudonymous key per erased identifier,
+ * kept independently of the grace-window tombstones. Read-time exclusion matches stored rows'
+ * subject keys against these rows; nothing prunes them while the erasure stands.
+ */
+export const erasureKeys = pgTable(
+  'erasure_keys',
+  {
+    workspaceId: uuid('workspace_id').notNull(),
+    kind: text('kind').$type<ErasureKeyKind>().notNull(),
+    keyValue: text('key_value').notNull(),
+    /** The matching data key id behind a hashed value; empty for values that are not hashed. */
+    keyVersion: text('key_version').notNull().default(''),
+    erasureId: text('erasure_id').notNull(),
+    recordedAt: ts('recorded_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.kind, t.keyValue, t.keyVersion] })],
+);
+
 export type OutboxState = 'pending' | 'delivering' | 'delivered' | 'failed';
 /**
  * Post-commit work a tenant transaction implies (#978 part 2): a network call is enqueued in the

@@ -23,7 +23,11 @@ type Disposable = Awaited<ReturnType<typeof createDisposableDb>>;
 type Capture = {
   version: number;
   binding: { target: string; backup: string };
-  log: { erasures: { id: string }[]; cleanupJobs: { selectors: string; selectorKey: string }[] };
+  log: {
+    erasures: { id: string }[];
+    cleanupJobs: { selectors: string; selectorKey: string }[];
+    keys: { kind: string; keyValue: string; keyVersion: string }[];
+  };
 };
 
 async function seed(d: Disposable, suffix: string): Promise<{ profile: string; erasureId: string }> {
@@ -39,6 +43,13 @@ async function seed(d: Disposable, suffix: string): Promise<{ profile: string; e
     `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek)
      VALUES ($1, $2, ARRAY[$3]::text[], $4, $5, 'local-test')`,
     [d.workspace, erasureId, profile, Buffer.from(`selectors-${suffix}`), Buffer.from(`key-${suffix}`)],
+  );
+  // #1037: the durable erasure-key ledger is part of the captured log too.
+  await d.db.admin.query(
+    `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id) VALUES
+       ($1, 'profile', $2, '', $3),
+       ($1, 'email', $4, 'dk_capture', $3)`,
+    [d.workspace, profile, erasureId, `hash-${suffix}`],
   );
   return { profile, erasureId };
 }
@@ -91,6 +102,12 @@ describe.skipIf(!hasTestDatabase())('restore capture binding and recovery (#1009
     expect(saved.binding.backup).toContain(dir);
     expect(saved.log.erasures.map((e) => e.id)).toEqual([first.erasureId]);
     expect(saved.log.cleanupJobs[0]?.selectors).toBe(Buffer.from('selectors-ca01').toString('base64'));
+    expect(saved.log.keys).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'profile', keyValue: `prf_0000000000000000000000000000ca01`, keyVersion: '' }),
+        expect.objectContaining({ kind: 'email', keyValue: 'hash-ca01', keyVersion: 'dk_capture' }),
+      ]),
+    );
 
     // A person erased after the failed attempt is not in the saved capture yet. The retry unions
     // the live log, so the capture (and the eventual replay) includes both.
@@ -98,6 +115,7 @@ describe.skipIf(!hasTestDatabase())('restore capture binding and recovery (#1009
     await expect(restoreBackup({ dir, env, skipKeyCheck: true, log: () => {} })).rejects.toThrow();
     const merged = await readCapture(capture);
     expect(merged.log.erasures.map((e) => e.id).sort()).toEqual([first.erasureId, second.erasureId].sort());
+    expect(merged.log.keys).toHaveLength(4);
   }, 120_000);
 
   it('refuses a capture bound to another target instead of reusing it', async () => {

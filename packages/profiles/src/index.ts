@@ -38,4 +38,5 @@ export * from './erasure';
 export * from './erasureCleanup';
 export * from './identity';
 export * from './resolve';
+export * from './subjectKeys';
 export * from './worker';

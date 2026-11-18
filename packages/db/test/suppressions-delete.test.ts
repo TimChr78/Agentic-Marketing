@@ -112,6 +112,7 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'agent_actions',
       'broadcast_runs',
       'erasure_cleanup_jobs',
+      'erasure_keys',
       'journey_processed_events',
     ])
       await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);

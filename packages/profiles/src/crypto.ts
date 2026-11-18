@@ -18,8 +18,9 @@ export const normalizePhone = (v: string) => {
 };
 
 export function personCrypto(tx: Tx, workspaceId: string, kp: KeyProvider) {
-  let matching: Promise<Buffer> | undefined;
+  let matching: Promise<{ id: string; key: Buffer }> | undefined;
   const profileKeys = new Map<string, Promise<Buffer | null>>();
+  const matchingDataKey = () => (matching ??= activeDataKey(tx, workspaceId, kp, 'matching'));
 
   async function loadProfileKey(profileId: string): Promise<Buffer | null> {
     const [k] = await tx
@@ -33,11 +34,19 @@ export function personCrypto(tx: Tx, workspaceId: string, kp: KeyProvider) {
   const c = {
     /** HMAC of a normalised e-mail or phone number: equal inputs match without storing plaintext. */
     async matchHash(type: 'email' | 'phone', value: string) {
-      matching ??= activeDataKey(tx, workspaceId, kp, 'matching').then((k) => k.key);
       const norm = type === 'email' ? normalizeEmail(value) : normalizePhone(value);
-      return createHmac('sha256', await matching)
+      return createHmac('sha256', (await matchingDataKey()).key)
         .update(`${type}:${norm}`)
         .digest('hex');
+    },
+
+    /**
+     * The data key id behind `matchHash` (#1037): the erasure-key ledger records it as the key
+     * version of an e-mail or phone hash, so a row stays interpretable after the matching key is
+     * rotated. Calling it provisions the active key exactly as `matchHash` would.
+     */
+    async matchingKeyId() {
+      return (await matchingDataKey()).id;
     },
 
     /**
@@ -48,8 +57,7 @@ export function personCrypto(tx: Tx, workspaceId: string, kp: KeyProvider) {
      */
     async tombstoneHash(type: IdentifierType, value: string) {
       if (type === 'email' || type === 'phone') return value;
-      matching ??= activeDataKey(tx, workspaceId, kp, 'matching').then((k) => k.key);
-      return createHmac('sha256', await matching)
+      return createHmac('sha256', (await matchingDataKey()).key)
         .update(`${type}:${value}`)
         .digest('hex');
     },
