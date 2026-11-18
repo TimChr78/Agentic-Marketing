@@ -2,6 +2,23 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.15.3] - 2026-11-18
+
+### Fixed
+
+- A provider webhook batch that spans several broadcasts or journeys is written to the outbox one row per broadcast, so each row carries its `subject_ref`. The publication barrier now sees the whole batch: a staged-send canary check and a subject-test winner wait for a mixed batch's clicks and unsubscribes instead of deciding from incomplete data. A mixed row that an earlier release queued without a subject is matched by the events in its payload, so an upgrade cannot hide one either.
+- Mitigates erased people's events reappearing in ClickHouse while the full read-time exclusion ships in 0.17.0 (#1037). The ClickHouse sink drops events naming an erased person before storing them, but keeps an event when one of its identifiers belongs to a live profile; journey and message writers skip profiles that no longer exist; person-linked inserts are synchronous (`async_insert=0`); and the cleanup records its first successful sweep and re-sweeps after the mitigation interval before reporting `complete`. `complete` now arrives about 35 seconds later. This narrows the window but does not guarantee that a write already in flight at the ClickHouse server, or an eligibility check that ran before the erasure, can never land later.
+
+### Upgrading from 0.15.2
+
+- **Migrations:** `packages/db/migrations/0110_erasure_final_sweep.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none. An erasure now reports `complete` after a second ClickHouse sweep a short interval after the first successful one, so it arrives later than before; person-linked ClickHouse inserts are synchronous (`async_insert=0`), so event ingest can take a little longer per batch.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.15.3.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.15.3 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.15.3` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.15.3). Run `docker compose exec app am doctor`.
+
+<!-- issues: 1038 -->
+
 ## [0.15.2] - 2026-11-17
 
 ### Changed
