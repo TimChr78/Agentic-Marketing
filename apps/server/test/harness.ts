@@ -416,7 +416,13 @@ export async function startTestServer(
   name: string,
   port: number,
   env: Record<string, string> = {},
-  testOptions: { warehouseTickMs?: number; edgeTickMs?: number; holdTickMs?: number } = {},
+  testOptions: {
+    warehouseTickMs?: number;
+    edgeTickMs?: number;
+    holdTickMs?: number;
+    erasureFinalSweepMs?: number;
+    erasureCleanup?: boolean;
+  } = {},
 ) {
   const base = `http://localhost:${port}`;
   const { url: pgUrl, migrated, dbName } = await freshDatabase(`am_${name}`);
@@ -493,6 +499,10 @@ export async function startTestServer(
       holdTickMs: testOptions.holdTickMs ?? 300,
       // Experience rollout tests drive the sweep directly with a fixed clock.
       rolloutTickMs: 86_400_000,
+      // Erasure tests drive the cleanup rounds themselves. The short default final-sweep bound
+      // keeps the suite fast; production waits the ClickHouse request timeout plus a margin.
+      erasureFinalSweepMs: testOptions.erasureFinalSweepMs ?? 1_000,
+      ...(testOptions.erasureCleanup === undefined ? {} : { erasureCleanup: testOptions.erasureCleanup }),
     }),
   ];
 

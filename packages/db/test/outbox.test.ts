@@ -5,6 +5,7 @@ import {
   claimOutboxBatch,
   enqueueOutbox,
   failOutbox,
+  outboxPublicationBarrier,
   outboxRetrySeconds,
   pruneOutbox,
   renewOutboxLease,
@@ -237,6 +238,24 @@ describe.skipIf(!hasTestDatabase())('transactional outbox (#978 part 2)', () => 
     });
     expect(plans).toContain('outbox_undelivered_subject');
     expect(plans).toContain('outbox_failed_subject');
+  });
+
+  it('sees a legacy mixed message_event row that has no subject_ref', async () => {
+    const legacy = (journeyId: string, id: string, state: 'pending' | 'failed') =>
+      d.db.admin.query(
+        `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state)
+         VALUES ($1, $2, 'message_event', $3, $4, $5)`,
+        [d.workspace, id, { events: [{ journeyId, messageId: `msg_${id}`, type: 'clicked', eventId: `e_${id}` }] }, `legacy:${id}`, state],
+      );
+    // 0.15.2 wrote one row for a batch spanning several broadcasts, with no subject_ref. Such a row
+    // can still be in the queue right after an upgrade (#1038).
+    await legacy('bct_legacy_a', 'obx_legacy_live', 'pending');
+    await legacy('bct_legacy_b', 'obx_legacy_failed', 'failed');
+    await d.db.withWorkspace(d.workspace, async (tx) => {
+      await expect(outboxPublicationBarrier(tx, d.workspace, 'bct_legacy_a')).resolves.toEqual({ outstanding: 1, failed: 0 });
+      await expect(outboxPublicationBarrier(tx, d.workspace, 'bct_legacy_b')).resolves.toEqual({ outstanding: 0, failed: 1 });
+      await expect(outboxPublicationBarrier(tx, d.workspace, 'bct_unrelated')).resolves.toEqual({ outstanding: 0, failed: 0 });
+    });
   });
 
   it('bounds and flattens the stored error text', () => {

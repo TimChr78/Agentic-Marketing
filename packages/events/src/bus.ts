@@ -361,6 +361,30 @@ export async function resetNatsNamespace(url: string, namespace: string) {
   });
 }
 
+/** Where a durable consumer is in the stream. A diagnostic/test helper, never part of a gate. */
+export interface NatsConsumerState {
+  lastSequence: number;
+  ackFloor: number;
+  pending: number;
+}
+
+/** Reads a durable consumer's position, for tests that must know a worker consumed a message. */
+export async function natsConsumerState(url: string, namespace: string, consumer: string): Promise<NatsConsumerState> {
+  const nc = await connect({ servers: url });
+  try {
+    const jsm = await jetstreamManager(nc);
+    const stream = namespace.toUpperCase();
+    const [info, streamInfo] = await Promise.all([jsm.consumers.info(stream, consumer), jsm.streams.info(stream)]);
+    return {
+      lastSequence: streamInfo.state.last_seq,
+      ackFloor: info.ack_floor.stream_seq,
+      pending: info.num_pending + info.num_ack_pending,
+    };
+  } finally {
+    await nc.close();
+  }
+}
+
 /**
  * Deletes every stream whose name starts with [prefix] (case-insensitive), e.g. one run's
  * `am_<run>_` namespace. Package tests create streams that no database name can reveal, so global
