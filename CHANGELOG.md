@@ -2,6 +2,44 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.16.0] - 2026-11-18
+
+### Added
+
+- A segment condition can count the platform's own message engagement instead of a customer event: `{ "message": "opened" | "clicked" | "delivered" | "bounced" | "complained" | "unsubscribed", within, count, channel, purpose, broadcast, journey }`, read from the message log. "Engaged readers: opened in the last 30 days" is now buildable from the platform's own data, including people whose profile was merged after a send. Opens only exist where open tracking is enabled, and some mailboxes pre-fetch the pixel, so the segment reference says how opens are measured and recommends clicks where the count must not overstate engagement. A message leaf triggers no streaming evaluation by itself: a rule containing one is re-evaluated when another part of it changes, when a consent or preference write touches the person, and on the regular recompute (`segments.refresh`).
+- The segment builder offers "Message engagement" as a kind of condition with the message event, how many, the window, channel, purpose and the broadcast or journey it counts; the review drawer and segment preview read it as a sentence. The demo seed's "Engaged readers" segment uses it, so it now has members.
+- `templates.check` and the e-mail template editor now warn, without blocking save or publish, when the unsubscribe link's visibility depends on CSS the static check cannot evaluate — an at-rule such as `@media`, a combinator, attribute selector or pseudo-class, `hsl()` or another colour format, a gradient or image background, a transform, a relative offset, `clip`/`clip-path`, a rule past the check's cap, or an inline style on the link or an ancestor. The warning names the construct and points to a client preview; CSS that cannot reach the link stays silent.
+
+### Changed
+
+- New installs run PostgreSQL 18: Compose, the shared test stack and CI use `postgres:18`, and the
+  image ships the 18 `pg_dump`/`pg_restore` (which also export a 16 server for the upgrade path).
+  New clusters get data checksums by default; 18 also adds async I/O, B-tree skip scan and
+  `uuidv7()`, and `pg_upgrade` keeps planner statistics. PostgreSQL 16 remains the supported
+  minimum through at least June 2027.
+- `am doctor` reports the PostgreSQL server version (`postgres.version`) and warns below 16; a 16
+  server is reported as supported with a note that it is deprecated for new installs.
+- **Breaking / manual steps for existing installs:** a PostgreSQL 16 data volume cannot be opened
+  by 18. The shipped Compose file stops at the `postgres-check` service with the upgrade path
+  instead of starting an empty database, and `POSTGRES_IMAGE` keeps an install on 16 until it is
+  migrated. Stop every writer, take and verify a final `am backup` with the current image (a backup
+  taken while traffic still arrived loses the writes after it and can bring back an erased
+  profile), then restore into a **new** 18 volume while retaining the old 16 volume until the
+  checks pass; set `AM_VERSION` explicitly in both directions. See
+  [docs/deployment/postgres-18.md](docs/deployment/postgres-18.md). `pg_upgrade` is the advanced
+  alternative and needs matching data-checksum settings (18 enables checksums for a new cluster by
+  default).
+
+### Upgrading from 0.15.3
+
+- **Migrations:** none.
+- **Configuration:** `POSTGRES_IMAGE`.
+- **Breaking changes:** new installs run PostgreSQL 18, and an existing PostgreSQL 16 data volume cannot be opened by 18: with the new `docker-compose.yml`, the `postgres-check` service stops before Postgres starts and prints the upgrade path, so nothing is deleted and the app never starts against an empty database. Helm installs bring their own PostgreSQL and are unaffected until you move the cluster.
+- **Manual steps:** before `docker compose up -d`, choose one. **Stay on 16 for now:** set `POSTGRES_IMAGE=postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663` (the 0.15.3 image) in `.env`, then upgrade as usual. **Move to 18:** follow [docs/deployment/postgres-18.md](docs/deployment/postgres-18.md) — stop every writer, take and verify a final `am backup` with the 0.15.3 image, start 0.16.0 on a new 18 volume, restore into it and keep the old 16 volume until the checks pass. Either way set `AM_VERSION=0.16.0` explicitly.
+- **Upgrade:** download `agentic-marketing-compose-0.16.0.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.16.0 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.16.0` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.16.0). Run `docker compose exec app am doctor`.
+
+<!-- issues: 441, 872, 1001 -->
+
 ## [0.15.3] - 2026-11-18
 
 ### Fixed
