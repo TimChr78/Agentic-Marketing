@@ -309,17 +309,19 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
 
     const settings = await store.settingsFor(legacyWs);
     const sideRs = await store.client.query({
-      query: `SELECT key1, subject_profile, subject_anonymous, subject_user, subject_gclid, subject_key_version, subject_coverage
+      query: `SELECT key1, key2, key3, key4, subject_profile, subject_anonymous, subject_user, subject_gclid,
+                     subject_key_version, subject_coverage
               FROM subject_key_backfill FINAL WHERE workspace_id = {ws:UUID} AND table_name = 'events' ORDER BY key1`,
       query_params: { ws: legacyWs },
       format: 'JSONEachRow',
       clickhouse_settings: settings,
     });
     const side = await sideRs.json<Record<string, string | number>>();
-    expect(side.map((r) => r.key1)).toEqual(['legacy-Alpha', 'legacy-Bravo', 'legacy-Charlie']);
+    expect(side.map((r) => r.key4)).toEqual(['legacy-Alpha', 'legacy-Bravo', 'legacy-Charlie']);
     for (const row of side) {
-      const name = String(row.key1).replace('legacy-', '');
+      const name = String(row.key1);
       expect(row).toMatchObject({
+        key2: `legacy-anon-${name}`,
         subject_profile: hmac('profile', `prf-legacy-${name}`),
         subject_anonymous: hmac('anonymous_id', `legacy-anon-${name}`),
         subject_user: hmac('user_id', `legacy-user-${name}`),
@@ -354,6 +356,87 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
     expect(message).toMatchObject({ key1: 'legacy-msg', subject_profile: hmac('profile', 'prf-legacy-msg'), subject_coverage: 'ids_only' });
     expect(journey).toMatchObject({ key1: 'jrn_legacy', subject_profile: hmac('profile', 'prf-legacy-jrn'), subject_coverage: 'ids_only' });
   }, 120_000);
+
+  it('keys side-table rows by the full replacing key, not a client-supplied event id', async () => {
+    const legacyWs = newUuid();
+    const row = (name: string, anonymousId: string) => ({
+      workspace_id: legacyWs,
+      event_id: 'shared-client-id',
+      source_id: 'src_shared',
+      received_at: '2026-08-01 12:00:00',
+      timestamp: '2026-08-01 12:00:00',
+      type: 'track',
+      name,
+      anonymous_id: anonymousId,
+      user_id: '',
+      profile_id: '',
+      properties: {},
+      traits: {},
+      context: {},
+      consent: {},
+    });
+    await store.client.insert({
+      table: 'events',
+      values: [row('Alice Page', 'alice-anon'), row('Bob Page', 'bob-anon')],
+      format: 'JSONEachRow',
+    });
+    let step = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 10 });
+    for (let i = 0; i < 4 && !step.done; i++) step = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 10 });
+    expect(step.done).toBe(true);
+    expect((await store.subjectKeyCoverage([legacyWs])).pending).toBe(0);
+    const settings = await store.settingsFor(legacyWs);
+    const rs = await store.client.query({
+      query: `SELECT key1, key2, key4, subject_anonymous FROM subject_key_backfill FINAL
+              WHERE workspace_id = {ws:UUID} AND table_name = 'events' ORDER BY key1`,
+      query_params: { ws: legacyWs },
+      format: 'JSONEachRow',
+      clickhouse_settings: settings,
+    });
+    const side = await rs.json<{ key1: string; key2: string; key4: string; subject_anonymous: string }>();
+    expect(side).toEqual([
+      { key1: 'Alice Page', key2: 'alice-anon', key4: 'shared-client-id', subject_anonymous: hmac('anonymous_id', 'alice-anon') },
+      { key1: 'Bob Page', key2: 'bob-anon', key4: 'shared-client-id', subject_anonymous: hmac('anonymous_id', 'bob-anon') },
+    ]);
+  }, 60_000);
+
+  it('resets the cursor when the forward scan ends with rows still uncovered', async () => {
+    const legacyWs = newUuid();
+    const legacy = (name: string) => ({
+      workspace_id: legacyWs,
+      event_id: `stall-${name}`,
+      source_id: 'src_stall',
+      received_at: '2026-08-10 12:00:00',
+      timestamp: '2026-08-10 12:00:00',
+      type: 'track',
+      name,
+      anonymous_id: `stall-anon-${name}`,
+      user_id: '',
+      profile_id: '',
+      properties: {},
+      traits: {},
+      context: {},
+      consent: {},
+    });
+    await store.client.insert({ table: 'events', values: [legacy('Zulu')], format: 'JSONEachRow' });
+    const first = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
+    expect(first.tables.find((t) => t.table === 'events')?.advanced).toBe(true);
+
+    // A legacy row that sorts before the cursor arrives. The next forward scan is empty but the
+    // count is positive; the cursor must reset so a later pass can reach it.
+    await store.client.insert({ table: 'events', values: [legacy('Aardvark')], format: 'JSONEachRow' });
+    const empty = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
+    expect(empty.tables.find((t) => t.table === 'events')).toMatchObject({ advanced: false, remaining: true });
+    const found = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 1 });
+    expect(found.tables.find((t) => t.table === 'events')?.advanced).toBe(true);
+    const settings = await store.settingsFor(legacyWs);
+    const rs = await store.client.query({
+      query: `SELECT key1 FROM subject_key_backfill FINAL WHERE workspace_id = {ws:UUID} AND table_name = 'events' ORDER BY key1`,
+      query_params: { ws: legacyWs },
+      format: 'JSONEachRow',
+      clickhouse_settings: settings,
+    });
+    expect((await rs.json<{ key1: string }>()).map((row) => row.key1)).toEqual(['Aardvark', 'Zulu']);
+  }, 60_000);
 
   it('fails the write when the exclusion key cannot be resolved, and counts the failure', async () => {
     const before = subjectKeyFailureCount();

@@ -939,10 +939,10 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
           if (!rows.length) {
             const remaining = await uncoveredRows(client, spec, workspaceId, settings);
             const done = remaining === 0;
-            // Reset the cursor at the end of a pass: the next revalidation must find a legacy row
-            // that landed behind the old cursor.
+            // Reset the cursor whenever the forward scan is exhausted, even if the count is still
+            // positive: an uncovered row behind the cursor can only be found by scanning again.
             await writeBackfillCursor(client, spec.table, workspaceId, {
-              cursor: done ? '' : state.cursor,
+              cursor: '',
               revision: state.revision + 1,
             });
             tables.push({ table: spec.table, workspaceId, advanced: false, remaining: !done, done });

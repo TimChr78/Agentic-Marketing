@@ -94,9 +94,10 @@ export interface SubjectKeyBackfillTable {
   /** The table's full replacing/order key, used for the keyset cursor and ORDER BY. */
   sortColumns: readonly { name: string; type: string }[];
   /**
-   * The stable identity under which the side table keeps this row (PR 2 joins on it). `events`
-   * uses event_id; message events use message_id/type/event_id; journey events use
-   * journey_id/participant_id/seq/type.
+   * The stable identity under which the side table keeps this row (PR 2 joins on it). It is the
+   * table's complete replacing key minus `workspace_id`: events use name/anonymous_id/timestamp/
+   * event_id because a client-supplied event id alone is not unique; message events use
+   * message_id/type/event_id; journey events use journey_id/participant_id/seq/type.
    */
   identity: readonly { column: string; key: string }[];
   /** Raw columns whose values are hashed; click ids come from `context` for events. */
@@ -115,7 +116,15 @@ export const SUBJECT_KEY_BACKFILL_TABLES: readonly SubjectKeyBackfillTable[] = [
       { name: 'timestamp', type: "DateTime64(3, 'UTC')" },
       { name: 'event_id', type: 'String' },
     ],
-    identity: [{ column: 'event_id', key: 'key1' }],
+    // This table's identity is its complete replacing key minus workspace_id. A client-supplied
+    // event_id alone is not unique: two rows may share it and differ by name, anonymous id or
+    // timestamp, and a side entry keyed by id alone would drop one of them.
+    identity: [
+      { column: 'name', key: 'key1' },
+      { column: 'anonymous_id', key: 'key2' },
+      { column: 'timestamp', key: 'key3' },
+      { column: 'event_id', key: 'key4' },
+    ],
     sources: [
       { kind: 'profile', column: 'profile_id' },
       { kind: 'anonymous_id', column: 'anonymous_id' },

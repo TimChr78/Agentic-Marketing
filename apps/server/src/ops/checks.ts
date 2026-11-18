@@ -5,7 +5,7 @@ import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 import { appRoleReach, createDb, type Db, normalizeHost } from '@agentic-marketing/db';
-import { clickHouseStore } from '@agentic-marketing/events';
+import { clickHouseStore, type EventStore } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { endpointFailure, endpointOrigin, splitUrlCredentials } from '@agentic-marketing/telemetry';
 import { type Config, ENV_KEYS, loadConfig, REQUIRED_ENV_KEYS } from '../config';
@@ -68,10 +68,10 @@ const LOOPBACK_BINDS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** Race a promise against the check timeout, so a stuck socket or query cannot block the CLI. */
-async function withTimeout<T>(work: Promise<T>, what: string): Promise<T> {
+async function withTimeout<T>(work: Promise<T>, what: string, ms = TIMEOUT_MS): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${what} timed out after ${SECONDS}s`)), TIMEOUT_MS);
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms / 1000}s`)), ms);
   });
   try {
     return await Promise.race([work, timeout]);
@@ -1497,37 +1497,51 @@ export async function checkEgress(providers: ProviderRow[]): Promise<Check[]> {
 
 /**
  * Historical subject-key coverage (#1037 part 1). The backfill reads one workspace at a time
- * because the person tables are behind row policies, so this enumerates workspaces first. A
- * non-zero count is what PR 3 refuses to activate over; the message carries counts only.
+ * because the person tables are behind row policies, so this enumerates workspaces first and costs
+ * three FINAL joins per workspace. It is bounded at three seconds: when that budget runs out the
+ * answer is explicitly unknown, never `ok`, because an unfinished count is not evidence of zero.
+ * The message carries counts only.
  */
-export async function checkSubjectKeyCoverage(config: Config, db: Db): Promise<Check> {
+export interface SubjectKeyCoverageCheckDeps {
+  /** Test seam: a store whose coverage call can be observed. */
+  store?: Pick<EventStore, 'subjectKeyCoverage' | 'close'>;
+  timeoutMs?: number;
+}
+
+export async function checkSubjectKeyCoverage(config: Config, db: Db, deps: SubjectKeyCoverageCheckDeps = {}): Promise<Check> {
+  const ownsStore = !deps.store;
+  const store = deps.store ?? clickHouseStore({ url: config.clickhouse.url, database: config.clickhouse.database });
   try {
     const workspaces = await db.admin.query<{ id: string }>('SELECT id FROM workspaces');
-    const store = clickHouseStore({ url: config.clickhouse.url, database: config.clickhouse.database });
-    try {
-      const coverage = await withTimeout(store.subjectKeyCoverage(workspaces.rows.map((row) => row.id)), 'subject-key coverage');
-      if (coverage.pending === 0)
-        return { id: 'clickhouse.subject-keys', status: 'ok', message: 'every stored row has subject-key coverage' };
-      const byTable = coverage.tables
-        .filter((table) => table.pending > 0)
-        .map((table) => `${table.table}: ${table.pending}`)
-        .join(', ');
-      return {
-        id: 'clickhouse.subject-keys',
-        status: 'warn',
-        message: `${coverage.pending} historical row(s) still lack subject-key coverage (${byTable})`,
-        hint: 'The scheduler backfills them; the read-time exclusion contract stays inactive until the count is zero.',
-      };
-    } finally {
-      await store.close().catch(() => {});
-    }
+    const coverage = await withTimeout(
+      store.subjectKeyCoverage(workspaces.rows.map((row) => row.id)),
+      'subject-key coverage',
+      deps.timeoutMs,
+    );
+    if (coverage.pending === 0)
+      return { id: 'clickhouse.subject-keys', status: 'ok', message: 'every stored row has subject-key coverage' };
+    const byTable = coverage.tables
+      .filter((table) => table.pending > 0)
+      .map((table) => `${table.table}: ${table.pending}`)
+      .join(', ');
+    return {
+      id: 'clickhouse.subject-keys',
+      status: 'warn',
+      message: `${coverage.pending} historical row(s) still lack subject-key coverage (${byTable})`,
+      hint: 'The scheduler backfills them; the read-time exclusion contract stays inactive until the count is zero.',
+    };
   } catch (err) {
+    const timedOut = /timed out/.test(messageOf(err));
     return {
       id: 'clickhouse.subject-keys',
       status: 'info',
-      message: `subject-key coverage could not be read: ${messageOf(err)}`,
-      hint: 'Expected before the first backfill; re-run am doctor after the scheduler has run.',
+      message: timedOut
+        ? 'subject-key coverage is unknown: the check timed out before finishing'
+        : `subject-key coverage is unknown: ${messageOf(err)}`,
+      hint: 'A timed-out or unreadable count is not zero. Re-run `am doctor` after the scheduler has run.',
     };
+  } finally {
+    if (ownsStore) await store.close().catch(() => {});
   }
 }
 

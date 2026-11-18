@@ -438,6 +438,9 @@ export async function replayErasures(
     for (const erasure of log.erasures) bucket(erasure.workspaceId).erasures.push(erasure);
     for (const tombstone of log.tombstones) bucket(tombstone.workspaceId).tombstones.push(tombstone);
     for (const key of log.keys ?? []) bucket(key.workspaceId).keys.push(key);
+    // A workspace can have exclusion keys and hashed event rows without any erasure yet (a probe
+    // caught exactly that). Its key must still be replayed, or every stored hash loses its key.
+    for (const key of log.exclusionKeys ?? []) bucket(key.workspaceId);
 
     for (const [workspaceId, entries] of byWorkspace) {
       if (!workspaces.has(workspaceId)) {

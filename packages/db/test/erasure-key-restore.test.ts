@@ -94,6 +94,33 @@ describe.skipIf(!hasTestDatabase())('restore recreates the erasure-key ledger (#
     expect(count.rows[0]?.n).toBe('5');
   }, 60_000);
 
+  it('replays an exclusion key for a workspace with no erasure or ledger rows', async () => {
+    const live = await createDisposableDb('erasure_keys_only_live');
+    const restored = await createDisposableDb('erasure_keys_only_restored');
+    open.push(live, restored);
+    const workspace = live.workspace;
+    // Hashed event rows exist, so the key exists and matters; no erasure has happened yet, so
+    // there is no erasure or ledger row to create the replay bucket.
+    await live.db.admin.query(
+      `INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key, active, purpose)
+       VALUES ($1, $2, 'kek_test', $3, true, 'exclusion')`,
+      [workspace, KEY_ID, WRAPPED],
+    );
+    const log = await readErasureLog(live.url.toString());
+    expect(log.erasures).toEqual([]);
+    expect(log.keys).toEqual([]);
+    expect(log.exclusionKeys).toEqual([expect.objectContaining({ workspaceId: workspace, id: KEY_ID, wrappedKey: WRAPPED })]);
+
+    await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [workspace]);
+    const replayed = await replayErasures(restored.url.toString(), log);
+    expect(replayed).toMatchObject({ exclusionKeys: 1, keys: 0 });
+    const keys = await restored.db.admin.query<{ id: string; wrapped_key: Buffer; active: boolean }>(
+      "SELECT id, wrapped_key, active FROM data_keys WHERE workspace_id = $1 AND purpose = 'exclusion'",
+      [workspace],
+    );
+    expect(keys.rows).toEqual([{ id: KEY_ID, wrapped_key: WRAPPED, active: true }]);
+  }, 60_000);
+
   it('activates the key the ledger references over a newer active key in the snapshot', async () => {
     const live = await createDisposableDb('erasure_keys_conflict_live');
     const restored = await createDisposableDb('erasure_keys_conflict_restored');
