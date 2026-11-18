@@ -428,22 +428,31 @@ describe('protected reads exclude erased subjects (#1037 part 2)', () => {
     }
   }, 30_000);
 
-  it('plans the exclusion as a workspace-keyed FINAL read of erased subjects, not a wider scan', async () => {
+  it('plans one workspace-keyed ledger read per kind, fed by the base rows', async () => {
     const settings = await store.settingsFor(ws);
     const rs = await store.client.query({
-      query: 'EXPLAIN SELECT count() FROM events_protected FINAL WHERE workspace_id = {ws:UUID}',
-      query_params: { ws },
+      // A shape the application actually sends: one workspace, one event name, a time window.
+      query: `EXPLAIN SELECT count() FROM events_protected FINAL
+              WHERE workspace_id = {ws:UUID} AND name = {name:String}
+                AND timestamp >= {from:DateTime64(3, 'UTC')}`,
+      query_params: { ws, name: 'Purchase', from: '2026-10-01 00:00:00' },
       format: 'JSONEachRow',
       clickhouse_settings: settings,
     });
     const plan = (await rs.json<Record<string, string>>()).map((row) => Object.values(row).join('')).join('\n');
-    // The erased state is read once, FINAL, keyed by this workspace (the row policy applies too).
-    expect(plan).toContain('groupUniqArray(key)');
+    // Each kind's keys are read through the table's ordering prefix: `kind` and the workspace,
+    // never another workspace's exclusions and never the whole ledger as a per-row array.
+    expect(plan).toContain("kind = 'profile'");
+    expect(plan).toContain("kind = 'anonymous_id'");
+    expect(plan).toContain(`workspace_id = '${ws}'`);
     expect(plan).toContain('FINAL: 1');
-    // Only the workspace and key columns are read, and the row policy plus the predicate limit
-    // the read to this tenant: no other workspace's exclusions are touched.
-    expect(plan).toMatch(/ReadFromMergeTree \([^)]*erased_subjects\)[\s\S]{0,400}?Output: workspace_id, key/);
-    expect(plan).toMatch(new RegExp(`ReadFromMergeTree \\([^)]*erased_subjects\\)[\\s\\S]{0,600}?workspace_id = '${ws}'`));
+    expect(plan).not.toContain('groupUniqArray');
+    // The side table is read for one table and workspace, and joined on the full identity. On a
+    // populated install the plan also builds runtime filters from the base rows; the seeded
+    // benchmark pins that, because a one-row side table is too small for the planner to bother.
+    expect(plan).toContain("table_name = 'events'");
+    expect(plan).toContain('CAST(name AS String) = key1');
+    expect(plan).toContain('toString(timestamp) = key3');
     // The base table is deduped before the exclusion runs: FINAL is applied to the table read.
     expect(plan).toMatch(/ReadFromMergeTree \([^)]*\.events\)[\s\S]*?FINAL: 1/);
   }, 30_000);

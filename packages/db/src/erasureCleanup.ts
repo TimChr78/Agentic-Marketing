@@ -439,16 +439,31 @@ export async function erasureCleanupJob(
 }
 
 /**
- * The workspace's current exclusion publication generation (#1037 part 2). A query result computed
- * under an older generation may describe rows a later publication excluded, so a cache key includes
- * it; a publication therefore never has to invalidate a cache explicitly.
+ * The workspace's confirmed-publication epoch (#1037 part 2). A query result cache keys on it: it
+ * moves only after a publication's keys are visible in ClickHouse, so a query that ran *during*
+ * publication can never leave a pre-exclusion answer under the current value. Keying on
+ * `generation` instead would allow exactly that: the generation is allocated before the insert.
  */
-export async function erasureGeneration(tx: Tx, workspaceId: string): Promise<number> {
+export async function erasureVisibilityEpoch(tx: Tx, workspaceId: string): Promise<number> {
   const [row] = await tx
-    .select({ generation: schema.erasureGenerations.generation })
+    .select({ visible: schema.erasureGenerations.visiblePublications })
     .from(schema.erasureGenerations)
     .where(eq(schema.erasureGenerations.workspaceId, workspaceId));
-  return Number(row?.generation ?? 0);
+  return Number(row?.visible ?? 0);
+}
+
+/**
+ * Records that one publication is confirmed visible, moving the cache epoch. Called once per
+ * successful publication, after the FINAL read, so concurrent publishers each move it exactly once
+ * and a read can never observe a new epoch before the rows behind it are visible.
+ */
+export async function noteErasedSubjectsVisible(db: Db, workspaceId: string): Promise<void> {
+  await db.admin.query(
+    `INSERT INTO erasure_generations (workspace_id, visible_publications, visible_at) VALUES ($1, 1, now())
+     ON CONFLICT (workspace_id) DO UPDATE
+       SET visible_publications = erasure_generations.visible_publications + 1, visible_at = now(), updated_at = now()`,
+    [workspaceId],
+  );
 }
 
 /** One full-coverage ledger row the erasure stage committed for this erasure. */

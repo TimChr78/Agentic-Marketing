@@ -17,6 +17,7 @@ import {
   markErasureCleanupCheckpoint,
   markErasureCleanupPublished,
   nextErasureGeneration,
+  noteErasedSubjectsVisible,
   renewErasureCleanupLease,
   resetErasureCleanupCheckpoints,
 } from '@agentic-marketing/db';
@@ -142,6 +143,9 @@ async function publishErasedSubjects(deps: ErasureCleanupDeps, claim: ErasureCle
       ))
     )
       throw new Error('the published erased subjects are not visible in a FINAL read');
+    // Only now may a cached query result be invalidated: the cache epoch moves after the FINAL read,
+    // so a query that ran while the insert was in flight cannot be served under the new epoch.
+    await noteErasedSubjectsVisible(deps.db, claim.workspaceId);
   }
   if (!(await markErasureCleanupPublished(deps.db, claim, generation)))
     logger.debug({ erasureId: claim.erasureId }, 'erasure publication record was stale; another claim owns the job');

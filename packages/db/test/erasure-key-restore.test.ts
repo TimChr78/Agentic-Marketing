@@ -169,34 +169,40 @@ describe.skipIf(!hasTestDatabase())('restore recreates the erasure-key ledger (#
     open.push(live, restored);
     const workspace = live.workspace;
     await live.db.admin.query(
-      `INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, 7)
-       ON CONFLICT (workspace_id) DO UPDATE SET generation = 7`,
+      `INSERT INTO erasure_generations (workspace_id, generation, visible_publications) VALUES ($1, 7, 4)
+       ON CONFLICT (workspace_id) DO UPDATE SET generation = 7, visible_publications = 4`,
       [workspace],
     );
     const log = await readErasureLog(live.url.toString());
-    expect(log.generations).toEqual([{ workspaceId: workspace, generation: 7 }]);
+    expect(log.generations).toEqual([{ workspaceId: workspace, generation: 7, publications: 4 }]);
 
     await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [workspace]);
     // The snapshot was taken after three publications; ClickHouse already saw seven.
-    await restored.db.admin.query('INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, 3)', [workspace]);
+    await restored.db.admin.query('INSERT INTO erasure_generations (workspace_id, generation, visible_publications) VALUES ($1, 3, 1)', [
+      workspace,
+    ]);
     const replayed = await replayErasures(restored.url.toString(), log);
     expect(replayed.generations).toBe(1);
-    let current = await restored.db.admin.query<{ generation: string }>(
-      'SELECT generation FROM erasure_generations WHERE workspace_id = $1',
+    let current = await restored.db.admin.query<{ generation: string; visible_publications: string }>(
+      'SELECT generation, visible_publications FROM erasure_generations WHERE workspace_id = $1',
       [workspace],
     );
     expect(Number(current.rows[0]?.generation)).toBe(7);
+    // The cache epoch is replayed too, and never moves backwards.
+    expect(Number(current.rows[0]?.visible_publications)).toBe(4);
 
-    // A stale log (an older attempt's capture) must not move it back.
+    // A stale log (an older attempt's capture) must not move either value back.
     await replayErasures(restored.url.toString(), {
       erasures: [],
       tombstones: [],
-      generations: [{ workspaceId: workspace, generation: 3 }],
+      generations: [{ workspaceId: workspace, generation: 3, publications: 1 }],
     });
-    current = await restored.db.admin.query<{ generation: string }>('SELECT generation FROM erasure_generations WHERE workspace_id = $1', [
-      workspace,
-    ]);
+    current = await restored.db.admin.query<{ generation: string; visible_publications: string }>(
+      'SELECT generation, visible_publications FROM erasure_generations WHERE workspace_id = $1',
+      [workspace],
+    );
     expect(Number(current.rows[0]?.generation)).toBe(7);
+    expect(Number(current.rows[0]?.visible_publications)).toBe(4);
   }, 60_000);
 
   it('skips keys of a workspace the restored snapshot does not contain', async () => {

@@ -9,6 +9,12 @@
 CREATE TABLE IF NOT EXISTS erasure_generations (
   workspace_id uuid PRIMARY KEY REFERENCES workspaces (id) ON DELETE CASCADE,
   generation bigint NOT NULL DEFAULT 0,
+  -- How many publications have been confirmed visible. A query result cache keys on this, never on
+  -- `generation`: a generation is allocated before its rows reach ClickHouse, so keying on it would
+  -- let a query that ran during publication cache the pre-exclusion answer under the new value.
+  -- Only a confirmed publication moves it, and every confirmation moves it.
+  visible_publications bigint NOT NULL DEFAULT 0,
+  visible_at timestamptz,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -26,6 +32,8 @@ COMMENT ON TABLE erasure_generations IS
   'Per-workspace, monotonically increasing generation the ClickHouse erased-subjects state is published under (#1037).';
 COMMENT ON COLUMN erasure_generations.generation IS
   'The last publication generation. Only ever increases; a restore applies the larger of the snapshot and the live log.';
+COMMENT ON COLUMN erasure_generations.visible_publications IS
+  'Confirmed publications. The analytics cache keys on it, so it changes only after a FINAL read shows the exclusions.';
 
 -- What the cleanup job published, and when. NULL means "not published yet" and is what makes a
 -- restored or retried job publish again; 0 means the erasure had no full-coverage ledger row, so

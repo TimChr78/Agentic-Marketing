@@ -583,6 +583,9 @@ export const erasureKeys = pgTable(
 export const erasureGenerations = pgTable('erasure_generations', {
   workspaceId: uuid('workspace_id').primaryKey(),
   generation: bigint('generation', { mode: 'number' }).notNull().default(0),
+  /** Confirmed publications; a result cache keys on it, never on `generation` (#1037 part 2). */
+  visiblePublications: bigint('visible_publications', { mode: 'number' }).notNull().default(0),
+  visibleAt: ts('visible_at'),
   updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 

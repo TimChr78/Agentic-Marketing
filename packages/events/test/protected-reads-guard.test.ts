@@ -74,13 +74,20 @@ describe('protected reads (#1037 part 2)', () => {
   });
 
   it('every protected view is created by the ClickHouse migrations and filters erased subjects', async () => {
-    const migration = await readFile(join(ROOT, 'packages/events/clickhouse/0009_protected_views.sql'), 'utf8');
+    const source = await readFile(join(ROOT, 'packages/events/clickhouse/0009_protected_views.sql'), 'utf8');
+    // Comments explain the shape; only the statements are checked.
+    const migration = source.replace(/^\s*--.*$/gm, '');
     for (const table of PERSON_TABLES) {
       expect(migration).toContain(`CREATE VIEW IF NOT EXISTS ${table}_protected AS`);
     }
-    // The exclusion state is the whole point of a view; each one joins it and tests its keys.
-    expect(migration.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length);
-    expect(migration.match(/NOT arrayExists\(/g)).toHaveLength(PERSON_TABLES.length);
+    // The exclusion state is the whole point of a view: one anti-join per subject kind, each on
+    // (workspace, key) with the kind pushed into the right side.
+    expect(migration.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length * 16);
+    expect(migration.match(/LEFT ANTI JOIN \(/g)).toHaveLength(PERSON_TABLES.length * 16);
+    // The ledger is never materialised per row: that shape exhausted memory with 100k exclusions.
+    expect(migration).not.toMatch(/groupUniqArray|arrayExists\(/);
+    // Every anti-join names its kind, so the read uses the table's ordering prefix.
+    expect(migration.match(/WHERE kind = '/g)).toHaveLength(PERSON_TABLES.length * 16);
     // FINAL belongs inside the view (it returns one logical row per replacing key). A caller that
     // added it again would merge the view's output, and one that relied on it would silently miss
     // both the dedupe and the exclusion.

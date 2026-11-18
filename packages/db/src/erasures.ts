@@ -92,6 +92,8 @@ export interface ExclusionDataKeyRecord {
 export interface ErasureGenerationRecord {
   workspaceId: string;
   generation: number;
+  /** Confirmed publications; the analytics cache epoch (#1037 part 2). */
+  publications: number;
 }
 
 export interface ErasureLog {
@@ -317,10 +319,14 @@ export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
     // reuse a generation that is already visible.
     const generations = (await hasTable(client, 'erasure_generations'))
       ? (
-          await client.query<{ workspace_id: string; generation: number | string }>(
-            'SELECT workspace_id, generation FROM erasure_generations',
+          await client.query<{ workspace_id: string; generation: number | string; visible_publications: number | string }>(
+            'SELECT workspace_id, generation, visible_publications FROM erasure_generations',
           )
-        ).rows.map((row) => ({ workspaceId: row.workspace_id, generation: Number(row.generation) }))
+        ).rows.map((row) => ({
+          workspaceId: row.workspace_id,
+          generation: Number(row.generation),
+          publications: Number(row.visible_publications),
+        }))
       : [];
     return { erasures, tombstones, cleanupJobs, keys, exclusionKeys, generations };
   });
@@ -632,12 +638,15 @@ export async function replayErasures(
         const capturedGenerations = (log.generations ?? []).filter((entry) => entry.workspaceId === workspaceId);
         if (generationsTable && capturedGenerations.length) {
           const highest = Math.max(...capturedGenerations.map((entry) => entry.generation));
+          const publications = Math.max(...capturedGenerations.map((entry) => entry.publications));
           const applied = await client.query(
-            `INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, $2)
+            `INSERT INTO erasure_generations (workspace_id, generation, visible_publications) VALUES ($1, $2, $3)
              ON CONFLICT (workspace_id) DO UPDATE
-               SET generation = GREATEST(erasure_generations.generation, EXCLUDED.generation), updated_at = now()
+               SET generation = GREATEST(erasure_generations.generation, EXCLUDED.generation),
+                   visible_publications = GREATEST(erasure_generations.visible_publications, EXCLUDED.visible_publications),
+                   updated_at = now()
              RETURNING generation`,
-            [workspaceId, highest],
+            [workspaceId, highest, publications],
           );
           if (applied.rowCount) result.generations += 1;
         }

@@ -2,7 +2,7 @@ import { complementarySuppression, K, planComplementarySuppression, publishedSin
 import { campaignIdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
-import { erasureGeneration, schema, type Tx } from '@agentic-marketing/db';
+import { erasureVisibilityEpoch, schema, type Tx } from '@agentic-marketing/db';
 import { type EventStore, type MessageEvent, PROTECTED_VIEWS } from '@agentic-marketing/events';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -224,7 +224,7 @@ async function workspaceTimeZone(tx: Tx, workspaceId: string): Promise<string> {
   return w?.timeZone ?? 'UTC';
 }
 
-function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFilters, generation: number): string {
+function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFilters, epoch: number): string {
   const sortedFilters = Object.fromEntries(
     Object.entries(filters)
       .sort(([a], [b]) => a.localeCompare(b))
@@ -232,9 +232,10 @@ function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFil
   );
   return JSON.stringify({
     workspaceId,
-    // A publication changes which rows exist for this workspace (#1037 part 2); a result from an
-    // older generation must not be served after it.
-    generation,
+    // A confirmed publication changes which rows exist for this workspace (#1037 part 2). The epoch
+    // moves only after the exclusions are visible, so a result cached while a publication was in
+    // flight is never served afterwards.
+    epoch,
     measures: input.measures,
     dimensions: input.dimensions,
     from: input.from,
@@ -814,15 +815,15 @@ export async function runAnalyticsQuery(deps: Deps, input: QueryInput, options: 
   // would otherwise be served unsuppressed rows (#917 review round 6). Neither may a result that
   // carries a caller's pending-event snapshot (#1008).
   const raw = options.raw === true;
-  // The workspace's exclusion publication generation, part of the cache key.
-  const generation = await erasureGeneration(deps.tx, deps.workspaceId);
+  // The workspace's confirmed-publication epoch, part of the cache key.
+  const epoch = await erasureVisibilityEpoch(deps.tx, deps.workspaceId);
   // The snapshot half of a pending union never reaches ClickHouse before publication, so its
   // profiles are checked against the workspace's published exclusions here (#1037 part 2); the
   // published half is excluded by the protected view the query reads.
   const pendingMessageEvents = options.pendingMessageEvents?.length
     ? await deps.events.withoutErasedSubjects(deps.workspaceId, options.pendingMessageEvents)
     : [];
-  const key = raw || pendingMessageEvents.length ? null : cacheKey(deps.workspaceId, input, filters, generation);
+  const key = raw || pendingMessageEvents.length ? null : cacheKey(deps.workspaceId, input, filters, epoch);
   const now = Date.now();
   const hit = key === null ? undefined : cache.get(key);
   if (hit && hit.expires > now) {

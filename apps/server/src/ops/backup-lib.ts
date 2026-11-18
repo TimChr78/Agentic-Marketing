@@ -1120,7 +1120,7 @@ async function readRestoreCapture(path: string): Promise<RestoreCapture | null> 
       erasures?: ErasureLog['erasures'];
       tombstones?: ErasureLog['tombstones'];
       keys?: ErasureLog['keys'];
-      generations?: { workspaceId: string; generation: unknown }[];
+      generations?: { workspaceId: string; generation: unknown; publications?: unknown }[];
       exclusionKeys?: { workspaceId: string; id: string; kekId: string; wrappedKey: unknown; active: unknown; createdAt: string }[];
       cleanupJobs?: {
         workspaceId: string;
@@ -1156,6 +1156,7 @@ async function readRestoreCapture(path: string): Promise<RestoreCapture | null> 
       generations: (stored.log?.generations ?? []).map((entry) => ({
         workspaceId: entry.workspaceId,
         generation: Number(entry.generation) || 0,
+        publications: Number(entry.publications) || 0,
       })),
       exclusionKeys: (stored.log?.exclusionKeys ?? []).map((key) => ({
         workspaceId: key.workspaceId,
@@ -1222,7 +1223,15 @@ export function unionErasureLogs(captured: ErasureLog | null, live: ErasureLog):
   const generations = new Map<string, NonNullable<ErasureLog['generations']>[number]>();
   for (const entry of [...(captured?.generations ?? []), ...(live.generations ?? [])]) {
     const earlier = generations.get(entry.workspaceId);
-    if (!earlier || entry.generation > earlier.generation) generations.set(entry.workspaceId, entry);
+    if (!earlier || entry.generation > earlier.generation) {
+      generations.set(entry.workspaceId, {
+        workspaceId: entry.workspaceId,
+        generation: Math.max(entry.generation, earlier?.generation ?? 0),
+        publications: Math.max(entry.publications, earlier?.publications ?? 0),
+      });
+    } else if (entry.publications > earlier.publications) {
+      earlier.publications = entry.publications;
+    }
   }
   return {
     erasures: [...erasures.values()],

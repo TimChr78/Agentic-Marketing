@@ -336,8 +336,10 @@ describe('protected reads after an erasure (#1037 part 2)', () => {
     // Still the cached answer while no publication happened — that is what makes the next step a
     // real assertion rather than a fresh read.
     expect((await api.call('analytics.query', query)).rows).toEqual([[2]]);
-    // A publication moves the workspace's generation, exactly as the erasure worker does.
-    await t.srv.db.admin.query('UPDATE erasure_generations SET generation = generation + 1 WHERE workspace_id = $1', [ws]);
+    // A confirmed publication moves the workspace's cache epoch, exactly as the erasure worker does.
+    await t.srv.db.admin.query('UPDATE erasure_generations SET visible_publications = visible_publications + 1 WHERE workspace_id = $1', [
+      ws,
+    ]);
     expect((await api.call('analytics.query', query)).rows).toEqual([[3]]);
   }, 60_000);
 
@@ -354,4 +356,38 @@ describe('protected reads after an erasure (#1037 part 2)', () => {
     // queued event, never the erased person's.
     expect(withPending.sent).toBe((published.sent ?? 0) + 1);
   }, 60_000);
+  it('never caches a query that ran while its own exclusions were being published', async () => {
+    const api = t.api(owner, ws);
+    const input = {
+      measures: ['conversions'],
+      dimensions: [],
+      from: FROM,
+      to: TO,
+      filters: { name: ['Purchase'] },
+    };
+    await api.call('profiles.erase', { profileId: liveProfile, reason: 'cache race review' });
+    clearAnalyticsCache();
+    let during: number | null = null;
+    const real = t.srv.events;
+    const publishing = {
+      ...real,
+      async publishErasedSubjects(rows: Parameters<typeof real.publishErasedSubjects>[0]) {
+        // The query that races the publication: it sees the pre-exclusion answer and caches it.
+        during = (await api.call('analytics.query', input)).rows[0]?.[0] as number;
+        await real.publishErasedSubjects(rows);
+      },
+      erasedSubjectsVisible: real.erasedSubjectsVisible.bind(real),
+      // No physical sweep: only the published exclusion may change the answer.
+      async deleteEventsOf() {},
+    } as unknown as typeof real;
+    await runErasureCleanupOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: publishing, hot: t.srv.hot }, { finalSweepMs: 0 });
+    const cached = (await api.call('analytics.query', input)).rows[0]?.[0];
+    clearAnalyticsCache();
+    const fresh = (await api.call('analytics.query', input)).rows[0]?.[0];
+    // The race really happened: the mid-publication query saw the erased person's conversions.
+    expect(during).toBeGreaterThan(0);
+    // The cache epoch moves only after the FINAL read, so the stale entry is unreachable.
+    expect(cached).toBe(fresh);
+    expect(fresh).toBe(0);
+  }, 120_000);
 });
