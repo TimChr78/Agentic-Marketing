@@ -30,7 +30,7 @@ By hand, generate the two passwords as **hex** (`openssl rand -hex 32`) and the 
 
 Every variable the server reads is passed into the `app` container, including `METRICS_TOKEN`, the step-up limits, `ERASURE_GRACE_HOURS`, `KEY_PROVIDER` with the OpenBao/AWS KMS settings, the OTLP tracing endpoint and header variables, the scheduled-backup settings (`BACKUP_CRON`, `BACKUP_KEEP_DAYS`), and the isolation keys `APP_DB_ROLE`, `CLICKHOUSE_DATABASE`, `NATS_NAMESPACE` and `VALKEY_PREFIX`. Uncomment or append an entry in `.env` and run `docker compose up -d`; Compose recreates the container when the environment changes. `.env.example` documents every key with its default, so an unset (or empty) value still applies that default.
 
-Compose supplies the service URLs (`DATABASE_URL`, `CLICKHOUSE_URL`, `NATS_URL`, `VALKEY_URL`), `ROLE=all`, `PORT=3000` and `BACKUP_DIR=/backups` itself. They are documented in `.env.example` for other deployments; changing them in the Compose `.env` does not move the Compose stack to another service.
+Compose supplies the service URLs (`DATABASE_URL`, `CLICKHOUSE_URL`, `NATS_URL`, `VALKEY_URL`), `ROLE=all`, `PORT=3000` and `BACKUP_DIR=/backups` itself. They are documented in `.env.example` for other deployments; changing them in the Compose `.env` does not move the Compose stack to another service. `POSTGRES_IMAGE` chooses the Postgres image (default `postgres:18-alpine`, pinned by digest); it exists so an existing 16 install can stay on 16 while it is migrated, and the `postgres-check` service refuses a volume from another major ([PostgreSQL 18 and upgrading from 16](postgres-18.md)).
 
 `DATABASE_URL` must reach PostgreSQL directly or through a pooler in **session** pooling mode. Idempotency uses session advisory locks, which belong to the PostgreSQL backend; PgBouncer's **transaction** pooling mode can move that backend between clients and is not supported. The Compose stack has no pooler.
 
@@ -75,5 +75,7 @@ docker compose up -d
 ```
 
 The app takes a Postgres backup and runs migrations before it serves. `am backup`, `am restore` and `am smoke` are described in [UPGRADING.md](../../UPGRADING.md) and [operations](operations.md).
+
+A release that moves the shipped Postgres major (0.16.0 ships PostgreSQL 18 for new installs) needs one extra step for an existing volume: 16 data cannot be opened by 18, and `docker compose up -d` stops at the `postgres-check` service with the upgrade path instead of starting an empty database. Follow [PostgreSQL 18 and upgrading from 16](postgres-18.md): stop every writer, take and verify the final `am backup` with the old image, start 0.16 on a new `pgdata18` volume while keeping the 16 volume, and `am restore`. Set `AM_VERSION` explicitly; a 0.15.x image's 16 client tools cannot dump an 18 server.
 
 A release whose notes say **drain** (0.15.0 is the first) is not a rolling restart: stop the app with `docker compose stop app` before you change `AM_VERSION`, then start it and resume traffic once the container is healthy. Old and new writers must not run at the same time, and a rollback drains in the same way.

@@ -118,6 +118,7 @@ On Kubernetes: the Helm chart in [`deploy/helm`](deploy/helm/agentic-marketing) 
 - [Development](docs/development.md): layout, running locally, tests, key rotation.
 - [Kubernetes reference deployment](docs/deployment/kubernetes.md): Helm, OpenBao or AWS KMS keys, sizing.
 - [Docker Compose deployment](docs/deployment/compose.md): the release files, the override file, upgrades.
+- [PostgreSQL 18 and upgrading from 16](docs/deployment/postgres-18.md): the volume move, data checksums and rollback.
 - [Operations](docs/deployment/operations.md) (`am init`, `am doctor`), [backups and restore](docs/deployment/backups.md) and [post-upgrade checks](docs/deployment/smoke.md) (`am smoke`).
 - [Edge decisions](docs/deployment/edge.md): the decision API on Cloudflare Workers.
 - [Push notifications](docs/push.md): browsers, Android and Apple apps.

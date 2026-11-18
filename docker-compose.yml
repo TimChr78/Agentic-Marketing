@@ -7,19 +7,63 @@
 #
 # Copy .env.example to .env and fill in the secrets first.
 #
+# PostgreSQL 18 is the default for new installs. An existing 16 data directory cannot be opened by
+# 18: the postgres-check service stops with guidance before anything starts, and POSTGRES_IMAGE in
+# .env keeps an install on 16 until it is migrated (docs/deployment/postgres-18.md).
+#
 # Service images are pinned by digest: the multi-arch index (linux/amd64 and linux/arm64) behind
 # the tag, so `docker compose pull` never changes the runtime behind a release. The tag stays in
 # front of the digest, so an update is readable; Dependabot proposes new digests for the pinned
 # images (and the Dockerfile's), and bumping one is a deliberate change. The `app` image follows
-# AM_VERSION, the release you choose.
+# AM_VERSION, the release you choose; the Postgres image follows POSTGRES_IMAGE, which defaults
+# to PostgreSQL 18.
 services:
+  # A one-shot guard before Postgres: a data directory cannot be opened by another major version.
+  # The postgres:18 image would otherwise initialise a fresh cluster while an existing 16 volume
+  # sits unused, which looks like an empty install. This fails an upgrade of an existing 16 volume
+  # with the upgrade path, before Postgres starts, and opens the volume read-only. `restart: "no"`
+  # is deliberate: it must run once and exit.
+  postgres-check:
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015}
+    restart: "no"
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+          echo "postgres-check: empty pgdata volume; PostgreSQL $$PG_MAJOR will initialise it"
+          exit 0
+        fi
+        have=$$(cat /var/lib/postgresql/data/PG_VERSION)
+        if [ "$$have" = "$$PG_MAJOR" ]; then
+          echo "postgres-check: the pgdata volume holds PostgreSQL $$have"
+          exit 0
+        fi
+        echo "error: the pgdata volume holds a PostgreSQL $$have cluster, but this stack starts PostgreSQL $$PG_MAJOR." >&2
+        echo "Nothing changed: the volume was opened read-only and PostgreSQL did not start." >&2
+        echo "Upgrade the data with the documented dump-and-restore (or pg_upgrade): docs/deployment/postgres-18.md" >&2
+        echo "To stay on the old major for now, set POSTGRES_IMAGE in .env to the previous release's image, then run 'docker compose up -d'." >&2
+        exit 1
+    volumes:
+      - pgdata:/var/lib/postgresql/data:ro
+
   postgres:
-    image: postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
+    # Change POSTGRES_IMAGE in .env to run another official postgres image (for example to stay on
+    # 16 while an existing install is migrated). The guard above compares that image's major with
+    # the volume, so a mismatch stops with guidance instead of starting an empty database.
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015}
     restart: unless-stopped
+    depends_on:
+      postgres-check:
+        condition: service_completed_successfully
     environment:
       POSTGRES_USER: am
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: am
+      # Keep the pre-18 layout (/var/lib/postgresql/data) so one volume serves 16 and 18, and the
+      # guard can compare what is in it with the image's major. 18's own default is
+      # /var/lib/postgresql/18/docker, which would silently ignore an existing volume's root.
+      PGDATA: /var/lib/postgresql/data
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

@@ -41,6 +41,10 @@ describe('environment variable history', () => {
     expect(envKeysSince('0.7.4', '0.7.4')).toEqual([]);
   });
 
+  it('records the Compose Postgres image as new in 0.16.0 (#1001)', () => {
+    expect(envKeysSince('0.15.0', '0.16.0')).toEqual(['POSTGRES_IMAGE']);
+  });
+
   it('compares release versions and rejects non-versions', () => {
     expect(compareVersions('0.2.4', '0.2.3')).toBeGreaterThan(0);
     expect(compareVersions('v0.2.4', '0.2.4')).toBe(0);

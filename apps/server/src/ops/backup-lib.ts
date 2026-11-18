@@ -195,7 +195,7 @@ function run(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<v
     child.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'ENOENT')
         finish(
-          new Error(`${command} was not found. Install the PostgreSQL 16 client tools (postgresql-client-16 in the image) and try again.`),
+          new Error(`${command} was not found. Install the PostgreSQL 18 client tools (postgresql-client-18 in the image) and try again.`),
         );
       else finish(err);
     });
@@ -389,7 +389,78 @@ export async function restorePostgres(databaseUrl: string, dumpFile: string): Pr
   const clientEnv = postgresClientEnv(databaseUrl);
   if (!clientEnv.PGDATABASE) throw new Error('DATABASE_URL has no database name');
   // The database name is safe in argv; the password stays in PGPASSWORD.
-  await run('pg_restore', ['--clean', '--if-exists', '--no-owner', '--dbname', clientEnv.PGDATABASE, dumpFile], clientEnv);
+  const args = ['--clean', '--if-exists', '--no-owner', '--dbname', clientEnv.PGDATABASE, dumpFile];
+  try {
+    await run('pg_restore', args, clientEnv);
+  } catch (err) {
+    // pg_dump 18 writes `SET transaction_timeout = 0` (a 17+ setting) into every archive, including
+    // one read from a 16 server, and pg_restore 18 then gets one error from that statement when the
+    // target is 16. It ignores the error and restores everything else; accept exactly that case so
+    // an install kept on 16 with POSTGRES_IMAGE can still restore (#1001).
+    const message = err instanceof Error ? err.message : String(err);
+    if (!(await onlyRejectedTransactionTimeout(databaseUrl, message))) throw err;
+    process.stderr.write(
+      'warning: PostgreSQL 16 rejected the 18 client\'s "SET transaction_timeout"; the rest of the dump restored normally.\n',
+    );
+  }
+}
+
+/** The exact diagnostics pg_restore 18 writes when PostgreSQL 16 rejects one session setting. */
+const PG_RESTORE_EXIT_PREFIX = 'pg_restore failed (exit 1): ';
+const PG_RESTORE_QUERY_ERROR = 'pg_restore: error: could not execute query: ERROR:';
+const TRANSACTION_TIMEOUT_DIAGNOSTIC = 'unrecognized configuration parameter "transaction_timeout"';
+const PG_RESTORE_COMMAND = 'Command was: ';
+const TRANSACTION_TIMEOUT_STATEMENT = 'SET transaction_timeout = 0;';
+const PG_RESTORE_IGNORED_PREFIX = 'pg_restore: warning: errors ignored on restore: ';
+
+/** A small non-negative integer, parsed without a regex over command output (see AGENTS.md). */
+function ignoredErrorCount(text: string): number | null {
+  if (!text || text.length > 9) return null;
+  let count = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 48 || code > 57) return null;
+    count = count * 10 + (code - 48);
+  }
+  return count;
+}
+
+/**
+ * True only for a 16 target whose sole restore error is the 18 client's transaction_timeout.
+ *
+ * The whole message is matched, not a substring: a count of 10 must not match a `: 1` search, a
+ * different diagnostic that merely names `transaction_timeout` is a real failure, and any extra
+ * `pg_restore` error or warning means this is not the known session-setting difference (#1001).
+ */
+export function isOnlyIgnoredTransactionTimeout(message: string, targetMajor: number): boolean {
+  if (targetMajor >= 17) return false;
+  const body = message.startsWith(PG_RESTORE_EXIT_PREFIX) ? message.slice(PG_RESTORE_EXIT_PREFIX.length) : message;
+  const lines = body
+    .split('\n')
+    .map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line))
+    .filter((line) => line !== '');
+  if (lines.length !== 3) return false;
+  const [errorLine, commandLine, summaryLine] = lines;
+  if (!errorLine.startsWith(PG_RESTORE_QUERY_ERROR)) return false;
+  if (errorLine.slice(PG_RESTORE_QUERY_ERROR.length).trim() !== TRANSACTION_TIMEOUT_DIAGNOSTIC) return false;
+  if (!commandLine.startsWith(PG_RESTORE_COMMAND)) return false;
+  if (commandLine.slice(PG_RESTORE_COMMAND.length).trim() !== TRANSACTION_TIMEOUT_STATEMENT) return false;
+  if (!summaryLine.startsWith(PG_RESTORE_IGNORED_PREFIX)) return false;
+  return ignoredErrorCount(summaryLine.slice(PG_RESTORE_IGNORED_PREFIX.length).trim()) === 1;
+}
+
+async function onlyRejectedTransactionTimeout(databaseUrl: string, message: string): Promise<boolean> {
+  if (!message.includes('transaction_timeout')) return false;
+  const client = new pg.Client({ connectionString: databaseUrl });
+  try {
+    await client.connect();
+    const { rows } = await client.query<{ num: string }>("SELECT current_setting('server_version_num') AS num");
+    return isOnlyIgnoredTransactionTimeout(message, Math.floor(Number(rows[0]?.num ?? 0) / 10000));
+  } catch {
+    return false;
+  } finally {
+    await client.end().catch(() => {});
+  }
 }
 
 export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ dir: string; manifest: BackupManifest }> {

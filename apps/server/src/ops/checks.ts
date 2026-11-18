@@ -29,6 +29,10 @@ export type Env = Record<string, string | undefined>;
 
 const TIMEOUT_MS = 3000;
 const SECONDS = TIMEOUT_MS / 1000;
+/** New installs run PostgreSQL 18; 16 is the oldest major the migrations and `am doctor` support. */
+const MIN_POSTGRES_MAJOR = 16;
+const RECOMMENDED_POSTGRES_MAJOR = 18;
+const POSTGRES_UPGRADE_DOC = 'docs/deployment/postgres-18.md';
 const MIGRATIONS_DIR = fileURLToPath(new URL('../../../../packages/db/migrations', import.meta.url));
 
 // The host side of the public listener is a Compose setting, not one the container sees. Read the
@@ -540,6 +544,34 @@ async function sentAtBackfillCheck(db: Db): Promise<Check | null> {
     : { id: 'migrations.sent-at-backfill', status: 'ok', message: 'every completed message has its send time' };
 }
 
+/**
+ * The Postgres server version (#1001). 18 is what a new install starts on; 16 is still supported
+ * but no longer the default, and anything older cannot run the migrations (the app role checks use
+ * `pg_auth_members` options that arrived in 16).
+ */
+export function postgresVersionCheck(input: { version: string; versionNum?: string | number }): Check {
+  const id = 'postgres.version';
+  const shown = input.version.trim() || 'unknown';
+  const numeric = Number(input.versionNum);
+  const major = Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric / 10000) : Number(/^(\d+)/.exec(shown)?.[1] ?? 0);
+  if (!major) return { id, status: 'info', message: `Postgres is reachable, but its version could not be read (${shown})` };
+  if (major < MIN_POSTGRES_MAJOR)
+    return {
+      id,
+      status: 'warn',
+      message: `PostgreSQL ${shown} is below the supported minimum (${MIN_POSTGRES_MAJOR})`,
+      hint: `Upgrade to PostgreSQL ${RECOMMENDED_POSTGRES_MAJOR} before the next release; the migrations need 16 or newer. See ${POSTGRES_UPGRADE_DOC}.`,
+    };
+  if (major === MIN_POSTGRES_MAJOR)
+    return {
+      id,
+      status: 'ok',
+      message: `PostgreSQL ${shown} is supported, but ${MIN_POSTGRES_MAJOR} is deprecated for new installs`,
+      hint: `New installs start on PostgreSQL ${RECOMMENDED_POSTGRES_MAJOR}; the upgrade path is in ${POSTGRES_UPGRADE_DOC}.`,
+    };
+  return { id, status: 'ok', message: `PostgreSQL ${shown} is supported` };
+}
+
 async function postgresChecks(db: Db): Promise<{ checks: Check[]; reachable: boolean }> {
   try {
     await withTimeout(db.admin.query('SELECT 1'), 'Postgres');
@@ -558,6 +590,26 @@ async function postgresChecks(db: Db): Promise<{ checks: Check[]; reachable: boo
   }
 
   const checks: Check[] = [{ id: 'postgres', status: 'ok', message: 'Postgres is reachable' }];
+  try {
+    const { rows } = await withTimeout(
+      db.admin.query<{ version: string; version_num: string }>(
+        "SELECT current_setting('server_version') AS version, current_setting('server_version_num') AS version_num",
+      ),
+      'the Postgres version',
+    );
+    checks.push(
+      postgresVersionCheck({
+        version: rows[0]?.version ?? 'unknown',
+        versionNum: rows[0]?.version_num,
+      }),
+    );
+  } catch (err) {
+    checks.push({
+      id: 'postgres.version',
+      status: 'info',
+      message: `could not read the Postgres version: ${messageOf(err)}`,
+    });
+  }
   try {
     const [files, applied] = await Promise.all([
       migrationFiles(),

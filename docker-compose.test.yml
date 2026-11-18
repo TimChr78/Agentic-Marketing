@@ -23,16 +23,23 @@ name: am-test
 
 services:
   postgres:
-    image: postgres:16-alpine@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
+    # PostgreSQL 18, like docker-compose.yml and CI. A stack created before 0.16.0 keeps its data
+    # in pg_data (16); this file uses pg18_data so the new major starts on an empty volume instead
+    # of refusing an old one. The old volume carries am-test=1 and scripts/docker-clean.sh removes
+    # it when idle (`docker volume rm am-test_pg_data` does the same by hand).
+    image: postgres:18-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015
     labels: ["am-test=1"]
     environment:
       POSTGRES_USER: am
       POSTGRES_PASSWORD: am
       POSTGRES_DB: am
+      # 18 defaults to /var/lib/postgresql/18/docker; this keeps the pre-18 layout, which the
+      # harness and the regular Compose stack both expect.
+      PGDATA: /var/lib/postgresql/data
     ports:
       - "${AM_TEST_BIND_IP:-127.0.0.1}:${AM_TEST_PG_PORT:-25432}:5432"
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      - pg18_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U am -d am"]
       interval: 5s
@@ -144,7 +151,7 @@ services:
     mem_limit: 1g
 
 volumes:
-  pg_data:
+  pg18_data:
     labels: ["am-test=1"]
   ch_data:
     labels: ["am-test=1"]

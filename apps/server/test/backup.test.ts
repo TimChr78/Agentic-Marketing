@@ -16,6 +16,7 @@ import {
   createBackup,
   cronMatches,
   exportClickHouse,
+  isOnlyIgnoredTransactionTimeout,
   listBackups,
   nextCronRun,
   parseCron,
@@ -39,6 +40,60 @@ function toolMajor(tool: string): number {
 }
 
 const pgToolsReady = toolMajor('pg_dump') >= 16 && toolMajor('pg_restore') >= 16;
+
+describe('restore compatibility with a 16 target', () => {
+  /** The exact stderr pg_restore 18 writes when a 16 server rejects the one session setting. */
+  const timeoutFailure = (over: { count?: number; diagnostic?: string; command?: string; extra?: string[] } = {}) =>
+    [
+      `pg_restore failed (exit 1): pg_restore: error: could not execute query: ERROR:  ${
+        over.diagnostic ?? 'unrecognized configuration parameter "transaction_timeout"'
+      }`,
+      `Command was: ${over.command ?? 'SET transaction_timeout = 0;'}`,
+      ...(over.extra ?? []),
+      `pg_restore: warning: errors ignored on restore: ${over.count ?? 1}`,
+    ].join('\n');
+
+  it('accepts exactly the single transaction_timeout error on a 16 target', () => {
+    const rejected = timeoutFailure();
+    expect(isOnlyIgnoredTransactionTimeout(rejected, 16)).toBe(true);
+    // The bare stderr is the same case without run()'s exit-code prefix.
+    expect(isOnlyIgnoredTransactionTimeout(rejected.replace('pg_restore failed (exit 1): ', ''), 16)).toBe(true);
+    // The 18 server supports the setting: a failure there is a real restore failure.
+    expect(isOnlyIgnoredTransactionTimeout(rejected, 18)).toBe(false);
+  });
+
+  it('rejects any other ignored-error count, including one that merely starts with 1', () => {
+    expect(isOnlyIgnoredTransactionTimeout(timeoutFailure({ count: 2 }), 16)).toBe(false);
+    // `errors ignored on restore: 10` used to match a substring check for `: 1`.
+    expect(isOnlyIgnoredTransactionTimeout(timeoutFailure({ count: 10 }), 16)).toBe(false);
+    expect(isOnlyIgnoredTransactionTimeout(timeoutFailure({ count: 0 }), 16)).toBe(false);
+  });
+
+  it('rejects a different diagnostic that merely mentions transaction_timeout', () => {
+    expect(isOnlyIgnoredTransactionTimeout(timeoutFailure({ diagnostic: 'column "transaction_timeout" does not exist' }), 16)).toBe(false);
+    expect(isOnlyIgnoredTransactionTimeout(timeoutFailure({ diagnostic: 'permission denied for SET transaction_timeout' }), 16)).toBe(
+      false,
+    );
+  });
+
+  it('rejects a different failing statement or any additional diagnostic', () => {
+    expect(isOnlyIgnoredTransactionTimeout(timeoutFailure({ command: 'SET transaction_timeout = 1;' }), 16)).toBe(false);
+    expect(
+      isOnlyIgnoredTransactionTimeout(
+        timeoutFailure({ extra: ['pg_restore: error: could not execute query: ERROR:  permission denied'] }),
+        16,
+      ),
+    ).toBe(false);
+    expect(isOnlyIgnoredTransactionTimeout(timeoutFailure({ extra: ['pg_restore: warning: errors ignored on restore: 1'] }), 16)).toBe(
+      false,
+    );
+  });
+
+  it('rejects a message that has none of the expected structure', () => {
+    expect(isOnlyIgnoredTransactionTimeout('pg_restore failed (exit 1): connection refused', 16)).toBe(false);
+  });
+});
+
 const chUrl = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 const chUp = await fetch(new URL('/ping', chUrl), { signal: AbortSignal.timeout(2_000) })
   .then((response) => response.ok)

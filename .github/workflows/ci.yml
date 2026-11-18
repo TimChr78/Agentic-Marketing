@@ -113,7 +113,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
         env:
           POSTGRES_USER: am
           POSTGRES_PASSWORD: am
@@ -161,22 +161,23 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")"
           npm install -g --ignore-scripts "pnpm@$version"
-      # Ubuntu's postgresql-client can be older than the postgres:16 service above. Backups need a
-      # matching pg_dump/pg_restore, so install 16 from PGDG (the runner's codename is in VERSION_CODENAME).
-      - name: Install PostgreSQL 16 client tools
+      # Ubuntu's postgresql-client can be older than the postgres:18 service above. Backups need a
+      # pg_dump/pg_restore at least that new (18 also dumps a 16 install for the upgrade path), so
+      # install 18 from PGDG (the runner's codename is in VERSION_CODENAME).
+      - name: Install PostgreSQL 18 client tools
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg
           sudo curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
           . /etc/os-release
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
           # Newer runner images preinstall a later client, and Debian's pg_wrapper runs the newest
-          # one; put 16's own binaries first for every later step so backups use the matching tools.
-          echo /usr/lib/postgresql/16/bin >> "$GITHUB_PATH"
-          /usr/lib/postgresql/16/bin/pg_dump --version
-          /usr/lib/postgresql/16/bin/pg_dump --version | grep -Eq '\(PostgreSQL\) 16\.'
-          /usr/lib/postgresql/16/bin/pg_restore --version | grep -Eq '\(PostgreSQL\) 16\.'
+          # one; put 18's own binaries first for every later step so backups use the matching tools.
+          echo /usr/lib/postgresql/18/bin >> "$GITHUB_PATH"
+          /usr/lib/postgresql/18/bin/pg_dump --version
+          /usr/lib/postgresql/18/bin/pg_dump --version | grep -Eq '\(PostgreSQL\) 18\.'
+          /usr/lib/postgresql/18/bin/pg_restore --version | grep -Eq '\(PostgreSQL\) 18\.'
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
       - run: pnpm test:ci
       # JUnit results for every run, so a flaky test shows up as a pattern across runs.
@@ -200,7 +201,7 @@ jobs:
     timeout-minutes: 25
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
         env:
           POSTGRES_USER: am
           POSTGRES_PASSWORD: am
@@ -280,7 +281,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
         env:
           POSTGRES_USER: am
           POSTGRES_PASSWORD: am
@@ -354,7 +355,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
         env:
           POSTGRES_USER: am
           POSTGRES_PASSWORD: am

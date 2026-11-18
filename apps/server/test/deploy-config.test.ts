@@ -120,9 +120,26 @@ describe('compose production defaults', () => {
   it('restarts every service unless stopped', () => {
     const names = serviceNames(compose);
     expect(names).toEqual(expect.arrayContaining(['postgres', 'clickhouse', 'nats', 'valkey', 'app']));
+    // postgres-check is a one-shot guard (#1001): it must run once and exit, never restart.
+    const oneShot = new Set(['postgres-check']);
     for (const name of names) {
-      expect(service(compose, name)).toMatch(/^ {4}restart: unless-stopped$/m);
+      expect(service(compose, name)).toMatch(oneShot.has(name) ? /^ {4}restart: "no"$/m : /^ {4}restart: unless-stopped$/m);
     }
+  });
+
+  it('guards the PostgreSQL volume against a major-version mismatch (#1001)', () => {
+    const postgres = service(compose, 'postgres');
+    const guard = service(compose, 'postgres-check');
+    // A pulled 16 volume must fail with guidance, not start an empty 18 cluster beside it.
+    expect(postgres).toMatch(/depends_on:\n\s+postgres-check:\n\s+condition: service_completed_successfully/);
+    expect(guard).toContain('PG_VERSION');
+    expect(guard).toMatch(/restart: "no"/);
+    expect(guard).toContain('/var/lib/postgresql/data:ro');
+    expect(guard).toContain('postgres:18-alpine@sha256:');
+    // One volume layout for both majors, so POSTGRES_IMAGE can keep an install on 16.
+    expect(postgres).toContain('PGDATA: /var/lib/postgresql/data');
+    expect(postgres).toContain('${POSTGRES_IMAGE:-postgres:18-alpine@sha256:');
+    expect(envExample).toMatch(/^# POSTGRES_IMAGE=postgres:18-alpine@sha256:/m);
   });
 
   it('health-checks NATS on its monitoring endpoint and Valkey through the CLI', () => {
@@ -542,9 +559,12 @@ describe('image pinning (#870)', () => {
     for (const [file, text] of files) {
       const refs = images(text);
       expect(refs.length, `${file} has no images`).toBeGreaterThan(0);
-      for (const ref of refs) {
+      for (const raw of refs) {
         // The release and source-build images are selected by version, not by digest.
-        if (isAppImage(ref)) continue;
+        if (isAppImage(raw)) continue;
+        // A service image may be overridable (`${POSTGRES_IMAGE:-postgres:18-alpine@sha256:…}`);
+        // the default is what ships, so it is the part that must be pinned.
+        const ref = raw.replace(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}$/, '$1');
         expect(ref, `${file}: ${ref} is not pinned by digest`).toMatch(/@sha256:[0-9a-f]{64}$/);
         expect(ref, `${file}: ${ref} lost its tag`).toMatch(/:[^:@/]+@sha256:/);
       }

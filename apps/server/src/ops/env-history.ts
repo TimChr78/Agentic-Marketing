@@ -104,6 +104,9 @@ export const ENV_SINCE: Record<string, string> = {
 
   // 0.14.27 (issue #976): how long an idempotency key replays (default 30 days)
   RETENTION_IDEMPOTENCY_DAYS: '0.14.27',
+
+  // 0.16.0 (issue #1001): the Postgres image the Compose stack runs
+  POSTGRES_IMAGE: '0.16.0',
 };
 
 /**

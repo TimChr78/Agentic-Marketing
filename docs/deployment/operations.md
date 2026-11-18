@@ -87,6 +87,7 @@ These run only when the configuration itself is valid. Each network operation gi
 |---|---|---|
 | `config` | `loadConfig()` accepts the environment. | Fix the listed variables in `.env`. |
 | `postgres` | A query reaches the database in `DATABASE_URL`. | Start Postgres and check the URL, user and password. |
+| `postgres.version` | The server is PostgreSQL 16 or newer. 18 is what new installs run; 16 is reported as supported but deprecated for new installs, and anything older warns. | Upgrade to PostgreSQL 18; see [PostgreSQL 18 and upgrading from 16](postgres-18.md). |
 | `migrations` | Every migration file in `packages/db/migrations` is recorded in `schema_migrations`. A missing table or pending files warns. | Start the app (`docker compose up -d`) to migrate, or run `am migrate`. |
 | `clickhouse` | `GET <CLICKHOUSE_URL>/ping` succeeds. | Start ClickHouse and check `CLICKHOUSE_URL`. |
 | `nats` | A TCP connection to `NATS_URL` succeeds. | Start NATS and check `NATS_URL`. |

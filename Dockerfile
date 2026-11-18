@@ -48,8 +48,9 @@ COPY CHANGELOG.md /app/CHANGELOG.md
 # The `--` keeps pnpm from eating the CLI's flags: without it `am doctor --env-file X` passes
 # --env-file to node, which fails with "node: X: not found".
 RUN printf '#!/bin/sh\nexec pnpm --dir /app --silent --filter @agentic-marketing/server cli -- "$@"\n' > /usr/local/bin/am && chmod +x /usr/local/bin/am
-# pg_dump/pg_restore must match the postgres:16 server in docker-compose.yml. Debian's own
-# postgresql-client can be an older major, so install version 16 from PGDG for this base image's
+# pg_dump/pg_restore must be at least the postgres:18 server in docker-compose.yml (a newer client
+# can dump an older server: 18 reads a 16 install for the upgrade path). Debian's own
+# postgresql-client can be an older major, so install version 18 from PGDG for this base image's
 # codename (the repository serves both amd64 and arm64). Run as root, before USER node.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -58,7 +59,7 @@ RUN apt-get update \
  && . /etc/os-release \
  && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
  && apt-get update \
- && apt-get install -y --no-install-recommends postgresql-client-16 \
+ && apt-get install -y --no-install-recommends postgresql-client-18 \
  && rm -rf /var/lib/apt/lists/*
 # The named `backups` volume inherits this directory's owner (node, uid 1000).
 RUN mkdir -p /backups && chown node:node /backups
