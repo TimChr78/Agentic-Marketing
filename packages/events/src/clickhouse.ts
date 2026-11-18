@@ -565,7 +565,7 @@ async function uncoveredRows(
     query: `SELECT count() AS n FROM ${spec.table} AS t FINAL
             LEFT JOIN subject_key_backfill AS s FINAL
               ON s.workspace_id = t.workspace_id AND s.table_name = {table:String} AND ${identityJoin(spec)}
-            WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full' AND s.key1 = ''`,
+            WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full' AND s.table_name = ''`,
     query_params: { table: spec.table, ws: workspaceId },
     format: 'JSONEachRow',
     clickhouse_settings: settings,
@@ -928,7 +928,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
             query: `SELECT t.* FROM ${spec.table} AS t FINAL
                     LEFT JOIN subject_key_backfill AS s FINAL
                       ON s.workspace_id = t.workspace_id AND s.table_name = {table:String} AND ${identityJoin(spec)}
-                    WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full' AND s.key1 = '' ${after.sql}
+                    WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full' AND s.table_name = '' ${after.sql}
                     ORDER BY ${spec.sortColumns.map((column) => `t.${column.name}`).join(', ')}
                     LIMIT {limit:UInt32}`,
             query_params: { table: spec.table, ws: workspaceId, ...after.params, limit: batchSize },

@@ -69,9 +69,10 @@ ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_key_version String D
 ALTER TABLE journey_events ADD COLUMN IF NOT EXISTS subject_coverage LowCardinality(String) DEFAULT 'none';
 ALTER TABLE journey_events ADD INDEX IF NOT EXISTS idx_subject_coverage subject_coverage TYPE set(3) GRANULARITY 4;
 
--- The backfill's results live here, keyed by each row's stable identity (events: event_id;
+-- The backfill's results live here, keyed by each row's stable identity: the source table's full
+-- replacing key without workspace_id (events: name, anonymous_id, timestamp, event_id;
 -- message_events: message_id, type, event_id; journey_events: journey_id, participant_id, seq,
--- type). A backfill never rewrites a person-linked row: a stale physical copy could otherwise
+-- type). A missing side entry is detected by an empty table_name, since key1 may legitimately be ''. A backfill never rewrites a person-linked row: a stale physical copy could otherwise
 -- supersede a complete concurrent redelivery. Protected reads (PR 2) use
 -- coalesce(row.subject_*, side.subject_*) when the row's coverage is not `full`.
 CREATE TABLE IF NOT EXISTS subject_key_backfill (
