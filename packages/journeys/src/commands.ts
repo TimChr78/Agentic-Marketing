@@ -14,7 +14,7 @@ import { AppError, isoDateTime, newId, newUuid, personalDataInText, safeErrorTex
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient, sendIdempotencyKey } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
-import { consentStateOf, currentConsent, purposeAllowed } from '@agentic-marketing/profiles';
+import { consentStateOf, currentConsent, erasedProfileIdsInTx, purposeAllowed } from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -467,7 +467,15 @@ export const enrollProfiles = defineCommand({
           detail: holdoutDetail(assigned.assignment, campaign?.id),
         });
     }
-    if (holdout.length) ctx.afterCommit?.(() => ctx.services.events.insertJourneyEvents(holdout).catch(() => {}));
+    if (holdout.length) {
+      const erased = await erasedProfileIdsInTx(
+        ctx.tx,
+        ctx.principal.workspaceId,
+        holdout.map((event) => event.profileId),
+      );
+      const kept = holdout.filter((event) => !event.profileId || !erased.has(event.profileId));
+      if (kept.length) ctx.afterCommit?.(() => ctx.services.events.insertJourneyEvents(kept).catch(() => {}));
+    }
     return { entered, skipped: input.profileIds.length - entered };
   },
 });

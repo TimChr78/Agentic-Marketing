@@ -8,6 +8,7 @@ import {
   canonicalProfile,
   consentStateOf,
   currentConsent,
+  dropErasedProfileRows,
   lockProfileRows,
   purposeAllowed,
   type ResolvedEvent,
@@ -333,7 +334,10 @@ export function journeyHook(db: Db, deps: JourneyDeps) {
     await db.withWorkspace(workspaceId, (tx) => wakeWaitUntil(tx, workspaceId, resolved, deps));
     // ClickHouse is outside the transaction: an assignment that committed but whose event did not
     // is still measured from the table, and a lost event only affects the timeline.
-    if (holdout.length) await deps.events.insertJourneyEvents(holdout).catch((err) => logger.warn({ err }, 'holdout events not stored'));
+    if (holdout.length) {
+      const kept = await dropErasedProfileRows(db, workspaceId, holdout);
+      if (kept.length) await deps.events.insertJourneyEvents(kept).catch((err) => logger.warn({ err }, 'holdout events not stored'));
+    }
   };
 }
 
@@ -829,7 +833,10 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
       }
       return list.length;
     });
-    await deps.events.insertJourneyEvents(journeyEvents).catch((err) => logger.warn({ err }, 'journey events not stored'));
+    if (journeyEvents.length) {
+      const kept = await dropErasedProfileRows(db, ws, journeyEvents);
+      if (kept.length) await deps.events.insertJourneyEvents(kept).catch((err) => logger.warn({ err }, 'journey events not stored'));
+    }
   }
   return moved;
 }
