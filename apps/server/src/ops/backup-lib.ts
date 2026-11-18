@@ -1363,7 +1363,16 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       );
     log(`reading erasures recorded in the live database (snapshot from ${manifest.createdAt})`);
     const erasureLog = unionErasureLogs(capture?.log ?? null, await readErasureLog(databaseUrl));
-    const needsReplay = erasureLog.erasures.length > 0 || erasureLog.tombstones.length > 0 || (erasureLog.cleanupJobs?.length ?? 0) > 0;
+    // The durable ledger, its wrapped keys and the publication generations are part of what a
+    // restore must put back (#1037): a workspace can have ledger rows and an exclusion key without
+    // any erasure or tombstone row the older check looked at.
+    const needsReplay =
+      erasureLog.erasures.length > 0 ||
+      erasureLog.tombstones.length > 0 ||
+      (erasureLog.cleanupJobs?.length ?? 0) > 0 ||
+      (erasureLog.keys?.length ?? 0) > 0 ||
+      (erasureLog.exclusionKeys?.length ?? 0) > 0 ||
+      (erasureLog.generations?.length ?? 0) > 0;
     if (needsReplay) {
       await writeRestoreCapture(capturePath, binding, erasureLog);
       log(`saved the erasure log for this restore (${capturePath})`);

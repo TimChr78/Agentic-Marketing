@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { newUuid } from '@agentic-marketing/core';
-import { erasureAllocationChecker, nextErasureGeneration } from '@agentic-marketing/db';
+import { enqueueUnpublishedErasures, erasureLedgerChecker, readErasureLog, replayErasures } from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore, migrateClickHouse, resetClickHouse } from '@agentic-marketing/events';
 import { localKeyProvider } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -22,6 +23,9 @@ const MASTER_KEY = Buffer.alloc(32, 29).toString('base64');
 let d: Awaited<ReturnType<typeof createDisposableDb>>;
 let keyProvider: ReturnType<typeof localKeyProvider>;
 let store: EventStore;
+
+/** A stable 64-hex stand-in for a keyed hash; the ledger only stores strings. */
+const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 
 const deps = (events: Pick<EventStore, 'deleteEventsOf' | 'publishErasedSubjects' | 'erasedSubjectsVisible'>) =>
   ({ db: d.db, kp: keyProvider, events }) as unknown as Parameters<typeof runErasureCleanupOnce>[0];
@@ -225,22 +229,20 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
     expect(failed!.last_error).toMatch(/^clickhouse_error/);
   }, 60_000);
 
-  it('switches a workspace to the protected path as soon as a generation is allocated', async () => {
-    // The fast path reads base tables for a workspace that never allocated an erasure. Allocation
-    // happens before the ClickHouse insert, so a read issued while publication is in flight must
-    // already take the protected path — the allocation counter is the signal, not the confirmed
-    // epoch and not `published_at`.
-    // A fresh workspace: the other tests in this file already allocated generations here.
+  it('fails closed from the committed ledger, before any generation or publication exists', async () => {
+    // The read boundary is the durable ledger written by the erasure's SQL transaction, not the
+    // cleanup worker's allocation: an erasure recorded by an older release, or restored from a
+    // snapshot, has ledger rows and must already take the protected path.
     const workspace = newUuid();
-    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Allocation', 'none')", [workspace]);
-    const checker = erasureAllocationChecker(d.db);
+    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Ledger', 'none')", [workspace]);
+    const checker = erasureLedgerChecker(d.db);
     const scoped = clickHouseStore({
       url: CH_URL,
       database: CH_DB,
       subjectKeys: subjectKeyHasher({ db: d.db, kp: keyProvider }),
       hasErasures: checker,
     });
-    const anonymousId = `alloc-anon-${newUuid()}`;
+    const anonymousId = `ledger-anon-${newUuid()}`;
     try {
       const hasher = await subjectKeyHasher({ db: d.db, kp: keyProvider })(workspace);
       const key = await hasher.hash('anonymous_id', anonymousId);
@@ -248,10 +250,10 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
       await scoped.insert([
         {
           workspaceId: workspace,
-          sourceId: 'src_alloc',
+          sourceId: 'src_ledger',
           messageId: newUuid(),
           type: 'track',
-          name: 'Allocated',
+          name: 'Ledger Event',
           anonymousId,
           userId: '',
           profileId: '',
@@ -264,29 +266,175 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
           consent: {},
         },
       ]);
-      // The exclusion is visible, but no generation has been allocated yet: nothing can be excluded.
+      // No ledger row yet: the fast path is correct and the row is visible.
+      expect(await checker(workspace)).toBe(false);
+      expect(await scoped.eventsOf(workspace, { anonymousIds: [anonymousId], userIds: [] })).toHaveLength(1);
+
+      // The erasure's SQL stage commits its ledger; publication has not run (no job, no generation,
+      // no `published_at`). The next read must already be protected, and with the exclusion
+      // published it excludes the row.
+      await d.db.admin.query(
+        `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+         VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_test', 'era_ledger', 'full')`,
+        [workspace, key],
+      );
       await scoped.publishErasedSubjects([
         {
           workspaceId: workspace,
           kind: 'anonymous_id',
           key,
           keyVersion: 'dk_exclusion_test',
-          erasureId: 'era_alloc',
+          erasureId: 'era_ledger',
           generation: 1,
           recordedAt: new Date().toISOString(),
         },
       ]);
-      expect(await checker(workspace)).toBe(false);
-      expect(await scoped.eventsOf(workspace, { anonymousIds: [anonymousId], userIds: [] })).toHaveLength(1);
-
-      // Allocation only: no FINAL confirmation, no `published_at`, no visible epoch.
-      await nextErasureGeneration(d.db, workspace);
       expect(await checker(workspace)).toBe(true);
       expect(await scoped.eventsOf(workspace, { anonymousIds: [anonymousId], userIds: [] })).toEqual([]);
+      const generations = await d.db.admin.query('SELECT 1 FROM erasure_generations WHERE workspace_id = $1', [workspace]);
+      expect(generations.rowCount).toBe(0);
     } finally {
       await scoped.close();
     }
   }, 60_000);
+
+  it('re-enqueues erasures that have ledger rows but were never published', async () => {
+    const workspace = newUuid();
+    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Backlog', 'none')", [workspace]);
+    const insertErasure = (id: string) =>
+      d.db.admin.query(
+        `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+         VALUES ($1, $2, '{}', 'user_test', 'backlog test', '{}')`,
+        [workspace, id],
+      );
+    const insertKey = (eraser: string) =>
+      d.db.admin.query(
+        `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+         VALUES ($1, 'profile', $2, 'dk_exclusion_test', $3, 'full')`,
+        [workspace, hash(`backlog-${eraser}`), eraser],
+      );
+    // (1) a job that completed before publication existed, (2) an erasure with no job at all,
+    // (3) an erasure that already published and must be left alone.
+    for (const id of ['era_backlog_old', 'era_backlog_none', 'era_backlog_done']) {
+      await insertErasure(id);
+      await insertKey(id);
+    }
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, completed_at)
+       VALUES ($1, 'era_backlog_old', '{}', 'complete', now())`,
+      [workspace],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, completed_at, published_generation, published_at)
+       VALUES ($1, 'era_backlog_done', '{}', 'complete', now(), 3, now())`,
+      [workspace],
+    );
+
+    expect(await enqueueUnpublishedErasures(d.db)).toBeGreaterThanOrEqual(2);
+    const rows = await d.db.admin.query<{ erasure_id: string; state: string; published_at: Date | null }>(
+      'SELECT erasure_id, state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1 ORDER BY erasure_id',
+      [workspace],
+    );
+    expect(rows.rows).toEqual([
+      { erasure_id: 'era_backlog_done', state: 'complete', published_at: expect.any(Date) },
+      { erasure_id: 'era_backlog_none', state: 'pending_external', published_at: null },
+      { erasure_id: 'era_backlog_old', state: 'pending_external', published_at: null },
+    ]);
+    // Idempotent: a second pass has nothing to change.
+    await enqueueUnpublishedErasures(d.db);
+    const again = await d.db.admin.query<{ state: string }>(
+      "SELECT state FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = 'era_backlog_done'",
+      [workspace],
+    );
+    expect(again.rows).toEqual([{ state: 'complete' }]);
+  }, 60_000);
+
+  it('keeps a restored workspace on the protected path with ledger rows but no generation row', async () => {
+    // A snapshot can hold `erasure_keys` rows whose workspace never got a generation (part-1
+    // erasures, or a restore between publication attempts). The fast path must still fail closed,
+    // and the exclusions retained in ClickHouse must still apply after the replay.
+    const restored = await createDisposableDb('erasure_ledger_restore');
+    try {
+      const workspace = newUuid();
+      await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restore source', 'none')", [workspace]);
+      await d.db.admin.query(
+        `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+         VALUES ($1, 'era_restore_ledger', '{}', 'user_test', 'restore test', '{}')`,
+        [workspace],
+      );
+      const anonymousId = `restore-anon-${newUuid()}`;
+      const hasher = await subjectKeyHasher({ db: d.db, kp: keyProvider })(workspace);
+      const key = await hasher.hash('anonymous_id', anonymousId);
+      hasher.dispose();
+      await d.db.admin.query(
+        `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+         VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_test', 'era_restore_ledger', 'full')`,
+        [workspace, key],
+      );
+      const log = await readErasureLog(d.url.toString());
+      // ClickHouse is not part of the Postgres restore: its exclusions are retained.
+      const writer = clickHouseStore({
+        url: CH_URL,
+        database: CH_DB,
+        subjectKeys: subjectKeyHasher({ db: d.db, kp: keyProvider }),
+      });
+      try {
+        await writer.publishErasedSubjects([
+          {
+            workspaceId: workspace,
+            kind: 'anonymous_id',
+            key,
+            keyVersion: 'dk_exclusion_test',
+            erasureId: 'era_restore_ledger',
+            generation: 1,
+            recordedAt: new Date().toISOString(),
+          },
+        ]);
+        await writer.insert([
+          {
+            workspaceId: workspace,
+            sourceId: 'src_restore',
+            messageId: newUuid(),
+            type: 'track',
+            name: 'Restored Event',
+            anonymousId,
+            userId: '',
+            profileId: '',
+            timestamp: new Date().toISOString(),
+            receivedAt: new Date().toISOString(),
+            properties: {},
+            traits: {},
+            piiTraits: {},
+            context: {},
+            consent: {},
+          },
+        ]);
+      } finally {
+        await writer.close();
+      }
+
+      // The restored snapshot has the workspace but no ledger and no generation row.
+      await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [workspace]);
+      const replayed = await replayErasures(restored.url.toString(), log);
+      expect(replayed.keys).toBe(1);
+      // The erasure had no captured job; the ledger row still enqueues one so it publishes again.
+      expect(replayed.cleanupJobs).toBe(1);
+      expect(await restored.db.admin.query('SELECT 1 FROM erasure_generations WHERE workspace_id = $1', [workspace])).toMatchObject({
+        rowCount: 0,
+      });
+
+      const checker = erasureLedgerChecker(restored.db);
+      const scoped = clickHouseStore({ url: CH_URL, database: CH_DB, hasErasures: checker });
+      try {
+        expect(await checker(workspace)).toBe(true);
+        expect(await scoped.eventsOf(workspace, { anonymousIds: [anonymousId], userIds: [] })).toEqual([]);
+      } finally {
+        await scoped.close();
+      }
+    } finally {
+      await restored.close();
+    }
+  }, 120_000);
 
   it('keeps the published generation monotonic when two erasures publish', async () => {
     for (const profile of ['prf_0000000000000000000000000000c401', 'prf_0000000000000000000000000000c402']) await seedPerson(profile);
@@ -297,7 +445,9 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
     const generations = [Number((await job(first))!.published_generation), Number((await job(second))!.published_generation)].sort(
       (a, b) => a - b,
     );
-    // Two erasures, two distinct generations, both above the state before them.
-    expect(generations).toEqual([start + 1, start + 2]);
+    // Two erasures, two distinct generations, both above the state before them. The values need not
+    // be consecutive: another due job of this workspace can publish in the same round.
+    expect(generations[0]).toBeGreaterThan(start);
+    expect(generations[1]).toBeGreaterThan(generations[0]!);
   }, 120_000);
 });

@@ -5,7 +5,7 @@ import { runActiveMandateRepair, runArchivedApprovalSweep } from '@agentic-marke
 import { consentHook, runBroadcasts, runOutboxDispatcher, runRetention } from '@agentic-marketing/audience';
 import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
-import { type Db, runIdempotencyKeyCleanup, runSentAtBackfill } from '@agentic-marketing/db';
+import { type Db, enqueueUnpublishedErasures, runIdempotencyKeyCleanup, runSentAtBackfill } from '@agentic-marketing/db';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink, runSubjectKeyBackfill } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
@@ -122,6 +122,17 @@ export function startScheduler(
       ensureExclusionKeys({ db: srv.db, kp: srv.keyProvider })
         .then((count) => logger.info({ workspaces: count }, 'exclusion keys provisioned'))
         .catch((err) => logger.error({ err }, 'exclusion key provisioning failed')),
+    ),
+    // One pass at start: an erasure whose cleanup completed before part 2, or that predates durable
+    // jobs, has committed ledger rows but was never published to `erased_subjects`. Re-enqueue it so
+    // the cleanup job publishes it; the durable ledger already makes reads fail closed meanwhile.
+    loop(
+      'erasure-publication-backlog',
+      enqueueUnpublishedErasures(srv.db)
+        .then((count) => {
+          if (count) logger.info({ erasures: count }, 're-enqueued erasures without a published exclusion');
+        })
+        .catch((err) => logger.error({ err }, 'erasure publication backlog could not be re-enqueued')),
     ),
     // One pass at start: fills the subject-key columns of rows written before #1037 part 1, one
     // ClickHouse partition at a time. Nothing reads the columns yet, but the contract's later part

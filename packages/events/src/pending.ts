@@ -81,12 +81,17 @@ const arrayString = (name: string) => `{${name}:Array(String)}`;
  * publication, so a metric query sees what it will see once the outbox catches up.
  *
  * The published half reads the workspace's protected source (#1037 part 2) — the protected view
- * when the workspace has ever allocated an erasure, the base table otherwise — so it dedupes the
- * replacing table and excludes erased subjects, and its row policy is unchanged. The snapshot half is built from parallel `Array(String)` parameters over
- * `numbers()` — no per-row SQL text — and a `LEFT ANTI JOIN` drops any snapshot event that is
- * already published: a dispatcher that publishes between the snapshot and the read must leave the
- * event counted once, not twice. The caller applies its own WHERE to the result exactly as it would
- * to the table, so filters, channels and the time window describe both halves alike.
+ * when the workspace has a durable erasure ledger, the base table otherwise — so it dedupes the
+ * replacing table and excludes erased subjects, and its row policy is unchanged.
+ *
+ * The snapshot half is built from parallel `Array(String)` parameters over `numbers()` — no
+ * per-row SQL text — and a `LEFT ANTI JOIN` drops any snapshot event that is already published: a
+ * dispatcher that publishes between the snapshot and the read must leave the event counted once,
+ * not twice. The anti-join reads the base table, because it needs identity columns only; that keeps
+ * the protected source to one use in the union, so its ledger set is built once.
+ *
+ * The caller applies its own WHERE to the result exactly as it would to the table, so filters,
+ * channels and the time window describe both halves alike.
  *
  * `params` must already carry `ws` (the workspace UUID); this function adds its own `pending_*`
  * entries. Bounded by the caller: every row costs a parameter slot.
@@ -126,9 +131,13 @@ export function messageEventsWithPending(rows: readonly MessageEvent[], params: 
         ${element('pending_variant')} AS variant
       FROM numbers({pending_n:UInt64})
     ) AS queued
+    -- The dedupe key set, not a read of the person's data: only the three identity columns leave
+    -- this subquery, and a queued event shares its profile with its published twin, so exclusion
+    -- cannot change whether these two rows are the same event. Reading the base table here keeps
+    -- the protected source (and its ledger set) to one use in the union.
     LEFT ANTI JOIN (
       SELECT toString(message_id) AS message_id, toString(type) AS type, toString(event_id) AS event_id
-      FROM ${published}
+      FROM message_events FINAL
       WHERE workspace_id = {ws:UUID} AND message_id IN {pending_message_ids:Array(String)}
     ) AS published
     ON queued.message_id = published.message_id AND queued.type = published.type AND queued.event_id = published.event_id)`;

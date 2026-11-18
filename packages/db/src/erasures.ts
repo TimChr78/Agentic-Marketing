@@ -536,18 +536,20 @@ export async function replayErasures(
           // Valkey state may predate the erasure. The job starts pending, with the selectors the
           // live job carried when it still had them (a completed job purged them); the worker can
           // still delete message and journey events by profile id.
+          //
+          // An erasure with committed ledger rows always gets its job back, even when the live
+          // database had none: the ledger rows were written by a release whose cleanup ran before
+          // publication existed (or before durable jobs), and `erased_subjects` must be published
+          // for them after a restore (#1037 part 2).
           if (cleanupJobsTable) {
             const job = jobsByErasure.get(`${workspaceId}:${erasure.id}`);
-            // Only an erasure that already had a job gets one back. An erasure recorded before
-            // durable cleanup is treated as complete, exactly as profiles.erasureStatus reads it;
-            // its external work happened synchronously at erase time.
-            if (job) {
+            if (job || entries.keys.length) {
               const inserted = await client.query(
                 `INSERT INTO erasure_cleanup_jobs
                    (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek)
                  VALUES ($1, $2, $3, $4, $5, $6)
                  ON CONFLICT (workspace_id, erasure_id) DO NOTHING`,
-                [workspaceId, erasure.id, erasure.profileIds, job.selectors, job.selectorKey, job.selectorKek],
+                [workspaceId, erasure.id, erasure.profileIds, job?.selectors ?? null, job?.selectorKey ?? null, job?.selectorKek ?? null],
               );
               result.cleanupJobs += inserted.rowCount ?? 0;
             }

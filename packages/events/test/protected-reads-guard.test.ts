@@ -37,6 +37,48 @@ async function sourceFiles(dir: string): Promise<string[]> {
   return out;
 }
 
+/**
+ * Files allowed to interpolate a `FROM`/`JOIN` source whose value is not a person table. Each entry
+ * names where the variable comes from; a new one needs the same care as a literal base-table read.
+ */
+const INTERPOLATED_ALLOWED: { file: string; expression: string; why: string }[] = [
+  { file: 'packages/analytics/src/compile.ts', expression: 'from', why: 'built by personReadSource / messageEventsWithPending' },
+  { file: 'packages/events/src/clickhouse.ts', expression: 'source', why: 'built by personReadSource in the same function' },
+  { file: 'packages/events/src/clickhouse.ts', expression: 'spec.table', why: 'subject-key backfill reads the table it is filling' },
+  { file: 'packages/events/src/pending.ts', expression: 'published', why: 'built by personReadSource' },
+  { file: 'packages/analytics/src/query.ts', expression: 'table', why: 'built by personReadSource' },
+  { file: 'packages/warehouse/src/datasets.ts', expression: 'source', why: 'built by personReadSource' },
+];
+
+/** A `FROM`/`JOIN` whose table is interpolated, with the expression it interpolates. */
+const INTERPOLATED = /\b(?:FROM|JOIN)\s+\$\{([^}]+)\}/g;
+
+/** Interpolated `FROM`/`JOIN` sources that are neither a person-source helper nor allow-listed. */
+async function interpolatedSources(): Promise<{ file: string; line: number; expression: string }[]> {
+  const found: { file: string; line: number; expression: string }[] = [];
+  for (const root of SOURCE_ROOTS) {
+    for (const path of await sourceFiles(join(ROOT, root))) {
+      const file = relative(ROOT, path);
+      const source = await readFile(path, 'utf8');
+      // Only the person-read layer can hold a person-table interpolation; the rest of the tree has
+      // its own SQL (CTEs, warehouse schemas) that this guard is not about.
+      if (!/personReadSource|messageEventsWithPending|PROTECTED_VIEWS/.test(source)) continue;
+      for (const [index, line] of source.split('\n').entries()) {
+        if (/^\s*(?:\/\/|\*|\/\*)/.test(line)) continue;
+        for (const match of line.matchAll(INTERPOLATED)) {
+          // `DELETE FROM ${table}` is the erasure sweep, a writer, not a read.
+          if (/\bDELETE$/i.test(line.slice(0, match.index ?? 0).trimEnd())) continue;
+          const expression = match[1]!.trim();
+          if (/^personReadSource\(/.test(expression)) continue;
+          if (INTERPOLATED_ALLOWED.some((entry) => entry.file === file && entry.expression === expression)) continue;
+          found.push({ file, line: index + 1, expression });
+        }
+      }
+    }
+  }
+  return found;
+}
+
 /** Every non-maintenance read of a person table in the application source, with its line. */
 async function personTableReads(): Promise<{ file: string; line: number; text: string }[]> {
   const found: { file: string; line: number; text: string }[] = [];
@@ -67,13 +109,33 @@ async function personTableReads(): Promise<{ file: string; line: number; text: s
  * (`DELETE FROM …`) does not need an entry: the sweep and the load-test reset are writers, not
  * readers, and the guard skips them by statement.
  */
-const ALLOWED: { file: string; text: string; why: string }[] = [];
+const ALLOWED: { file: string; text: string; why: string }[] = [
+  {
+    file: 'packages/events/src/pending.ts',
+    text: 'FROM message_events FINAL',
+    // The pending union's dedupe key set: identity columns only, never returned to a reader.
+    why: 'pending-outbox anti-join',
+  },
+  {
+    file: 'packages/events/src/clickhouse.ts',
+    text: 'FROM message_events AS m FINAL',
+    // The id-scoped message-event read (#1037 part 2): its own exclusion predicate follows in the
+    // same statement, bounded to the keys the scope can carry.
+    why: 'id-scoped message read',
+  },
+];
 
 describe('protected reads (#1037 part 2)', () => {
   it('no application source reads a person-linked base table directly', async () => {
     const reads = await personTableReads();
     const offending = reads.filter((read) => !ALLOWED.some((entry) => entry.file === read.file && read.text.includes(entry.text)));
     expect(offending.map((read) => `${read.file}:${read.line}: ${read.text}`)).toEqual([]);
+  });
+
+  it('no interpolated FROM/JOIN source is a person table outside the allow-list', async () => {
+    // A base table can also arrive through a variable; a new one must be a helper call or listed
+    // above, so a bypass is reviewable rather than invisible to the literal scan.
+    expect((await interpolatedSources()).map((entry) => `${entry.file}:${entry.line}: ${entry.expression}`)).toEqual([]);
   });
 
   it('every protected view is created by the ClickHouse migrations and filters erased subjects', async () => {

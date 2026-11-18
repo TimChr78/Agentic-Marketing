@@ -1,4 +1,4 @@
-import { clickHouseStore, type EventStore, messageEventCountQuery, migrateClickHouse, resetClickHouse } from '@agentic-marketing/events';
+import { clickHouseStore, type EventStore, migrateClickHouse, resetClickHouse } from '@agentic-marketing/events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runScoped } from '../../db/test/run';
 import { buildQuery } from '../src/compile';
@@ -146,9 +146,11 @@ describe('protected reads stay close to the base read (#1037 part 2)', () => {
       return runSql(compiled.sql, compiled.params, workspace);
     });
 
-    await measure('guardrail message stats', (workspace, useProtected) => {
-      const compiled = messageEventCountQuery(workspace, { type: 'sent', sinceSeconds: SINCE }, useProtected);
-      return runSql(compiled.query, compiled.query_params as Record<string, unknown>, workspace);
+    // A send-path guardrail: the metric names its own messages, so the run reads a bounded scope
+    // rather than a workspace-wide window. 500 messages, as a just-sent broadcast has.
+    const guardrailIds = Array.from({ length: 500 }, (_, i) => `msg_${PER_WORKSPACE * 7 + i}`);
+    await measure('guardrail message stats', (workspace) => async () => {
+      await store.messageStats(workspace, { since: new Date(FROM), messageIds: guardrailIds });
     });
 
     await measure('segment event counts', (workspace) => async () => {
