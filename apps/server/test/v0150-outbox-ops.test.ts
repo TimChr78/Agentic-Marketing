@@ -80,4 +80,39 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     await d.db.admin.query("UPDATE erasure_cleanup_jobs SET state = 'complete' WHERE workspace_id = $1", [d.workspace]);
     expect((await erasureCheck())?.status).toBe('ok');
   });
+
+  it('reports erasure exclusion and physical purge separately from the cleanup queue', async () => {
+    const check = async (id: string) => (await operationalHealthChecks(d.db)).find((entry) => entry.id === id);
+    expect((await check('privacy.erasureExclusion'))?.status).toBe('ok');
+    expect((await check('queue.erasurePurge'))?.status).toBe('ok');
+
+    // A ledger row with no publication is a real exclusion backlog even when no cleanup job waits.
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'profile', 'hash-unpublished', 'dk_ops', 'era_ops_unpublished', 'full'),
+              ($1, 'email', 'matching-only', 'dk_ops', 'era_ops_unavailable', 'unavailable')`,
+      [d.workspace],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state)
+       VALUES ($1, 'era_ops_unpublished', '{prf_ops_unpublished}', 'pending_external')`,
+      [d.workspace],
+    );
+    const exclusion = await check('privacy.erasureExclusion');
+    expect(exclusion).toMatchObject({ status: 'warn' });
+    expect(exclusion?.message).toContain('not published');
+    expect(exclusion?.message).toContain('unavailable');
+
+    await d.db.admin.query('INSERT INTO erasure_generations (workspace_id, generation, purged_generation) VALUES ($1, 2, 0)', [
+      d.workspace,
+    ]);
+    const purge = await check('queue.erasurePurge');
+    expect(purge).toMatchObject({ status: 'warn' });
+    expect(purge?.message).toContain('1 workspace(s) have a physical purge due');
+
+    await d.db.admin.query('UPDATE erasure_generations SET purged_generation = 2, purge_last_sweep_at = now() WHERE workspace_id = $1', [
+      d.workspace,
+    ]);
+    expect((await check('queue.erasurePurge'))?.status).toBe('ok');
+  });
 });

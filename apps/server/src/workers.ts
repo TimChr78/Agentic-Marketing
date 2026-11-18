@@ -11,7 +11,7 @@ import { runSink, runSubjectKeyBackfill } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
 import { journeyHook, runEnrollmentJobs, runSweeper } from '@agentic-marketing/journeys';
 import { refreshSnapshots, runEdgeSync, snapshotHook } from '@agentic-marketing/personalize';
-import { ensureExclusionKeys, erasedEventFilter, runErasureCleanup, runProfileWorkers } from '@agentic-marketing/profiles';
+import { ensureExclusionKeys, erasedEventFilter, runErasureCleanup, runErasurePurge, runProfileWorkers } from '@agentic-marketing/profiles';
 import { runSegmentScheduler, segmentHook } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { runWarehouseExports } from '@agentic-marketing/warehouse';
@@ -97,10 +97,14 @@ export function startScheduler(
     erasureFinalSweepMs?: number;
     /** False keeps the erasure cleanup loop out of the way; a test drives its rounds itself. */
     erasureCleanup?: boolean;
+    /** How often a workspace with retained exclusion keys is physically swept again. */
+    erasurePurgeIntervalSeconds?: number;
+    /** False keeps the recurring physical purge loop out of the way; a test drives it itself. */
+    erasurePurge?: boolean;
   } = {},
 ): WorkerLoop[] {
   logger.info(
-    'scheduler role: segment recomputation, broadcasts, the transactional outbox, erasure cleanup, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, subject-key backfill, expired OAuth choices, expired idempotency keys',
+    'scheduler role: segment recomputation, broadcasts, the transactional outbox, erasure cleanup and physical purge, retention, OAuth token refresh, audience sync, ad spend import, warehouse exports, edge sync, threshold alerts, held agent changes, agent notifications, agent events, hosted agents, content sources, segment enrollment jobs, experience rollouts, sent_at backfill, subject-key backfill, expired OAuth choices, expired idempotency keys',
   );
   return [
     // One pass at start: an abandoned consent choice is short-lived, and nothing in the request
@@ -215,6 +219,19 @@ export function startScheduler(
             'erasure-cleanup',
             runErasureCleanup({ db: srv.db, kp: srv.keyProvider, events: srv.events, hot: srv.hot }, signal, {
               ...(opts.erasureFinalSweepMs === undefined ? {} : { finalSweepMs: opts.erasureFinalSweepMs }),
+            }),
+          ),
+        ]),
+    ...(opts.erasurePurge === false
+      ? []
+      : [
+          // The recurring physical purge (#1037 part 3): deletes rows matching retained exclusion
+          // keys in bounded batches. Read-time exclusion is already the contract; this only reduces
+          // what stays on disk, and it keeps running because late writes can still arrive.
+          loop(
+            'erasure-purge',
+            runErasurePurge({ db: srv.db, events: srv.events }, signal, {
+              ...(opts.erasurePurgeIntervalSeconds === undefined ? {} : { intervalSeconds: opts.erasurePurgeIntervalSeconds }),
             }),
           ),
         ]),

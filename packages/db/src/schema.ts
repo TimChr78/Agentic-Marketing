@@ -586,6 +586,12 @@ export const erasureGenerations = pgTable('erasure_generations', {
   /** Confirmed publications; a result cache keys on it, never on `generation` (#1037 part 2). */
   visiblePublications: bigint('visible_publications', { mode: 'number' }).notNull().default(0),
   visibleAt: ts('visible_at'),
+  /** The publication generation whose keys the last completed physical sweep covered (#1037 part 3). */
+  purgedGeneration: bigint('purged_generation', { mode: 'number' }).notNull().default(0),
+  purgeLastSweepAt: ts('purge_last_sweep_at'),
+  purgeDeletedRows: bigint('purge_deleted_rows', { mode: 'number' }).notNull().default(0),
+  purgeClaimToken: text('purge_claim_token'),
+  purgeLeaseUntil: ts('purge_lease_until'),
   updatedAt: ts('updated_at').notNull().defaultNow(),
 });
 
@@ -648,6 +654,10 @@ export const erasureCleanupJobs = pgTable(
      */
     publishedGeneration: bigint('published_generation', { mode: 'number' }),
     publishedAt: ts('published_at'),
+    /** When a FINAL coverage count was zero; completion requires it (#1037 part 3). */
+    coverageClearedAt: ts('coverage_cleared_at'),
+    /** Why the job has not completed yet: publication, outbox, final_sweep or subject_key_coverage. */
+    completionReason: text('completion_reason').$type<'publication' | 'outbox' | 'final_sweep' | 'subject_key_coverage'>(),
     selectors: bytea('selectors'),
     selectorKey: bytea('selector_key'),
     selectorKek: text('selector_kek'),

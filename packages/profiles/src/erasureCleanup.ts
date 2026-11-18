@@ -16,6 +16,7 @@ import {
   formatErasureCleanupFailure,
   markErasureCleanupCheckpoint,
   markErasureCleanupPublished,
+  markErasureCoverageClear,
   nextErasureGeneration,
   noteErasedSubjectsVisible,
   renewErasureCleanupLease,
@@ -43,7 +44,7 @@ import { type ErasureSelectors, openSelectors } from './erasure';
 export interface ErasureCleanupDeps {
   db: Db;
   kp: KeyProvider;
-  events: Pick<EventStore, 'deleteEventsOf' | 'publishErasedSubjects' | 'erasedSubjectsVisible'>;
+  events: Pick<EventStore, 'deleteEventsOf' | 'publishErasedSubjects' | 'erasedSubjectsVisible' | 'subjectKeyCoverage'>;
   hot?: Pick<HotState, 'deleteSnapshot'>;
 }
 
@@ -53,6 +54,8 @@ export interface ErasureCleanupOptions {
   maxAttempts?: number;
   /** How long a job waits when undelivered outbox rows still name the person. */
   outboxWaitSeconds?: number;
+  /** How long a job waits before retrying a non-zero subject-key coverage count. */
+  coverageWaitSeconds?: number;
   /**
    * The scheduling interval between the first successful sweep and the final one. Defaults to the
    * ClickHouse request timeout plus a margin; tests shorten it. It is a mitigation interval, not a
@@ -198,7 +201,7 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
       // A publisher still holding an outbox row for this person could recreate data after the
       // sweep. Wait for it before deleting anything; the job keeps its checkpoints meanwhile.
       if ((await erasureOutboxOutstanding(deps.db, claim.workspaceId, claim.profileIds)) > 0) {
-        await deferErasureCleanup(deps.db, claim, opts.outboxWaitSeconds ?? ERASURE_OUTBOX_WAIT_SECONDS);
+        await deferErasureCleanup(deps.db, claim, opts.outboxWaitSeconds ?? ERASURE_OUTBOX_WAIT_SECONDS, 'outbox');
         result.deferred++;
         continue;
       }
@@ -243,7 +246,7 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
       // after the barrier check: sweep again before completing instead of leaving it behind.
       if ((await erasureOutboxOutstanding(deps.db, claim.workspaceId, claim.profileIds)) > 0) {
         await resetErasureCleanupCheckpoints(deps.db, claim);
-        await deferErasureCleanup(deps.db, claim, opts.outboxWaitSeconds ?? ERASURE_OUTBOX_WAIT_SECONDS);
+        await deferErasureCleanup(deps.db, claim, opts.outboxWaitSeconds ?? ERASURE_OUTBOX_WAIT_SECONDS, 'outbox');
         result.deferred++;
         continue;
       }
@@ -254,7 +257,7 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
       // more rather than complete on a queue that is no longer empty.
       if ((await erasureOutboxOutstanding(deps.db, claim.workspaceId, claim.profileIds)) > 0) {
         await resetErasureCleanupCheckpoints(deps.db, claim);
-        await deferErasureCleanup(deps.db, claim, opts.outboxWaitSeconds ?? ERASURE_OUTBOX_WAIT_SECONDS);
+        await deferErasureCleanup(deps.db, claim, opts.outboxWaitSeconds ?? ERASURE_OUTBOX_WAIT_SECONDS, 'outbox');
         result.deferred++;
         continue;
       }
@@ -265,11 +268,25 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
       if (!final) {
         const anchor = claim.firstSweepDoneAt ? new Date(claim.firstSweepDoneAt).getTime() : Date.now();
         const seconds = Math.max(1, Math.ceil((anchor + finalSweepMs - Date.now()) / 1000));
-        await deferErasureCleanup(deps.db, claim, seconds);
+        await deferErasureCleanup(deps.db, claim, seconds, 'final_sweep');
         result.deferred++;
         continue;
       }
       stage = 'unknown';
+      // Logical completion is only honest when protected reads can check every stored row: the
+      // workspace-wide subject-key coverage count must be zero. A non-zero count means a row has
+      // no key that could match the published ledger; complete would claim an exclusion that does
+      // not cover it. The scheduler's backfill keeps working while this job waits (#1037 part 3).
+      const coverage = await deps.events.subjectKeyCoverage([claim.workspaceId]);
+      if (coverage.pending > 0) {
+        await deferErasureCleanup(deps.db, claim, opts.coverageWaitSeconds ?? ERASURE_OUTBOX_WAIT_SECONDS, 'subject_key_coverage');
+        result.deferred++;
+        continue;
+      }
+      if (!(await markErasureCoverageClear(deps.db, claim))) {
+        logger.debug({ erasureId: claim.erasureId }, 'erasure coverage checkpoint was stale; another claim owns the job');
+        continue;
+      }
       if (await completeErasureCleanup(deps.db, claim)) result.completed++;
       else logger.debug({ erasureId: claim.erasureId }, 'erasure completion was stale; another claim owns the job');
     } catch (err) {

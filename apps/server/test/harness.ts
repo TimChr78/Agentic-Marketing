@@ -429,6 +429,8 @@ export async function startTestServer(
     holdTickMs?: number;
     erasureFinalSweepMs?: number;
     erasureCleanup?: boolean;
+    erasurePurge?: boolean;
+    erasurePurgeIntervalSeconds?: number;
   } = {},
 ) {
   const base = `http://localhost:${port}`;
@@ -510,6 +512,12 @@ export async function startTestServer(
       // keeps the suite fast; production waits the ClickHouse request timeout plus a margin.
       erasureFinalSweepMs: testOptions.erasureFinalSweepMs ?? 1_000,
       ...(testOptions.erasureCleanup === undefined ? {} : { erasureCleanup: testOptions.erasureCleanup }),
+      // Tests drive the physical purge themselves; the background loop starts at once and would
+      // race their assertions. A test that wants the loop opts in explicitly.
+      erasurePurge: testOptions.erasurePurge ?? false,
+      ...(testOptions.erasurePurgeIntervalSeconds === undefined
+        ? {}
+        : { erasurePurgeIntervalSeconds: testOptions.erasurePurgeIntervalSeconds }),
     }),
   ];
 

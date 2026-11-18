@@ -8,7 +8,7 @@ import {
   natsConsumerState,
   runSink,
 } from '@agentic-marketing/events';
-import { erasedEventFilter, runErasureCleanupOnce } from '@agentic-marketing/profiles';
+import { erasedEventFilter, runErasureCleanupOnce, subjectKeyHasher } from '@agentic-marketing/profiles';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -243,13 +243,29 @@ describe('erasure and the ClickHouse sink (#978)', () => {
     const raw = clickHouseStore({
       url: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
       database: t.dbName,
+      // A direct writer hashes its subject ids, so its row is fully covered and the completion
+      // gate (#1037 part 3) is about its physical presence, not a historical coverage gap.
+      subjectKeys: subjectKeyHasher({ db: t.srv.db, kp: t.srv.keyProvider }),
     });
     try {
       await raw.insertJourneyEvents([event]);
     } finally {
       await raw.close();
     }
-    expect(await t.srv.events.journeyCounts(ws, journeyId)).toHaveLength(1);
+    const baseRows = async () => {
+      const rs = await t.srv.events.client.query({
+        query: `SELECT participant_id FROM journey_events FINAL
+                 WHERE workspace_id = {ws:UUID} AND journey_id = {id:String}`,
+        query_params: { ws, id: journeyId },
+        format: 'JSONEachRow',
+        clickhouse_settings: await t.srv.events.settingsFor(ws),
+      });
+      return rs.json<{ participant_id: number }>();
+    };
+    // The write is physically stored, but the published exclusion already hides it from every
+    // application read (#1037 part 3); the final sweep below is only the physical milestone.
+    expect(await baseRows()).toHaveLength(1);
+    expect(await t.srv.events.journeyCounts(ws, journeyId)).toEqual([]);
 
     await runJobNow(erased.erasureId);
     expect(await runErasureCleanupOnce(cleanupDeps(), { finalSweepMs: 0, outboxWaitSeconds: 0 })).toMatchObject({
@@ -257,5 +273,6 @@ describe('erasure and the ClickHouse sink (#978)', () => {
       completed: 1,
     });
     expect(await t.srv.events.journeyCounts(ws, journeyId)).toEqual([]);
+    expect(await baseRows()).toEqual([]);
   }, 60_000);
 });

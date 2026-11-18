@@ -36,6 +36,7 @@ export * from './crypto';
 export * from './erasedEvents';
 export * from './erasure';
 export * from './erasureCleanup';
+export * from './erasurePurge';
 export * from './exclusion';
 export * from './identity';
 export * from './resolve';

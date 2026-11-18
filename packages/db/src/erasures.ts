@@ -654,6 +654,17 @@ export async function replayErasures(
           );
           if (applied.rowCount) result.generations += 1;
         }
+        // A restore may put back a ClickHouse snapshot from before a physical purge, so purge
+        // progress is not evidence after a replay: reset it and let the recurring sweep run again
+        // (#1037 part 3). The publication generation itself stays monotonic above.
+        if (generationsTable)
+          await client.query(
+            `UPDATE erasure_generations
+                SET purged_generation = 0, purge_last_sweep_at = NULL,
+                    purge_claim_token = NULL, purge_lease_until = NULL, updated_at = now()
+              WHERE workspace_id = $1`,
+            [workspaceId],
+          );
         await client.query('COMMIT');
         result.workspaces += 1;
       } catch (err) {
