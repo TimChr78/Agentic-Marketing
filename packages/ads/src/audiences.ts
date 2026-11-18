@@ -1,6 +1,6 @@
 import { type AudienceSync, DEFAULT_PURPOSES, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
 import { defineCommand, type Impact } from '@agentic-marketing/commands';
-import { AppError, safeErrorText, sleep } from '@agentic-marketing/core';
+import { AppError, isAbortError, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { accessTokenOf, connectionSecrets, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import { consentStatusSql, profileForMessage } from '@agentic-marketing/profiles';
@@ -813,7 +813,12 @@ async function writePlans(
     const addEntries = send.filter((s) => s.plan.add).map((s) => ({ profileId: s.plan.profileId, hashes: s.plan.add! }));
     let failed = false;
     if (removeSets.length) {
-      const r = await call.call('remove', removeSets).catch((e: Error) => ({ ok: false as const, error: audienceErrorText(e) }));
+      const r = await call.call('remove', removeSets).catch((e: unknown) => {
+        // A stop is not a provider failure: it is reported as itself, so nothing is recorded against
+        // the source, the member or the sync (#1043 review).
+        if (isAbortError(e)) throw e;
+        return { ok: false as const, error: audienceErrorText(e) };
+      });
       if (!r.ok) {
         const ids = send.filter((s) => s.remove.length).map((s) => s.plan.profileId);
         await markProfilesOrphaned(db, ws, syncId, platform, destinationKeyOf(ref), ids, `removal failed: ${r.error}`, 'both');
@@ -830,7 +835,12 @@ async function writePlans(
           'add',
           addEntries.map((e) => e.hashes),
         )
-        .catch((e: Error) => ({ ok: false as const, error: audienceErrorText(e) }));
+        .catch((e: unknown) => {
+          // The intents recorded above are the durable work a later round finishes; a cancellation
+          // leaves them exactly as they are.
+          if (isAbortError(e)) throw e;
+          return { ok: false as const, error: audienceErrorText(e) };
+        });
       if (!r.ok) {
         await markProfilesOrphaned(
           db,
@@ -1902,6 +1912,9 @@ export async function syncAudience(
       try {
         out.push(await syncPlatform(db, ws, syncId, def, platform, deps, opts));
       } catch (err) {
+        // Cancellation travels as itself: the platform result is not recorded as an error and the
+        // stop is not logged as a failed sync.
+        if (isAbortError(err)) throw err;
         const message = audienceErrorText(err);
         logger.error({ workspace: ws, sync: syncId, platform, err }, 'audience platform sync failed');
         out.push(resultOf(platform, message));
@@ -2017,7 +2030,7 @@ export async function runAudienceSyncRound(
       );
     } catch (err) {
       // A stop is not a failed sync: the member ledger keeps the work for the next round.
-      if (signal?.aborted) break;
+      if (isAbortError(err) || signal?.aborted) break;
       failures++;
       logger.error({ workspace: row.workspace_id, sync: row.sync_id, err }, 'audience sync round entry failed');
     }

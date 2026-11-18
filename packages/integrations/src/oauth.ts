@@ -98,21 +98,21 @@ function oauthFailureText(err: unknown): string {
   return 'the token endpoint could not be reached; connect again';
 }
 
-/** Calls the token endpoint (authorization code or refresh token) and returns what to store. */
-async function tokenRequest(
-  tokenUrl: string,
-  params: Record<string, string>,
-  egress: EgressPolicy,
-  request: OAuthRequest = safeRequest,
-  signal?: AbortSignal,
-) {
+/**
+ * Calls the token endpoint (authorization code or refresh token) and returns what to store.
+ *
+ * It is never given a shutdown signal (#1043 review). A rotating provider may have redeemed the
+ * refresh token and rotated it before the response arrives; destroying that response leaves the
+ * dead token stored and the next refresh is `invalid_grant`, so the person has to reconnect. A stop
+ * only prevents a new exchange from starting, and this one finishes inside its own request timeout.
+ */
+async function tokenRequest(tokenUrl: string, params: Record<string, string>, egress: EgressPolicy, request: OAuthRequest = safeRequest) {
   const res = await request(
     tokenUrl,
     {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: new URLSearchParams(params).toString(),
-      ...(signal ? { signal } : {}),
     },
     egress,
   );
@@ -422,6 +422,9 @@ export async function refreshConnection(
       });
       return;
     }
+    // A stop never cancels an exchange already promised to the provider: the redemption may have
+    // rotated the token, and only its response carries the replacement. It only prevents a new one.
+    if (opts.signal?.aborted) return;
     const { tokens, expiresAt } = await tokenRequest(
       oauthOf(claim.row).tokenUrl,
       {
@@ -432,7 +435,6 @@ export async function refreshConnection(
       },
       deps.egress,
       deps.http,
-      opts.signal,
     );
     await db.withWorkspace(ws, async (tx) => {
       const [row] = await tx.select().from(schema.connections).where(eq(schema.connections.id, id)).for('update');
@@ -484,7 +486,8 @@ export async function runTokenRefresher(deps: OAuthDeps, signal: AbortSignal, ti
         [new Date(Date.now() + REFRESH_MARGIN_MS)],
       );
       for (const r of rows) {
-        // Between connections only: a token exchange already in flight stops through its signal.
+        // Between connections only: an exchange already on the wire finishes and stores its
+        // rotation, a new one does not start (#1043 review).
         if (signal.aborted) return;
         await refreshConnection(deps.db, r.workspace_id, r.id, deps, { signal });
       }

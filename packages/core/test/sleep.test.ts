@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { sleep } from '../src';
+import { CancelledError, isAbortError, sleep } from '../src';
 
 // #1028 follow-up: every scheduler and worker loop sleeps between rounds. A sleep that only listens
 // for a *later* abort hangs for a whole tick when the signal aborts first — an hour for retention,
 // six for the spend import — and SIGTERM waits for it. The helper resolves either way.
+
+describe('cancellation', () => {
+  it('recognises our cancellation, a fetch AbortError and Node ABORT_ERR', () => {
+    expect(isAbortError(new CancelledError())).toBe(true);
+    expect(isAbortError(Object.assign(new Error('aborted'), { name: 'AbortError' }))).toBe(true);
+    expect(isAbortError(Object.assign(new Error('aborted'), { code: 'ABORT_ERR' }))).toBe(true);
+    expect(isAbortError(new Error('the provider refused'))).toBe(false);
+    expect(isAbortError({ name: 'AbortError' })).toBe(false);
+    expect(isAbortError('aborted')).toBe(false);
+  });
+});
 
 describe('sleep(ms, signal)', () => {
   it('waits out the interval when nothing aborts', async () => {

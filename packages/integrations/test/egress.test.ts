@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { createServer as createHttp2Server } from 'node:http2';
 import type { AddressInfo } from 'node:net';
 import { getDefaultAutoSelectFamily, setDefaultAutoSelectFamily } from 'node:net';
+import { isAbortError } from '@agentic-marketing/core';
 import { describe, expect, it } from 'vitest';
 import {
   checkUrl,
@@ -272,7 +273,13 @@ describe('response bounds', () => {
     try {
       const request = safeRequest(`http://127.0.0.1:${port}/`, { signal: stop.signal, timeoutMs: 30_000 }, local);
       setTimeout(() => stop.abort(), 50);
-      await expect(request).rejects.toThrow(/the request was aborted/);
+      // A cancellation is its own error, not a provider failure, so callers can tell it apart
+      // (#1043 review).
+      const err = await request.then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(isAbortError(err)).toBe(true);
       expect(Date.now() - started).toBeLessThan(4_000);
     } finally {
       srv.close();
@@ -283,7 +290,11 @@ describe('response bounds', () => {
     const stop = new AbortController();
     stop.abort();
     const started = Date.now();
-    await expect(safeRequest('http://127.0.0.1:1/', { signal: stop.signal }, local)).rejects.toThrow(/the request was aborted/);
+    const err = await safeRequest('http://127.0.0.1:1/', { signal: stop.signal }, local).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(isAbortError(err)).toBe(true);
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { sha256 } from '@agentic-marketing/core';
+import { CancelledError, sha256 } from '@agentic-marketing/core';
 import type { Db } from '@agentic-marketing/db';
 import { localKeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
 import { sql } from 'drizzle-orm';
@@ -322,6 +322,62 @@ describe.skipIf(!hasTestDatabase())('OAuth callback (#375)', () => {
 });
 
 describe.skipIf(!hasTestDatabase())('OAuth refresh serialization (#376)', () => {
+  it('finishes a rotation already on the wire and stores it, even as the shutdown lands (#1043 review)', async () => {
+    const id = await addConnection({ access: 'AT1', refresh: 'RT1', expiresAt: new Date(Date.now() - 1_000) });
+    let started!: () => void;
+    const inFlight = new Promise<void>((r) => {
+      started = r;
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let exchangeSignal: AbortSignal | undefined;
+    const http: OAuthRequest = async (_url, init) => {
+      // The provider has redeemed RT1 and rotated it: the answer carries RT2, and RT1 is dead from
+      // here on. Losing this response would leave the stored RT1 and force a reconnect. The fake
+      // behaves like the guarded request: an abort destroys the answer.
+      exchangeSignal = init.signal;
+      started();
+      const aborted = new Promise<never>((_resolve, reject) =>
+        init.signal?.addEventListener('abort', () => reject(new CancelledError('the request was cancelled')), { once: true }),
+      );
+      await Promise.race([gate, aborted]);
+      return response({ access_token: 'AT2', refresh_token: 'RT2', expires_in: 3600 });
+    };
+    const deps: OAuthDeps = { db: t.db, kp, egress: EGRESS, http };
+    const stop = new AbortController();
+    const refreshing = refreshConnection(t.db, t.workspace, id, deps, { signal: stop.signal });
+    await inFlight;
+    stop.abort();
+    release();
+    await refreshing;
+    // The exchange was never handed the shutdown: it finished and its rotation is stored.
+    expect(exchangeSignal).toBeUndefined();
+    expect((await secretsOf(id)).__oauth).toMatchObject({ accessToken: 'AT2', refreshToken: 'RT2' });
+    expect(await connectionOf(id)).toMatchObject({
+      oauth_status: 'connected',
+      oauth_error: null,
+      oauth_refresh_lease_until: null,
+      oauth_refresh_lease_token: null,
+    });
+  });
+
+  it('does not start an exchange once the signal aborted', async () => {
+    const id = await addConnection({ access: 'AT1', refresh: 'RT1', expiresAt: new Date(Date.now() - 1_000) });
+    let calls = 0;
+    const http: OAuthRequest = async () => {
+      calls++;
+      return response({ access_token: 'AT2', refresh_token: 'RT2', expires_in: 3600 });
+    };
+    const stop = new AbortController();
+    stop.abort();
+    await refreshConnection(t.db, t.workspace, id, { db: t.db, kp, egress: EGRESS, http }, { signal: stop.signal });
+    expect(calls).toBe(0);
+    expect((await secretsOf(id)).__oauth).toMatchObject({ accessToken: 'AT1', refreshToken: 'RT1' });
+    expect(await connectionOf(id)).toMatchObject({ oauth_status: 'connected', oauth_refresh_lease_until: null });
+  });
+
   it('lets one of two concurrent refreshes redeem a rotating token and stores its result', async () => {
     const id = await addConnection({ access: 'AT1', refresh: 'RT1', expiresAt: new Date(Date.now() - 1_000) });
     let posts = 0;

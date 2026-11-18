@@ -9,7 +9,9 @@ import {
   syncAudience,
 } from '@agentic-marketing/ads';
 import type { AudienceSync } from '@agentic-marketing/artifacts';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { isAbortError } from '@agentic-marketing/core';
+import { logger } from '@agentic-marketing/telemetry';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
 // 0.7.4 audience reconciliation (#400, #401, #402). The fake platforms model membership, not
@@ -437,6 +439,54 @@ describe('concurrency fencing', () => {
     holdAdds = false;
     const [firstResult] = await first;
     expect(firstResult).toMatchObject({ status: 'ok', added: 1, members: 1 });
+  });
+
+  it('records no failure when the stop cancels an upload, and keeps the durable intent (#1043 review)', async () => {
+    const segment = await createSegment('shutdown');
+    const profile = await person('shutdown-a', 'shutdown-a@example.com', '+4511000501', 'shutdown');
+    await addToSegment(segment, profile);
+    const sync = await createSync({ segment, meta: { connection: ids.meta, audienceId: '90000501' } });
+    const def = defOf(segment, { meta: { connection: ids.meta, audienceId: '90000501' } });
+    const deps = { kp: t.srv.keyProvider, egress: t.srv.egress };
+
+    holdAdds = true;
+    let reached: () => void;
+    const seen = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    addReached = reached!;
+    const warn = vi.spyOn(logger, 'warn');
+    const stop = new AbortController();
+    const running = syncAudience(t.srv.db, ws, sync, def, { ...deps, signal: stop.signal });
+    await seen;
+    stop.abort();
+    const err = await running.then(
+      () => null,
+      (e: unknown) => e,
+    );
+    releaseAdd!();
+    holdAdds = false;
+
+    // Cancellation travels as itself, not as a sync error: no warn, no saved state.
+    expect(isAbortError(err)).toBe(true);
+    expect(warn).not.toHaveBeenCalledWith(expect.anything(), 'audience sync failed');
+    warn.mockRestore();
+    const { rows: state } = await t.srv.db.admin.query<{ status: string; error: string | null }>(
+      'SELECT status, error FROM audience_sync_state WHERE workspace_id = $1 AND sync_id = $2',
+      [ws, sync],
+    );
+    expect(state).toEqual([]);
+
+    // The intent recorded before the upload is the durable work: it carries no error text and the
+    // next round finishes it.
+    const { rows: intents } = await t.srv.db.admin.query<{ last_error: string | null }>(
+      'SELECT last_error FROM audience_write_intents WHERE workspace_id = $1 AND sync_id = $2',
+      [ws, sync],
+    );
+    expect(intents.length).toBeGreaterThan(0);
+    expect(intents.every((row) => row.last_error === null)).toBe(true);
+    const [recovered] = await syncAudience(t.srv.db, ws, sync, def, deps);
+    expect(recovered).toMatchObject({ platform: 'meta', status: 'ok', members: 1 });
   });
 });
 

@@ -1,4 +1,4 @@
-import { safeErrorText, sleep } from '@agentic-marketing/core';
+import { isAbortError, safeErrorText, sleep } from '@agentic-marketing/core';
 import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
@@ -88,20 +88,22 @@ async function requestFeed(url: string, headers: Record<string, string>, options
         options.egress,
       );
       if ((res.status === 429 || res.status >= 500) && attempt < delays.length) {
-        await sleep(delays[attempt] ?? 0);
+        await sleep(delays[attempt] ?? 0, options.signal);
         continue;
       }
       return res;
     } catch (err) {
-      if (attempt >= delays.length) throw err;
-      await sleep(delays[attempt] ?? 0);
+      // A stop is not a feed worth retrying: retrying only delays it and then counts as a failure
+      // against the source, which stretches its backoff after the restart (#1043 review).
+      if (isAbortError(err) || attempt >= delays.length) throw err;
+      await sleep(delays[attempt] ?? 0, options.signal);
     }
   }
 }
 
 type HostLimiter = (url: string) => Promise<void>;
 
-function hostLimiter(gapMs: number): HostLimiter {
+function hostLimiter(gapMs: number, signal?: AbortSignal): HostLimiter {
   const last = new Map<string, number>();
   return async (url) => {
     const host = new URL(url).host;
@@ -109,7 +111,8 @@ function hostLimiter(gapMs: number): HostLimiter {
     const now = Date.now();
     if (previous !== undefined && gapMs > 0) {
       const wait = gapMs - (now - previous);
-      if (wait > 0) await sleep(wait);
+      // Abortable like every other wait: the per-host gap must not delay a stop either.
+      if (wait > 0) await sleep(wait, signal);
     }
     last.set(host, Date.now());
   };
@@ -188,6 +191,9 @@ export async function fetchSource(
       error: null,
     };
   } catch (err) {
+    // A stop is not the feed's failure: nothing is recorded, so `lastFetchAt` and the failure count
+    // (which stretches the interval up to 16x) stay exactly as they were (#1043 review).
+    if (isAbortError(err)) throw err;
     const error = failureMessage(err);
     await markFailure(tx, source, now, error);
     return { sourceId: source.id, status: 'failed', itemsAdded: 0, itemsUpdated: 0, error };
@@ -221,7 +227,7 @@ export async function runContentFetchOnce(deps: ContentFetchDeps, now: Date = ne
     itemsAdded: 0,
     itemsUpdated: 0,
   };
-  const throttle = hostLimiter(deps.hostGapMs ?? 1000);
+  const throttle = hostLimiter(deps.hostGapMs ?? 1000, deps.signal);
   for (const { workspace_id: workspaceId } of rows) {
     // Between workspaces only: the feed request in flight stops through the signal it carries.
     if (deps.signal?.aborted) break;
@@ -242,6 +248,8 @@ export async function runContentFetchOnce(deps: ContentFetchDeps, now: Date = ne
         }
       });
     } catch (err) {
+      // Cancellation ends the sweep without a failure count and without a log line.
+      if (isAbortError(err) || deps.signal?.aborted) break;
       logger.error({ err, workspaceId }, 'content fetch round failed');
     }
   }
@@ -256,7 +264,7 @@ export async function runContentFetches(deps: ContentFetchDeps, signal: AbortSig
     try {
       await runContentFetchOnce({ ...deps, signal });
     } catch (err) {
-      logger.error({ err }, 'content fetch round failed');
+      if (!isAbortError(err) && !signal.aborted) logger.error({ err }, 'content fetch round failed');
     }
     await sleep(tickMs, signal);
   }

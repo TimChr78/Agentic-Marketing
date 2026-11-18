@@ -3,6 +3,7 @@ import { request as httpRequest } from 'node:http';
 import { connect as http2Connect } from 'node:http2';
 import { request as httpsRequest } from 'node:https';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
+import { CancelledError } from '@agentic-marketing/core';
 
 // Outbound HTTP for webhooks and connector actions, guarded against SSRF
 // (security-and-privacy.md §5): only http(s), no redirects, bounded time and response size, and
@@ -251,12 +252,15 @@ export function safeRequest(
       if (err) reject(err);
       else resolve(value!);
     };
+    // A cancellation is not a provider failure (#1043 review): callers stop quietly and keep it out
+    // of their error state.
+    const cancelled = () => new CancelledError('the request was cancelled');
     const onAbort = () => {
       req.destroy();
-      finish(new EgressError('the request was aborted'));
+      finish(cancelled());
     };
     if (init.signal?.aborted) {
-      finish(new EgressError('the request was aborted'));
+      finish(cancelled());
       return;
     }
     const req = (u.protocol === 'https:' ? httpsRequest : httpRequest)(
