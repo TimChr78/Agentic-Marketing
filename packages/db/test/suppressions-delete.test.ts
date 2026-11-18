@@ -113,6 +113,7 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'broadcast_runs',
       'erasure_cleanup_jobs',
       'erasure_keys',
+      'erasure_generations',
       'data_keys',
       'journey_processed_events',
     ])

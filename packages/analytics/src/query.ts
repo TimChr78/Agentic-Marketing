@@ -2,8 +2,8 @@ import { complementarySuppression, K, planComplementarySuppression, publishedSin
 import { campaignIdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
-import { schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore, MessageEvent } from '@agentic-marketing/events';
+import { erasureVisibilityEpoch, schema, type Tx } from '@agentic-marketing/db';
+import { type EventStore, type MessageEvent, personReadSource } from '@agentic-marketing/events';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -133,6 +133,8 @@ export interface FreshnessInput {
   scope?: MeasureScope;
   campaignMap?: CampaignMap;
   journeyVersion?: number;
+  /** Whether this workspace's reads go through the protected views (#1037 part 2). Default: true. */
+  protectedRead?: boolean;
 }
 
 interface CacheEntry {
@@ -224,7 +226,7 @@ async function workspaceTimeZone(tx: Tx, workspaceId: string): Promise<string> {
   return w?.timeZone ?? 'UTC';
 }
 
-function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFilters): string {
+function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFilters, epoch: number): string {
   const sortedFilters = Object.fromEntries(
     Object.entries(filters)
       .sort(([a], [b]) => a.localeCompare(b))
@@ -232,6 +234,10 @@ function cacheKey(workspaceId: string, input: QueryInput, filters: NormalizedFil
   );
   return JSON.stringify({
     workspaceId,
+    // A confirmed publication changes which rows exist for this workspace (#1037 part 2). The epoch
+    // moves only after the exclusions are visible, so a result cached while a publication was in
+    // flight is never served afterwards.
+    epoch,
     measures: input.measures,
     dimensions: input.dimensions,
     from: input.from,
@@ -257,7 +263,9 @@ async function conversionInput(tx: Tx, filters: NormalizedFilters): Promise<{ ru
 
 export async function freshness(deps: Deps, input: FreshnessInput): Promise<string | null> {
   const { source, from, to, filters, names = [], scope, campaignMap, journeyVersion } = input;
-  const table = source === 'events' ? 'events' : source;
+  // Only person-linked sources reach freshness; segment membership and campaign reads are handled
+  // before it, and campaign freshness reads message events.
+  const table = personReadSource(source as 'events' | 'message_events' | 'journey_events', input.protectedRead ?? true);
   const column = source === 'events' ? 'received_at' : 'at';
   const params: Record<string, unknown> = { ws: deps.workspaceId, from: from.replace('Z', ''), to: to.replace('Z', '') };
   const where = ['workspace_id = {ws:UUID}', `${column} >= {from:DateTime64(3, 'UTC')}`, `${column} <= {to:DateTime64(3, 'UTC')}`];
@@ -636,6 +644,7 @@ async function execute(
   filters: NormalizedFilters,
   raw = false,
   pendingMessageEvents?: readonly MessageEvent[],
+  protectedRead = true,
 ) {
   const source = measures[0].source;
   if (source === 'segment_memberships') return segmentQuery(deps, input, filters);
@@ -678,6 +687,7 @@ async function execute(
         conversionRules: conversion.rules,
         queryMap: queryMap!,
         identity,
+        protectedRead,
       })
     : buildQuery({
         workspaceId: deps.workspaceId,
@@ -695,6 +705,7 @@ async function execute(
         campaignMap: queryMap?.map,
         journeyVersion: input.journeyVersion,
         pendingMessageEvents,
+        protectedRead,
       });
 
   const started = Date.now();
@@ -791,6 +802,7 @@ async function execute(
         scope: measureScope(measures),
         campaignMap: queryMap?.map,
         journeyVersion: input.journeyVersion,
+        protectedRead,
       }),
       suppressed,
       k: K,
@@ -806,15 +818,25 @@ export async function runAnalyticsQuery(deps: Deps, input: QueryInput, options: 
   // would otherwise be served unsuppressed rows (#917 review round 6). Neither may a result that
   // carries a caller's pending-event snapshot (#1008).
   const raw = options.raw === true;
-  const pendingMessageEvents = options.pendingMessageEvents ?? [];
-  const key = raw || pendingMessageEvents.length ? null : cacheKey(deps.workspaceId, input, filters);
+  // The workspace's confirmed-publication epoch, part of the cache key.
+  const epoch = await erasureVisibilityEpoch(deps.tx, deps.workspaceId);
+  // The shared read-layer decision (#1037 part 2): a workspace with no durable `erasure_keys`
+  // ledger row reads the base tables, so the protected view's ledger scan is not paid for nothing.
+  const protectedRead = (await deps.events.hasErasures?.(deps.workspaceId)) ?? true;
+  // The snapshot half of a pending union never reaches ClickHouse before publication, so its
+  // profiles are checked against the workspace's published exclusions here (#1037 part 2); the
+  // published half is excluded by the protected view the query reads.
+  const pendingMessageEvents = options.pendingMessageEvents?.length
+    ? await deps.events.withoutErasedSubjects(deps.workspaceId, options.pendingMessageEvents)
+    : [];
+  const key = raw || pendingMessageEvents.length ? null : cacheKey(deps.workspaceId, input, filters, epoch);
   const now = Date.now();
   const hit = key === null ? undefined : cache.get(key);
   if (hit && hit.expires > now) {
     logger.debug({ workspaceId: deps.workspaceId, measures: input.measures }, 'analytics query cache hit');
     return clone(hit.value);
   }
-  const value = await execute(deps, input, measures, dimensions, filters, raw, pendingMessageEvents);
+  const value = await execute(deps, input, measures, dimensions, filters, raw, pendingMessageEvents, protectedRead);
   if (key !== null) {
     cache.set(key, { expires: now + CACHE_TTL_MS, value });
     // Keep the map small in a long-running process; the TTL is the point, not an unbounded store.

@@ -212,6 +212,7 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'broadcast_runs',
         'erasure_cleanup_jobs',
         'erasure_keys',
+        'erasure_generations',
         'data_keys',
         'journey_processed_events',
       ])

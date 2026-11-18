@@ -80,10 +80,10 @@ describe('campaign query compiler', () => {
     expect(compiled.sql).toContain('conversion AS');
     expect(compiled.sql).toContain('rec_roll AS');
     expect(compiled.sql).toContain('conv_roll AS');
-    expect(compiled.sql).toContain('FROM message_events m FINAL');
+    expect(compiled.sql).toContain('FROM message_events_protected(ws={ws:UUID}) m FINAL');
     expect(compiled.sql).toContain("type IN ('sent', 'delivered')");
     expect(compiled.sql).toContain('arrayElement({campaign_map_ids:Array(String)}');
-    expect(compiled.sql).toContain('FROM events e FINAL');
+    expect(compiled.sql).toContain('FROM events_protected(ws={ws:UUID}) e FINAL');
     expect(compiled.sql).toContain('campaign_attr_days:Array(Int32)');
     expect(compiled.sql).toContain('campaign_id AS dim_campaign');
     expect(compiled.sql).toContain('ORDER BY r.dim_campaign ASC');

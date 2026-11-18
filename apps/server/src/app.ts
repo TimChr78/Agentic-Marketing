@@ -19,7 +19,7 @@ import {
 } from '@agentic-marketing/auth';
 import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid, RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
-import { createDb, normalizeHost, normalizePathPrefix } from '@agentic-marketing/db';
+import { createDb, erasureLedgerChecker, normalizeHost, normalizePathPrefix } from '@agentic-marketing/db';
 import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
@@ -127,6 +127,13 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         url: config.clickhouse.url,
         database: config.clickhouse.database,
         subjectKeys: subjectKeyHasher({ db, kp: keyProvider }),
+        // The shared read layer's fast path (#1037 part 2): a workspace with no durable erasure
+        // ledger reads the base tables instead of paying the protected view's ledger scan. The
+        // check is the committed ledger, so it fails closed for erasures whose publication has not
+        // run yet (older releases, restores) as well as for new ones.
+        hasErasures: erasureLedgerChecker(db, {
+          onError: (err) => logger.error({ err }, 'the erasure ledger could not be read; person-linked reads fail closed'),
+        }),
       }),
       db,
     ),

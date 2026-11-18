@@ -1,5 +1,5 @@
 import type { Db, WarehouseDataset } from '@agentic-marketing/db';
-import type { EventStore } from '@agentic-marketing/events';
+import { type EventStore, personReadSource } from '@agentic-marketing/events';
 import { type SQL, sql } from 'drizzle-orm';
 
 // What leaves for the warehouse. Nothing here is personal data in the clear: profiles carry only
@@ -131,6 +131,21 @@ async function* chBatches(events: EventStore, ws: string, query: string, params:
   if (batch.length) yield batch;
 }
 
+/**
+ * The same streamed read, through the workspace's protected source (#1037 part 2): the protected
+ * view when its durable `erasure_keys` ledger has a row, the base table otherwise.
+ */
+async function* protectedChBatches(
+  events: EventStore,
+  ws: string,
+  table: 'events' | 'message_events',
+  build: (source: string) => string,
+  params: Record<string, unknown>,
+): AsyncGenerator<Row[]> {
+  const source = personReadSource(table, (await events.hasErasures?.(ws)) ?? true);
+  yield* chBatches(events, ws, build(source), params);
+}
+
 const chTime = (iso: string) => iso.replace('T', ' ').replace('Z', '');
 const toIso = (v: unknown) => `${String(v).replace(' ', 'T')}Z`;
 
@@ -184,12 +199,13 @@ export function readDataset(
       ]);
     case 'events':
       return mapRows(
-        chBatches(
+        protectedChBatches(
           deps.events,
           ws,
-          `SELECT event_id, type, name, timestamp, received_at, anonymous_id, user_id,
+          'events',
+          (source) => `SELECT event_id, type, name, timestamp, received_at, anonymous_id, user_id,
                   toJSONString(properties) AS properties, toJSONString(context) AS context
-           FROM events FINAL
+           FROM ${source} FINAL
            WHERE workspace_id = {ws:UUID} AND received_at > {since:DateTime64(3, 'UTC')} AND received_at <= {until:DateTime64(3, 'UTC')}
            ORDER BY received_at, event_id`,
           { since: chTime(since), until: chTime(until) },
@@ -204,11 +220,12 @@ export function readDataset(
       );
     case 'message_events':
       return mapRows(
-        chBatches(
+        protectedChBatches(
           deps.events,
           ws,
-          `SELECT message_id, event_id, type, at, profile_id, channel, purpose, template_id, journey_id, reason, url
-           FROM message_events FINAL
+          'message_events',
+          (source) => `SELECT message_id, event_id, type, at, profile_id, channel, purpose, template_id, journey_id, reason, url
+           FROM ${source} FINAL
            WHERE workspace_id = {ws:UUID} AND at > {since:DateTime64(3, 'UTC')} AND at <= {until:DateTime64(3, 'UTC')}
            ORDER BY at, message_id, event_id`,
           { since: chTime(since), until: chTime(until) },

@@ -396,26 +396,69 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
       disposeErasure(prepared);
     }
 
-    let entered!: () => void;
-    const blockedInClickHouse = new Promise<void>((resolve) => {
-      entered = resolve;
+    // The staged erasure must have a publishable ledger row, or the worker would skip publication
+    // and the first barrier below would never open.
+    const ledger = await d.db.admin.query('SELECT 1 FROM erasure_keys WHERE workspace_id = $1 AND erasure_id = $2 AND coverage = $3', [
+      ws,
+      erasureId,
+      'full',
+    ]);
+    expect(ledger.rowCount).toBeGreaterThan(0);
+
+    // Two store barriers: publication (before any sweep) and the ClickHouse delete itself. Neither
+    // may hold an identity lock, and both run on the real worker path.
+    let publishEntered!: () => void;
+    const inPublication = new Promise<void>((resolve) => {
+      publishEntered = resolve;
     });
-    let release!: () => void;
-    const mayFinish = new Promise<void>((resolve) => {
-      release = resolve;
+    let publishMayFinish!: () => void;
+    const publicationMayFinish = new Promise<void>((resolve) => {
+      publishMayFinish = resolve;
+    });
+    let deleteEntered!: () => void;
+    const inDelete = new Promise<void>((resolve) => {
+      deleteEntered = resolve;
+    });
+    let deleteMayFinish!: () => void;
+    const deleteMayResolve = new Promise<void>((resolve) => {
+      deleteMayFinish = resolve;
     });
     const eventStore = {
+      async publishErasedSubjects() {
+        publishEntered();
+        await publicationMayFinish;
+      },
+      async erasedSubjectsVisible() {
+        return true;
+      },
       async deleteEventsOf() {
-        entered();
-        await mayFinish;
+        deleteEntered();
+        await deleteMayResolve;
       },
     } as unknown as EventStore;
     const hot = { async deleteSnapshot() {} } as unknown as HotState;
-    // The real scheduler path: claim the committed job and block inside the ClickHouse delete.
+    // The real scheduler path: claim the committed job and block inside publication first.
     // The interval is zero here so the test can drive the distinct final pass immediately.
     const worker = runErasureCleanupOnce({ db: d.db, kp, events: eventStore, hot }, { finalSweepMs: 0 });
-    await blockedInClickHouse;
+    await inPublication;
 
+    // Another identify completes while the erasure's publication is in flight: publication is
+    // ClickHouse I/O and holds no identity lock.
+    const duringPublication = `anon-${newId('prf')}`;
+    await runBatch([event({ anonymousId: duringPublication })]);
+    expect(
+      (
+        await d.db.admin.query(
+          `SELECT p.id FROM profiles p JOIN identifiers i ON i.profile_id = p.id AND i.workspace_id = p.workspace_id
+            WHERE p.workspace_id = $1 AND i.type = 'anonymous_id' AND i.value = $2`,
+          [ws, duringPublication],
+        )
+      ).rowCount,
+    ).toBe(1);
+    publishMayFinish();
+    await inDelete;
+
+    // And another one completes while the sweep waits on ClickHouse — the original assertion.
     const fresh = `anon-${newId('prf')}`;
     await runBatch([event({ anonymousId: fresh })]);
     const created = await d.db.admin.query(
@@ -425,7 +468,7 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
     );
     expect(created.rowCount).toBe(1);
 
-    release();
+    deleteMayFinish();
     const first = await worker;
     expect(first.claimed).toBeGreaterThanOrEqual(1);
     // The first successful sweep is the checkpoint; the distinct final pass completes the job.
@@ -435,11 +478,12 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
     ]);
     const result = await runErasureCleanupOnce({ db: d.db, kp, events: eventStore, hot }, { finalSweepMs: 0 });
     expect(result.completed).toBeGreaterThanOrEqual(1);
-    const job = await d.db.admin.query<{ state: string }>(
-      'SELECT state FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
+    const job = await d.db.admin.query<{ state: string; published_at: Date | null }>(
+      'SELECT state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
       [ws, erasureId],
     );
     expect(job.rows[0]?.state).toBe('complete');
+    expect(job.rows[0]?.published_at).toBeInstanceOf(Date);
   }, 60_000);
 
   it('rolls back and re-prepares when the matching key changes between preparation and the lock', async () => {

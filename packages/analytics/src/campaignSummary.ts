@@ -4,6 +4,7 @@ import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
+import { personReadSource } from '@agentic-marketing/events';
 import { computeJourneyHoldout } from '@agentic-marketing/journeys';
 import { eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
@@ -162,12 +163,12 @@ const sendingMembers = (record: CampaignRecord): CampaignMember[] =>
  * the default window follow real sends, not the informational `startsAt`: a journey can send before
  * the planned start, and the start can be edited later (0.14.10 review).
  */
-async function firstSendAt(deps: Deps, memberIds: string[]): Promise<string | null> {
+async function firstSendAt(deps: Deps, memberIds: string[], protectedRead: boolean): Promise<string | null> {
   if (!memberIds.length) return null;
   // No FINAL: duplicate rows cannot change a minimum, and FINAL would merge the members' whole
   // history before aggregating.
   const result = await deps.events.client.query({
-    query: `SELECT formatDateTime(min(at), '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS first, count() AS n FROM message_events
+    query: `SELECT formatDateTime(min(at), '%Y-%m-%dT%H:%i:%S.%fZ', 'UTC') AS first, count() AS n FROM ${personReadSource('message_events', protectedRead)}
             WHERE workspace_id = {ws:UUID} AND journey_id IN {members:Array(String)}
               AND type IN ('sent', 'delivered')`,
     query_params: { ws: deps.workspaceId, members: memberIds },
@@ -221,6 +222,7 @@ async function memberBreakdown(
   goalEvents: string[],
   attributionDays: number,
   identity: IdentityMap,
+  protectedRead: boolean,
 ) {
   // The same chunked transport as the campaign measures: a large map must not exceed ClickHouse's
   // per-field limit just because this surface builds its own query (#590).
@@ -241,7 +243,7 @@ async function memberBreakdown(
             m.journey_id AS member_id,
             coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id,
             m.at AS first_at
-          FROM message_events m FINAL
+          FROM ${personReadSource('message_events', protectedRead)} m FINAL
           LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
           WHERE m.workspace_id = {ws:UUID} AND m.journey_id IN {members:Array(String)}
             AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}
@@ -259,7 +261,7 @@ async function memberBreakdown(
             nullIf(by_profile.profile_id, ''),
             e.profile_id
           ) AS profile_id
-        FROM events e FINAL
+        FROM ${personReadSource('events', protectedRead)} e FINAL
         LEFT JOIN identity by_user ON by_user.identity_key = e.user_id AND by_user.kind = 'user_id'
         LEFT JOIN identity by_anonymous ON by_anonymous.identity_key = e.anonymous_id AND by_anonymous.kind = 'anonymous_id'
         LEFT JOIN identity by_profile ON by_profile.identity_key = e.profile_id AND by_profile.kind = 'profile'
@@ -280,7 +282,7 @@ async function memberBreakdown(
             m.type AS event_type,
             m.channel AS channel,
             coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id
-          FROM message_events m FINAL
+          FROM ${personReadSource('message_events', protectedRead)} m FINAL
           LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
           WHERE m.workspace_id = {ws:UUID} AND m.journey_id IN {members:Array(String)}
             AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}
@@ -557,6 +559,7 @@ export const analyticsCampaignSummary = defineCommand({
   target: (i) => i.campaignId,
   handler: async (input, ctx) => {
     const deps: Deps = { tx: ctx.tx, events: ctx.services.events, workspaceId: ctx.principal.workspaceId };
+    const protectedRead = (await deps.events.hasErasures?.(deps.workspaceId)) ?? true;
     const record = await loadCampaignRecord(ctx.tx, input.campaignId);
     const timeZone = await workspaceTimeZone(ctx.tx, deps.workspaceId);
     const now = new Date().toISOString();
@@ -569,7 +572,7 @@ export const analyticsCampaignSummary = defineCommand({
     // a campaign is not started for this period only when nothing was sent on or before `to`. The
     // planned startsAt is informational (journeys can send before it, and it can be edited), so it
     // never hides real results (#588, #747, 0.14.10 review).
-    const firstSent = await firstSendAt(deps, memberIds);
+    const firstSent = await firstSendAt(deps, memberIds, protectedRead);
     const notStarted = campaignNotStarted({
       published: record.published,
       sendingMembers: sending.length,
@@ -657,7 +660,7 @@ export const analyticsCampaignSummary = defineCommand({
       record.goal,
       (conversionMap?.rules ?? []).map((r) => r.event),
     );
-    const breakdown = await memberBreakdown(deps, memberIds, from, to, goalEvents, record.goal.attributionDays, identity);
+    const breakdown = await memberBreakdown(deps, memberIds, from, to, goalEvents, record.goal.attributionDays, identity, protectedRead);
     // The same k rule the query layer applies to a dimension group: a member row whose group of
     // people reached is below k has every count and derived rate suppressed (null), and is
     // counted in meta.suppressed. Every headline total beside the rows is protected per total

@@ -48,7 +48,7 @@ describe('query compiler', () => {
   it('compiles a per-day count into one parameterised ClickHouse query', () => {
     const compiled = buildQuery(input({ dimensions: ['day'] }));
 
-    expect(compiled.sql).toContain('FROM message_events FINAL');
+    expect(compiled.sql).toContain('FROM message_events_protected(ws={ws:UUID}) FINAL');
     expect(compiled.sql).toContain('workspace_id = {ws:UUID}');
     expect(compiled.sql).toContain("at >= {from:DateTime64(3, 'UTC')}");
     expect(compiled.sql).toContain("at <= {to:DateTime64(3, 'UTC')}");
@@ -149,7 +149,7 @@ describe('query compiler', () => {
         order: { by: 'journey_step', dir: 'asc' },
       }),
     );
-    expect(journey.sql).toContain('FROM journey_events FINAL');
+    expect(journey.sql).toContain('FROM journey_events_protected(ws={ws:UUID}) FINAL');
     expect(journey.sql).toContain('node AS dim_journey_step');
     expect(journey.sql).toContain('min(seq) AS sort_key');
     expect(journey.sql).toContain('ORDER BY sort_key ASC');
@@ -233,7 +233,7 @@ describe('query compiler', () => {
         conversionNames: ['Order Completed', 'Signed Up'],
       }),
     );
-    expect(compiled.sql).toContain('FROM events FINAL');
+    expect(compiled.sql).toContain('FROM events_protected(ws={ws:UUID}) FINAL');
     expect(compiled.sql).toContain("timestamp >= {from:DateTime64(3, 'UTC')}");
     expect(compiled.sql).toContain('name IN {names:Array(String)}');
     expect(compiled.sql).toContain('uniqExact(event_id) AS base_conversions');
@@ -350,7 +350,7 @@ describe('pending message events (#1008)', () => {
   it('reads published rows plus the snapshot through the same aggregation and filters', () => {
     const compiled = buildQuery(input({ measures: [measure('email.complained'), measure('email.sent')], pendingMessageEvents: [queued] }));
     expect(compiled.sql).toContain('FROM (SELECT');
-    expect(compiled.sql).toContain('FROM message_events FINAL');
+    expect(compiled.sql).toContain('FROM message_events_protected(ws={ws:UUID}) FINAL');
     expect(compiled.sql).toContain('UNION ALL');
     expect(compiled.sql).toContain('LEFT ANTI JOIN');
     expect(compiled.sql).toContain('numbers({pending_n:UInt64})');
@@ -368,7 +368,7 @@ describe('pending message events (#1008)', () => {
   });
 
   it('keeps the plain table when there is nothing queued', () => {
-    expect(buildQuery(input()).sql).toContain('FROM message_events FINAL WHERE');
+    expect(buildQuery(input()).sql).toContain('FROM message_events_protected(ws={ws:UUID}) FINAL WHERE');
   });
 
   it('refuses a snapshot on a source that has no message events', () => {

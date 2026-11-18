@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { MessageEvent } from './clickhouse';
+import { personReadSource } from './protected';
 
 // Message events reach ClickHouse after the transaction that recorded them commits, through the
 // outbox (0.15.0). A decision that reads ClickHouse metrics before publication would miss them, so
@@ -79,18 +80,25 @@ const arrayString = (name: string) => `{${name}:Array(String)}`;
  * A `FROM` source that reads published message events plus the events still queued for
  * publication, so a metric query sees what it will see once the outbox catches up.
  *
- * The published half stays `message_events FINAL` (the replacing table, its row policy and its
- * dedupe unchanged). The snapshot half is built from parallel `Array(String)` parameters over
- * `numbers()` — no per-row SQL text — and a `LEFT ANTI JOIN` drops any snapshot event that is
- * already published: a dispatcher that publishes between the snapshot and the read must leave the
- * event counted once, not twice. The caller applies its own WHERE to the result exactly as it would
- * to the table, so filters, channels and the time window describe both halves alike.
+ * The published half reads the workspace's protected source (#1037 part 2) — the protected view
+ * when the workspace has a durable erasure ledger, the base table otherwise — so it dedupes the
+ * replacing table and excludes erased subjects, and its row policy is unchanged.
+ *
+ * The snapshot half is built from parallel `Array(String)` parameters over `numbers()` — no
+ * per-row SQL text — and a `LEFT ANTI JOIN` drops any snapshot event that is already published: a
+ * dispatcher that publishes between the snapshot and the read must leave the event counted once,
+ * not twice. The anti-join reads the base table, because it needs identity columns only; that keeps
+ * the protected source to one use in the union, so its ledger set is built once.
+ *
+ * The caller applies its own WHERE to the result exactly as it would to the table, so filters,
+ * channels and the time window describe both halves alike.
  *
  * `params` must already carry `ws` (the workspace UUID); this function adds its own `pending_*`
  * entries. Bounded by the caller: every row costs a parameter slot.
  */
-export function messageEventsWithPending(rows: readonly MessageEvent[], params: Record<string, unknown>): string {
-  if (!rows.length) return 'message_events FINAL';
+export function messageEventsWithPending(rows: readonly MessageEvent[], params: Record<string, unknown>, protectedRead = true): string {
+  const published = `${personReadSource('message_events', protectedRead)} FINAL`;
+  if (!rows.length) return published;
   const at = rows.map((e) => e.at.replace('Z', ''));
   params.pending_n = rows.length;
   params.pending_at = at;
@@ -106,7 +114,7 @@ export function messageEventsWithPending(rows: readonly MessageEvent[], params: 
   params.pending_message_ids = [...new Set(rows.map((e) => e.messageId))];
 
   const element = (name: string) => `arrayElement(${arrayString(name)}, number + 1)`;
-  return `(SELECT ${columnList} FROM message_events FINAL
+  return `(SELECT ${columnList} FROM ${published}
     UNION ALL
     SELECT ${columnList} FROM (
       SELECT
@@ -123,6 +131,10 @@ export function messageEventsWithPending(rows: readonly MessageEvent[], params: 
         ${element('pending_variant')} AS variant
       FROM numbers({pending_n:UInt64})
     ) AS queued
+    -- The dedupe key set, not a read of the person's data: only the three identity columns leave
+    -- this subquery, and a queued event shares its profile with its published twin, so exclusion
+    -- cannot change whether these two rows are the same event. Reading the base table here keeps
+    -- the protected source (and its ledger set) to one use in the union.
     LEFT ANTI JOIN (
       SELECT toString(message_id) AS message_id, toString(type) AS type, toString(event_id) AS event_id
       FROM message_events FINAL

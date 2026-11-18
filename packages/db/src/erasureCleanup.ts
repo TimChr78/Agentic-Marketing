@@ -91,6 +91,9 @@ export interface ErasureCleanupClaim {
   claimToken: string;
   clickhouseDone: boolean;
   hotstateDone: boolean;
+  /** The generation published to ClickHouse's erased subjects; null until confirmed (#1037 part 2). */
+  publishedGeneration: number | null;
+  publishedAt: Date | null;
   selectors: Buffer | null;
   selectorKey: Buffer | null;
   selectorKek: string | null;
@@ -143,6 +146,8 @@ export async function claimErasureCleanupJobs(
     claim_token: string;
     clickhouse_done: boolean;
     hotstate_done: boolean;
+    published_generation: number | string | null;
+    published_at: Date | null;
     selectors: Buffer | null;
     selector_key: Buffer | null;
     selector_kek: string | null;
@@ -171,7 +176,8 @@ export async function claimErasureCleanupJobs(
                (j.first_sweep_done_at IS NOT NULL
                 AND GREATEST(COALESCE(j.final_sweep_at, now()), j.first_sweep_done_at)
                     + make_interval(secs => $3::double precision) <= now()) AS final_due,
-               j.claim_token, j.clickhouse_done, j.hotstate_done, j.selectors, j.selector_key, j.selector_kek`,
+               j.claim_token, j.clickhouse_done, j.hotstate_done,
+               j.published_generation, j.published_at, j.selectors, j.selector_key, j.selector_kek`,
     [limit, leaseMs / 1000, finalSweepSeconds],
   );
   return rows.map((r) => ({
@@ -185,6 +191,8 @@ export async function claimErasureCleanupJobs(
     claimToken: r.claim_token,
     clickhouseDone: r.clickhouse_done,
     hotstateDone: r.hotstate_done,
+    publishedGeneration: r.published_generation === null ? null : Number(r.published_generation),
+    publishedAt: r.published_at,
     selectors: r.selectors,
     selectorKey: r.selector_key,
     selectorKek: r.selector_kek,
@@ -428,4 +436,189 @@ export async function erasureCleanupJob(
     .from(schema.erasureCleanupJobs)
     .where(and(eq(schema.erasureCleanupJobs.workspaceId, workspaceId), eq(schema.erasureCleanupJobs.erasureId, erasureId)));
   return job ?? null;
+}
+
+/**
+ * The workspace's confirmed-publication epoch (#1037 part 2). A query result cache keys on it: it
+ * moves only after a publication's keys are visible in ClickHouse, so a query that ran *during*
+ * publication can never leave a pre-exclusion answer under the current value. Keying on
+ * `generation` instead would allow exactly that: the generation is allocated before the insert.
+ */
+export async function erasureVisibilityEpoch(tx: Tx, workspaceId: string): Promise<number> {
+  const [row] = await tx
+    .select({ visible: schema.erasureGenerations.visiblePublications })
+    .from(schema.erasureGenerations)
+    .where(eq(schema.erasureGenerations.workspaceId, workspaceId));
+  return Number(row?.visible ?? 0);
+}
+
+/** The number of workspaces a process remembers as having a durable erasure ledger. */
+export const ERASURE_LEDGER_CACHE_MAX = 10_000;
+
+export interface ErasureLedgerCheckerOptions {
+  /** Called at most once per checker, when the ledger cannot be read. */
+  onError?: (err: unknown) => void;
+  /** How many positive workspaces to remember. Defaults to {@link ERASURE_LEDGER_CACHE_MAX}. */
+  cacheMax?: number;
+}
+
+/**
+ * A workspace's erasure check for the shared read layer (#1037 part 2). The signal is the **durable
+ * ledger** — `erasure_keys`, written in the erasure's own SQL transaction — not a worker-allocated
+ * generation: an erasure committed by an older release, or restored from a snapshot, has ledger rows
+ * without ever having been published, and must still take the protected path.
+ *
+ * A positive is cached (nothing prunes `erasure_keys`, so it never becomes false) in a bounded LRU,
+ * because a long-lived process must not grow a set per erased workspace. A negative is never
+ * cached: the next erasure in that workspace has to take effect on the next read.
+ *
+ * A failure to read the ledger is fail-closed: every read stays on the protected path. It is
+ * reported once per checker (not once per read) and rethrown with a fixed, explicit message, so an
+ * operator sees a cause rather than a silent read-path outage.
+ */
+export function erasureLedgerChecker(
+  db: Pick<Db, 'admin'>,
+  opts: ErasureLedgerCheckerOptions = {},
+): (workspaceId: string) => Promise<boolean> {
+  const known = new Map<string, true>();
+  const cacheMax = Math.max(1, opts.cacheMax ?? ERASURE_LEDGER_CACHE_MAX);
+  let reported = false;
+  return async (workspaceId: string) => {
+    if (known.has(workspaceId)) {
+      // Refresh the LRU position: the workspace is still being read.
+      known.delete(workspaceId);
+      known.set(workspaceId, true);
+      return true;
+    }
+    try {
+      const { rows } = await db.admin.query('SELECT 1 AS present FROM erasure_keys WHERE workspace_id = $1 LIMIT 1', [workspaceId]);
+      if (!rows.length) return false;
+      if (known.size >= cacheMax) known.delete(known.keys().next().value as string);
+      known.set(workspaceId, true);
+      return true;
+    } catch (err) {
+      if (!reported) {
+        reported = true;
+        opts.onError?.(err);
+      }
+      throw new Error(
+        'the erasure ledger for this workspace could not be read, so person-linked reads fail closed; retry once the database is reachable',
+        { cause: err },
+      );
+    }
+  };
+}
+
+/**
+ * Re-enqueues every erasure whose ledger has publishable rows but no recorded publication (#1037
+ * part 2). Erasures whose cleanup completed before this release, or that predate durable jobs, have
+ * committed `erasure_keys` (so reads already fail closed to the protected path) but no
+ * `erased_subjects` rows. Idempotent: a job that already published is left alone, a job that is
+ * still running keeps its claim token, lease and checkpoints, and a queued job stays queued. One
+ * statement across tenants, like the claim itself.
+ *
+ * Only `full`-coverage rows are publishable, while the read-layer check protects on **any** ledger
+ * row. A workspace whose only rows are `unavailable` therefore stays on the protected path with an
+ * empty published set: fail closed, and nothing to publish. That asymmetry is deliberate.
+ */
+export async function enqueueUnpublishedErasures(db: Db): Promise<number> {
+  const { rowCount } = await db.admin.query(
+    `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids)
+     SELECT e.workspace_id, e.id, e.profile_ids
+       FROM erasures e
+      WHERE EXISTS (
+        SELECT 1 FROM erasure_keys k
+         WHERE k.workspace_id = e.workspace_id AND k.erasure_id = e.id AND k.coverage = 'full'
+      )
+     ON CONFLICT (workspace_id, erasure_id) DO UPDATE
+       SET state = 'pending_external',
+           next_attempt_at = now(),
+           clickhouse_done = false,
+           hotstate_done = false,
+           published_generation = NULL,
+           published_at = NULL,
+           claim_token = NULL,
+           lease_until = NULL,
+           updated_at = now()
+       -- Only a finished job may be re-opened. A running job has a live claim token and its
+       -- checkpoints, and a scheduler start on another replica must not reset it underneath the
+       -- worker; a pending_external job is already queued, so the pass leaves it alone (a
+       -- repeated pass is a no-op). published_at stays the second condition: a job that already
+       -- published must never run again.
+       WHERE erasure_cleanup_jobs.published_at IS NULL
+         AND erasure_cleanup_jobs.state IN ('complete', 'failed')`,
+  );
+  return rowCount ?? 0;
+}
+
+/**
+ * Records that one publication is confirmed visible, moving the cache epoch. Called once per
+ * successful publication, after the FINAL read, so concurrent publishers each move it exactly once
+ * and a read can never observe a new epoch before the rows behind it are visible.
+ */
+export async function noteErasedSubjectsVisible(db: Db, workspaceId: string): Promise<void> {
+  await db.admin.query(
+    `INSERT INTO erasure_generations (workspace_id, visible_publications, visible_at) VALUES ($1, 1, now())
+     ON CONFLICT (workspace_id) DO UPDATE
+       SET visible_publications = erasure_generations.visible_publications + 1, visible_at = now(), updated_at = now()`,
+    [workspaceId],
+  );
+}
+
+/** One full-coverage ledger row the erasure stage committed for this erasure. */
+export interface ErasureLedgerKey {
+  kind: string;
+  keyValue: string;
+  keyVersion: string;
+}
+
+/**
+ * The ledger rows one erasure published (#1037 part 2). Only `coverage = 'full'` rows are
+ * publishable: an `unavailable` row keeps its matching-key value because the plaintext could not
+ * be recovered, so it would never match a stored subject key and must not be published as if it
+ * would. A read under the owner connection, scoped by the ledger's own key.
+ */
+export async function erasureLedgerKeys(db: Db, workspaceId: string, erasureId: string): Promise<ErasureLedgerKey[]> {
+  const { rows } = await db.admin.query<ErasureLedgerKey>(
+    `SELECT kind, key_value AS "keyValue", key_version AS "keyVersion"
+       FROM erasure_keys
+      WHERE workspace_id = $1 AND erasure_id = $2 AND coverage = 'full'
+      ORDER BY kind, key_value, key_version`,
+    [workspaceId, erasureId],
+  );
+  return rows;
+}
+
+/**
+ * The next publication generation for a workspace (#1037 part 2). The upsert increments in one
+ * statement, so two workers publishing for the same workspace can never take the same value and a
+ * generation never moves backwards.
+ */
+export async function nextErasureGeneration(db: Db, workspaceId: string): Promise<number> {
+  const { rows } = await db.admin.query<{ generation: number | string }>(
+    `INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, 1)
+     ON CONFLICT (workspace_id) DO UPDATE
+       SET generation = erasure_generations.generation + 1, updated_at = now()
+     RETURNING generation`,
+    [workspaceId],
+  );
+  return Number(rows[0]?.generation ?? 1);
+}
+
+/**
+ * Records that a claim published its ledger and confirmed the result is visible. A stale claim
+ * returns false and changes nothing: the new owner publishes the same keys, which is idempotent.
+ */
+export async function markErasureCleanupPublished(
+  db: Db,
+  claim: Pick<ErasureCleanupClaim, 'workspaceId' | 'erasureId' | 'claimToken'>,
+  generation: number,
+): Promise<boolean> {
+  const { rowCount } = await db.admin.query(
+    `UPDATE erasure_cleanup_jobs
+        SET published_generation = $4, published_at = now(), updated_at = now()
+      WHERE workspace_id = $1 AND erasure_id = $2 AND claim_token = $3 AND state = 'running'`,
+    [claim.workspaceId, claim.erasureId, claim.claimToken, generation],
+  );
+  return (rowCount ?? 0) > 0;
 }

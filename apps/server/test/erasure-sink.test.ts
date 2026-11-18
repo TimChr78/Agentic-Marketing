@@ -138,16 +138,28 @@ describe('erasure and the ClickHouse sink (#978)', () => {
     const firstRound = await runErasureCleanupOnce(cleanupDeps(), { finalSweepMs: 60_000, outboxWaitSeconds: 0 });
     expect(firstRound).toMatchObject({ claimed: 1, deferred: 1, completed: 0 });
 
-    // Replica 1's insert lands after the first sweep.
+    // Replica 1's insert lands after the first sweep. It is physically stored (the base table
+    // shows it), but the publication that preceded the sweep already excludes it from every
+    // protected read — this is the gap 0.17.0 closes (#1037 part 2).
     release();
     await first;
-    const visible = await eventually(
-      () => t.srv.events.eventsOf(ws, { anonymousIds: ['dup-a'], userIds: [] }),
-      (rows) => rows.some((row) => row.eventId === 'dup-c2'),
+    const stored = await eventually(
+      async () => {
+        const rs = await t.srv.events.client.query({
+          query: `SELECT event_id FROM events FINAL WHERE workspace_id = {ws:UUID} AND event_id = {id:String}`,
+          query_params: { ws, id: 'dup-c2' },
+          format: 'JSONEachRow',
+          clickhouse_settings: await t.srv.events.settingsFor(ws),
+        });
+        return rs.json<{ event_id: string }>();
+      },
+      (rows) => rows.length > 0,
     );
-    expect(visible.map((row) => row.eventId)).toContain('dup-c2');
+    expect(stored.map((row) => row.event_id)).toContain('dup-c2');
+    expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['dup-a'], userIds: [] })).toEqual([]);
 
-    // Final sweep after the bound removes it again, and only now is the erasure complete.
+    // The final sweep after the bound still removes the physical row, and only now is the erasure
+    // complete.
     await runJobNow(erased.erasureId);
     const finalRound = await runErasureCleanupOnce(cleanupDeps(), { finalSweepMs: 0, outboxWaitSeconds: 0 });
     expect(finalRound).toMatchObject({ claimed: 1, completed: 1 });

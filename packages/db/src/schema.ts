@@ -576,6 +576,19 @@ export const erasureKeys = pgTable(
   (t) => [primaryKey({ columns: [t.workspaceId, t.kind, t.keyValue, t.keyVersion] })],
 );
 
+/**
+ * The per-workspace generation the ClickHouse `erased_subjects` state is published under (#1037
+ * part 2). Only ever increases; a restore applies the larger of the snapshot and the live log.
+ */
+export const erasureGenerations = pgTable('erasure_generations', {
+  workspaceId: uuid('workspace_id').primaryKey(),
+  generation: bigint('generation', { mode: 'number' }).notNull().default(0),
+  /** Confirmed publications; a result cache keys on it, never on `generation` (#1037 part 2). */
+  visiblePublications: bigint('visible_publications', { mode: 'number' }).notNull().default(0),
+  visibleAt: ts('visible_at'),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+});
+
 export type OutboxState = 'pending' | 'delivering' | 'delivered' | 'failed';
 /**
  * Post-commit work a tenant transaction implies (#978 part 2): a network call is enqueued in the
@@ -628,6 +641,13 @@ export const erasureCleanupJobs = pgTable(
     finalSweepAt: ts('final_sweep_at'),
     /** When the first ClickHouse delete succeeded; the final pass is scheduled from here. */
     firstSweepDoneAt: ts('first_sweep_done_at'),
+    /**
+     * What the job published to `erased_subjects` (#1037 part 2), and when a FINAL read confirmed
+     * it. NULL means not published yet (a restored or retried job publishes again); 0 means the
+     * erasure had no full-coverage ledger row, so there was nothing to publish.
+     */
+    publishedGeneration: bigint('published_generation', { mode: 'number' }),
+    publishedAt: ts('published_at'),
     selectors: bytea('selectors'),
     selectorKey: bytea('selector_key'),
     selectorKek: text('selector_kek'),
