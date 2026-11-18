@@ -1,7 +1,7 @@
 import { canaryAssignment, dispatchOutboxOnce } from '@agentic-marketing/audience';
 import { enqueueMessageEvents } from '@agentic-marketing/email';
 import type { MessageEvent } from '@agentic-marketing/events';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { eventually, startTestServer, testPort, type User } from './harness';
 
@@ -190,6 +190,11 @@ beforeAll(async () => {
   );
 }, 120_000);
 
+afterEach(async () => {
+  await t.srv.db.admin.query('DROP TRIGGER IF EXISTS am_test_hold_outbox ON outbox').catch(() => {});
+  await t.srv.db.admin.query('DROP FUNCTION IF EXISTS am_test_hold_outbox()').catch(() => {});
+});
+
 afterAll(async () => {
   await t?.srv.db.admin.query('DROP TRIGGER IF EXISTS am_test_hold_outbox ON outbox').catch(() => {});
   await t?.srv.db.admin.query('DROP FUNCTION IF EXISTS am_test_hold_outbox()').catch(() => {});
@@ -198,133 +203,169 @@ afterAll(async () => {
 
 describe('the publication barrier sees a mixed-subject provider batch (#1038)', () => {
   it('defers the staged-send canary and the subject-test winner until the batch is published', async () => {
-    const canaryId = await broadcast({
-      template,
-      segment,
-      stagedSend: { canaryPercent: 20, wait: 'PT2H', minCanary: 5, maxUnsubscribeRate: 0.02 },
-    });
-    const testId = await broadcast({
-      template,
-      segment,
-      subjectTest: { subjects: ['Mixed A', 'Mixed B'], samplePercent: 50, decideAfter: 'PT4H' },
-    });
-
-    // Both decisions are waiting on their scheduled time: the canary has gone out, and the
-    // subject test has sent its whole sample.
-    await eventually(
-      () => status(canaryId),
-      (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
-      30_000,
-    );
-    const canary = await canaryMessages(canaryId, 20);
-    await eventually(
-      async () => {
-        const stats = await t.srv.events.messageStats(ws, {
-          since: new Date(Date.now() - 3_600_000),
-          journeyId: canaryId,
-          messageIds: canary.map((m) => m.id),
-        });
-        return stats.sent ?? 0;
-      },
-      (n) => n >= 5,
-      30_000,
-    );
-    const deciding = await eventually(
-      () => status(testId),
-      (s) => s.test?.state === 'deciding' && s.test.variants.reduce((n, v) => n + v.sent, 0) >= 1,
-      30_000,
-    );
-    expect(deciding.test).not.toBeNull();
-    const sample = (await messagesOf(testId)).filter((m) => m.variant !== null);
-    await eventually(
-      () => status(testId),
-      (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sample.length,
-      30_000,
-    );
-    // Every message of the canary and the sample must already be published, so the mixed batch is
-    // the only thing that can defer either decision.
-    await flushOutbox();
-    expect(await unsubjectedRows()).toBe(0);
-
-    const a = sample.filter((m) => m.variant === 'A');
-    const b = sample.filter((m) => m.variant === 'B');
-    const expectedWinner = Math.min(a.length, b.length) >= 20 ? 'B' : 'A';
-    const clicked = expectedWinner === 'B' ? b : a;
-    const at = new Date().toISOString();
-    const event = (message: MessageRow, broadcastId: string, type: MessageEvent['type'], n: number): MessageEvent => ({
-      workspaceId: ws,
-      messageId: message.id,
-      eventId: `mixed:${type}:${message.id}:${n}`,
-      type,
-      at,
-      profileId: message.profile_id,
-      channel: 'email',
-      purpose: 'marketing_email',
-      provider: 'log',
-      templateId: template,
-      templateVersion: 1,
-      journeyId: broadcastId,
-      variant: message.variant ?? '',
-      reason: '',
-      url: type === 'clicked' ? 'https://example.com/' : '',
-    });
+    const s = await prepareDecisions();
 
     // One provider webhook batch: unsubscribes for the canary of one broadcast, clicks on the
     // sample of another.
     await holdPublication();
-    await t.srv.db.withWorkspace(ws, (tx) =>
-      enqueueMessageEvents(tx, ws, [
-        ...canary.slice(0, 2).map((m, i) => event(m, canaryId, 'unsubscribed', i)),
-        ...clicked.map((m, i) => event(m, testId, 'clicked', i)),
-      ]),
-    );
+    await t.srv.db.withWorkspace(ws, (tx) => enqueueMessageEvents(tx, ws, mixedEvents(s)));
     // The batch is one row per broadcast now; before the fix it was a single unsubjected row.
     expect(await unsubjectedRows()).toBe(0);
 
-    await decideNow(canaryId, 'canary');
-    await decideNow(testId, 'subject');
+    await expectDeferred(s);
+    await publishAndExpect(s);
+  }, 180_000);
 
-    // Deferred: the run parks on a future lease with a counted deferral, and neither decision is
-    // taken from the incomplete data.
-    await eventually(
-      async () => {
-        const [canaryRun, testRun] = await Promise.all([runOf(canaryId), runOf(testId)]);
-        return (
-          (canaryRun?.defer_count ?? 0) >= 1 &&
-          (canaryRun?.lease_until?.getTime() ?? 0) > Date.now() &&
-          (testRun?.defer_count ?? 0) >= 1 &&
-          (testRun?.lease_until?.getTime() ?? 0) > Date.now()
-        );
-      },
-      Boolean,
-      30_000,
-    );
-    const held = await status(canaryId);
-    expect(held.stage?.stage).toBe('canary_waiting');
-    expect((await messagesOf(canaryId)).length).toBe(canary.length);
-    expect((await status(testId)).test?.state).toBe('deciding');
-    expect((await status(testId)).test?.winner).toBeNull();
+  it('defers on a legacy mixed row written without subject_ref before the upgrade', async () => {
+    const s = await prepareDecisions();
 
-    // Once the batch is published, the same decisions see the events: the canary stops on its
-    // unsubscribe rate and the subject test picks the clicked variant.
-    await releasePublication();
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
-    await flushOutbox();
+    // Exactly the shape 0.15.2 wrote: one row for the whole provider batch, with no subject_ref.
+    // It stays in the queue through an upgrade, and the barrier must still see it (#1038).
+    await holdPublication();
+    await t.srv.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state)
+       VALUES ($1, 'obx_legacy_mixed_batch', 'message_event', $2::jsonb, 'legacy-mixed-batch', 'pending')`,
+      [ws, JSON.stringify({ events: mixedEvents(s) })],
+    );
+    expect(await unsubjectedRows()).toBe(1);
 
-    await decideNow(canaryId, 'canary');
-    await decideNow(testId, 'subject');
-    const stopped = await eventually(
-      () => status(canaryId),
-      (s) => s.run.status === 'stopped' && s.stage?.stage === 'stopped',
-      30_000,
-    );
-    expect(stopped.stage?.stopReason).toContain('unsubscribe rate');
-    expect(stopped.stage?.unsubscribed).toBeGreaterThanOrEqual(2);
-    const decided = await eventually(
-      () => status(testId),
-      (s) => s.test?.state === 'winner_sent',
-      30_000,
-    );
-    expect(decided.test?.winner).toBe(expectedWinner);
+    await expectDeferred(s);
+    await publishAndExpect(s);
   }, 180_000);
 });
+
+interface Scenario {
+  canaryId: string;
+  testId: string;
+  canary: MessageRow[];
+  clicked: MessageRow[];
+  expectedWinner: string;
+}
+
+/** A staged send waiting on its canary and a subject test waiting on its sample, both with nothing left to publish. */
+async function prepareDecisions(): Promise<Scenario> {
+  const canaryId = await broadcast({
+    template,
+    segment,
+    stagedSend: { canaryPercent: 20, wait: 'PT2H', minCanary: 5, maxUnsubscribeRate: 0.02 },
+  });
+  const testId = await broadcast({
+    template,
+    segment,
+    subjectTest: { subjects: ['Mixed A', 'Mixed B'], samplePercent: 50, decideAfter: 'PT4H' },
+  });
+
+  // Both decisions are waiting on their scheduled time: the canary has gone out, and the subject
+  // test has sent its whole sample.
+  await eventually(
+    () => status(canaryId),
+    (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
+    30_000,
+  );
+  const canary = await canaryMessages(canaryId, 20);
+  await eventually(
+    async () => {
+      const stats = await t.srv.events.messageStats(ws, {
+        since: new Date(Date.now() - 3_600_000),
+        journeyId: canaryId,
+        messageIds: canary.map((m) => m.id),
+      });
+      return stats.sent ?? 0;
+    },
+    (n) => n >= 5,
+    30_000,
+  );
+  const deciding = await eventually(
+    () => status(testId),
+    (s) => s.test?.state === 'deciding' && s.test.variants.reduce((n, v) => n + v.sent, 0) >= 1,
+    30_000,
+  );
+  expect(deciding.test).not.toBeNull();
+  const sample = (await messagesOf(testId)).filter((m) => m.variant !== null);
+  await eventually(
+    () => status(testId),
+    (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sample.length,
+    30_000,
+  );
+  // Every message of the canary and the sample must already be published, so the batch is the only
+  // thing that can defer either decision.
+  await flushOutbox();
+
+  const a = sample.filter((m) => m.variant === 'A');
+  const b = sample.filter((m) => m.variant === 'B');
+  const expectedWinner = Math.min(a.length, b.length) >= 20 ? 'B' : 'A';
+  return { canaryId, testId, canary, clicked: expectedWinner === 'B' ? b : a, expectedWinner };
+}
+
+/** The events of the provider batch: two canary unsubscribes and a click on every sample of the winning arm. */
+function mixedEvents(s: Scenario): MessageEvent[] {
+  const at = new Date().toISOString();
+  const event = (message: MessageRow, broadcastId: string, type: MessageEvent['type'], n: number): MessageEvent => ({
+    workspaceId: ws,
+    messageId: message.id,
+    eventId: `mixed:${type}:${message.id}:${n}`,
+    type,
+    at,
+    profileId: message.profile_id,
+    channel: 'email',
+    purpose: 'marketing_email',
+    provider: 'log',
+    templateId: template,
+    templateVersion: 1,
+    journeyId: broadcastId,
+    variant: message.variant ?? '',
+    reason: '',
+    url: type === 'clicked' ? 'https://example.com/' : '',
+  });
+  return [
+    ...s.canary.slice(0, 2).map((m, i) => event(m, s.canaryId, 'unsubscribed', i)),
+    ...s.clicked.map((m, i) => event(m, s.testId, 'clicked', i)),
+  ];
+}
+
+/** Forces both decisions and checks they were deferred with no verdict taken from incomplete data. */
+async function expectDeferred(s: Scenario) {
+  await decideNow(s.canaryId, 'canary');
+  await decideNow(s.testId, 'subject');
+  await eventually(
+    async () => {
+      const [canaryRun, testRun] = await Promise.all([runOf(s.canaryId), runOf(s.testId)]);
+      return (
+        (canaryRun?.defer_count ?? 0) >= 1 &&
+        (canaryRun?.lease_until?.getTime() ?? 0) > Date.now() &&
+        (testRun?.defer_count ?? 0) >= 1 &&
+        (testRun?.lease_until?.getTime() ?? 0) > Date.now()
+      );
+    },
+    Boolean,
+    30_000,
+  );
+  const held = await status(s.canaryId);
+  expect(held.stage?.stage).toBe('canary_waiting');
+  expect((await messagesOf(s.canaryId)).length).toBe(s.canary.length);
+  expect((await status(s.testId)).test?.state).toBe('deciding');
+  expect((await status(s.testId)).test?.winner).toBeNull();
+}
+
+/** Publishes the batch, then checks both decisions take their verdict from the published events. */
+async function publishAndExpect(s: Scenario) {
+  await releasePublication();
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await flushOutbox();
+
+  await decideNow(s.canaryId, 'canary');
+  await decideNow(s.testId, 'subject');
+  const stopped = await eventually(
+    () => status(s.canaryId),
+    (status) => status.run.status === 'stopped' && status.stage?.stage === 'stopped',
+    30_000,
+  );
+  expect(stopped.stage?.stopReason).toContain('unsubscribe rate');
+  expect(stopped.stage?.unsubscribed).toBeGreaterThanOrEqual(2);
+  const decided = await eventually(
+    () => status(s.testId),
+    (status) => status.test?.state === 'winner_sent',
+    30_000,
+  );
+  expect(decided.test?.winner).toBe(s.expectedWinner);
+}
