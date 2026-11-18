@@ -174,6 +174,21 @@ export interface EventStore {
 }
 
 export const ROW_POLICY = 'am_workspace';
+
+/**
+ * Client-side bound on every ClickHouse request. The erasure cleanup uses it to choose a fixed
+ * interval between its two sweeps; it is not proof that the ClickHouse server stopped executing a
+ * write, and a late write can still land. Read-time exclusion (#1037) is the full contract.
+ */
+export const CLICKHOUSE_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * Person-linked inserts are synchronous. Without this a ClickHouse server with async inserts
+ * enabled could acknowledge a batch before it is committed. A resolved insert here means
+ * ClickHouse responded, though a client timeout still does not prove the server stopped executing.
+ */
+const SYNC_INSERT = { async_insert: 0, wait_for_async_insert: 1 } as const;
+
 const SCOPED_TABLES = ['events', 'message_events', 'journey_events', 'ad_spend'];
 
 /**
@@ -380,6 +395,9 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
   const client = createClient({
     ...clientOptions(opts.url),
     database: opts.database,
+    // Every request is client-bounded. The erasure cleanup schedules its second sweep from this
+    // interval; it does not claim that a timed-out server-side write has ended (#1037).
+    request_timeout: CLICKHOUSE_REQUEST_TIMEOUT_MS,
     // Large identity scopes exceed the server URI limit when encoded as URL parameters.
     use_multipart_params_auto: true,
     clickhouse_settings: { date_time_input_format: 'best_effort', output_format_json_quote_64bit_integers: 0 },
@@ -442,7 +460,8 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
     client,
     settingsFor,
     async insert(events) {
-      if (events.length) await client.insert({ table: 'events', values: events.map(toRow), format: 'JSONEachRow' });
+      if (events.length)
+        await client.insert({ table: 'events', values: events.map(toRow), format: 'JSONEachRow', clickhouse_settings: SYNC_INSERT });
     },
     async eventsOf(workspaceId, ids, o = {}) {
       if (!ids.anonymousIds.length && !ids.userIds.length) return [];
@@ -627,6 +646,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       await client.insert({
         table: 'message_events',
         format: 'JSONEachRow',
+        clickhouse_settings: SYNC_INSERT,
         values: events.map((e) => ({
           workspace_id: e.workspaceId,
           message_id: e.messageId,
@@ -651,6 +671,7 @@ export function clickHouseStore(opts: { url: string; database: string }): EventS
       await client.insert({
         table: 'journey_events',
         format: 'JSONEachRow',
+        clickhouse_settings: SYNC_INSERT,
         values: events.map((e) => ({
           workspace_id: e.workspaceId,
           journey_id: e.journeyId,

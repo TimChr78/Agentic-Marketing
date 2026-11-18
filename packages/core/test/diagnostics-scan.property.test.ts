@@ -208,30 +208,19 @@ describe('the scanner is linear for every special shape (#902 round 4)', () => {
     return performance.now() - started;
   };
 
-  // A shared runner makes small measurements noisy, so the comparison carries an absolute floor:
-  // a linear scan of 1,600 units (a few KiB to a few tens of KiB) takes milliseconds even on a slow
-  // machine, while a quadratic one grows 64-fold for the same 8-fold size step. Measured on the
-  // Unicode-quote shape: 178 ms at 1,600 units on ec532183, against a 36 ms threshold; under 8 ms
-  // here.
+  const UNITS = PREFIXES.flatMap((prefix) =>
+    OPENERS.flatMap((opener) => FILLERS.flatMap((filler) => TERMINATORS.map((terminator) => `${prefix}${opener}${filler}${terminator}`))),
+  );
+  // Every shape repeated together: a quadratic path in any one of them still grows with the whole
+  // text, so a combined input keeps the check real while giving the ratio helper enough work per
+  // measurement. One shape at a time is milliseconds of work and far below its noise floor.
+  const build = (n: number) => UNITS.map((unit) => unit.repeat(n)).join('');
+
+  // 128 units is about 0.5 MB; the helper compares it with 4n (about 2 MB) and judges the ratio,
+  // not an absolute millisecond limit. A noisy shared runner can fail a two-sample min-of-two
+  // measurement (`"token=“\n"` at 200 vs 800 units), which is what this replaced (#902 round 5).
   it('grows roughly fourfold when the input grows fourfold', () => {
-    const slow: string[] = [];
-    for (const prefix of PREFIXES) {
-      for (const opener of OPENERS) {
-        for (const filler of FILLERS) {
-          for (const terminator of TERMINATORS) {
-            const unit = `${prefix}${opener}${filler}${terminator}`;
-            const small = unit.repeat(200);
-            const large = unit.repeat(800);
-            measure(small);
-            const first = Math.min(measure(small), measure(small));
-            const second = Math.min(measure(large), measure(large));
-            if (second > Math.max(first * 10, 20)) slow.push(JSON.stringify(unit));
-          }
-        }
-      }
-    }
-    expect(slow.slice(0, 10)).toEqual([]);
-    expect(slow).toHaveLength(0);
+    expectLinearRatio(build, redactCredentials, 128);
   }, 180_000);
 
   it('finishes every shape at a large size without a per-shape budget', () => {
@@ -279,31 +268,30 @@ describe('the scanner stays linear on very large input (#902 round 5)', () => {
     expect(out).toBe(text);
   }, 120_000);
 
-  it('finishes an adversarial 10 MB text', () => {
-    // Every lookahead the scanner has, at a size where a quadratic path cannot hide: unclosed
-    // quotes and structures, repeated pairs, markers, PEM beginnings, scheme words, long tokens and
-    // one single-line text with no whitespace at all.
-    const text = [
-      repeatTo('token="abc\n', MB),
-      repeatTo('apiSecret=[xyz\n', MB),
-      repeatTo('password={"a":1\n', MB),
-      repeatTo('key=', MB),
-      repeatTo('[redacted] ', MB),
-      repeatTo('-----BEGIN X\n', MB),
-      repeatTo('Bearer ', MB),
-      repeatTo('token=Bearer Bearer ', MB),
-      repeatTo('a+b.c-d', MB),
-      repeatTo('secret=', MB),
-      repeatTo('Zz9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk', MB),
-    ].join('');
-    const started = performance.now();
-    const out = redactCredentials(text);
-    const elapsed = performance.now() - started;
-    expect(out.length).toBeGreaterThan(0);
-    // Same rule as the 10 MB test: a bound that separates a finished super-linear scan from a hung
-    // one, wide enough for a loaded runner.
-    expect(elapsed).toBeLessThan(45_000);
-  }, 120_000);
+  // Every lookahead the scanner has: unclosed quotes and structures, repeated pairs, markers, PEM
+  // beginnings, scheme words, long tokens and one single-line text with no whitespace at all.
+  const ADVERSARIAL_UNITS = [
+    'token="abc\n',
+    'apiSecret=[xyz\n',
+    'password={"a":1\n',
+    'key=',
+    '[redacted] ',
+    '-----BEGIN X\n',
+    'Bearer ',
+    'token=Bearer Bearer ',
+    'a+b.c-d',
+    'secret=',
+    'Zz9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk',
+  ];
+  const adversarial = (bytes: number) => ADVERSARIAL_UNITS.map((unit) => repeatTo(unit, bytes)).join('');
+
+  it('grows linearly on the adversarial text', () => {
+    // Growth only, like the shape test above: 4n must not cost 8n. The release failed this test
+    // twice on a 45 s wall-clock bound (48.3 s on an otherwise healthy runner), which measures the
+    // runner, not a super-linear scan (#902 round 5). Each unit is repeated to 32 KiB, so n is
+    // about 350 KiB and 4n about 1.4 MiB: enough work for the ratio, far below the old 10 MiB.
+    expectLinearRatio(adversarial, redactCredentials, 32 * 1024);
+  }, 180_000);
 });
 
 // A shared CI runner takes ~1.2 s for the slowest linear megabyte; the quadratic shapes this guards

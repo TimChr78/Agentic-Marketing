@@ -875,12 +875,16 @@ export const eraseProfile = defineCommand({
   name: 'profiles.erase',
   title: 'Erase a person (erasure request)',
   description:
-    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again. The person’s rows are gone when this returns `pending`; ClickHouse events and the decision API’s hot state are cleaned up by a durable job, whose progress `profiles.erasureStatus` reports.',
+    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again. The person’s SQL rows and keys are gone when this returns `pending`; a durable job then sweeps ClickHouse events and the decision API’s hot state, and `profiles.erasureStatus` reports it. The sweep is a mitigation, not a general guarantee: a ClickHouse write already in flight, or an eligibility check that ran before the erasure, can still land later; 0.17.0 adds read-time exclusion (#1037).',
   input: z.object({ profileId: ProfileId, reason: z.string().min(1).max(500).describe('E.g. "Erasure request by e-mail on 2026-10-22"') }),
   output: z.object({
     erasureId: z.string(),
     counts: z.object({ profiles: z.number(), identifiers: z.number(), consentRecords: z.number() }),
-    status: z.literal('pending').describe('External cleanup is queued; poll profiles.erasureStatus for complete'),
+    status: z
+      .literal('pending')
+      .describe(
+        'External cleanup is queued; poll profiles.erasureStatus for complete, which means ClickHouse was swept twice (not a general no-later-write guarantee, #1037)',
+      ),
   }),
   permission: 'profiles:erase',
   effect: 'destructive',
@@ -908,19 +912,21 @@ export const erasureStatus = defineCommand({
   name: 'profiles.erasureStatus',
   title: 'Read an erasure’s status',
   description:
-    'Whether an erasure’s external cleanup (ClickHouse events and the decision API’s hot state) has finished. The person’s SQL rows are already gone when profiles.erase returns. Erasures recorded before durable cleanup existed have no job and report complete.',
+    'Whether an erasure’s cleanup has finished. The person’s SQL rows and keys are already gone when profiles.erase returns. `complete` means ClickHouse was swept twice after the erasure, an immediate pass and a final pass after the mitigation interval. It does not prove that a write already in flight at the ClickHouse server, or one whose eligibility check ran before the erasure, can never land later; 0.17.0 makes such rows invisible to every query (#1037). Erasures recorded before durable cleanup existed have no job and report complete.',
   input: z.object({ erasureId: z.string().regex(/^era_[0-9a-f]{32}$/) }),
   output: z.object({
     erasureId: z.string(),
     status: z
       .enum(['pending', 'running', 'complete', 'failed'])
-      .describe('failed means the retry budget ran out; events may still remain in ClickHouse'),
+      .describe(
+        'pending: cleanup is queued or waiting for its final sweep, while the SQL rows and keys are already gone; running: a worker is sweeping; complete: SQL rows and keys deleted and ClickHouse swept twice, but not a general no-later-write guarantee (#1037); failed: the retry budget ran out and rows may remain',
+      ),
     counts: z.record(z.string(), z.number()),
     profiles: z.number().int().describe('Profiles in the erased merged family'),
     attempts: z.number().int(),
     lastError: z.string().nullable(),
     checkpoints: z.object({
-      clickhouse: z.boolean().describe('The ClickHouse event deletion finished'),
+      clickhouse: z.boolean().describe('The most recent ClickHouse sweep finished; complete also requires the final sweep'),
       hotState: z.boolean().describe('The decision API hot-state deletion finished'),
     }),
     requestedAt: z.string(),
