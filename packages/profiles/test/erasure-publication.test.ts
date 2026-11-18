@@ -1,4 +1,5 @@
 import { newUuid } from '@agentic-marketing/core';
+import { erasureAllocationChecker, nextErasureGeneration } from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore, migrateClickHouse, resetClickHouse } from '@agentic-marketing/events';
 import { localKeyProvider } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -222,6 +223,69 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
     const failed = await job(erasureId);
     expect(failed).toMatchObject({ state: 'failed', published_generation: null, published_at: null, clickhouse_done: false });
     expect(failed!.last_error).toMatch(/^clickhouse_error/);
+  }, 60_000);
+
+  it('switches a workspace to the protected path as soon as a generation is allocated', async () => {
+    // The fast path reads base tables for a workspace that never allocated an erasure. Allocation
+    // happens before the ClickHouse insert, so a read issued while publication is in flight must
+    // already take the protected path — the allocation counter is the signal, not the confirmed
+    // epoch and not `published_at`.
+    // A fresh workspace: the other tests in this file already allocated generations here.
+    const workspace = newUuid();
+    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Allocation', 'none')", [workspace]);
+    const checker = erasureAllocationChecker(d.db);
+    const scoped = clickHouseStore({
+      url: CH_URL,
+      database: CH_DB,
+      subjectKeys: subjectKeyHasher({ db: d.db, kp: keyProvider }),
+      hasErasures: checker,
+    });
+    const anonymousId = `alloc-anon-${newUuid()}`;
+    try {
+      const hasher = await subjectKeyHasher({ db: d.db, kp: keyProvider })(workspace);
+      const key = await hasher.hash('anonymous_id', anonymousId);
+      hasher.dispose();
+      await scoped.insert([
+        {
+          workspaceId: workspace,
+          sourceId: 'src_alloc',
+          messageId: newUuid(),
+          type: 'track',
+          name: 'Allocated',
+          anonymousId,
+          userId: '',
+          profileId: '',
+          timestamp: new Date().toISOString(),
+          receivedAt: new Date().toISOString(),
+          properties: {},
+          traits: {},
+          piiTraits: {},
+          context: {},
+          consent: {},
+        },
+      ]);
+      // The exclusion is visible, but no generation has been allocated yet: nothing can be excluded.
+      await scoped.publishErasedSubjects([
+        {
+          workspaceId: workspace,
+          kind: 'anonymous_id',
+          key,
+          keyVersion: 'dk_exclusion_test',
+          erasureId: 'era_alloc',
+          generation: 1,
+          recordedAt: new Date().toISOString(),
+        },
+      ]);
+      expect(await checker(workspace)).toBe(false);
+      expect(await scoped.eventsOf(workspace, { anonymousIds: [anonymousId], userIds: [] })).toHaveLength(1);
+
+      // Allocation only: no FINAL confirmation, no `published_at`, no visible epoch.
+      await nextErasureGeneration(d.db, workspace);
+      expect(await checker(workspace)).toBe(true);
+      expect(await scoped.eventsOf(workspace, { anonymousIds: [anonymousId], userIds: [] })).toEqual([]);
+    } finally {
+      await scoped.close();
+    }
   }, 60_000);
 
   it('keeps the published generation monotonic when two erasures publish', async () => {

@@ -1,6 +1,6 @@
 import { artifactTypes, type CampaignDefinition, holdoutHashVersion } from '@agentic-marketing/artifacts';
 import { schema, type Tx } from '@agentic-marketing/db';
-import type { EventStore } from '@agentic-marketing/events';
+import { type EventStore, personReadSource } from '@agentic-marketing/events';
 import { and, eq, gte, inArray, lte, or } from 'drizzle-orm';
 import { type IdentityMap, identityScopeProfileLimit, loadIdentityMap, overLimitIdentityMap } from './identity';
 
@@ -25,7 +25,7 @@ export interface CampaignIdentityWindow {
 
 type Deps = {
   tx: Tx;
-  events: Pick<EventStore, 'client' | 'settingsFor'>;
+  events: Pick<EventStore, 'client' | 'settingsFor' | 'hasErasures'>;
   workspaceId: string;
 };
 
@@ -40,8 +40,9 @@ async function sentProfileIds(deps: Deps, scope: CampaignIdentityWindow, limit: 
     `type IN ('sent', 'delivered')`,
     `profile_id != ''`,
   ];
+  const protectedRead = (await deps.events.hasErasures?.(deps.workspaceId)) ?? true;
   const result = await deps.events.client.query({
-    query: `SELECT DISTINCT profile_id FROM message_events_protected FINAL
+    query: `SELECT DISTINCT profile_id FROM ${personReadSource('message_events', protectedRead)} FINAL
             WHERE ${conditions.join(' AND ')}
             LIMIT {limit:UInt32}`,
     query_params: {

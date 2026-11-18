@@ -1,4 +1,4 @@
-import { type MessageEvent, messageEventsWithPending, PROTECTED_VIEWS } from '@agentic-marketing/events';
+import { type MessageEvent, messageEventsWithPending, personReadSource } from '@agentic-marketing/events';
 import type { DimensionId, MeasureDef, SourceId, Unit } from './registry';
 import { MEASURES } from './registry';
 
@@ -57,6 +57,8 @@ export interface BuildInput {
    * caught up. Only `message_events` measures accept them.
    */
   pendingMessageEvents?: readonly MessageEvent[];
+  /** Whether this workspace's reads go through the protected views (#1037 part 2). Default: true. */
+  protectedRead?: boolean;
 }
 
 export interface Column {
@@ -91,13 +93,14 @@ export interface CompiledQuery {
   revenue: boolean;
 }
 
-// Person-linked sources read their protected view (#1037 part 2), which applies FINAL's logical
-// row, the workspace row policy and the erased-subject exclusion before any aggregation. The
-// `${table} FINAL` below is therefore `FROM events_protected FINAL`.
+// The two non-person sources. Person-linked sources come from `personReadSource`: the protected
+// view for a workspace that has ever allocated an erasure, the base table otherwise (#1037 part 2).
+// The `${table} FINAL` below is therefore `FROM events_protected(ws={ws:UUID}) FINAL` or
+// `FROM events FINAL`.
 const SOURCE_TABLE: Record<SourceId, string> = {
-  message_events: PROTECTED_VIEWS.message_events,
-  journey_events: PROTECTED_VIEWS.journey_events,
-  events: PROTECTED_VIEWS.events,
+  message_events: 'message_events',
+  journey_events: 'journey_events',
+  events: 'events',
   segment_memberships: 'segment_memberships',
   // Campaign measures need a join between message_events and events; campaign.ts compiles them.
   campaign: '',
@@ -292,7 +295,8 @@ export function buildQuery(input: BuildInput): CompiledQuery {
     to: input.to.replace('Z', ''),
     limit: input.limit,
   };
-  const table = SOURCE_TABLE[source];
+  const protectedRead = input.protectedRead ?? true;
+  const table = source === 'segment_memberships' || source === 'campaign' ? SOURCE_TABLE[source] : personReadSource(source, protectedRead);
   const timeColumn = TIME_COLUMN[source];
   const pending = input.pendingMessageEvents ?? [];
   if (pending.length && source !== 'message_events')
@@ -391,7 +395,7 @@ export function buildQuery(input: BuildInput): CompiledQuery {
 
   // With queued events the FROM is published rows UNION ALL the snapshot; without them it stays the
   // plain table, so every ordinary query compiles exactly as before.
-  const from = pending.length ? messageEventsWithPending(pending, params) : `${table} FINAL`;
+  const from = pending.length ? messageEventsWithPending(pending, params, protectedRead) : `${table} FINAL`;
   const innerSql = `SELECT ${inner.join(', ')} FROM ${from} WHERE ${where.join(' AND ')} ${
     groupBy.length ? `GROUP BY ${groupBy.join(', ')}` : ''
   }`;

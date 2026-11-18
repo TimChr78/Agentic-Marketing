@@ -2,6 +2,7 @@ import { artifactTypes, type CampaignDefinition } from '@agentic-marketing/artif
 import { goalEventsFor, type IdentityMap, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
+import { personReadSource } from '@agentic-marketing/events';
 import { and, eq, inArray } from 'drizzle-orm';
 import {
   type CampaignMap,
@@ -218,6 +219,8 @@ export interface CampaignBuildInput {
   queryMap: CampaignQueryMap;
   /** The shared identity map (#590); omitted in a caller that does not need merge resolution. */
   identity?: IdentityMap;
+  /** Whether this workspace's reads go through the protected views (#1037 part 2). Default: true. */
+  protectedRead?: boolean;
 }
 
 const alias = (prefix: string, id: string) => `${prefix}_${id.replace(/[^A-Za-z0-9_]/g, '_')}`;
@@ -232,6 +235,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
   // the result is not identity-resolved (#590). The caller scopes it to the campaign's recipients,
   // so unrelated merges elsewhere in the workspace cannot push it over the bound.
   const identity = input.identity?.overLimit ? [] : (input.identity?.pairs ?? []);
+  const protectedRead = input.protectedRead ?? true;
   // Each array is split below ClickHouse's per-field limit; the CTE concatenates the parts back.
   const identityParams = identityQueryParams(identity);
   const params: Record<string, unknown> = {
@@ -282,7 +286,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
         arrayElement({campaign_map_ids:Array(String)}, indexOf({campaign_map_members:Array(String)}, m.journey_id)) AS campaign_id,
         coalesce(nullIf(by_profile.profile_id, ''), m.profile_id) AS profile_id,
         m.at AS send_at
-      FROM message_events_protected m FINAL
+      FROM ${personReadSource('message_events', protectedRead)} m FINAL
       LEFT JOIN identity by_profile ON by_profile.identity_key = m.profile_id AND by_profile.kind = 'profile'
       WHERE m.workspace_id = {ws:UUID}
         AND m.at >= {from:DateTime64(3, 'UTC')} AND m.at <= {to:DateTime64(3, 'UTC')}
@@ -325,7 +329,7 @@ export function buildCampaignQuery(input: CampaignBuildInput): CompiledQuery {
         nullIf(by_profile.profile_id, ''),
         e.profile_id
       ) AS profile_id
-    FROM events_protected e FINAL
+    FROM ${personReadSource('events', protectedRead)} e FINAL
     LEFT JOIN identity by_user ON by_user.identity_key = e.user_id AND by_user.kind = 'user_id'
     LEFT JOIN identity by_anonymous ON by_anonymous.identity_key = e.anonymous_id AND by_anonymous.kind = 'anonymous_id'
     LEFT JOIN identity by_profile ON by_profile.identity_key = e.profile_id AND by_profile.kind = 'profile'

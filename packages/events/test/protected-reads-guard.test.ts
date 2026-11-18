@@ -2,6 +2,7 @@ import type { Dirent } from 'node:fs';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { PROTECTED_VIEWS, personReadSource, PERSON_TABLES as TABLES } from '../src/protected';
 
 // #1037 part 2: read-time exclusion is only a contract if every reader goes through the protected
 // views. A new query that names `events`, `message_events` or `journey_events` directly would
@@ -10,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');
 const SOURCE_ROOTS = ['packages', 'apps/server/src'];
-const PERSON_TABLES = ['events', 'message_events', 'journey_events'];
+const PERSON_TABLES = ['events', 'message_events', 'journey_events'] as const;
 
 /** A read of a person table in SQL. Keywords are upper case by convention, which keeps prose such
  * as "From Events Manager" and "an agent from events" out of the scan. */
@@ -43,6 +44,8 @@ async function personTableReads(): Promise<{ file: string; line: number; text: s
     for (const path of await sourceFiles(join(ROOT, root))) {
       const lines = (await readFile(path, 'utf8')).split('\n');
       for (const [index, line] of lines.entries()) {
+        // A comment may quote the SQL it explains; only real statements are scanned.
+        if (/^\s*(?:\/\/|\*|\/\*)/.test(line)) continue;
         READ.lastIndex = 0;
         for (const match of line.matchAll(READ)) {
           // `DELETE FROM events` is the erasure sweep and the load-test reset, not a read. Any
@@ -79,15 +82,21 @@ describe('protected reads (#1037 part 2)', () => {
     const migration = source.replace(/^\s*--.*$/gm, '');
     for (const table of PERSON_TABLES) {
       expect(migration).toContain(`CREATE VIEW IF NOT EXISTS ${table}_protected AS`);
+      // The views are parameterized on the workspace, and the shared layer always supplies it.
+      expect(personReadSource(table, true)).toBe(`${PROTECTED_VIEWS[table]}(ws={ws:UUID})`);
+      expect(personReadSource(table, false)).toBe(table);
     }
-    // The exclusion state is the whole point of a view: one anti-join per subject kind, each on
-    // (workspace, key) with the kind pushed into the right side.
-    expect(migration.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length * 16);
-    expect(migration.match(/LEFT ANTI JOIN \(/g)).toHaveLength(PERSON_TABLES.length * 16);
-    // The ledger is never materialised per row: that shape exhausted memory with 100k exclusions.
-    expect(migration).not.toMatch(/groupUniqArray|arrayExists\(/);
-    // Every anti-join names its kind, so the read uses the table's ordering prefix.
-    expect(migration.match(/WHERE kind = '/g)).toHaveLength(PERSON_TABLES.length * 16);
+    expect(TABLES).toEqual(PERSON_TABLES);
+    // The exclusion state is the whole point of a view: one set subquery per view, keyed by the
+    // caller's workspace parameter, and one array test over the row's subject keys.
+    expect(migration.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length);
+    expect(migration.match(/NOT arrayExists\(/g)).toHaveLength(PERSON_TABLES.length);
+    // Both the ledger subquery and the backfill side read name the workspace, so each scan uses
+    // its table's ordering prefix.
+    expect(migration.match(/workspace_id = \{ws:UUID\}/g)).toHaveLength(PERSON_TABLES.length * 2);
+    // Neither of the two shapes that failed a review: no per-row ledger array, no per-kind joins.
+    expect(migration).not.toContain('groupUniqArray');
+    expect(migration).not.toContain('LEFT ANTI JOIN');
     // FINAL belongs inside the view (it returns one logical row per replacing key). A caller that
     // added it again would merge the view's output, and one that relied on it would silently miss
     // both the dedupe and the exclusion.

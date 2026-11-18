@@ -417,9 +417,8 @@ describe('protected reads exclude erased subjects (#1037 part 2)', () => {
           { t: table },
         ),
         rows<{ name: string; type: string }>(
-          `SELECT name, type FROM system.columns WHERE database = currentDatabase() AND table = {t:String} ORDER BY position`,
-          ws,
-          { t: PROTECTED_VIEWS[table] },
+          // A parameterized view has no stored column list; DESCRIBE of an invocation does.
+          `DESCRIBE (SELECT * FROM ${PROTECTED_VIEWS[table]}(ws='${ws}'))`,
         ),
       ]);
       expect(viewColumns.map((column) => `${column.name}:${column.type}`)).toEqual(
@@ -428,11 +427,11 @@ describe('protected reads exclude erased subjects (#1037 part 2)', () => {
     }
   }, 30_000);
 
-  it('plans one workspace-keyed ledger read per kind, fed by the base rows', async () => {
+  it('plans one workspace-keyed exclusion set, fed by the base rows', async () => {
     const settings = await store.settingsFor(ws);
     const rs = await store.client.query({
       // A shape the application actually sends: one workspace, one event name, a time window.
-      query: `EXPLAIN SELECT count() FROM events_protected FINAL
+      query: `EXPLAIN SELECT count() FROM events_protected(ws={ws:UUID}) FINAL
               WHERE workspace_id = {ws:UUID} AND name = {name:String}
                 AND timestamp >= {from:DateTime64(3, 'UTC')}`,
       query_params: { ws, name: 'Purchase', from: '2026-10-01 00:00:00' },
@@ -440,13 +439,13 @@ describe('protected reads exclude erased subjects (#1037 part 2)', () => {
       clickhouse_settings: settings,
     });
     const plan = (await rs.json<Record<string, string>>()).map((row) => Object.values(row).join('')).join('\n');
-    // Each kind's keys are read through the table's ordering prefix: `kind` and the workspace,
-    // never another workspace's exclusions and never the whole ledger as a per-row array.
-    expect(plan).toContain("kind = 'profile'");
-    expect(plan).toContain("kind = 'anonymous_id'");
+    // The ledger is read once, as a set, keyed by this workspace through the table's ordering
+    // prefix; no per-row array and no per-kind joins.
+    expect(plan).toMatch(/Capture\[Set\]|CreatingSets/);
     expect(plan).toContain(`workspace_id = '${ws}'`);
     expect(plan).toContain('FINAL: 1');
     expect(plan).not.toContain('groupUniqArray');
+    expect(plan).not.toContain('LEFT ANTI JOIN');
     // The side table is read for one table and workspace, and joined on the full identity. On a
     // populated install the plan also builds runtime filters from the base rows; the seeded
     // benchmark pins that, because a one-row side table is too small for the planner to bother.

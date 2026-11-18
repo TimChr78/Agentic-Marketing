@@ -19,7 +19,7 @@ import {
 } from '@agentic-marketing/auth';
 import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid, RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
-import { createDb, normalizeHost, normalizePathPrefix } from '@agentic-marketing/db';
+import { createDb, erasureAllocationChecker, normalizeHost, normalizePathPrefix } from '@agentic-marketing/db';
 import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
@@ -127,6 +127,9 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         url: config.clickhouse.url,
         database: config.clickhouse.database,
         subjectKeys: subjectKeyHasher({ db, kp: keyProvider }),
+        // The shared read layer's fast path (#1037 part 2): a workspace that never allocated an
+        // erasure reads the base tables instead of paying the protected view's ledger scan.
+        hasErasures: erasureAllocationChecker(db),
       }),
       db,
     ),

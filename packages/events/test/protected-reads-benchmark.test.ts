@@ -2,12 +2,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runScoped } from '../../db/test/run';
 import { clickHouseStore, type EventStore, migrateClickHouse, resetClickHouse } from '../src';
 
-// #1037 part 2 memory regression. A workspace's exclusion ledger is permanent, so a read shape that
-// materialises it once per row eventually fails for ordinary queries: with 100,000 exclusion hashes
-// a filtered count over a workspace exhausted a 10 GiB allocation (2026-11-18 review). The
-// protected views now anti-join one kind at a time on (workspace, key), which reads the ledger
-// through its ordering prefix and never builds a per-row array. This test pins that: 1.2M events
-// over 12 workspaces, a 100,000-row ledger in one of them, and a 1 GiB per-query limit.
+// #1037 part 2 memory and fast-path regression. A workspace's exclusion ledger is permanent, so a
+// read shape that materialises it once per row eventually fails for ordinary queries: with 100,000
+// exclusion hashes a filtered count over a workspace exhausted a 10 GiB allocation. The protected
+// views build the workspace's ledger as one set per query and test the row's subject keys against
+// it; the shared read layer skips the view entirely for a workspace that never allocated an
+// erasure. This test pins both: 1.2M events over 12 workspaces, a 100,000-row ledger in one, and a
+// 1 GiB per-query limit.
 
 const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 const CH_DB = runScoped('am_test_protected_bench');
@@ -51,7 +52,12 @@ const countOf = (source: string) => `SELECT count() AS n FROM ${source} WHERE wo
 beforeAll(async () => {
   await resetClickHouse(CH_URL, CH_DB);
   await migrateClickHouse(CH_URL, CH_DB);
-  store = clickHouseStore({ url: CH_URL, database: CH_DB });
+  store = clickHouseStore({
+    url: CH_URL,
+    database: CH_DB,
+    // The benchmark drives both sources explicitly; the store's read methods use the protected one.
+    hasErasures: async () => true,
+  });
   // One workspace per 100k consecutive rows. Every row is `coverage = 'full'` with its own profile
   // hash, and every row also has a side-table entry: the worst case for the identity join.
   await store.client.command({
@@ -108,7 +114,7 @@ describe('protected reads have a bounded memory shape (#1037 part 2)', () => {
     expect(ledger.count).toBe(100_000);
 
     const base = await counted(countOf('events FINAL'), ERASED_WORKSPACE);
-    const protectedResult = await counted(countOf('events_protected FINAL'), ERASED_WORKSPACE);
+    const protectedResult = await counted(countOf('events_protected(ws={ws:UUID}) FINAL'), ERASED_WORKSPACE);
     // The reference: the same rows minus the erased profile hashes, computed without the view.
     const reference = await counted(
       `SELECT count() AS n FROM events FINAL
@@ -141,7 +147,7 @@ describe('protected reads have a bounded memory shape (#1037 part 2)', () => {
 
   it('stays proportional for a workspace with an empty ledger', async () => {
     const base = await counted(countOf('events FINAL'), CLEAN_WORKSPACE);
-    const protectedResult = await counted(countOf('events_protected FINAL'), CLEAN_WORKSPACE);
+    const protectedResult = await counted(countOf('events_protected(ws={ws:UUID}) FINAL'), CLEAN_WORKSPACE);
     expect(protectedResult.count).toBe(base.count);
     expect(protectedResult.memory).toBeLessThan(MEMORY_LIMIT / 2);
     console.log(
@@ -156,23 +162,24 @@ describe('protected reads have a bounded memory shape (#1037 part 2)', () => {
     );
   }, 120_000);
 
-  it('plans every ledger read with its kind and workspace, and the side scan from the base rows', async () => {
+  it('plans one workspace-keyed exclusion set and a base-driven side scan', async () => {
     const settings = await store.settingsFor(ERASED_WORKSPACE);
     const result = await store.client.query({
-      query: `EXPLAIN SELECT count() FROM events_protected FINAL WHERE workspace_id = {ws:UUID} AND ${WINDOW}`,
+      query: `EXPLAIN SELECT count() FROM events_protected(ws={ws:UUID}) FINAL WHERE workspace_id = {ws:UUID} AND ${WINDOW}`,
       query_params: { ws: ERASED_WORKSPACE },
       format: 'JSONEachRow',
       clickhouse_settings: settings,
     });
     const plan = (await result.json<Record<string, string>>()).map((row) => Object.values(row).join('')).join('\n');
-    // Each kind's keys are read with the table's ordering prefix, not the whole ledger.
-    expect(plan).toMatch(new RegExp(`kind = 'profile' AND workspace_id = '${ERASED_WORKSPACE}'`));
-    expect(plan).toContain("kind = 'anonymous_id'");
+    // One set, built from this workspace's ledger rows through the table's ordering prefix.
+    expect(plan).toMatch(/Capture\[Set\]|CreatingSets/);
+    expect(plan).toContain(`workspace_id = '${ERASED_WORKSPACE}'`);
     // The backfill identity join is fed by runtime filters built from the base rows, so a narrow
     // query does not read the workspace's whole side table.
     expect(plan).toContain('BuildRuntimeFilter');
     expect(plan).toMatch(/table_name = 'events'[\s\S]{0,400}?RF\d+\(/);
-    // No per-row ledger materialisation anywhere in the plan.
+    // No per-row ledger materialisation and no per-kind join in the plan.
     expect(plan).not.toContain('groupUniqArray');
+    expect(plan).not.toContain('LEFT ANTI JOIN');
   }, 120_000);
 });

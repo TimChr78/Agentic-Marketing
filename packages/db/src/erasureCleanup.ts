@@ -453,6 +453,27 @@ export async function erasureVisibilityEpoch(tx: Tx, workspaceId: string): Promi
 }
 
 /**
+ * A workspace's erasure-allocation check for the shared read layer (#1037 part 2). `true` means the
+ * workspace has allocated at least one publication generation, so reads must use the protected
+ * views — including while that publication is still in flight. Only positives are cached: an
+ * erasure is permanent, so `true` can never become false, and a `false` is always answered from
+ * the database. That is what stops a read from keeping the base-table fast path after an erasure
+ * has been recorded.
+ */
+export function erasureAllocationChecker(db: Pick<Db, 'admin'>): (workspaceId: string) => Promise<boolean> {
+  const allocated = new Set<string>();
+  return async (workspaceId: string) => {
+    if (allocated.has(workspaceId)) return true;
+    const { rows } = await db.admin.query('SELECT 1 AS allocated FROM erasure_generations WHERE workspace_id = $1 AND generation > 0', [
+      workspaceId,
+    ]);
+    if (!rows.length) return false;
+    allocated.add(workspaceId);
+    return true;
+  };
+}
+
+/**
  * Records that one publication is confirmed visible, moving the cache epoch. Called once per
  * successful publication, after the FINAL read, so concurrent publishers each move it exactly once
  * and a read can never observe a new epoch before the rows behind it are visible.

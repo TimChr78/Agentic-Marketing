@@ -3,6 +3,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import type {} from '@agentic-marketing/commands';
 import { type ClickHouseClient, createClient } from '@clickhouse/client';
 import { messageEventsWithPending } from './pending';
+import { personReadSource } from './protected';
 import type { BusEvent } from './schema';
 import {
   type ErasedSubjectRow,
@@ -126,6 +127,14 @@ export interface EventStore {
   publishErasedSubjects(rows: ErasedSubjectRow[]): Promise<void>;
   /** The workspace's published exclusion hashes, as one FINAL read (never the raw identifiers). */
   erasedSubjectKeys(workspaceId: string): Promise<Set<string>>;
+  /**
+   * Whether a read of this workspace must use the protected views (#1037 part 2). False only when
+   * the workspace has never allocated an erasure generation, so nothing has ever been excluded.
+   * Never cached as a stale "no": the allocation counter is read per request (or a positive-only
+   * cache is used), so a read after an allocation always takes the protected path, even before its
+   * publication is confirmed.
+   */
+  hasErasures(workspaceId: string): Promise<boolean>;
   /**
    * Confirms a publication is visible: every key in `keys` must be present in a FINAL read. Used
    * by the erasure cleanup before it records the published generation (#1037 part 2).
@@ -486,7 +495,7 @@ export async function migrateClickHouse(
  * ClickHouse so only one row per person crosses the wire. Exported so the plan guard in the tests
  * follows the real query rather than a copy.
  */
-export function messageEventCountQuery(workspaceId: string, q: MessageEventCountQuery) {
+export function messageEventCountQuery(workspaceId: string, q: MessageEventCountQuery, protectedRead = true) {
   const params: Record<string, unknown> = { ws: workspaceId, msgType: q.type };
   if (q.sinceSeconds !== undefined) params.since = q.sinceSeconds;
   if (q.channel !== undefined) params.channel = q.channel;
@@ -494,7 +503,7 @@ export function messageEventCountQuery(workspaceId: string, q: MessageEventCount
   if (q.sentBy !== undefined) params.sentBy = q.sentBy;
   if (q.profileIds) params.profiles = q.profileIds;
   return {
-    query: `SELECT profile_id, count() AS c FROM message_events_protected FINAL
+    query: `SELECT profile_id, count() AS c FROM ${personReadSource('message_events', protectedRead)} FINAL
             WHERE workspace_id = {ws:UUID} AND type = {msgType:String} AND profile_id != ''
             ${q.sinceSeconds !== undefined ? 'AND at >= now64(3) - toIntervalSecond({since:UInt32})' : ''}
             ${q.channel !== undefined ? 'AND channel = {channel:String}' : ''}
@@ -588,7 +597,16 @@ async function uncoveredRows(
   return Number(row?.n ?? 0);
 }
 
-export function clickHouseStore(opts: { url: string; database: string; subjectKeys?: SubjectKeyHasherFactory }): EventStore {
+export function clickHouseStore(opts: {
+  url: string;
+  database: string;
+  subjectKeys?: SubjectKeyHasherFactory;
+  /**
+   * The workspace erasure-allocation check the fast path uses. Without one every read is protected:
+   * fail closed rather than guess that a workspace has nothing to exclude.
+   */
+  hasErasures?: (workspaceId: string) => Promise<boolean>;
+}): EventStore {
   const client = createClient({
     ...clientOptions(opts.url),
     database: opts.database,
@@ -625,6 +643,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       ids?: { anonymousIds: string[]; userIds: string[] };
       excludeEventIds?: string[];
     },
+    protectedRead: boolean,
   ) => {
     const params: Record<string, unknown> = { ws: workspaceId, name: q.name, exclude: q.excludeEventIds ?? [] };
     const where = Object.entries(q.where ?? {}).map(([k, v], i) => {
@@ -636,7 +655,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     if (q.sinceSeconds) params.since = q.sinceSeconds;
     if (q.ids) Object.assign(params, { anon: q.ids.anonymousIds, users: q.ids.userIds });
     return {
-      query: `SELECT anonymous_id, user_id, count() AS c FROM events_protected FINAL
+      query: `SELECT anonymous_id, user_id, count() AS c FROM ${personReadSource('events', protectedRead)} FINAL
               WHERE workspace_id = {ws:UUID} AND name = {name:String}
               ${q.sinceSeconds ? 'AND timestamp >= now64(3) - toIntervalSecond({since:UInt32})' : ''}
               ${q.ids ? 'AND (anonymous_id IN {anon:Array(String)} OR user_id IN {users:Array(String)})' : ''}
@@ -653,6 +672,8 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     count: Number(r.c),
   });
   const messageCountRow = (r: { profile_id: string; c: number | string }) => ({ profileId: r.profile_id, count: Number(r.c) });
+  /** This request's protected-read decision; `false` only for a workspace with no allocation. */
+  const protectedReadFor = async (workspaceId: string): Promise<boolean> => (opts.hasErasures ? opts.hasErasures(workspaceId) : true);
   /** The workspace's published exclusion hashes. FINAL so a republished exclusion counts once. */
   const readErasedSubjectKeys = async (workspaceId: string): Promise<Set<string>> => {
     const rs = await query(workspaceId, {
@@ -693,6 +714,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
   return {
     client,
     settingsFor,
+    hasErasures: protectedReadFor,
     async insert(events) {
       if (!events.length) return;
       // Hashes are computed before the insert, while the event's PII traits and click ids are
@@ -730,9 +752,10 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
           : o.beforeId
             ? "AND (timestamp, name, anonymous_id, event_id) < ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String}, {beforeId:String})"
             : "AND (timestamp, name, anonymous_id) <= ({before:DateTime64(3, 'UTC')}, {beforeName:String}, {beforeAnonymousId:String})";
+      const protectedRead = await protectedReadFor(workspaceId);
       const rs = await query(workspaceId, {
         query: `SELECT event_id, source_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
-                FROM events_protected FINAL
+                FROM ${personReadSource('events', protectedRead)} FINAL
                 WHERE ${idFilter} ${after}
                 ORDER BY timestamp DESC, name DESC, anonymous_id DESC, event_id DESC LIMIT {limit:UInt32}`,
         query_params: {
@@ -761,9 +784,10 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     },
     async eventsOfAnonymousIds(workspaceId, anonymousIds, perId) {
       if (!anonymousIds.length) return [];
+      const protectedRead = await protectedReadFor(workspaceId);
       const rs = await query(workspaceId, {
         query: `SELECT event_id, source_id, type, name, timestamp, received_at, anonymous_id, user_id, properties, context
-                FROM events_protected FINAL
+                FROM ${personReadSource('events', protectedRead)} FINAL
                 WHERE workspace_id = {ws:UUID} AND anonymous_id IN {anon:Array(String)}
                 ORDER BY timestamp DESC, event_id DESC
                 LIMIT {perId:UInt32} BY anonymous_id`,
@@ -796,11 +820,11 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       await command(workspaceId, { query: `DELETE FROM events WHERE ${idFilter}`, query_params: params(workspaceId, ids) });
     },
     async countEvents(workspaceId, q) {
-      const rs = await query(workspaceId, countQuery(workspaceId, q));
+      const rs = await query(workspaceId, countQuery(workspaceId, q, await protectedReadFor(workspaceId)));
       return (await rs.json<{ anonymous_id: string; user_id: string; c: number }>()).map(countRow);
     },
     async *countEventsBatches(workspaceId, q, batchSize = 10_000) {
-      const rs = await query(workspaceId, countQuery(workspaceId, q));
+      const rs = await query(workspaceId, countQuery(workspaceId, q, await protectedReadFor(workspaceId)));
       let batch: { anonymousId: string; userId: string; count: number }[] = [];
       for await (const rows of rs.stream<{ anonymous_id: string; user_id: string; c: number }>()) {
         for (const row of rows) {
@@ -816,11 +840,11 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     async countMessageEvents(workspaceId, q) {
       // An empty scope means nobody: do not fall through to a workspace-wide read.
       if (q.profileIds && !q.profileIds.length) return [];
-      const rs = await query(workspaceId, messageEventCountQuery(workspaceId, q));
+      const rs = await query(workspaceId, messageEventCountQuery(workspaceId, q, await protectedReadFor(workspaceId)));
       return (await rs.json<{ profile_id: string; c: number | string }>()).map(messageCountRow);
     },
     async *countMessageEventsBatches(workspaceId, q, batchSize = 10_000) {
-      const rs = await query(workspaceId, messageEventCountQuery(workspaceId, q));
+      const rs = await query(workspaceId, messageEventCountQuery(workspaceId, q, await protectedReadFor(workspaceId)));
       let batch: { profileId: string; count: number }[] = [];
       for await (const rows of rs.stream<{ profile_id: string; c: number | string }>()) {
         for (const row of rows) {
@@ -834,18 +858,19 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       if (batch.length) yield batch;
     },
     async experimentCounts(workspaceId, q) {
+      const protectedRead = await protectedReadFor(workspaceId);
       const rs = await query(workspaceId, {
         query: `WITH
             exposures AS (
               SELECT anonymous_id AS visitor, argMin(toString(properties.variant_id), timestamp) AS variant, min(timestamp) AS first
-              FROM events_protected FINAL
+              FROM ${personReadSource('events', protectedRead)} FINAL
               WHERE workspace_id = {ws:UUID} AND name = 'Experience Viewed' AND toString(properties.experience_id) = {exp:String}
                 AND toString(properties.version) = {version:String}
                 AND anonymous_id != '' AND timestamp >= {since:DateTime64(3, 'UTC')}
               GROUP BY anonymous_id),
             goals AS (
               SELECT anonymous_id AS visitor, max(timestamp) AS last
-              FROM events_protected FINAL
+              FROM ${personReadSource('events', protectedRead)} FINAL
               WHERE workspace_id = {ws:UUID} AND name = {goal:String} AND anonymous_id != '' AND timestamp >= {since:DateTime64(3, 'UTC')}
               GROUP BY anonymous_id)
           SELECT e.variant AS variant, count() AS exposed, countIf(g.visitor != '' AND g.last >= e.first) AS converted
@@ -871,7 +896,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       // so results can say how many were excluded instead of leaving them unexplained (#758).
       const unversionedRs = await query(workspaceId, {
         query: `SELECT count() AS n FROM (
-                  SELECT anonymous_id FROM events_protected FINAL
+                  SELECT anonymous_id FROM ${personReadSource('events', protectedRead)} FINAL
                   WHERE workspace_id = {ws:UUID} AND name = 'Experience Viewed'
                     AND toString(properties.experience_id) = {exp:String}
                     AND coalesce(toString(properties.version), '') = ''
@@ -1079,6 +1104,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       // The snapshot half of the union has not reached ClickHouse, so the protected view cannot
       // exclude it; check its profiles against the published ledger here (#1037 part 2).
       const pending = q.pendingEvents?.length ? await withoutErased(workspaceId, q.pendingEvents) : [];
+      const protectedRead = await protectedReadFor(workspaceId);
       const params: Record<string, unknown> = {
         ws: workspaceId,
         since: q.since.toISOString().replace('Z', ''),
@@ -1089,7 +1115,9 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       };
       const rs = await query(workspaceId, {
         query: `SELECT type, uniqExact(message_id) AS c FROM ${
-          pending.length ? messageEventsWithPending(pending, params) : 'message_events_protected FINAL'
+          pending.length
+            ? messageEventsWithPending(pending, params, protectedRead)
+            : `${personReadSource('message_events', protectedRead)} FINAL`
         }
                 WHERE workspace_id = {ws:UUID} AND at >= {since:DateTime64(3, 'UTC')}
                 ${q.until ? "AND at < {until:DateTime64(3, 'UTC')}" : ''}
@@ -1102,8 +1130,9 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       return Object.fromEntries((await rs.json<{ type: string; c: number }>()).map((r) => [r.type, Number(r.c)]));
     },
     async journeyCounts(workspaceId, journeyId) {
+      const protectedRead = await protectedReadFor(workspaceId);
       const rs = await query(workspaceId, {
-        query: `SELECT node, type, uniqExact(participant_id) AS c FROM journey_events_protected FINAL
+        query: `SELECT node, type, uniqExact(participant_id) AS c FROM ${personReadSource('journey_events', protectedRead)} FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} GROUP BY node, type`,
         query_params: { ws: workspaceId, j: journeyId },
         format: 'JSONEachRow',
@@ -1116,9 +1145,10 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       // One deterministic take per participant: the first split step by (at, seq, detail). A
       // participant that loops back through the same split keeps that first arm, so its outcomes
       // cannot be counted twice or attributed to two arms (#369).
+      const protectedRead = await protectedReadFor(workspaceId);
       const rows = await query(workspaceId, {
         query: `SELECT participant_id, profile_id, variant, at FROM (
-                  SELECT participant_id, profile_id, detail AS variant, at FROM journey_events_protected FINAL
+                  SELECT participant_id, profile_id, detail AS variant, at FROM ${personReadSource('journey_events', protectedRead)} FINAL
                   WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
                     AND startsWith(detail, 'variant ')
                   ORDER BY at ASC, seq ASC, detail ASC LIMIT 1 BY participant_id
@@ -1140,8 +1170,9 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     async journeyHoldoutOutcomes(workspaceId, q) {
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');
+      const protectedRead = await protectedReadFor(workspaceId);
       const converted = await query(workspaceId, {
-        query: `SELECT DISTINCT profile_id, participant_id, at FROM journey_events_protected FINAL
+        query: `SELECT DISTINCT profile_id, participant_id, at FROM ${personReadSource('journey_events', protectedRead)} FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'converted'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
                 ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
@@ -1149,7 +1180,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
         format: 'JSONEachRow',
       });
       const unsubscribed = await query(workspaceId, {
-        query: `SELECT DISTINCT profile_id, at FROM message_events_protected FINAL
+        query: `SELECT DISTINCT profile_id, at FROM ${personReadSource('message_events', protectedRead)} FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'unsubscribed' AND channel = 'email'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
                 ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
@@ -1215,10 +1246,11 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       const scope = scopes.length ? `AND (${scopes.join(' OR ')})` : '';
       const pageSize = Math.max(1, Math.trunc(q.pageSize ?? 10_000));
       const events: ConversionEvent[] = [];
+      const protectedRead = await protectedReadFor(workspaceId);
       let after: { timestamp: string; name: string; anonymousId: string; eventId: string } | undefined;
       for (;;) {
         const rs = await query(workspaceId, {
-          query: `SELECT event_id, profile_id, anonymous_id, user_id, name, timestamp, properties FROM events_protected FINAL
+          query: `SELECT event_id, profile_id, anonymous_id, user_id, name, timestamp, properties FROM ${personReadSource('events', protectedRead)} FINAL
                   WHERE workspace_id = {ws:UUID} AND name IN {names:Array(String)}
                     AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}
                     ${scope}
@@ -1267,6 +1299,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
     },
     async unsubscribedProfiles(workspaceId, q) {
       if (!q.journeyIds.length) return [];
+      const protectedRead = await protectedReadFor(workspaceId);
       if (q.profileIds !== undefined && !q.profileIds.length) return [];
       // Scope by the people being counted when the caller has them (the holdout report's page),
       // so a page reads only its own unsubscribes. Chunk the array like conversionEvents: one
@@ -1297,7 +1330,7 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');
       const rs = await query(workspaceId, {
-        query: `SELECT DISTINCT profile_id FROM message_events_protected FINAL
+        query: `SELECT DISTINCT profile_id FROM ${personReadSource('message_events', protectedRead)} FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id IN {ids:Array(String)}
                   AND type = 'unsubscribed' AND channel = 'email'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
@@ -1315,8 +1348,9 @@ export function clickHouseStore(opts: { url: string; database: string; subjectKe
       return (await rs.json<{ profile_id: string }>()).map((r) => r.profile_id);
     },
     async messageEventsOf(workspaceId, filter, limit = 200) {
+      const protectedRead = await protectedReadFor(workspaceId);
       const rs = await query(workspaceId, {
-        query: `SELECT * FROM message_events_protected FINAL WHERE workspace_id = {ws:UUID}
+        query: `SELECT * FROM ${personReadSource('message_events', protectedRead)} FINAL WHERE workspace_id = {ws:UUID}
                 ${filter.messageIds ? 'AND message_id IN {ids:Array(String)}' : ''}
                 ${filter.profileId ? 'AND profile_id = {profile:String}' : ''}
                 ORDER BY at DESC LIMIT {limit:UInt32}`,

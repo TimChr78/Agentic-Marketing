@@ -2,7 +2,7 @@ import { type ConversionMap, publishedSingleton } from '@agentic-marketing/artif
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, providerDiagnostic, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
+import { type ConversionEvent, type EventStore, personReadSource } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, EgressError, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -18,10 +18,10 @@ import { incompleteSpendFor, incompleteSpendNote, type SpendKey } from './spendS
  * Mutable only so tests can lower them.
  */
 /** Campaign touches of a chunk's visitors in its window, with the campaign and source they carry. */
-const TOUCHES_SQL = `SELECT anonymous_id, timestamp, event_id,
+const touchesSql = (protectedRead: boolean) => `SELECT anonymous_id, timestamp, event_id,
          coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_campaign')), ''), toString(context.campaign.name)) AS touch_campaign,
          coalesce(nullIf(decodeURLFormComponent(extractURLParameter(toString(context.page.url), 'utm_source')), ''), toString(context.campaign.source)) AS touch_source
-  FROM events_protected FINAL
+  FROM ${personReadSource('events', protectedRead)} FINAL
   WHERE workspace_id = {ws:UUID} AND anonymous_id IN {visitors:Array(String)}
     AND timestamp >= {from:DateTime64(3, 'UTC')} AND timestamp <= {to:DateTime64(3, 'UTC')}`;
 
@@ -519,6 +519,9 @@ export const adPerformance = defineCommand({
     const incompleteSpend = incompleteSpendFor(gaps, { since, until, ...(input.platform ? { platform: input.platform } : {}) }, accounts);
     const spendTruncated = incompleteSpend.length > 0;
     const ch = ctx.services.events.client;
+    // The shared read-layer decision (#1037 part 2): only a workspace that has ever allocated an
+    // erasure pays for the protected view's ledger scan.
+    const protectedRead = (await ctx.services.events.hasErasures?.(ws)) ?? true;
     const clickhouse_settings = await ctx.services.events.settingsFor(ws);
     const spend = await (
       await ch.query({
@@ -645,7 +648,7 @@ export const adPerformance = defineCommand({
           (
             await ch.query({
               query: `SELECT anonymous_id, count() AS n
-                    FROM (${TOUCHES_SQL})
+                    FROM (${touchesSql(protectedRead)})
                     WHERE touch_campaign != ''
                     GROUP BY anonymous_id`,
               query_params: {
@@ -682,7 +685,7 @@ export const adPerformance = defineCommand({
                            argMax(t.touch_source, (t.timestamp, t.event_id)) AS source
                     FROM (
                       SELECT anonymous_id, timestamp, event_id, touch_campaign, touch_source
-                      FROM (${TOUCHES_SQL})
+                      FROM (${touchesSql(protectedRead)})
                       WHERE touch_campaign != ''
                     ) AS t
                     INNER JOIN (

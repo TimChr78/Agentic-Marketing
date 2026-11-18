@@ -82,7 +82,7 @@ describe('message events with a pending snapshot (#1008)', () => {
   });
 
   it('keeps the plain table when nothing is queued', () => {
-    expect(messageEventsWithPending([], { ws })).toBe('message_events_protected FINAL');
+    expect(messageEventsWithPending([], { ws })).toBe('message_events_protected(ws={ws:UUID}) FINAL');
   });
 
   it('leaves everything outside the snapshot out of the count', async () => {
