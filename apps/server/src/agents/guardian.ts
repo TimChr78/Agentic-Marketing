@@ -1,7 +1,7 @@
 import { type NotifyDeps, sendMemberEmails } from '@agentic-marketing/alerts';
 import { activeMandate } from '@agentic-marketing/artifacts';
 import { lockAgentPolicy, type Services } from '@agentic-marketing/commands';
-import { newId } from '@agentic-marketing/core';
+import { newId, sleep } from '@agentic-marketing/core';
 import { type AgentGuardState, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, desc, eq, sql } from 'drizzle-orm';
@@ -357,17 +357,6 @@ export async function runGuardian(deps: GuardianDeps, signal: AbortSignal, opts:
   logger.info('scheduler role: agent guardian');
   while (!signal.aborted) {
     await runGuardianOnce(deps).catch((err) => logger.error({ err }, 'guardian round failed'));
-    if (signal.aborted) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

@@ -1,3 +1,4 @@
+import { sleep } from '@agentic-marketing/core';
 import {
   ackOutbox,
   claimOutboxBatch,
@@ -175,6 +176,6 @@ export async function runOutboxDispatcher(
       lastPrune = Date.now();
       await pruneOutbox(deps.db, retentionDays).catch((err) => logger.warn({ err }, 'outbox prune failed'));
     }
-    if (!claimed) await new Promise((r) => setTimeout(r, idleMs));
+    if (!claimed) await sleep(idleMs, signal);
   }
 }

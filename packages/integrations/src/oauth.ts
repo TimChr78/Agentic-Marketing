@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, providerDiagnostic, safeErrorText, sha256 } from '@agentic-marketing/core';
+import { AppError, providerDiagnostic, safeErrorText, sha256, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -39,7 +39,14 @@ const stateHash = (state: string) => sha256(`oauth-state:${state}`);
 /** The HTTP seam; tests pass a deterministic delayed/failing exchange instead of a real provider. */
 export type OAuthRequest = (
   url: string,
-  init: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number; maxBytes?: number },
+  init: {
+    method?: string;
+    headers?: Record<string, string>;
+    body?: string | Buffer;
+    timeoutMs?: number;
+    maxBytes?: number;
+    signal?: AbortSignal;
+  },
   egress: EgressPolicy,
 ) => Promise<SafeResponse>;
 
@@ -92,13 +99,20 @@ function oauthFailureText(err: unknown): string {
 }
 
 /** Calls the token endpoint (authorization code or refresh token) and returns what to store. */
-async function tokenRequest(tokenUrl: string, params: Record<string, string>, egress: EgressPolicy, request: OAuthRequest = safeRequest) {
+async function tokenRequest(
+  tokenUrl: string,
+  params: Record<string, string>,
+  egress: EgressPolicy,
+  request: OAuthRequest = safeRequest,
+  signal?: AbortSignal,
+) {
   const res = await request(
     tokenUrl,
     {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: new URLSearchParams(params).toString(),
+      ...(signal ? { signal } : {}),
     },
     egress,
   );
@@ -378,7 +392,13 @@ function stillOwnsRefresh(claim: RefreshClaim, row: Row, secrets: Record<string,
  * two replicas never redeem the same rotating refresh token and a stale `invalid_grant` cannot
  * overwrite a newer valid authorization (#376).
  */
-export async function refreshConnection(db: Db, ws: string, id: string, deps: OAuthDeps, opts: { force?: boolean } = {}) {
+export async function refreshConnection(
+  db: Db,
+  ws: string,
+  id: string,
+  deps: OAuthDeps,
+  opts: { force?: boolean; signal?: AbortSignal } = {},
+) {
   const claim = await claimRefresh(deps, ws, id, opts.force);
   if (!claim) return;
   const refreshToken = (claim.secrets.__oauth as Partial<OAuthTokens> | undefined)?.refreshToken;
@@ -412,6 +432,7 @@ export async function refreshConnection(db: Db, ws: string, id: string, deps: OA
       },
       deps.egress,
       deps.http,
+      opts.signal,
     );
     await db.withWorkspace(ws, async (tx) => {
       const [row] = await tx.select().from(schema.connections).where(eq(schema.connections.id, id)).for('update');
@@ -462,21 +483,15 @@ export async function runTokenRefresher(deps: OAuthDeps, signal: AbortSignal, ti
         `SELECT workspace_id, id FROM connections WHERE oauth_status = 'connected' AND enabled AND token_expires_at < $1 LIMIT 100`,
         [new Date(Date.now() + REFRESH_MARGIN_MS)],
       );
-      for (const r of rows) await refreshConnection(deps.db, r.workspace_id, r.id, deps);
+      for (const r of rows) {
+        // Between connections only: a token exchange already in flight stops through its signal.
+        if (signal.aborted) return;
+        await refreshConnection(deps.db, r.workspace_id, r.id, deps, { signal });
+      }
     } catch (err) {
       logger.error({ err }, 'token refresh round failed');
     }
-    await new Promise<void>((r) => {
-      const timer = setTimeout(r, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          r();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }
 

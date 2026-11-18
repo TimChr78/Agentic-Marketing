@@ -1,5 +1,5 @@
 import { type DecisionQuestion, decisionQuestions, type PromptDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
-import { safeErrorText } from '@agentic-marketing/core';
+import { safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
@@ -886,6 +886,6 @@ export async function runAiWorker(db: Db, deps: AiStepDeps, signal: AbortSignal)
     } catch (err) {
       logger.error({ err }, 'AI worker round failed');
     }
-    if (!handled) await new Promise((r) => setTimeout(r, 250));
+    if (!handled) await sleep(250, signal);
   }
 }

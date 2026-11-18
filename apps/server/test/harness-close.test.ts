@@ -61,16 +61,32 @@ describe('a bounded test-server close (#1028)', () => {
   });
 
   it('reports a step it never reached once the budget is spent', async () => {
-    // Whichever millisecond the budget runs out in, the later step is reported, not waited for.
-    await expect(
-      closeBounded(
-        [
-          { name: 'workers', close: hang },
-          { name: 'postgres', close: () => {} },
-        ],
-        { budgetMs: 50, stageMs: 60 },
-      ),
-    ).rejects.toThrow(/postgres \((no close after \d+ms|did not start: the budget was spent)\)/);
+    // The step blocks until the test releases it, and the clock it spends is the test's: the later
+    // step is always reported as not started, never raced against a millisecond (#1041).
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let now = 0;
+    let ran = false;
+    const closing = closeBounded(
+      [
+        { name: 'workers', close: () => blocked },
+        {
+          name: 'postgres',
+          close: () => {
+            ran = true;
+          },
+        },
+      ],
+      { budgetMs: 1_000, now: () => now },
+    );
+    // A whole budget passes while the first step is still blocked; releasing it then leaves no
+    // time for the next one.
+    now = 5_000;
+    release();
+    await expect(closing).rejects.toThrow(/still open: postgres \(did not start: the budget was spent\)/);
+    expect(ran).toBe(false);
   });
 
   it('reports every step as not started when it has no budget at all', async () => {

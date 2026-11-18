@@ -1,6 +1,6 @@
 import { DEFAULT_PURPOSES, type EmailTemplate, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type CampaignUtmCache, campaignUtmCampaign } from '@agentic-marketing/campaigns';
-import { AppError, hashValue, newId, newUuid } from '@agentic-marketing/core';
+import { AppError, hashValue, newId, newUuid, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import {
@@ -525,6 +525,6 @@ export async function runDeliveryWorker(db: Db, deps: { kp: KeyProvider; events:
     } catch (err) {
       logger.error({ err }, 'delivery round failed');
     }
-    if (!handled) await new Promise((r) => setTimeout(r, 500));
+    if (!handled) await sleep(500, signal);
   }
 }

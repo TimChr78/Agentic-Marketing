@@ -1,5 +1,5 @@
 import { type AnalyticsResult, runAnalyticsQuery } from '@agentic-marketing/analytics';
-import { newId } from '@agentic-marketing/core';
+import { newId, sleep } from '@agentic-marketing/core';
 import {
   type AlertChannel,
   type AlertNotification,
@@ -497,16 +497,6 @@ export async function runAlertEvaluator(deps: AlertDeps, signal: AbortSignal, op
     }
     if (signal.aborted) break;
     // Abort-aware: a scheduler role stopping must not wait out a five-minute (or test) tick.
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

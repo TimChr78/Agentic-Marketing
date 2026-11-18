@@ -1,6 +1,6 @@
 import { type AudienceSync, DEFAULT_PURPOSES, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
 import { defineCommand, type Impact } from '@agentic-marketing/commands';
-import { AppError, safeErrorText } from '@agentic-marketing/core';
+import { AppError, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { accessTokenOf, connectionSecrets, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
 import { consentStatusSql, profileForMessage } from '@agentic-marketing/profiles';
@@ -214,7 +214,13 @@ const errorOf = (status: number, body: string) => {
 
 type Call = (op: 'add' | 'remove', members: Hashes[]) => Promise<{ ok: true } | { ok: false; error: string }>;
 
-function metaCall(row: ConnectionRow, secrets: Record<string, unknown>, ref: DestinationRef, egress: EgressPolicy): Call {
+function metaCall(
+  row: ConnectionRow,
+  secrets: Record<string, unknown>,
+  ref: DestinationRef,
+  egress: EgressPolicy,
+  signal?: AbortSignal,
+): Call {
   const settings = metaAdsConnector.settings.parse(row.settings);
   const { accessToken } = metaAdsConnector.secrets.parse(secrets);
   return async (op, members) => {
@@ -232,6 +238,7 @@ function metaCall(row: ConnectionRow, secrets: Record<string, unknown>, ref: Des
           },
           access_token: accessToken,
         }),
+        ...(signal ? { signal } : {}),
       },
       egress,
     );
@@ -251,7 +258,13 @@ export function metaAudienceError(status: number, body: string): string {
   return /flag/i.test(body) ? `${error} (the audience is flagged by Meta: review it in Ads Manager)` : error;
 }
 
-function googleCall(row: ConnectionRow, secrets: Record<string, unknown>, ref: DestinationRef, egress: EgressPolicy): Call {
+function googleCall(
+  row: ConnectionRow,
+  secrets: Record<string, unknown>,
+  ref: DestinationRef,
+  egress: EgressPolicy,
+  signal?: AbortSignal,
+): Call {
   const settings = googleAdsConnector.settings.parse(row.settings);
   const token = row.oauthStatus === 'connected' ? accessTokenOf(secrets) : undefined;
   const account = (id: string) => ({ accountId: id, accountType: 'GOOGLE_ADS' });
@@ -282,6 +295,7 @@ function googleCall(row: ConnectionRow, secrets: Record<string, unknown>, ref: D
           // Customer Match needs its terms accepted; the workspace owner did so by setting up this sync.
           ...(op === 'add' ? { termsOfService: { customerMatchTermsOfServiceStatus: 'ACCEPTED' } } : {}),
         }),
+        ...(signal ? { signal } : {}),
       },
       egress,
     );
@@ -295,9 +309,12 @@ function callFor(
   secrets: Record<string, unknown>,
   ref: DestinationRef,
   egress: EgressPolicy,
+  signal?: AbortSignal,
 ): { call: Call } | { error: string } {
   try {
-    return { call: platform === 'meta' ? metaCall(conn, secrets, ref, egress) : googleCall(conn, secrets, ref, egress) };
+    return {
+      call: platform === 'meta' ? metaCall(conn, secrets, ref, egress, signal) : googleCall(conn, secrets, ref, egress, signal),
+    };
   } catch (err) {
     return { error: `connection is unusable: ${audienceErrorText(err)}` };
   }
@@ -319,6 +336,11 @@ export interface SyncResult {
 export interface AudienceSyncDeps {
   kp: KeyProvider;
   egress: EgressPolicy;
+  /**
+   * The scheduler's shutdown signal: an upload already in flight is destroyed instead of holding a
+   * `SIGTERM` for a whole provider round trip (#1028).
+   */
+  signal?: AbortSignal;
   /** The connection/secrets resolved for the destination being written; set by the caller. */
   connection?: ConnectionRow;
   secrets?: Record<string, unknown>;
@@ -760,7 +782,7 @@ async function writePlans(
     outcome.errors.push('no usable connection was resolved for this destination');
     return outcome;
   }
-  const call = callFor(platform, deps.connection, deps.secrets ?? {}, ref, deps.egress);
+  const call = callFor(platform, deps.connection, deps.secrets ?? {}, ref, deps.egress, deps.signal);
   if ('error' in call) {
     outcome.retryableError = true;
     outcome.errors.push(call.error);
@@ -1966,22 +1988,36 @@ export async function selectAudienceSyncRound(db: Db, limit = MAX_SYNCS_PER_ROUN
   return rows;
 }
 
-export async function runAudienceSyncRound(deps: {
-  db: Db;
-  kp: KeyProvider;
-  egress: EgressPolicy;
-}): Promise<{ syncs: number; failures: number }> {
+export async function runAudienceSyncRound(
+  deps: {
+    db: Db;
+    kp: KeyProvider;
+    egress: EgressPolicy;
+  },
+  signal?: AbortSignal,
+): Promise<{ syncs: number; failures: number }> {
   let rows = await selectAudienceSyncRound(deps.db);
   if (!rows.length) rows = await selectAudienceSyncRound(deps.db);
   let failures = 0;
   for (const row of rows) {
+    // Between items only: the sync in flight stops through the signal its egress calls carry.
+    if (signal?.aborted) break;
     try {
       const meta = await definitionFor(deps.db, row.workspace_id, row.sync_id);
-      await syncAudience(deps.db, row.workspace_id, row.sync_id, meta.def, deps, {
-        cleanupOnly: !meta.published,
-        removeAll: !meta.exists,
-      });
+      await syncAudience(
+        deps.db,
+        row.workspace_id,
+        row.sync_id,
+        meta.def,
+        { ...deps, signal },
+        {
+          cleanupOnly: !meta.published,
+          removeAll: !meta.exists,
+        },
+      );
     } catch (err) {
+      // A stop is not a failed sync: the member ledger keeps the work for the next round.
+      if (signal?.aborted) break;
       failures++;
       logger.error({ workspace: row.workspace_id, sync: row.sync_id, err }, 'audience sync round entry failed');
     }
@@ -1993,21 +2029,11 @@ export async function runAudienceSyncRound(deps: {
 export async function runAudienceSyncs(deps: { db: Db; kp: KeyProvider; egress: EgressPolicy }, signal: AbortSignal, tickMs = 900_000) {
   while (!signal.aborted) {
     try {
-      await runAudienceSyncRound(deps);
+      await runAudienceSyncRound(deps, signal);
     } catch (err) {
       logger.error({ err }, 'audience sync round failed');
     }
-    await new Promise<void>((r) => {
-      const timer = setTimeout(r, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          r();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }
 

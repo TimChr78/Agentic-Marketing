@@ -1,6 +1,6 @@
 import { artifactTypes, canonicalPeople, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
-import { newId, safeErrorText } from '@agentic-marketing/core';
+import { newId, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { fingerprintParts, requestEmail, requestPush, requestSms, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
@@ -849,6 +849,6 @@ export async function runSweeper(db: Db, deps: JourneyDeps, signal: AbortSignal)
     } catch (err) {
       logger.error({ err }, 'journey sweep failed');
     }
-    if (!moved) await new Promise((r) => setTimeout(r, 250));
+    if (!moved) await sleep(250, signal);
   }
 }

@@ -1,5 +1,4 @@
-import { setTimeout as delay } from 'node:timers/promises';
-import { newId, safeErrorText } from '@agentic-marketing/core';
+import { newId, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type WarehouseDataset } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
@@ -257,8 +256,6 @@ export async function runWarehouseExports(deps: WarehouseDeps & { tickMs?: numbe
     } catch (err) {
       logger.error({ err }, 'warehouse export round failed');
     }
-    await delay(deps.tickMs ?? 30_000, undefined, { signal }).catch((err: unknown) => {
-      if (!signal.aborted) throw err;
-    });
+    await sleep(deps.tickMs ?? 30_000, signal);
   }
 }

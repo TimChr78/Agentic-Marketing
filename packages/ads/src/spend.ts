@@ -1,6 +1,6 @@
 import { type ConversionMap, publishedSingleton } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, providerDiagnostic } from '@agentic-marketing/core';
+import { AppError, providerDiagnostic, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { ConversionEvent, EventStore } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, EgressError, type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
@@ -111,6 +111,7 @@ export async function metaSpend(
   until: string,
   egress: EgressPolicy,
   onPage?: SpendPageSink,
+  signal?: AbortSignal,
 ): Promise<SpendRead> {
   const s = metaAdsConnector.settings.parse(conn.settings);
   if (!s.adAccountId) throw new AppError('invalid_input', 'Set adAccountId on the Meta connection to import spend.');
@@ -137,7 +138,7 @@ export async function metaSpend(
       truncated = true;
       break;
     }
-    const res = await safeRequest(url, { method: 'GET', headers: { accept: 'application/json' } }, egress);
+    const res = await safeRequest(url, { method: 'GET', headers: { accept: 'application/json' }, ...(signal ? { signal } : {}) }, egress);
     // A provider refusal is expected and its documented code is the caller's diagnostic; the body
     // itself is not (#885): it can echo the access token in this URL back.
     if (res.status !== 200) throw providerFailure('Meta Insights', res);
@@ -184,6 +185,7 @@ export async function googleSpend(
   until: string,
   egress: EgressPolicy,
   onPage?: SpendPageSink,
+  signal?: AbortSignal,
 ): Promise<SpendRead> {
   const s = googleAdsConnector.settings.parse(conn.settings);
   const k = googleAdsConnector.secrets.parse(secrets);
@@ -215,6 +217,7 @@ export async function googleSpend(
           ...(s.loginCustomerId ? { 'login-customer-id': s.loginCustomerId } : {}),
         },
         body: JSON.stringify({ query, ...(pageToken ? { pageToken } : {}) }),
+        ...(signal ? { signal } : {}),
       },
       egress,
     );
@@ -344,7 +347,7 @@ export async function importSpend(
   ws: string,
   connectionId: string,
   days: number,
-  deps: { kp: KeyProvider; egress: EgressPolicy },
+  deps: { kp: KeyProvider; egress: EgressPolicy; signal?: AbortSignal },
 ) {
   const { conn, secrets } = await db.withWorkspace(ws, async (tx) => {
     const [c] = await tx.select().from(schema.connections).where(eq(schema.connections.id, connectionId));
@@ -357,8 +360,8 @@ export async function importSpend(
   const since = day(new Date(Date.now() - (days - 1) * 86_400_000));
   const { rows, truncated } = await storeSpendPages({ db, events, ws, platform, since, until }, (sink) =>
     platform === 'meta'
-      ? metaSpend(conn, secrets, since, until, deps.egress, sink)
-      : googleSpend(conn, secrets, since, until, deps.egress, sink),
+      ? metaSpend(conn, secrets, since, until, deps.egress, sink, deps.signal)
+      : googleSpend(conn, secrets, since, until, deps.egress, sink, deps.signal),
   );
   return { rows, since, until, truncated };
 }
@@ -375,24 +378,18 @@ export async function runSpendImport(
         `SELECT workspace_id, id FROM connections WHERE enabled AND (
            (connector = 'meta_ads' AND settings ? 'adAccountId') OR (connector = 'google_ads' AND oauth_status = 'connected'))`,
       );
-      for (const r of rows)
-        await importSpend(deps.db, deps.events, r.workspace_id, r.id, 3, deps).catch((err) =>
-          logger.warn({ err, connection: r.id }, 'spend import failed'),
-        );
+      for (const r of rows) {
+        // Between connections only: a read in flight stops through the signal it carries.
+        if (signal.aborted) return;
+        await importSpend(deps.db, deps.events, r.workspace_id, r.id, 3, { ...deps, signal }).catch((err) => {
+          // A stop is not a failed import: the stored window is what a later round replaces.
+          if (!signal.aborted) logger.warn({ err, connection: r.id }, 'spend import failed');
+        });
+      }
     } catch (err) {
       logger.error({ err }, 'spend import round failed');
     }
-    await new Promise<void>((r) => {
-      const timer = setTimeout(r, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          r();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }
 

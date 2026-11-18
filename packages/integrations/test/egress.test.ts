@@ -260,6 +260,33 @@ describe('SSRF guard gaps (#817)', () => {
 describe('response bounds', () => {
   const local = { allowedHosts: ['127.0.0.1'] };
 
+  it('stops a request the caller aborts, without waiting for the deadline (#1028)', async () => {
+    const srv = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      // Headers, never the end: only the abort can settle this request inside the test's bound.
+    });
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+    const port = (srv.address() as AddressInfo).port;
+    const stop = new AbortController();
+    const started = Date.now();
+    try {
+      const request = safeRequest(`http://127.0.0.1:${port}/`, { signal: stop.signal, timeoutMs: 30_000 }, local);
+      setTimeout(() => stop.abort(), 50);
+      await expect(request).rejects.toThrow(/the request was aborted/);
+      expect(Date.now() - started).toBeLessThan(4_000);
+    } finally {
+      srv.close();
+    }
+  });
+
+  it('rejects at once when the signal was already aborted', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const started = Date.now();
+    await expect(safeRequest('http://127.0.0.1:1/', { signal: stop.signal }, local)).rejects.toThrow(/the request was aborted/);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it('rejects an oversized HTTP/1 response as soon as the byte limit is crossed', async () => {
     const srv = createServer((_req, res) => {
       res.writeHead(200, { 'content-type': 'text/plain' });

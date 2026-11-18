@@ -1,7 +1,6 @@
-import { setTimeout as delay } from 'node:timers/promises';
 import { artifactTypes, DEFAULT_PURPOSES, publishedSingleton, publishListeners } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, safeErrorText, sha256 } from '@agentic-marketing/core';
+import { AppError, safeErrorText, sha256, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { HotState, ProfileSnapshot } from '@agentic-marketing/hotstate';
 import { type EgressPolicy, egressFetch } from '@agentic-marketing/integrations';
@@ -823,12 +822,13 @@ export async function runEdgeSync(deps: EdgeDeps & { tickMs?: number }, signal: 
           WHERE t.enabled OR t.cleanup_mode IS NOT NULL OR t.prior_target IS NOT NULL
              OR EXISTS (SELECT 1 FROM edge_outbox o WHERE o.workspace_id = t.workspace_id)`,
       );
-      for (const r of rows) await syncEdge(deps, r.workspace_id);
+      for (const r of rows) {
+        if (signal.aborted) break;
+        await syncEdge(deps, r.workspace_id);
+      }
     } catch (err) {
       logger.error({ err }, 'edge sync round failed');
     }
-    await delay(deps.tickMs ?? 1000, undefined, { signal }).catch((err: unknown) => {
-      if (!signal.aborted) throw err;
-    });
+    await sleep(deps.tickMs ?? 1000, signal);
   }
 }

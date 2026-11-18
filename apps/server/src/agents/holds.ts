@@ -10,6 +10,7 @@ import {
   REACH_CLASSES,
   type Services,
 } from '@agentic-marketing/commands';
+import { sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
 import { eq } from 'drizzle-orm';
@@ -107,17 +108,6 @@ async function checkHeld(
 export async function runHolds(deps: { db: Db; services: Services }, signal: AbortSignal, tickMs = 30_000) {
   while (!signal.aborted) {
     await runHoldsOnce(deps).catch((err) => logger.error({ err }, 'held agent changes round failed'));
-    if (signal.aborted) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

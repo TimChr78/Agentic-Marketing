@@ -1,4 +1,4 @@
-import { safeErrorText } from '@agentic-marketing/core';
+import { safeErrorText, sleep } from '@agentic-marketing/core';
 import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
@@ -27,6 +27,8 @@ export interface ContentFetchOptions {
 export interface ContentFetchDeps extends ContentFetchOptions {
   db: Db;
   egress: EgressPolicy;
+  /** The scheduler's shutdown signal: an in-flight feed request stops instead of being waited out. */
+  signal?: AbortSignal;
 }
 
 /** What fetching one source needs: the egress policy and the bounds, without the pool. */
@@ -55,8 +57,6 @@ export interface ContentFetchSummary {
 const DEFAULT_USER_AGENT = 'agentic-marketing-content/1 (+https://github.com/TimChr78/Agentic-Marketing)';
 const MAX_ERROR_LENGTH = 500;
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 function failureMessage(err: unknown): string {
   // Redact while the message is complete, then cut (#885): a response that echoes a token must not
   // leave a fragment of it in `content_sources.last_error` or in the caller's summary.
@@ -78,7 +78,13 @@ async function requestFeed(url: string, headers: Record<string, string>, options
     try {
       const res = await safeRequest(
         url,
-        { method: 'GET', headers, timeoutMs: options.timeoutMs, maxBytes: options.maxBytes },
+        {
+          method: 'GET',
+          headers,
+          timeoutMs: options.timeoutMs,
+          maxBytes: options.maxBytes,
+          ...(options.signal ? { signal: options.signal } : {}),
+        },
         options.egress,
       );
       if ((res.status === 429 || res.status >= 500) && attempt < delays.length) {
@@ -217,12 +223,15 @@ export async function runContentFetchOnce(deps: ContentFetchDeps, now: Date = ne
   };
   const throttle = hostLimiter(deps.hostGapMs ?? 1000);
   for (const { workspace_id: workspaceId } of rows) {
+    // Between workspaces only: the feed request in flight stops through the signal it carries.
+    if (deps.signal?.aborted) break;
     summary.workspaces++;
     try {
       await deps.db.withWorkspace(workspaceId, async (tx) => {
         const sources = await tx.select().from(schema.contentSources).where(eq(schema.contentSources.enabled, true));
         const due = sources.filter((source) => isSourceDue(source, now)).slice(0, deps.maxSourcesPerRun ?? 20);
         for (const source of due) {
+          if (deps.signal?.aborted) break;
           const result = await fetchSource(tx, source, deps, now, throttle);
           summary.sources++;
           if (result.status === 'ok') summary.ok++;
@@ -245,21 +254,10 @@ export async function runContentFetches(deps: ContentFetchDeps, signal: AbortSig
   logger.info('scheduler role: content sources');
   while (!signal.aborted) {
     try {
-      await runContentFetchOnce(deps);
+      await runContentFetchOnce({ ...deps, signal });
     } catch (err) {
       logger.error({ err }, 'content fetch round failed');
     }
-    if (signal.aborted) break;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }

@@ -1,3 +1,4 @@
+import { sleep } from '@agentic-marketing/core';
 import type pg from 'pg';
 
 // Idempotency-key retention (#976). A key stays replayable for 30 days; after that the request
@@ -129,16 +130,6 @@ export async function runIdempotencyKeyCleanup(
       opts.onError?.(err);
     }
     if (signal.aborted) return;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, tickMs);
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true },
-      );
-    });
+    await sleep(tickMs, signal);
   }
 }
