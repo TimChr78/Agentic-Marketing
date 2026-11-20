@@ -2,6 +2,56 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.17.1] - 2026-11-20
+
+### Changed
+
+- The segment builder's message-engagement Purpose dropdown shows a saved but unresolved purpose as “Unavailable purpose”, with the key behind the usual copy control instead of in the label.
+- The message row and the estimate panel now say that engagement counted live and the stored membership can differ until the next scheduled refresh, so “estimated size” is not mistaken for what a send will reach.
+- Documentation: the workspace lock protocol has a section in the data-platform architecture page; the journey funnel note contract lists every note a client can receive; CONTRIBUTING.md names PostgreSQL 18 (16 still supported); the README status section links the current status page.
+
+### Fixed
+
+- A redelivered event can no longer satisfy a later wait or goal that listens for the same event
+  name. An event that wakes a waiting participant now gets the same processed marker as one that
+  enrols somebody, so it is applied exactly once.
+- A delivery worker no longer drops the rest of a claimed batch when one message hits an unexpected error. A message that failed before any provider call goes back to the queue with its normal backoff and attempt budget; once the provider may have been reached, only that message is marked failed with an "unknown outcome" reason, so nothing is retried into a possible duplicate.
+- The REST `idempotency-key` header and the MCP `idempotencyKey` argument now describe the `idempotency_key_reversed` 409, and the architecture overview says that a key is remembered for 30 days (`RETENTION_IDEMPOTENCY_DAYS`) instead of for the life of the workspace.
+- The pilot guide, the smoke-test guide, the implement skill, `.env.example` and the `am smoke --cleanup` message no longer say that retention removes unconfirmed signups. Removing them has been paused since 0.15.0; retention counts them and keeps them, so erase a smoke signup as a person in the admin UI.
+- `ai.classify` keeps only a redacted copy of the text it classified: `ai.calls` and `ai.reviews`
+  no longer show the sender's e-mail address or phone number, though the model still sees the text
+  it was asked to classify.
+- Server shutdown now stops accepting connections and waits, bounded, for requests that are already being served before it closes the workers, pools and clients. An idle keep-alive connection is dropped at once, and a request still running at the bound is force-closed, so deploys and `docker compose stop` no longer cut off a form submission, an API write or an agent turn mid-request.
+- An erasure whose exclusion publication ran out of retries is re-opened on a periodic scheduler
+  pass instead of only at start, so ClickHouse soon stops returning the person.
+- `am doctor` now says that the person's queued events and reads still include them until the
+  exclusion publishes, and `/metrics` reports `am_erasures_unpublished`.
+- A double opt-in confirmation link clicked after an erasure now records nothing and shows the
+  expired page, instead of recreating the erased person and recording a consent grant.
+- Adding people to or removing people from a static or snapshot audience now locks each person's profile row and follows them to their surviving profile under that lock, so a merge that commits while the call is in flight can no longer leave a membership row on a merged-away id that no send, estimate or membership read ever sees. The command no longer holds a workspace-wide lock, so other writes in the workspace are not held up.
+- The audience's Segment Entered and Segment Exited events now go through the transactional outbox as the new `segment_change` kind, published after the change commits. When the bus is down they wait in the outbox: `am doctor` reports them under `queue.outbox`, and `am outbox --kind segment_change` requeues them.
+- `journeys.holdoutResult` now resolves a person's merge family the same way the campaign report
+  does: one person counts once with their earliest assignment, and a conversion or unsubscribe
+  recorded under an id that was merged away still counts for the survivor.
+- Message delivery now resolves a person through the same merge walk as holdouts and reports (256 hops, cycle-safe) instead of stopping after 20 merges. Someone merged more than 20 times deep receives their mail instead of being recorded as having no profile, so a broadcast's treatment and holdout groups count people who could actually be contacted.
+- Segment time windows are capped at 10 years when a segment is saved, so a look-back ClickHouse cannot bind can no longer be published and fail on every evaluation. Message engagement now counts distinct messages rather than engagement events, so two opens of one issue (a mailbox that pre-fetches the pixel) or two clicks on one link count once. A new message window longer than the 25 months of message history that is kept is refused at save, and the builder says that a rule without a window reads those 25 months.
+- Republishing a segment version that already holds a window longer than 25 months is refused as well, with the fix in the message; the version keeps working until then.
+- A segment saved with a window beyond the new 10-year cap stays readable: its stored members are still listed, and previewing it answers a clean “re-save it” error instead of a 500.
+- One segment that cannot be evaluated no longer stops the refresh of the workspace's other segments, or the refresh of other workspaces, and an already saved definition that no longer parses is skipped and logged instead of taking the round down. An unsubscribe that has committed stays a success even when the segment re-evaluation fails.
+- The journey report no longer hides the sequential funnel for a journey republished as v2 or
+  later. The gate now asks for a published version whose steps map to the topology, which is what
+  the server's version-pinned counts provide, instead of demanding version 1.
+
+### Upgrading from 0.17.0
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** Segment conditions are validated more strictly when a segment is saved or published. A time window longer than 10 years is refused, and so is a message-engagement window longer than the 758 days of message history that is kept. Republishing a segment that already holds such a window is refused until the window is shortened; until then the published version keeps working. A message-engagement `count` now counts distinct messages, not engagement events, so a segment like "opened at least 2 times" can lose members who opened one message twice.
+- **Manual steps:** Helm installs with separate scheduler and API pods only: during the rollout, a scheduler pod still on 0.17.0 marks audience Segment Entered/Exited outbox rows (the new `segment_change` kind) as permanently failed. If `am doctor` then reports failed rows under `queue.outbox`, run `am outbox --kind segment_change --permanent` once to requeue them. A single Compose container is not affected.
+- **Upgrade:** download `agentic-marketing-compose-0.17.1.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.17.1 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.17.1` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.17.1). Run `docker compose exec app am doctor`.
+
+<!-- issues: 1052, 1054, 1055, 1056, 1057, 1059, 1060, 1062, 1067, 1068, 1070, 1071, 1072, 1073, 1076, 1077, 1078, 1082, 1083, 1084, 1085, 1086 -->
+
 ## [0.17.0] - 2026-11-20
 
 ### Changed
