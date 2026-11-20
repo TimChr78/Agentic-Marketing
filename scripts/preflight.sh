@@ -36,7 +36,7 @@ MIN_FREE_GB=${AM_TEST_MIN_FREE_GB:-10}
 PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.65.0-noble
 IMAGES=(
   postgres:18-alpine
-  clickhouse/clickhouse-server:26.8
+  clickhouse/clickhouse-server:26.8.41.14@sha256:4fcc05a5642c52250ab57a184bc0523a00ba5dcd4e8b43a918e7477b844f1048
   valkey/valkey:8.1.9
   nats:2.15.0-alpine
   openbao/openbao:2.6.4

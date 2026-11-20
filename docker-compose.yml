@@ -72,7 +72,7 @@ services:
       retries: 10
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.8@sha256:d426d2f612e1e189c90f9a3f8dcd85a03c6851273833817a296bb327e63aa7a7
+    image: clickhouse/clickhouse-server:26.8.41.14@sha256:4fcc05a5642c52250ab57a184bc0523a00ba5dcd4e8b43a918e7477b844f1048
     restart: unless-stopped
     environment:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1  # row policies need it

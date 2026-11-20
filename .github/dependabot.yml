@@ -43,9 +43,9 @@ updates:
       actions:
         patterns: ['*']
   - package-ecosystem: docker
-    # Covers the Dockerfile's base image and the digest pins in docker-compose.yml,
-    # docker-compose.test.yml and docker-compose.build.yml at the repository root. A bump of a
-    # pinned digest is a runtime change: read it like a version bump, not a formality.
+    # Covers the Dockerfile's base image. The Compose files need their own ecosystem below: this
+    # one never opened a PR for them. A bump of a pinned digest is a runtime change: read it like a
+    # version bump, not a formality.
     directory: /
     schedule:
       interval: weekly
@@ -53,4 +53,19 @@ updates:
     # The Node major follows `engines` in package.json; change both together, by hand.
     ignore:
       - dependency-name: node
+        update-types: [version-update:semver-major]
+  - package-ecosystem: docker-compose
+    # The service images pinned by tag and digest in docker-compose.yml and docker-compose.test.yml.
+    # CI's ClickHouse service and scripts/preflight.sh name the same image by hand, and
+    # deploy-config.test.ts fails until they match: update them in the same PR.
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    ignore:
+      # Stay on the 26.8 LTS line; the move to the next LTS (27.3) is planned by hand (#1113).
+      - dependency-name: clickhouse/clickhouse-server
+        versions: ['>=26.9']
+      # A PostgreSQL major is an install-level change with its own upgrade path (#1001).
+      - dependency-name: postgres
         update-types: [version-update:semver-major]
