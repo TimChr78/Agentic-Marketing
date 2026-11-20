@@ -67,7 +67,7 @@ const canaryMessages = async (artifactId: string, canaryPercent: number) =>
 /** Publish what is queued and wait for the outbox to be empty, so only the mixed batch can defer. */
 const flushOutbox = async () => {
   await t.srv.db.admin.query(`UPDATE outbox SET next_attempt_at = now() WHERE workspace_id = $1 AND state = 'pending'`, [ws]);
-  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 5000 });
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 5000 });
   await eventually(
     async () =>
       Number(
@@ -350,7 +350,7 @@ async function expectDeferred(s: Scenario) {
 /** Publishes the batch, then checks both decisions take their verdict from the published events. */
 async function publishAndExpect(s: Scenario) {
   await releasePublication();
-  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 1000 });
   await flushOutbox();
 
   await decideNow(s.canaryId, 'canary');

@@ -1035,7 +1035,7 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
           id: 'queue.outbox',
           status: 'warn',
           message: `${outboxFailed} outbox row(s) failed after their retries; ${outboxWaiting}`,
-          hint: 'Message events and double opt-in confirmations are queued here. Check ClickHouse and the scheduler role, then requeue with `am outbox` (or `am outbox --kind message_event`).',
+          hint: 'Message events, double opt-in confirmations and audience segment changes are queued here. Check ClickHouse, NATS and the scheduler role, then requeue with `am outbox` (or `am outbox --kind <kind>`, e.g. message_event or segment_change).',
         }
       : outboxPending === 0
         ? { id: 'queue.outbox', status: 'ok', message: 'the transactional outbox is empty' }

@@ -102,7 +102,7 @@ const editor = (
   </ToastProvider>
 );
 
-const estimateText = () => screen.getByText('Estimated size now').parentElement?.textContent ?? '';
+const estimateText = () => screen.getByText('Estimated size from live data').parentElement?.textContent ?? '';
 
 beforeEach(() => {
   cleanup();

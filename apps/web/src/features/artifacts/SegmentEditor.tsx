@@ -757,8 +757,13 @@ function MessageRow({
                 {p.name}
               </option>
             ))}
-            {missingPurpose && c.purpose && <option value={c.purpose}>Unavailable purpose ({c.purpose})</option>}
+            {missingPurpose && c.purpose && <option value={c.purpose}>Unavailable purpose</option>}
           </Select>
+          {missingPurpose && c.purpose && (
+            <div className="mt-1">
+              <CopyPurposeKey purposeKey={c.purpose} />
+            </div>
+          )}
         </Field>
       </div>
       <div className="grid gap-2 sm:grid-cols-2">
@@ -778,7 +783,9 @@ function MessageRow({
       </div>
       <p className="text-[12px] text-muted">
         Opens are counted only where the provider or the workspace tracks them, and a mailbox that pre-fetches the pixel can open a message
-        before the person does: treat opens as a hint and clicks as a signal.
+        before the person does: treat opens as a hint and clicks as a signal. Engagement is counted per message, so two opens of one issue
+        still count once. A message-engagement rule changes who is in the segment only at the next scheduled refresh (or when someone
+        refreshes the segment), not as messages arrive.
       </p>
     </div>
   );
@@ -952,6 +959,22 @@ export function referencedSegmentIds(condition: unknown): string[] {
   return [...found].sort();
 }
 
+/**
+ * Whether a rule can hold a message-engagement leaf, whose membership moves only at a refresh. A
+ * segment reference is treated as possibly holding one: the builder does not load the referenced
+ * definition here, and showing the caveat is safer than hiding it.
+ */
+export function containsMessage(condition: unknown): boolean {
+  if (!condition || typeof condition !== 'object') return false;
+  if (Array.isArray(condition)) return condition.some(containsMessage);
+  const c = condition as Record<string, unknown>;
+  if (typeof c.message === 'string') return true;
+  if (typeof c.segment === 'string') return true;
+  if (Array.isArray(c.all) && c.all.some(containsMessage)) return true;
+  if (Array.isArray(c.any) && c.any.some(containsMessage)) return true;
+  return 'not' in c && containsMessage(c.not);
+}
+
 /** A referenced segment as the estimate recorded it: its published version, plus a list's stamp. */
 /**
  * The referenced segments' current published versions, and the membership stamp of any that is a
@@ -1033,6 +1056,9 @@ function EstimatedSize({ condition }: { condition: Condition }) {
   const { can } = useSession();
   const allowed = can('profiles:read');
   const conditionKey = JSON.stringify(condition);
+  // A message rule reads live engagement, but the stored membership only moves on the scheduler's
+  // refresh, so the estimate and the send can disagree until then (#1078).
+  const messageRule = containsMessage(condition);
   const keyRef = useRef(conditionKey);
   keyRef.current = conditionKey;
   const requestRef = useRef(0);
@@ -1116,7 +1142,8 @@ function EstimatedSize({ condition }: { condition: Condition }) {
     <div className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-surface-2 px-3.5 py-3" aria-live="polite">
       <Users size={18} className="text-muted" aria-hidden />
       <div className="min-w-0 flex-1">
-        <p className="text-[12px] text-muted">Estimated size now</p>
+        <p className="text-[12px] text-muted">Estimated size from live data</p>
+        {messageRule && <p className="text-[12px] text-muted">Membership updates at the next scheduled refresh, not as messages arrive.</p>}
         {!allowed ? (
           <p className="text-[13px] text-muted">Your role can’t read profiles, so the size isn’t shown.</p>
         ) : current?.loading ? (

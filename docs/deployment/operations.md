@@ -128,7 +128,7 @@ called while a consent write holds its locks. Delivery is at-least-once with sta
   retried for about 27 hours before the row is marked `failed`; malformed payloads fail at once.
   `am doctor` warns on `queue.outbox` when rows are waiting too long or any row is failed.
 - **Requeue.** After an outage is fixed, `am outbox` puts failed rows back in the queue with a fresh
-  attempt budget; `am outbox --kind message_event` (or `doi_send`) limits it to one kind. Rows that
+  attempt budget; `am outbox --kind message_event` (or `doi_send`, or `segment_change` for audience Segment Entered/Exited events) limits it to one kind. Rows that
   failed permanently (a payload the dispatcher cannot parse, such as a malformed event) are skipped
   and counted; `--permanent` requeues those too, which is only useful after a payload was repaired
   by hand. The scheduler publishes requeued rows at its next round; duplicates are harmless (message

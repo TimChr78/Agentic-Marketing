@@ -1,7 +1,7 @@
 import { newId } from '@agentic-marketing/core';
 import { enqueueOutbox, schema } from '@agentic-marketing/db';
 import { linkSigner } from '@agentic-marketing/email';
-import type { BusEvent, EventStore, MessageEvent } from '@agentic-marketing/events';
+import type { BusEvent, EventBus, EventStore, MessageEvent } from '@agentic-marketing/events';
 import { personCrypto } from '@agentic-marketing/profiles';
 import { localKeyProvider, recordingKeyProvider } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -32,6 +32,9 @@ const events = {
     sent.push(...list);
   },
 } as unknown as EventStore;
+
+/** The segment-change publisher the dispatcher needs; this file has no segment rows. */
+const bus = { async publish() {} } as unknown as EventBus;
 
 const formEvent = (doubleOptIn = true, messageId = newId('evt')): BusEvent => ({
   workspaceId: d.workspace,
@@ -194,13 +197,13 @@ describe.skipIf(!hasTestDatabase())('double opt-in send intents (#978 part 2)', 
     await hook()(d.workspace, [{ event, profileId }]);
 
     clickhouseBlocked = false;
-    const first = await dispatchOutboxOnce({ db: d.db, kp, events });
+    const first = await dispatchOutboxOnce({ db: d.db, kp, events, bus });
     expect(first).toMatchObject({ claimed: 1, delivered: 1 });
     const [message] = await messagesForKey(key);
     expect(message).toMatchObject({ status: 'queued' });
 
     // The decision event is itself an outbox row; the next round publishes it.
-    const second = await dispatchOutboxOnce({ db: d.db, kp, events });
+    const second = await dispatchOutboxOnce({ db: d.db, kp, events, bus });
     expect(second.delivered).toBe(1);
     expect(sent).toHaveLength(1);
     const eventId = sent[0]!.eventId;
@@ -216,8 +219,8 @@ describe.skipIf(!hasTestDatabase())('double opt-in send intents (#978 part 2)', 
       `UPDATE outbox SET state = 'pending', lease_until = NULL, delivered_at = NULL WHERE workspace_id = $1 AND kind = 'message_event'`,
       [d.workspace],
     );
-    await dispatchOutboxOnce({ db: d.db, kp, events });
-    await dispatchOutboxOnce({ db: d.db, kp, events });
+    await dispatchOutboxOnce({ db: d.db, kp, events, bus });
+    await dispatchOutboxOnce({ db: d.db, kp, events, bus });
     expect(await messagesForKey(key)).toHaveLength(1);
     expect(sent.map((e) => e.eventId)).toEqual([eventId, eventId]);
   });
@@ -229,7 +232,7 @@ describe.skipIf(!hasTestDatabase())('double opt-in send intents (#978 part 2)', 
     clickhouseBlocked = false;
     // Both rounds claim with SKIP LOCKED, and whichever runs the handler uses the intent's own
     // `doi:<message>` key, which requestEmail serialises and replays.
-    await Promise.all([dispatchOutboxOnce({ db: d.db, kp, events }), dispatchOutboxOnce({ db: d.db, kp, events })]);
+    await Promise.all([dispatchOutboxOnce({ db: d.db, kp, events, bus }), dispatchOutboxOnce({ db: d.db, kp, events, bus })]);
     expect(await messagesForKey(key)).toHaveLength(1);
   });
 
@@ -242,7 +245,7 @@ describe.skipIf(!hasTestDatabase())('double opt-in send intents (#978 part 2)', 
       }),
     );
     clickhouseBlocked = false;
-    const result = await dispatchOutboxOnce({ db: d.db, kp, events });
+    const result = await dispatchOutboxOnce({ db: d.db, kp, events, bus });
     expect(result.failed).toBe(1);
     expect(await messagesForKey('doi:missing-key')).toHaveLength(0);
     const { rows } = await d.db.admin.query<{ state: string; failure_kind: string }>(
@@ -251,7 +254,7 @@ describe.skipIf(!hasTestDatabase())('double opt-in send intents (#978 part 2)', 
     );
     expect(rows[0]).toEqual({ state: 'failed', failure_kind: 'permanent' });
     // A permanent failure is not retried on a later round.
-    expect((await dispatchOutboxOnce({ db: d.db, kp, events })).claimed).toBe(0);
+    expect((await dispatchOutboxOnce({ db: d.db, kp, events, bus })).claimed).toBe(0);
   });
 
   it('fails a malformed message-event payload permanently instead of retrying it', async () => {
@@ -263,7 +266,7 @@ describe.skipIf(!hasTestDatabase())('double opt-in send intents (#978 part 2)', 
       }),
     );
     clickhouseBlocked = false;
-    const result = await dispatchOutboxOnce({ db: d.db, kp, events });
+    const result = await dispatchOutboxOnce({ db: d.db, kp, events, bus });
     expect(result.failed).toBe(1);
     expect(sent).toHaveLength(0);
     const { rows } = await d.db.admin.query<{ state: string; failure_kind: string }>(
@@ -284,7 +287,7 @@ describe.skipIf(!hasTestDatabase())('double opt-in send intents (#978 part 2)', 
       });
     });
     clickhouseBlocked = false;
-    const result = await dispatchOutboxOnce({ db: d.db, kp, events });
+    const result = await dispatchOutboxOnce({ db: d.db, kp, events, bus });
     expect(result.failed).toBeGreaterThanOrEqual(1);
     const { rows } = await d.db.admin.query<{ state: string; last_error: string }>(
       `SELECT state, last_error FROM outbox WHERE workspace_id = $1 AND operation_key = 'unknown-kind'`,
