@@ -149,11 +149,16 @@ export async function postgresDestination(
       .map((c) => `"${c}" = excluded."${c}"`)
       .concat('exported_at = now()')
       .join(', ');
+    // ClickHouse may hold two rows with the same warehouse key (events are deduplicated on a wider
+    // ReplacingMergeTree key), and PostgreSQL rejects a statement whose ON CONFLICT target is
+    // touched twice (#1139). Keep the last row, which is the latest in the export's order.
+    const unique = new Map<string, Row>();
+    for (const row of rows) unique.set(JSON.stringify(spec.key.map((k) => row[k] ?? null)), row);
     await client.query(
       `INSERT INTO ${schemaName}.${table(dataset)} (workspace_id, ${quoted})
        SELECT $1, ${quoted} FROM jsonb_to_recordset($2::jsonb) AS x(${recordType})
        ON CONFLICT (workspace_id, ${spec.key.map((k) => `"${k}"`).join(', ')}) DO UPDATE SET ${updates}`,
-      [ws, JSON.stringify(rows.map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null]))))],
+      [ws, JSON.stringify([...unique.values()].map((r) => Object.fromEntries(cols.map((c) => [c, r[c] ?? null]))))],
     );
   }
 

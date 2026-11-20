@@ -68,7 +68,7 @@ const decisionSample = (rows: Awaited<ReturnType<typeof messagesOf>>) =>
 /** The variant send total in a status response. */
 const variantSends = (s: Awaited<ReturnType<typeof status>>) => s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0;
 
-const click = (message: { id: string; profile_id: string }, broadcastId: string, n: number) => ({
+const click = (message: { id: string; profile_id: string; variant: string | null }, broadcastId: string, n: number) => ({
   workspaceId: ws,
   messageId: message.id,
   eventId: `click:${message.id}:${n}`,
@@ -81,6 +81,8 @@ const click = (message: { id: string; profile_id: string }, broadcastId: string,
   templateId: template,
   templateVersion: 1,
   journeyId: broadcastId,
+  // Production message events carry the message's variant; the status aggregate filters on it.
+  variant: message.variant ?? '',
   reason: '',
   url: 'https://example.com/',
 });
@@ -362,6 +364,10 @@ describe('subject A/B test', () => {
       (s) => (s.counts.clicked ?? 0) >= b.length,
     );
     expect(stats.counts.clicked).toBe(b.length);
+    // A broadcast's `bct_` id is a valid journeyId here, and the variant is filtered in the event
+    // store rather than by loading the variant's message ids (#1153).
+    const byBroadcast = await api().call('messages.stats', { days: 1, journeyId: winnerId, variant: 'B' });
+    expect(byBroadcast.counts.clicked).toBe(b.length);
   }, 60_000);
 
   it('defers the winner while the sample clicks are still in the outbox, then picks from published events', async () => {

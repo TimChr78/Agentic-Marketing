@@ -353,6 +353,44 @@ describe('static and snapshot audiences', () => {
     }
   }, 120_000);
 
+  it('re-locks a merge target lower than a held id in ascending order (#1137)', async () => {
+    // `prf_0…` sorts before `prf_1…`. The add resolves the higher id; a merge then folds it into
+    // the lower one, which the old loop would lock only in a later round while still holding the
+    // higher row — the AB-BA order against erase and merges.
+    const low = `prf_${'0'.repeat(32)}`;
+    const high = `prf_${'1'.repeat(32)}`;
+    const prefix = `v028-lower-${Date.now()}`;
+    await t.srv.db.admin.query(
+      `INSERT INTO profiles (workspace_id, id, created_at, first_seen, last_seen, updated_at)
+       VALUES ($1, $2, now() - interval '1 hour', now() - interval '1 hour', now(), now()),
+              ($1, $3, now(), now(), now(), now())`,
+      [ws, low, high],
+    );
+    await t.srv.db.admin.query(
+      `INSERT INTO identifiers (workspace_id, type, value, profile_id)
+       VALUES ($1, 'user_id', $2, $3), ($1, 'anonymous_id', $4, $5)`,
+      [ws, `${prefix}-user`, low, `${prefix}-anon`, high],
+    );
+    const list = await createSegment('Lower target list', { mode: 'static' });
+    const rounds: string[][] = [];
+    audienceTestHooks.afterRowLocks = async (ids) => {
+      rounds.push(ids);
+    };
+    try {
+      const result = await resultAfterMergeDuringCall(
+        high,
+        () => send([{ type: 'identify', userId: `${prefix}-user`, anonymousId: `${prefix}-anon` }]),
+        () => api().call('audiences.add', { segmentId: list, profileIds: [high] }),
+      );
+      expect(result).toMatchObject({ added: 1, existing: 0, unmatched: [] });
+    } finally {
+      delete audienceTestHooks.afterRowLocks;
+    }
+    // Round 0 locked the pre-merge id; round 1 rolled that back and locked both ids, ascending.
+    expect(rounds).toEqual([[high], [low, high]]);
+    expect((await api().call('segments.members', { artifactId: list })).members.map((m) => m.profileId)).toEqual([low]);
+  }, 120_000);
+
   it('counts a merge that folds two resolved ids during an import, so added and existing add up (#1111)', async () => {
     const { loser, survivor, merge } = await twoProfilesForOnePerson('v028-import-count');
     const list = await createSegment('Import counted list', { mode: 'static' });

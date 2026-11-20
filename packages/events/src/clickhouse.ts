@@ -189,9 +189,20 @@ export interface EventStore {
       templateId?: string;
       journeyId?: string;
       messageIds?: string[];
+      /** Subject-test variant, matched on `message_events.variant` (#1153). */
+      variant?: string;
       pendingEvents?: readonly MessageEvent[];
     },
   ): Promise<Record<string, number>>;
+  /**
+   * Unique message events per subject-test variant for one broadcast, aggregated in ClickHouse.
+   * Reads by `journey_id`, so a large subject test never sends its message ids as a parameter
+   * (#1153).
+   */
+  messageVariantStats(
+    workspaceId: string,
+    journeyId: string,
+  ): Promise<Record<string, { delivered: number; opened: number; clicked: number }>>;
   /** Per node and event type counts for a journey (analytics, canvas overlays). */
   journeyCounts(workspaceId: string, journeyId: string): Promise<{ node: string; type: string; count: number }[]>;
   /**
@@ -1383,6 +1394,7 @@ export function clickHouseStore(opts: {
         ...(q.until ? { until: q.until.toISOString().replace('Z', '') } : {}),
         t: q.templateId ?? '',
         j: q.journeyId ?? '',
+        v: q.variant ?? '',
         ids: q.messageIds ?? [],
       };
       const conditions = [
@@ -1391,6 +1403,7 @@ export function clickHouseStore(opts: {
         ...(q.until ? ["m.at < {until:DateTime64(3, 'UTC')}"] : []),
         ...(q.templateId ? ['m.template_id = {t:String}'] : []),
         ...(q.journeyId ? ['m.journey_id = {j:String}'] : []),
+        ...(q.variant ? ['m.variant = {v:String}'] : []),
         ...(q.messageIds ? ['m.message_id IN {ids:Array(String)}'] : []),
       ];
       // Without a queued half, an id-scoped read bounds the ledger set to the keys its own scope can
@@ -1418,6 +1431,27 @@ export function clickHouseStore(opts: {
         format: 'JSONEachRow',
       });
       return Object.fromEntries((await rs.json<{ type: string; c: number }>()).map((r) => [r.type, Number(r.c)]));
+    },
+    async messageVariantStats(workspaceId, journeyId) {
+      // Aggregate by the message's variant in ClickHouse: filtering by the broadcast's journey id
+      // keeps the query parameter a single string however large the subject test is (#1153).
+      const protectedRead = await protectedReadFor(workspaceId);
+      const rs = await query(workspaceId, {
+        query: `SELECT variant, type, uniqExact(message_id) AS c
+                FROM ${personReadSource('message_events', protectedRead)} FINAL
+                WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND variant != ''
+                  AND type IN ('delivered', 'opened', 'clicked')
+                GROUP BY variant, type`,
+        query_params: { ws: workspaceId, j: journeyId },
+        format: 'JSONEachRow',
+      });
+      const out: Record<string, { delivered: number; opened: number; clicked: number }> = {};
+      for (const r of await rs.json<{ variant: string; type: string; c: number | string }>()) {
+        const slot = out[r.variant] ?? { delivered: 0, opened: 0, clicked: 0 };
+        out[r.variant] = slot;
+        if (r.type === 'delivered' || r.type === 'opened' || r.type === 'clicked') slot[r.type] = Number(r.c);
+      }
+      return out;
     },
     async journeyCounts(workspaceId, journeyId) {
       const protectedRead = await protectedReadFor(workspaceId);

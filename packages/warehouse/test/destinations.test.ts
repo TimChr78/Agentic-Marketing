@@ -168,6 +168,29 @@ describe('postgres destination erasure', () => {
     return { dest, client };
   }
 
+  it('deduplicates a batch by the dataset key, keeping the last row (#1139)', async () => {
+    const { dest, client } = await destination();
+    const event = (name: string) => ({
+      event_id: 'evt_same_key',
+      type: 'track',
+      name,
+      timestamp: '2026-11-01T00:00:00.000Z',
+      received_at: '2026-11-01T00:00:00.000Z',
+      anonymous_id: 'a-1',
+      user_id: 'u-1',
+      properties: {},
+      context: {},
+    });
+    // A ReplacingMergeTree may hold two rows with one warehouse key; PostgreSQL would abort the
+    // single INSERT with SQLSTATE 21000 when the conflict target is touched twice.
+    await dest.write('events', [event('First'), event('Last')]);
+
+    const insert = client.calls.find((c) => c.sql.includes('INSERT INTO "agentic_marketing".am_events'));
+    const rows = JSON.parse(String(insert?.params[1])) as { name: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.name).toBe('Last');
+  });
+
   it('adds the coverage columns to a destination created by an earlier version', async () => {
     const client = fakeClient();
     const dest = await postgresDestination(

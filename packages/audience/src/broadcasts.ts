@@ -672,26 +672,15 @@ async function variantResults(
     .select({ id: schema.messages.id, variant: schema.messages.variant, status: schema.messages.status })
     .from(schema.messages)
     .where(and(eq(schema.messages.journeyId, broadcastId), eq(schema.messages.test, false), isNotNull(schema.messages.variant)));
-  const delivered = new Map<string, Set<string>>();
-  const opened = new Map<string, Set<string>>();
-  const clicked = new Map<string, Set<string>>();
-  if (rows.length) {
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    const evts = await events.messageEventsOf(workspaceId, { messageIds: rows.map((r) => r.id) }, 100_000);
-    for (const e of evts) {
-      const variant = byId.get(e.messageId)?.variant;
-      if (!variant) continue;
-      const target = e.type === 'delivered' ? delivered : e.type === 'opened' ? opened : e.type === 'clicked' ? clicked : null;
-      if (!target) continue;
-      const set = target.get(variant) ?? new Set<string>();
-      set.add(e.messageId);
-      target.set(variant, set);
-    }
-  }
+  // One aggregate per variant, read by the broadcast's journey id: passing every message id used
+  // to exceed ClickHouse's multipart parameter limit on a large subject test and truncate at
+  // 100,000 events (#1153). The decision uses opened/clicked, which the aggregate counts exactly.
+  const stats = rows.length ? await events.messageVariantStats(workspaceId, broadcastId) : {};
   return subjects.map((subject, i) => {
     const variant = String.fromCharCode(65 + i);
     const mine = rows.filter((r) => r.variant === variant);
-    const deliveredNow = mine.filter((r) => r.status === 'delivered');
+    const deliveredNow = mine.filter((r) => r.status === 'delivered').length;
+    const counts = stats[variant];
     return {
       variant,
       subject,
@@ -701,9 +690,11 @@ async function variantResults(
       // could say "fewer than 20 sends" for a complete sample (#1099). Suppressed and failed rows
       // were never sent, so they stay out.
       sent: mine.filter((r) => r.status !== 'suppressed' && r.status !== 'failed').length,
-      delivered: new Set([...deliveredNow.map((r) => r.id), ...(delivered.get(variant) ?? [])]).size,
-      opened: opened.get(variant)?.size ?? 0,
-      clicked: clicked.get(variant)?.size ?? 0,
+      // The status and the event are written in one transaction, and the outbox publishes before a
+      // decision; whichever source has seen more is the delivered set, without loading its ids.
+      delivered: Math.max(deliveredNow, counts?.delivered ?? 0),
+      opened: counts?.opened ?? 0,
+      clicked: counts?.clicked ?? 0,
     };
   });
 }
