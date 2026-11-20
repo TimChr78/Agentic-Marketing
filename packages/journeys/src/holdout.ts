@@ -2,9 +2,11 @@ import {
   type ArmResult,
   analyseHoldout,
   artifactTypes,
+  canonicalPeople,
   type HoldoutVerdict,
   holdoutBelowK,
   holdoutHashVersion,
+  holdoutWinners,
   K,
   type SuppressedArmResult,
   suppressHoldout,
@@ -12,7 +14,7 @@ import {
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
-import { and, eq, gte, lte } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 // Holdout helpers moved to @agentic-marketing/artifacts so campaigns measure with the same
 // assignment and statistics. Re-exported here because journeys.holdoutResult and its tests use
@@ -86,28 +88,19 @@ export async function computeJourneyHoldout(
   const hashVersion = holdoutHashVersion(cg.percent);
   const from = range.from ? new Date(range.from) : undefined;
   const to = range.to ? new Date(range.to) : undefined;
-  const assignments = await deps.tx
-    .select({ profileId: schema.holdoutAssignments.profileId, arm: schema.holdoutAssignments.arm })
-    .from(schema.holdoutAssignments)
-    .where(
-      and(
-        eq(schema.holdoutAssignments.workspaceId, deps.workspaceId),
-        eq(schema.holdoutAssignments.scopeType, 'journey'),
-        eq(schema.holdoutAssignments.scopeId, journeyId),
-        eq(schema.holdoutAssignments.hashVersion, hashVersion),
-        from ? gte(schema.holdoutAssignments.assignedAt, from) : undefined,
-        to ? lte(schema.holdoutAssignments.assignedAt, to) : undefined,
-      ),
-    );
+  // The same merge-family resolution and window the campaign report uses (#985, #1070): one
+  // person, one arm, the earliest assignment decides, and the window applies to that winner rather
+  // than to every row. A later copy an entry wrote onto the survivor must not count the person
+  // twice, and an alias's row must not decide an arm whose earliest assignment is outside the
+  // window. The winners live in a transaction-scoped table, so they are read in bounded pages.
+  const winners = await holdoutWinners(deps.tx, deps.workspaceId, { type: 'journey', id: journeyId }, hashVersion, {
+    ...(from ? { from } : {}),
+    ...(to ? { to } : {}),
+  });
   const counts = {
-    control: { entered: 0, converted: 0, unsubscribed: 0 },
-    treatment: { entered: 0, converted: 0, unsubscribed: 0 },
+    control: { entered: winners.control, converted: 0, unsubscribed: 0 },
+    treatment: { entered: winners.treatment, converted: 0, unsubscribed: 0 },
   };
-  const people = { control: new Set<string>(), treatment: new Set<string>() };
-  for (const row of assignments) {
-    counts[row.arm].entered++;
-    people[row.arm].add(row.profileId);
-  }
   // The same k rule as the campaign summary (#590): an arm below k is never reported, so the
   // journey's own report and MCP cannot expose a handful of people the summary already hides.
   if (holdoutBelowK(counts)) {
@@ -121,20 +114,28 @@ export async function computeJourneyHoldout(
     };
   }
   // Outcomes come from ClickHouse (the journey's goal events and the e-mail unsubscribe
-  // guardrail), joined in code to the Postgres assignments. The event store applies the row
-  // policies through settingsFor, so a query never crosses workspaces.
+  // guardrail), joined in code to the Postgres winners. The event store applies the row policies
+  // through settingsFor, so a query never crosses workspaces. An outcome recorded before a merge
+  // still carries the alias id, so resolve the outcome through the same component map as the
+  // assignment side before matching it to a winner.
   const outcomes = await deps.events.journeyHoldoutOutcomes(deps.workspaceId, {
     journeyId,
     ...(from ? { from } : {}),
     ...(to ? { to } : {}),
   });
-  const converted = new Set(outcomes.converted);
-  const unsubscribed = new Set(outcomes.unsubscribed);
-  for (const arm of ['control', 'treatment'] as const) {
-    for (const profileId of people[arm]) {
-      if (converted.has(profileId)) counts[arm].converted++;
-      if (unsubscribed.has(profileId)) counts[arm].unsubscribed++;
+  const outcomeIds = [...new Set([...outcomes.converted, ...outcomes.unsubscribed])];
+  const canonical = await canonicalPeople(deps.tx, deps.workspaceId, outcomeIds);
+  const converted = new Set(outcomes.converted.map((id) => canonical.get(id) ?? id));
+  const unsubscribed = new Set(outcomes.unsubscribed.map((id) => canonical.get(id) ?? id));
+  const PAGE = 1000;
+  for (let after: string | undefined; ; ) {
+    const page = await winners.page(after, PAGE);
+    for (const winner of page) {
+      if (converted.has(winner.person)) counts[winner.arm].converted++;
+      if (unsubscribed.has(winner.person)) counts[winner.arm].unsubscribed++;
     }
+    if (page.length < PAGE) break;
+    after = page[page.length - 1]!.person;
   }
   const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
   const note =

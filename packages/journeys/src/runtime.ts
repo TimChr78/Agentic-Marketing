@@ -214,30 +214,43 @@ export async function enterJourneys(
  * SQL only, so it runs in the same transaction as the enrolment: a participant this event enrols is
  * `ready`, never `waiting`, and therefore cannot be woken by the event that created it (#1011
  * review).
+ *
+ * Returns the (event, person) pairs that woke at least one participant, so the caller can record
+ * the same processed marker an enrolment writes. Without it an event that only wakes a wait has no
+ * marker, and a redelivery wakes whatever the participant waits for later — including a second
+ * wait or goal on the same event name (#1052).
  */
-export async function wakeWaiters(tx: Tx, workspaceId: string, resolved: ResolvedEvent[]): Promise<number> {
-  if (!resolved.length) return 0;
+export async function wakeWaiters(
+  tx: Tx,
+  workspaceId: string,
+  resolved: ResolvedEvent[],
+): Promise<{ eventId: string; profileId: string }[]> {
+  if (!resolved.length) return [];
   // Same merge-following reason as `enterJourneys` (#1011).
   const canonical = await canonicalPeople(
     tx,
     workspaceId,
     resolved.map((r) => r.profileId),
   );
-  let woken = 0;
+  const woken: { eventId: string; profileId: string }[] = [];
   for (const r of resolved) {
     const profileId = canonical.get(r.profileId) ?? r.profileId;
     const w = await tx.execute(sql`
       UPDATE journey_participants SET matched = true, waiting_event = NULL, due_at = now(), updated_at = now()
       WHERE workspace_id = ${workspaceId} AND profile_id = ${profileId} AND waiting_event = ${r.event.name} AND status = 'waiting'`);
-    woken += w.rowCount ?? 0;
+    if (w.rowCount) woken.push({ eventId: r.event.messageId, profileId });
   }
   return woken;
 }
 
 /**
  * The events of this batch the journey hook has not applied yet. A redelivered event has a row from
- * the transaction that enrolled someone for it and is skipped entirely: its enrolment and the
- * wake-up it caused happened exactly once (#1011 review).
+ * the transaction that enrolled someone, or woke someone waiting for it, and is skipped entirely:
+ * its enrolment and the wake-up it caused happened exactly once (#1011 review, #1052).
+ *
+ * The marker's age bound is the same for both kinds (retention prunes them after 30 days, the
+ * upstream stream's own replay window); a delivery older than that can be re-applied. Bounding a
+ * delivery's age at enrolment is #1027, which would close that window for both markers.
  */
 async function freshEvents(tx: Tx, workspaceId: string, resolved: ResolvedEvent[]): Promise<ResolvedEvent[]> {
   if (!resolved.length) return [];
@@ -249,13 +262,19 @@ async function freshEvents(tx: Tx, workspaceId: string, resolved: ResolvedEvent[
   return resolved.filter((r) => !done.has(r.event.messageId));
 }
 
-/** Records the events whose enrolment committed, in that same transaction. */
-async function markProcessed(tx: Tx, workspaceId: string, enrolled: { eventId: string; profileId: string }[]): Promise<void> {
-  if (!enrolled.length) return;
+/**
+ * Records the events this hook applied, in that same transaction: each event that enrolled someone
+ * or woke a waiting participant. The table has one row per event (an event belongs to exactly one
+ * person), so an event that both enrolled and woke someone still writes one row.
+ */
+async function markProcessed(tx: Tx, workspaceId: string, applied: { eventId: string; profileId: string }[]): Promise<void> {
+  if (!applied.length) return;
+  const byEvent = new Map<string, string>();
+  for (const row of applied) if (!byEvent.has(row.eventId)) byEvent.set(row.eventId, row.profileId);
   await tx.execute(sql`
     INSERT INTO journey_processed_events (workspace_id, event_id, profile_id)
     VALUES ${sql.join(
-      enrolled.map((e) => sql`(${workspaceId}, ${e.eventId}, ${e.profileId})`),
+      [...byEvent].map(([eventId, profileId]) => sql`(${workspaceId}, ${eventId}, ${profileId})`),
       sql`, `,
     )}
     ON CONFLICT DO NOTHING`);
@@ -325,8 +344,10 @@ export function journeyHook(db: Db, deps: JourneyDeps) {
         if (!fresh.length) return;
         const entered = await enterJourneys(tx, workspaceId, fresh);
         holdout = entered.holdout;
-        await wakeWaiters(tx, workspaceId, fresh);
-        await markProcessed(tx, workspaceId, entered.enrolled);
+        const woken = await wakeWaiters(tx, workspaceId, fresh);
+        // Enrolment and waking both spend the event: either one writes the marker that keeps a
+        // redelivery from applying it again, to this or a later node (#1052).
+        await markProcessed(tx, workspaceId, [...entered.enrolled, ...woken]);
       }),
     );
     // Wait-until conditions may reach ClickHouse, so this recheck runs in its own transaction,

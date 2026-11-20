@@ -117,6 +117,31 @@ const purchaseJourney = (name: string) =>
     { id: 'done', kind: 'exit', label: 'Done', config: {} },
   ]);
 
+/** Waits for the same event twice: the event that satisfies the first wait must not satisfy the second. */
+const twiceJourney = (name: string) =>
+  publishJourney([
+    { id: 'start', kind: 'trigger', label: 'Start', config: { event: name }, next: [{ to: 'first' }] },
+    { id: 'first', kind: 'waitEvent', label: 'First wait', config: { event: name, timeout: 'P30D' }, next: [{ to: 'second' }] },
+    { id: 'second', kind: 'waitEvent', label: 'Second wait', config: { event: name, timeout: 'P30D' }, next: [{ to: 'done' }] },
+    { id: 'done', kind: 'exit', label: 'Done', config: {} },
+  ]);
+
+/** A wait followed by a goal on the same event name: the goal must only see a later delivery. */
+const waitThenGoalJourney = (name: string) =>
+  publishJourney([
+    { id: 'start', kind: 'trigger', label: 'Start', config: { event: name }, next: [{ to: 'gate' }] },
+    { id: 'gate', kind: 'waitEvent', label: 'Gate', config: { event: name, timeout: 'P30D' }, next: [{ to: 'goal' }] },
+    {
+      id: 'goal',
+      kind: 'goal',
+      label: 'Goal',
+      config: { event: name, within: 'P30D' },
+      next: [{ to: 'won' }, { to: 'lost' }],
+    },
+    { id: 'won', kind: 'exit', label: 'Converted', config: {} },
+    { id: 'lost', kind: 'exit', label: 'Missed', config: {} },
+  ]);
+
 /** Re-entry after exit: once the participant leaves, another delivery of the same event is allowed. */
 const signupJourney = (name: string) =>
   publishJourney([
@@ -233,6 +258,58 @@ describe.skipIf(!hasTestDatabase())('a journey event is applied once (#1011 revi
 
     // It waits for the *next* purchase, not the one that enrolled it.
     expect(await participantsOf(journeyId)).toMatchObject([{ status: 'waiting', matched: false }]);
+  }, 120_000);
+
+  it('does not wake a later wait with a redelivery of the event that satisfied the first wait (#1052)', async () => {
+    const person = newId('prf');
+    await seedProfile(person, { anonymous: `anon-${person}` });
+    const journeyId = await twiceJourney('Repeat Click');
+    const hook = journeyHook(d.db, deps());
+
+    // The trigger enrols the person; the sweeper moves them to the first wait.
+    await hook(ws, await runBatch([event({ anonymousId: `anon-${person}`, name: 'Repeat Click' })]));
+    await sweep(d.db, deps());
+    expect(await participantsOf(journeyId)).toMatchObject([{ status: 'waiting', node: 'first', matched: false }]);
+
+    // A genuinely new click satisfies the first wait and moves the person to the second.
+    const click = await runBatch([event({ anonymousId: `anon-${person}`, name: 'Repeat Click' })]);
+    await hook(ws, click);
+    await sweep(d.db, deps());
+    expect(await participantsOf(journeyId)).toMatchObject([{ status: 'waiting', node: 'second', matched: false }]);
+
+    // The same click delivered again is the event that already spent itself on the first wait.
+    await hook(ws, click);
+    await sweep(d.db, deps());
+
+    expect(await participantsOf(journeyId)).toMatchObject([{ status: 'waiting', node: 'second', matched: false }]);
+  }, 120_000);
+
+  it('does not satisfy a goal with a redelivery of the event that satisfied the earlier wait (#1052)', async () => {
+    const person = newId('prf');
+    await seedProfile(person, { anonymous: `anon-${person}` });
+    const journeyId = await waitThenGoalJourney('Repeat Goal');
+    const hook = journeyHook(d.db, deps());
+
+    await hook(ws, await runBatch([event({ anonymousId: `anon-${person}`, name: 'Repeat Goal' })]));
+    await sweep(d.db, deps());
+    expect(await participantsOf(journeyId)).toMatchObject([{ status: 'waiting', node: 'gate', matched: false }]);
+
+    // This event satisfies the gate; the person now waits at the goal on the same event name.
+    const goalEvent = await runBatch([event({ anonymousId: `anon-${person}`, name: 'Repeat Goal' })]);
+    await hook(ws, goalEvent);
+    await sweep(d.db, deps());
+    expect(await participantsOf(journeyId)).toMatchObject([{ status: 'waiting', node: 'goal', matched: false }]);
+
+    // Its redelivery must not convert the person at the goal.
+    await hook(ws, goalEvent);
+    await sweep(d.db, deps());
+
+    expect(await participantsOf(journeyId)).toMatchObject([{ status: 'waiting', node: 'goal', matched: false }]);
+    const { rows } = await d.db.admin.query<{ converted: boolean }>(
+      'SELECT converted FROM journey_participants WHERE workspace_id = $1 AND journey_id = $2',
+      [ws, journeyId],
+    );
+    expect(rows).toEqual([{ converted: false }]);
   }, 120_000);
 
   it('does not enrol one event twice after its participant left the journey', async () => {
