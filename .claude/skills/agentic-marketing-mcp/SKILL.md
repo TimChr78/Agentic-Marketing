@@ -130,7 +130,7 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
 
 ## Content rules that save round trips
 
-- **Ids** look like `not_` (note), `jrn_` (journey), `blk_` (e-mail block), `eml_` (e-mail template), `sms_` (SMS template), `psh_` (push template), `seg_` (segment), `exp_` (web experience), `prm_` (AI prompt), `frm_` (signup form), `brd_` (brand), `bct_` (broadcast), `cmp_` (campaign), `cpb_` (campaign brief), `brf_` (content brief), `tpl_` (tracking plan), `pur_` (purposes), `cvm_` (conversion map), `aud_` (audience sync), `dlp_` (delivery policy), `mnd_` (agent mandate), `bcx_` (business context), each followed by 32 hex characters. Assets are `ast_`, people `prf_`, content topics `ctp_`, content selections `csel_`, content sources `csrc_` and learnings `lrn_`.
+- **Ids** look like `not_` (note), `jrn_` (journey), `blk_` (e-mail block), `eml_` (e-mail template), `sms_` (SMS template), `psh_` (push template), `seg_` (segment), `exp_` (web experience), `prm_` (AI prompt), `frm_` (signup form), `brd_` (brand), `bct_` (broadcast), `cmp_` (campaign), `cpb_` (campaign brief), `brf_` (content brief), `tpl_` (tracking plan), `pur_` (purposes), `cvm_` (conversion map), `aud_` (audience sync), `dlp_` (delivery policy), `mnd_` (agent mandate), `bcx_` (business context), `skl_` (skill), each followed by 32 hex characters. Assets are `ast_`, people `prf_`, content topics `ctp_`, content selections `csel_`, content sources `csrc_` and learnings `lrn_`.
 - **Durations** are ISO 8601: `PT6H`, `P2D`, `P1W`. **Timestamps** are ISO in UTC: `2026-10-30T07:00:00Z`.
 - **E-mail templates:** MJML with Liquid.
   - Variables: `{{ profile.firstName | default: "there" }}`, `{{ content.<slot> }}` (AI-generated text), and journey context.
@@ -144,8 +144,8 @@ Worked examples with full payloads are in [references/recipes.md](references/rec
 - **Segment conditions:** `{"trait":"plan","op":"eq","value":"pro"}`, `{"event":"Product Viewed","where":{"category":"tents"},"count":{"gte":2},"within":"P7D"}`, `{"consent":"marketing_email"}`, `{"segment":"seg_…"}`. Combine them with `{"all":[…]}`, `{"any":[…]}` and `{"not":…}`.
   - The platform's own engagement is a condition too, so "opened in the last 30 days" needs no customer event: `{"message":"opened","within":"P30D","count":{"gte":2}}`, narrowed by `"channel":"email"`, `"purpose":"marketing_email"`, or the send with `"broadcast":"bct_…"` / `"journey":"jrn_…"` (not both). `message` is `delivered`, `opened`, `clicked`, `bounced`, `complained` or `unsubscribed`. Opens come from a tracking pixel, which not every configuration records and which some mailboxes pre-fetch: prefer `clicked` when the offer must not overstate engagement. A message leaf never triggers a streaming evaluation by itself: a rule containing one is re-evaluated when another part of it changes, when a consent or preference write refreshes that person, and on the regular `segments.refresh` recompute.
 - **Journey nodes:**
-  - kinds: `trigger`, `wait`, `waitEvent`, `waitUntil`, `branch`, `split`, `email`, `sms`, `push`, `webhook`, `action`, `transform`, `updateProfile`, `aiDecide`, `aiGenerate`, `goal`, `exit`;
-  - give `next` edges explicitly when a node has several outcomes (branch: `[yes, no]`; waitEvent, waitUntil and goal: `[matched, timeout]`; action: `[ok, error]`; split: one per weight; aiDecide: one per option).
+  - kinds: `trigger`, `wait`, `waitEvent`, `waitUntil`, `branch`, `split`, `email`, `sms`, `push`, `webhook`, `action`, `transform`, `updateProfile`, `aiDecide`, `aiGenerate`, `decision`, `goal`, `exit`;
+  - give `next` edges explicitly when a node has several outcomes (branch: `[yes, no]`; waitEvent, waitUntil and goal: `[matched, timeout]`; action: `[ok, error]`; split: one per weight; aiDecide: one per option; decision: `[at-or-above the threshold, fallback]`).
 
 ## Inputs and results
 

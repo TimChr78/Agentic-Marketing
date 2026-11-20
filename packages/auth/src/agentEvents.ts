@@ -67,7 +67,7 @@ export const subscribeAgent = defineCommand({
   name: 'agents.subscribe',
   title: 'Subscribe an agent to events',
   description:
-    'Have an agent hear about what its loop reacts to instead of polling: a hold that ran or was vetoed or now needs a person, an approval decided, a guardian episode or guardrail breach, an experiment that reached a significant verdict, and an alert firing. With a webhookId the platform delivers each event to that signed webhook (retried like any delivery); without one the agent reads them with agents.events. Events carry ids and a summary, never personal data. An agent subscribes itself; a person can for any agent.',
+    'Have an agent hear about what its loop reacts to instead of polling: a hold that ran or was vetoed or now needs a person, an approval decided, a guardian episode or guardrail breach, an experiment that reached a significant verdict, an experience rollout paused by its guardrail, and an alert firing. With a webhookId the platform delivers each event to that signed webhook (retried like any delivery); without one the agent reads them with agents.events. Events carry ids and a summary, never personal data. An agent subscribes itself; a person can for any agent.',
   input: z.object({
     agentId: AGENT_ID.optional().describe('The agent that receives the events; omit as an agent to subscribe itself'),
     eventTypes: EventTypes.describe('Event types to receive'),

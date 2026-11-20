@@ -127,9 +127,9 @@ what happened to a message it sent, read from ClickHouse `message_events` (#441)
 ```
 
 - `message` is `delivered`, `opened`, `clicked`, `bounced`, `complained` or `unsubscribed`.
-- `within` is an ISO 8601 window (at most 10 years), `count` the number of such messages (default at
-  least once; `{"lte": 0}` is "never"), `channel` narrows to `email`, `sms` or `push`, and `purpose`
-  to a published purpose key.
+- `within` is an ISO 8601 window (at most 25 months, the message history that is kept), `count` the
+  number of such messages (default at least once; `{"lte": 0}` is "never"), `channel` narrows to
+  `email`, `sms` or `push`, and `purpose` to a published purpose key.
 - **Distinct messages, not events:** `count` counts the messages that met the condition, not the
   engagement rows. Two pixel fetches for one issue (a mailbox that pre-fetches images) or two clicks
   on one link are one message. That is why `{"gte": 2}` means "opened two issues", not "opened twice".

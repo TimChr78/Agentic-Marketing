@@ -83,7 +83,7 @@ Completion semantics are now the contract. `profiles.erasureStatus` reports **lo
 
 ## 4. Identity, authentication & authorization
 
-- **Auth:** Better Auth (MIT) — email/password + passkeys + TOTP MFA in v1; organizations/workspaces; OIDC/SAML SSO and SCIM in a later phase.
+- **Auth:** Better Auth (MIT) — email/password, the MCP OAuth 2.1 authorization server, per-workspace OIDC/SAML single sign-on and SCIM 2.0 provisioning. No organization, passkey or TOTP/2FA plugin is enabled.
 - **Principals:** `user`, `agent` (owned by a user/workspace, scoped tokens), `service` (SDK write keys, server keys, connectors).
 - **Authorization:** RBAC with built-in roles (owner, admin, marketer, approver, viewer) mapping to permission strings checked in the command layer; per-agent scope sets. Designed so it can move to relationship-based authz (OpenFGA, Apache-2.0) if fine-grained sharing is needed.
 - **Tenant isolation:** `workspace_id` + Postgres RLS (session variable set by the command layer); ClickHouse row policies; NATS subjects per workspace; Valkey key prefixes.

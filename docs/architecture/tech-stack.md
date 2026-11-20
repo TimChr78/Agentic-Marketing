@@ -16,7 +16,7 @@ This table describes what the repository ships today. Roadmap items are marked *
 | HTTP framework | **Hono** + `@hono/zod-openapi` | MIT | Fastify, NestJS | Small, fast, zod → OpenAPI built in, also runs on edge runtimes (future edge `decide`) |
 | Schemas & validation | **Zod 4** | MIT | TypeBox, Valibot | One source for runtime validation, JSON Schema (MCP), OpenAPI, forms |
 | DB access | **Drizzle ORM** + Drizzle Kit migrations (1.0 planned after GA, [#1003](https://github.com/TimChr78/Agentic-Marketing/issues/1003)) | Apache-2.0 | Kysely, Prisma | SQL-close, typed, good Postgres feature support (RLS, partitions via raw SQL) |
-| Lint/format | **Biome** (oxlint's type-aware rules being evaluated next to it, [#1002](https://github.com/TimChr78/Agentic-Marketing/issues/1002)) | MIT | ESLint + Prettier | One fast tool |
+| Lint/format | **Biome**, plus **oxlint** with its type-aware rules (`oxlint --type-aware`, run by `pnpm lint`) | MIT | ESLint + Prettier | One fast formatter and linter, with the type-aware checks that Biome does not do yet (`lint:oxlint` in [package.json](../../package.json)) |
 | Testing | **Vitest**, **Playwright**; one shared Docker service stack for integration tests | MIT / Apache-2.0 | Jest, Testcontainers | Fast unit and component tests. Integration tests use Postgres, ClickHouse, NATS and Valkey from one local stack (`scripts/test-services.sh`) or CI service containers, not per-test containers |
 
 ## Data & messaging
@@ -60,7 +60,7 @@ This table describes what the repository ships today. Roadmap items are marked *
 
 | Area | Choice | License | Alternatives considered | Why |
 |---|---|---|---|---|
-| Authentication | **Better Auth** (organizations, passkeys, 2FA, `@better-auth/mcp` OAuth 2.1 authorization server for MCP, SSO plugin later; all packages pinned to one version) | MIT | Keycloak, Ory, Zitadel, Auth.js | Library, not another server to run; covers MCP OAuth needs. Keycloak/Zitadel remain options as external IdPs via OIDC |
+| Authentication | **Better Auth** (email/password, `@better-auth/mcp` OAuth 2.1 authorization server for MCP, per-workspace OIDC/SAML SSO and SCIM 2.0; no organization, passkey or 2FA plugin; all packages pinned to one version) | MIT | Keycloak, Ory, Zitadel, Auth.js | Library, not another server to run; covers MCP OAuth needs. Keycloak/Zitadel remain options as external IdPs via OIDC |
 | Authorization | Own RBAC in command layer → OpenFGA if needed | — / Apache-2.0 | Casbin, Cerbos | Start simple |
 | Key management | Pluggable: env/file KEK, AWS/GCP KMS, **OpenBao** transit | MPL-2.0 | Vault (BSL) | OpenBao is the open fork of Vault |
 | HTML sanitizing | **Own sanitisers**: a DOM walk in the browser SDK, htmlparser2 allow-lists on the server | MIT | DOMPurify (not used) | Experience HTML is sanitised before it reaches the page ([sdk-js/personalize.ts](../../packages/sdk-js/src/personalize.ts)); hosted archive bodies and uploaded SVGs use bounded allow-list scans over htmlparser2 ([audience/archive.ts](../../packages/audience/src/archive.ts), [assets/svg.ts](../../packages/assets/src/svg.ts)). Fail-closed, with no DOM dependency on the server |

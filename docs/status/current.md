@@ -79,7 +79,6 @@ The Wave 5 epic #439 is closed (complete in code); these checks are tracked in #
 ## Next
 
 - After 0.14.0, Wave 5 is complete in code. The next step depends on the owner. Candidates from the open issues:
-  - #441: segments on the platform's own engagement.
   - #173: organise the test suite by domain.
   - #183: an AI PR reviewer.
   - #208: contributor scaffolding.
