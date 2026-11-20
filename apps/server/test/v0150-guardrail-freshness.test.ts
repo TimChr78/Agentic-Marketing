@@ -146,7 +146,7 @@ async function drainExcept(ws: string, type: string) {
      WHERE workspace_id = $1 AND state = 'pending' AND NOT (payload->'events'->0->>'type' = $2)`,
     [ws, type],
   );
-  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus });
   return eventually(
     async () =>
       (
@@ -241,7 +241,7 @@ describe('guardrails read unpublished message events (#1008)', () => {
 
     // Once the queue is published, the same published data reaches the same verdict.
     await releasePublication(s.ws);
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus });
     await eventually(
       () => t.srv.events.messageStats(s.ws, { since: new Date(Date.now() - 3_600_000) }),
       (stats) => (stats.complained ?? 0) === 1,
@@ -352,7 +352,7 @@ describe('guardrails read unpublished message events (#1008)', () => {
     // Publish what is still waiting (the send decisions, not the complaint) so only the dead
     // letter remains: nothing is outstanding, and nothing will ever carry the complaint.
     await releasePublication(s.ws);
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus });
     await eventually(
       async () => {
         const pending = await t.srv.db.admin.query<{ n: number }>(
@@ -409,7 +409,7 @@ describe('guardrails read unpublished message events (#1008)', () => {
       [s.ws],
     );
     await releasePublication(s.ws);
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus });
     await eventually(
       async () =>
         (

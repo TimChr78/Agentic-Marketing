@@ -4,6 +4,7 @@ import { artifactTypes, type SegmentDefinition } from '@agentic-marketing/artifa
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { BusEvent, EventBus, EventStore } from '@agentic-marketing/events';
 import type { ResolvedEvent } from '@agentic-marketing/profiles';
+import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { type EvalContext, evaluate, relevant } from './evaluate';
 import { materialize } from './sql';
@@ -22,10 +23,20 @@ export interface PublishedSegment {
   definition: SegmentDefinition;
 }
 
+/** Definitions that no longer parse, reported once per process so a hot loop does not repeat it. */
+const reportedInvalid = new Set<string>();
+
+/**
+ * The published segments a workspace can evaluate. A definition that no longer parses (a saved
+ * `within` beyond the schema's cap, or content written by an older release) is left out and logged
+ * once, so one unreadable segment cannot make the whole workspace's refresh fail (#1073). The
+ * segment's own preview still reports the parse error.
+ */
 export async function publishedSegments(tx: Tx): Promise<PublishedSegment[]> {
   const rows = await tx
     .select({
       id: schema.artifacts.id,
+      workspaceId: schema.artifacts.workspaceId,
       name: schema.artifacts.name,
       version: schema.artifacts.publishedVersion,
       content: schema.artifactVersions.content,
@@ -40,7 +51,21 @@ export async function publishedSegments(tx: Tx): Promise<PublishedSegment[]> {
       ),
     )
     .where(and(eq(schema.artifacts.type, 'segment'), isNotNull(schema.artifacts.publishedVersion), eq(schema.artifacts.archived, false)));
-  return rows.map((r) => ({ id: r.id, name: r.name, version: r.version ?? 0, definition: artifactTypes.segment.content.parse(r.content) }));
+  const segments: PublishedSegment[] = [];
+  for (const r of rows) {
+    try {
+      segments.push({ id: r.id, name: r.name, version: r.version ?? 0, definition: artifactTypes.segment.content.parse(r.content) });
+    } catch (err) {
+      const key = `${r.workspaceId}:${r.id}`;
+      if (reportedInvalid.has(key)) continue;
+      reportedInvalid.add(key);
+      logger.error(
+        { err, workspace: r.workspaceId, segment: r.id },
+        'published segment is no longer valid; it is skipped until it is re-saved',
+      );
+    }
+  }
+  return segments;
 }
 
 export function contextFor(
@@ -309,15 +334,29 @@ export async function refreshPeople(tx: Tx, workspaceId: string, profileIds: str
   const out: BusEvent[] = [];
   for (const seg of segments) {
     if (seg.definition.mode !== 'dynamic' || !seg.definition.condition) continue;
-    const members = await evaluate(seg.definition.condition, contextFor(tx, workspaceId, events, segments, { scope }));
-    const { entered, exited } = await applyDiff(tx, workspaceId, seg.id, members, scope);
-    if (!entered.length && !exited.length) continue;
-    const changesKey = [...entered.map((p) => `${p}:in`), ...exited.map((p) => `${p}:out`)].sort();
-    const runCause = `run:${createHash('sha256')
-      .update(`${seg.id}\n${await scopeRunToken(tx)}\n${changesKey.join('\n')}`)
-      .digest('hex')
-      .slice(0, 32)}`;
-    out.push(...(await membershipEvents(tx, workspaceId, seg, entered, exited, () => `${cause}:${runCause}`)));
+    // This runs inside the unsubscribe request's transaction. One segment that cannot be
+    // evaluated (a message rule the message store refuses, a purpose that is gone) must not turn
+    // the committed withdrawal into an error page, and must not stop the other segments from
+    // moving: its own savepoint rolls back and the loop continues (#1073).
+    const savepoint = `refresh_people_${seg.id.replace(/[^a-z0-9_]/gi, '_')}`;
+    await tx.execute(sql.raw(`SAVEPOINT ${savepoint}`));
+    try {
+      const members = await evaluate(seg.definition.condition, contextFor(tx, workspaceId, events, segments, { scope }));
+      const { entered, exited } = await applyDiff(tx, workspaceId, seg.id, members, scope);
+      if (entered.length || exited.length) {
+        const changesKey = [...entered.map((p) => `${p}:in`), ...exited.map((p) => `${p}:out`)].sort();
+        const runCause = `run:${createHash('sha256')
+          .update(`${seg.id}\n${await scopeRunToken(tx)}\n${changesKey.join('\n')}`)
+          .digest('hex')
+          .slice(0, 32)}`;
+        out.push(...(await membershipEvents(tx, workspaceId, seg, entered, exited, () => `${cause}:${runCause}`)));
+      }
+      await tx.execute(sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
+    } catch (err) {
+      logger.warn({ err, workspace: workspaceId, segment: seg.id }, 'segment re-evaluation after a consent change failed; continuing');
+      await tx.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`)).catch(() => {});
+      await tx.execute(sql.raw(`RELEASE SAVEPOINT ${savepoint}`)).catch(() => {});
+    }
   }
   return out;
 }

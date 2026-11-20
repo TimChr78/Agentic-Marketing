@@ -2,18 +2,27 @@ import { createHash } from 'node:crypto';
 import { artifactTypes, canonicalProfileIds, createArtifact, type SegmentDefinition } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
-import { schema, type Tx } from '@agentic-marketing/db';
+import { enqueueOutbox, schema, type Tx } from '@agentic-marketing/db';
 import type { BusEvent } from '@agentic-marketing/events';
 import { personCrypto } from '@agentic-marketing/profiles';
 import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { parseCsv } from './csv';
-import { listChangeEvents, type PublishedSegment, publishInSlices } from './membership';
+import { listChangeEvents, type PublishedSegment } from './membership';
 
 // Static and snapshot audiences (#83): membership is data, not an artifact version, so editing a
 // list never opens a review. The list table is the source of truth; every change is mirrored into
 // segment_memberships so broadcasts, journeys and segment references keep reading one table.
 // Membership is not consent: sends still check consent, suppression and delivery policy.
+
+/**
+ * The payload a `segment_change` outbox row carries: the Segment Entered/Exited events of one list
+ * change, chunked so a large snapshot never writes one huge row. Only the workspace is checked; the
+ * events were built by `listChangeEvents` and are published as they are.
+ */
+export const segmentChangePayloadSchema = z.object({
+  events: z.array(z.object({ workspaceId: z.string().min(1) }).catchall(z.unknown())).min(1),
+});
 
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
 const ProfileId = z.string().regex(/^prf_[0-9a-f]{32}$/);
@@ -25,6 +34,13 @@ type ListSegment = { id: string; name: string; version: number; definition: Segm
 type UnmatchedReason = 'not_found' | 'ambiguous' | 'invalid';
 type Resolved = { profileId: string } | { reason: UnmatchedReason };
 type Unmatched = { value: string; reason: UnmatchedReason };
+
+/**
+ * A test seam, set only by the concurrency test for #1068: it runs after the unlocked follow and
+ * before the profile rows are locked, so the test can commit a merge in exactly that window.
+ * Production never sets it.
+ */
+export const audienceTestHooks: { beforeRowLocks?: () => Promise<void> } = {};
 
 /** The latest version of a segment, which is what an edit acts on. */
 async function latestSegment(tx: Tx, workspaceId: string, id: string): Promise<ListSegment> {
@@ -65,6 +81,93 @@ function requireList(seg: ListSegment): void {
  */
 export async function canonicalOf(tx: Tx, workspaceId: string, ids: string[]): Promise<Map<string, string | null>> {
   return canonicalProfileIds(tx, workspaceId, ids);
+}
+
+/**
+ * Today's people for ids resolved a moment earlier, with their profile rows locked `FOR SHARE`.
+ *
+ * The caller resolves identifiers before this (that step can unwrap a key with the provider); a
+ * merge may commit in between. Locking the canonical rows in ascending id order — the profile row
+ * order in `packages/profiles/src/identity.ts` — makes the rest race-free:
+ *
+ * - a merge that committed first is visible in the locked re-read, so the id is followed to its
+ *   survivor;
+ * - a merge that starts later must `UPDATE profiles SET merged_into` on the folded row, which
+ *   conflicts with `FOR SHARE`, so it waits for this transaction. When it runs, migration 0069's
+ *   `merge_segment_memberships` moves the row this transaction wrote to the survivor.
+ *
+ * The residual is the wait a merge takes while it holds its own identity lock; it is bounded by
+ * this command's database-only work (batched inserts and deletes, no network I/O) and #1074 tracks
+ * lock-wait bounds. Locking rows rather than the workspace keeps public endpoints and unrelated
+ * people unblocked by a large import or snapshot.
+ */
+async function lockedSurvivors(tx: Tx, workspaceId: string, ids: string[]): Promise<string[]> {
+  const canonical = await canonicalOf(tx, workspaceId, ids);
+  let frontier = [...new Set([...canonical.values()].filter((id): id is string => !!id))];
+  // The concurrency test for #1068 pauses here: the unlocked follow of a moment ago can be stale,
+  // and everything after this line must re-read `merged_into` under the row lock.
+  await audienceTestHooks.beforeRowLocks?.();
+  const locked = new Map<string, { id: string; mergedInto: string | null }>();
+  const survivors = new Set<string>();
+  for (let round = 0; round < 20 && frontier.length; round++) {
+    const toLock = [...new Set(frontier.filter((id) => !locked.has(id)))].sort();
+    if (toLock.length) {
+      const rows = (
+        await tx.execute<{ id: string; merged_into: string | null }>(sql`
+          SELECT id, merged_into FROM profiles
+          WHERE workspace_id = ${workspaceId} AND id = ANY(${sql.param(toLock)}::text[])
+          ORDER BY id
+          FOR SHARE`)
+      ).rows;
+      for (const r of rows) locked.set(r.id, { id: r.id, mergedInto: r.merged_into });
+    }
+    const next: string[] = [];
+    for (const id of frontier) {
+      if (!locked.has(id)) continue;
+      const row = locked.get(id)!;
+      // A merge that committed before this lock is now visible; follow it. One that starts after
+      // it is waiting on the FOR SHARE and cannot move the row until this transaction commits.
+      if (row.mergedInto) next.push(row.mergedInto);
+      else survivors.add(id);
+    }
+    frontier = [...new Set(next)].filter((id) => !locked.has(id));
+  }
+  return [...survivors];
+}
+
+/**
+ * Today's people for ids resolved a moment earlier, without taking any lock. Only a dry run, which
+ * writes nothing, may use this: a write must go through `lockedSurvivors`.
+ */
+async function resolvedPeople(tx: Tx, workspaceId: string, ids: string[]): Promise<string[]> {
+  const canonical = await canonicalOf(tx, workspaceId, ids);
+  return [...new Set([...canonical.values()].filter((id): id is string => !!id))];
+}
+
+/** The people among `ids` who are already on the list. */
+async function existingMembers(tx: Tx, segmentId: string, ids: string[]): Promise<Set<string>> {
+  if (!ids.length) return new Set();
+  const rows = await tx
+    .select({ profileId: schema.segmentListMembers.profileId })
+    .from(schema.segmentListMembers)
+    .where(and(eq(schema.segmentListMembers.segmentId, segmentId), inArray(schema.segmentListMembers.profileId, ids)));
+  return new Set(rows.map((r) => r.profileId));
+}
+
+/**
+ * Publishes list change events after the command commits. The outbox row is written in the same
+ * transaction, so a process that dies after the commit still delivers on the next dispatcher round,
+ * and no network I/O runs while profile rows are locked.
+ */
+async function enqueueSegmentChanges(tx: Tx, workspaceId: string, events: BusEvent[], cause: string) {
+  const size = 5000;
+  for (let i = 0; i < events.length; i += size) {
+    await enqueueOutbox(tx, workspaceId, {
+      kind: 'segment_change',
+      payload: { events: events.slice(i, i + size) },
+      operationKey: `${cause}:${i / size}`,
+    });
+  }
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -226,14 +329,6 @@ async function recordRun(tx: Tx, workspaceId: string, seg: PublishedSegment, ent
   return written?.stamp ?? null;
 }
 
-/** Publishes list change events before the command commits; stable ids make a retried batch harmless. */
-async function publishChanges(ctx: CommandContext, seg: PublishedSegment, entered: string[], exited: string[], cause: string) {
-  if (!entered.length && !exited.length) return [] as BusEvent[];
-  const events = await listChangeEvents(ctx.tx, ctx.principal.workspaceId, seg, entered, exited, cause);
-  await publishInSlices(ctx.services.bus, events);
-  return events;
-}
-
 function asPublished(seg: ListSegment, definition = seg.definition): PublishedSegment {
   return { id: seg.id, name: seg.name, version: seg.version, definition };
 }
@@ -265,12 +360,14 @@ export const addAudienceMembers = defineCommand({
     if (!resolved.length) return { added: 0, existing: 0, unmatched };
 
     const at = new Date();
+    const people = await lockedSurvivors(ctx.tx, ws, resolved);
+    if (!people.length) return { added: 0, existing: 0, unmatched };
     const added: string[] = [];
-    for (let i = 0; i < resolved.length; i += MAX_BATCH) {
+    for (let i = 0; i < people.length; i += MAX_BATCH) {
       const rows = await ctx.tx
         .insert(schema.segmentListMembers)
         .values(
-          resolved.slice(i, i + MAX_BATCH).map((profileId) => ({
+          people.slice(i, i + MAX_BATCH).map((profileId) => ({
             workspaceId: ws,
             segmentId: seg.id,
             profileId,
@@ -297,8 +394,12 @@ export const addAudienceMembers = defineCommand({
 
     const published = asPublished(seg);
     await recordRun(ctx.tx, ws, published, entered.length, 0);
-    if (entered.length) await publishChanges(ctx, published, entered, [], `list:${newId('chg')}`);
-    return { added: added.length, existing: resolved.length - added.length, unmatched };
+    if (entered.length) {
+      const cause = `list:${newId('chg')}`;
+      const events = await listChangeEvents(ctx.tx, ws, published, entered, [], cause);
+      await enqueueSegmentChanges(ctx.tx, ws, events, cause);
+    }
+    return { added: added.length, existing: people.length - added.length, unmatched };
   },
 });
 
@@ -324,21 +425,27 @@ export const removeAudienceMembers = defineCommand({
     const { resolved, unmatched } = await resolveSelectors(ctx, input);
     if (!resolved.length) return { removed: 0, notMembers: 0, unmatched };
 
+    const people = await lockedSurvivors(ctx.tx, ws, resolved);
+    if (!people.length) return { removed: 0, notMembers: 0, unmatched };
     const removedRows = await ctx.tx
       .delete(schema.segmentListMembers)
-      .where(and(eq(schema.segmentListMembers.segmentId, seg.id), inArray(schema.segmentListMembers.profileId, resolved)))
+      .where(and(eq(schema.segmentListMembers.segmentId, seg.id), inArray(schema.segmentListMembers.profileId, people)))
       .returning({ profileId: schema.segmentListMembers.profileId });
     const removed = removedRows.map((r) => r.profileId);
     const exitedRows = await ctx.tx
       .delete(schema.segmentMemberships)
-      .where(and(eq(schema.segmentMemberships.segmentId, seg.id), inArray(schema.segmentMemberships.profileId, resolved)))
+      .where(and(eq(schema.segmentMemberships.segmentId, seg.id), inArray(schema.segmentMemberships.profileId, people)))
       .returning({ profileId: schema.segmentMemberships.profileId });
     const exited = exitedRows.map((r) => r.profileId);
 
     const published = asPublished(seg);
     await recordRun(ctx.tx, ws, published, 0, exited.length);
-    if (exited.length) await publishChanges(ctx, published, [], exited, `list:${newId('chg')}`);
-    return { removed: removed.length, notMembers: resolved.length - removed.length, unmatched };
+    if (exited.length) {
+      const cause = `list:${newId('chg')}`;
+      const events = await listChangeEvents(ctx.tx, ws, published, [], exited, cause);
+      await enqueueSegmentChanges(ctx.tx, ws, events, cause);
+    }
+    return { removed: removed.length, notMembers: people.length - removed.length, unmatched };
   },
 });
 
@@ -424,22 +531,20 @@ export const importAudienceCsv = defineCommand({
     const { results } = await resolveMany(ctx, input.idType, values);
     const unmatched = results.flatMap((r, i) => ('reason' in r ? [{ row: i + 2, reason: r.reason }] : []));
     const matched = results.length - unmatched.length;
-    const people = [...new Set(results.filter((r): r is { profileId: string } => 'profileId' in r).map((r) => r.profileId))];
+    const resolved = [...new Set(results.filter((r): r is { profileId: string } => 'profileId' in r).map((r) => r.profileId))];
 
-    const existingRows = people.length
-      ? await ctx.tx
-          .select({ profileId: schema.segmentListMembers.profileId })
-          .from(schema.segmentListMembers)
-          .where(and(eq(schema.segmentListMembers.segmentId, seg.id), inArray(schema.segmentListMembers.profileId, people)))
-      : [];
-    const existing = new Set(existingRows.map((r) => r.profileId));
-    const fresh = people.filter((p) => !existing.has(p));
-
+    const at = new Date();
     if (input.dryRun) {
+      // A dry run writes nothing, so it takes no row locks: it only answers what the import would do.
+      const people = await resolvedPeople(ctx.tx, ws, resolved);
+      const existing = await existingMembers(ctx.tx, seg.id, people);
+      const fresh = people.filter((p) => !existing.has(p));
       return { importId: null, rows: data.length, matched, added: fresh.length, existing: people.length - fresh.length, unmatched };
     }
 
-    const at = new Date();
+    const people = await lockedSurvivors(ctx.tx, ws, resolved);
+    const existing = await existingMembers(ctx.tx, seg.id, people);
+    const fresh = people.filter((p) => !existing.has(p));
     const added: string[] = [];
     for (let i = 0; i < fresh.length; i += MAX_BATCH) {
       const rows = await ctx.tx
@@ -471,7 +576,11 @@ export const importAudienceCsv = defineCommand({
 
     const published = asPublished(seg);
     const stamp = await recordRun(ctx.tx, ws, published, entered.length, 0);
-    if (entered.length) await publishChanges(ctx, published, entered, [], `import:${newId('chg')}`);
+    if (entered.length) {
+      const cause = `import:${newId('chg')}`;
+      const events = await listChangeEvents(ctx.tx, ws, published, entered, [], cause);
+      await enqueueSegmentChanges(ctx.tx, ws, events, cause);
+    }
     const importId = await recordImport(ctx.tx, ws, seg.id, {
       source: 'csv',
       rows: data.length,
@@ -482,7 +591,15 @@ export const importAudienceCsv = defineCommand({
       fileSha256: createHash('sha256').update(input.csv).digest('hex'),
       actor: ctx.principal.userId,
     });
-    return { importId, rows: data.length, matched, added: added.length, existing: people.length - added.length, unmatched, stamp };
+    return {
+      importId,
+      rows: data.length,
+      matched,
+      added: added.length,
+      existing: people.length - added.length,
+      unmatched,
+      stamp,
+    };
   },
 });
 
@@ -539,26 +656,31 @@ export const listAudienceImports = defineCommand({
   },
 });
 
-/** The surviving members of a segment, for a snapshot copy. */
-async function memberIds(tx: Tx, workspaceId: string, segmentId: string): Promise<string[]> {
+/**
+ * The profile ids a segment's membership stores, without following merges: the snapshot caller
+ * locks them `FOR SHARE` and follows them to today's survivors before copying (#1068).
+ */
+async function memberProfileIds(tx: Tx, segmentId: string): Promise<string[]> {
   const rows = await tx
     .select({ profileId: schema.segmentMemberships.profileId })
     .from(schema.segmentMemberships)
-    .innerJoin(
-      schema.profiles,
-      and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, schema.segmentMemberships.profileId)),
-    )
-    .where(and(eq(schema.segmentMemberships.segmentId, segmentId), sql`${schema.profiles.mergedInto} IS NULL`));
+    .where(eq(schema.segmentMemberships.segmentId, segmentId));
   return rows.map((r) => r.profileId);
 }
 
-/** Makes the snapshot's stored list exactly `target`, mirroring memberships and reporting the diff. */
+/**
+ * Makes the snapshot's stored list exactly `target`, mirroring memberships and reporting the diff.
+ * `target` is the output of `lockedSurvivors`, so the profile rows are held `FOR SHARE` until this
+ * transaction commits and a merge cannot strand a row on a folded id (#1068). The change events are
+ * returned, not published: the caller writes them to the outbox.
+ */
 async function replaceList(
   ctx: CommandContext,
   seg: PublishedSegment,
   target: string[],
   source: 'snapshot',
-): Promise<{ added: number; removed: number; entered: number; exited: number; members: number }> {
+  cause: string,
+): Promise<{ added: number; removed: number; entered: number; exited: number; members: number; events: BusEvent[] }> {
   const ws = ctx.principal.workspaceId;
   const want = new Set(target);
   const currentRows = await ctx.tx
@@ -610,8 +732,8 @@ async function replaceList(
   }
 
   await recordRun(ctx.tx, ws, seg, entered.length, exited.length);
-  await publishChanges(ctx, seg, entered, exited, `snapshot:${newId('chg')}`);
-  return { added: add.length, removed: remove.length, entered: entered.length, exited: exited.length, members: want.size };
+  const events = entered.length || exited.length ? await listChangeEvents(ctx.tx, ws, seg, entered, exited, cause) : ([] as BusEvent[]);
+  return { added: add.length, removed: remove.length, entered: entered.length, exited: exited.length, members: want.size, events };
 }
 
 export const snapshotAudience = defineCommand({
@@ -657,8 +779,11 @@ export const snapshotAudience = defineCommand({
       version: created.version,
       definition: artifactTypes.segment.content.parse(content),
     };
-    const members = await memberIds(ctx.tx, ws, input.sourceSegmentId);
-    const result = await replaceList(ctx, seg, members, 'snapshot');
+    const cause = `snapshot:${newId('chg')}`;
+    // The artifact rows are written first; the profile row locks come after them, consistently.
+    const members = await lockedSurvivors(ctx.tx, ws, await memberProfileIds(ctx.tx, input.sourceSegmentId));
+    const result = await replaceList(ctx, seg, members, 'snapshot', cause);
+    if (result.events.length) await enqueueSegmentChanges(ctx.tx, ws, result.events, cause);
     await recordImport(ctx.tx, ws, seg.id, {
       source: 'snapshot',
       rows: members.length,
@@ -700,8 +825,10 @@ export const refreshSnapshotAudience = defineCommand({
       .from(schema.artifacts)
       .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, sourceId)));
     if (!source?.publishedVersion) throw new AppError('conflict', `The snapshot's source ${sourceId} is not published.`);
-    const members = await memberIds(ctx.tx, ws, sourceId);
-    const result = await replaceList(ctx, asPublished(seg), members, 'snapshot');
+    const cause = `snapshot:${newId('chg')}`;
+    const members = await lockedSurvivors(ctx.tx, ws, await memberProfileIds(ctx.tx, sourceId));
+    const result = await replaceList(ctx, asPublished(seg), members, 'snapshot', cause);
+    if (result.events.length) await enqueueSegmentChanges(ctx.tx, ws, result.events, cause);
     const importId = await recordImport(ctx.tx, ws, seg.id, {
       source: 'snapshot',
       rows: members.length,

@@ -5,7 +5,7 @@ import { runActiveMandateRepair, runArchivedApprovalSweep } from '@agentic-marke
 import { consentHook, runBroadcasts, runOutboxDispatcher, runRetention } from '@agentic-marketing/audience';
 import { cleanupExpiredOAuthWorkspaceSelections, RESET_PASSWORD_TTL_SECONDS } from '@agentic-marketing/auth';
 import { runContentFetches } from '@agentic-marketing/content';
-import { type Db, enqueueUnpublishedErasures, runIdempotencyKeyCleanup, runSentAtBackfill } from '@agentic-marketing/db';
+import { type Db, runErasurePublicationBacklog, runIdempotencyKeyCleanup, runSentAtBackfill } from '@agentic-marketing/db';
 import { runDeliveryWorker } from '@agentic-marketing/email';
 import { runSink, runSubjectKeyBackfill } from '@agentic-marketing/events';
 import { type DeliveryDeps, runDeliveries, runTokenRefresher, webhookHook } from '@agentic-marketing/integrations';
@@ -101,6 +101,8 @@ export function startScheduler(
     erasurePurgeIntervalSeconds?: number;
     /** False keeps the recurring physical purge loop out of the way; a test drives it itself. */
     erasurePurge?: boolean;
+    /** How often failed or unpublished erasure jobs are re-opened (#1062). */
+    erasurePublicationTickMs?: number;
   } = {},
 ): WorkerLoop[] {
   logger.info(
@@ -127,16 +129,17 @@ export function startScheduler(
         .then((count) => logger.info({ workspaces: count }, 'exclusion keys provisioned'))
         .catch((err) => logger.error({ err }, 'exclusion key provisioning failed')),
     ),
-    // One pass at start: an erasure whose cleanup completed before part 2, or that predates durable
-    // jobs, has committed ledger rows but was never published to `erased_subjects`. Re-enqueue it so
-    // the cleanup job publishes it; the durable ledger already makes reads fail closed meanwhile.
+    // At start and periodically: an erasure whose cleanup completed before part 2, that predates
+    // durable jobs or whose publication job exhausted its retries has committed ledger rows but no
+    // visible exclusion. Re-enqueue it so the cleanup publishes it; the durable ledger already makes
+    // reads fail closed to the protected path meanwhile (#1062).
     loop(
       'erasure-publication-backlog',
-      enqueueUnpublishedErasures(srv.db)
-        .then((count) => {
-          if (count) logger.info({ erasures: count }, 're-enqueued erasures without a published exclusion');
-        })
-        .catch((err) => logger.error({ err }, 'erasure publication backlog could not be re-enqueued')),
+      runErasurePublicationBacklog({ db: srv.db }, signal, {
+        ...(opts.erasurePublicationTickMs === undefined ? {} : { tickMs: opts.erasurePublicationTickMs }),
+        log: (message) => logger.info(message),
+        onError: (err) => logger.error({ err }, 'erasure publication backlog could not be re-enqueued'),
+      }),
     ),
     // One pass at start: fills the subject-key columns of rows written before #1037 part 1, one
     // ClickHouse partition at a time. Nothing reads the columns yet, but the contract's later part
@@ -203,7 +206,7 @@ export function startScheduler(
     loop('broadcasts', runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs)),
     // Post-commit work enqueued by tenant transactions (#978 part 2): message events and DOI
     // confirmation sends. It runs across tenants, as the owner, and claims with SKIP LOCKED.
-    loop('outbox-dispatcher', runOutboxDispatcher({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal)),
+    loop('outbox-dispatcher', runOutboxDispatcher({ db: srv.db, kp: srv.keyProvider, events: srv.events, bus: srv.bus }, signal)),
     loop(
       'retention',
       runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention, erasureGraceHours: srv.erasureGraceHours }, signal),

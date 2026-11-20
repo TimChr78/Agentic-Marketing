@@ -308,7 +308,7 @@ function renderWithToast(ui: ReactElement) {
 }
 
 function estimateText() {
-  return screen.getByText('Estimated size now').parentElement?.textContent ?? '';
+  return screen.getByText('Estimated size from live data').parentElement?.textContent ?? '';
 }
 
 function pendingCount() {

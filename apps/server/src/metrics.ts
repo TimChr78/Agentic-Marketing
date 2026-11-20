@@ -36,6 +36,8 @@ export interface GaugeSnapshot {
   warehouseDue?: number;
   /** Webhook/action deliveries that ended dead in the last 24 hours. */
   deliveriesDead24h?: number;
+  /** Erasures whose ledger keys were committed but never published to ClickHouse (#1062). */
+  erasuresUnpublished?: number;
   /** Agent decisions in the ledger over the last hour, per decision. */
   agentDecisions?: { decision: string; count: number }[];
   dependencies?: { name: DependencyName; up: boolean }[];
@@ -207,6 +209,12 @@ export function createMetricsRegistry(): MetricsRegistry {
       if (gauges.warehouseDue !== undefined) sample('am_warehouse_exports_due', '', gauges.warehouseDue);
       metric('am_deliveries_dead_24h', 'gauge', 'Webhook and action deliveries that ended dead in the last 24 hours.');
       if (gauges.deliveriesDead24h !== undefined) sample('am_deliveries_dead_24h', '', gauges.deliveriesDead24h);
+      metric(
+        'am_erasures_unpublished',
+        'gauge',
+        'Erasures whose exclusion ledger was committed but is not yet published to ClickHouse, so reads still return the person.',
+      );
+      if (gauges.erasuresUnpublished !== undefined) sample('am_erasures_unpublished', '', gauges.erasuresUnpublished);
 
       metric('am_agent_decisions_last_hour', 'gauge', 'Agent decisions in the ledger over the last hour, per decision.');
       const decisions = new Map((gauges.agentDecisions ?? []).map((row) => [row.decision, row.count]));
@@ -262,6 +270,7 @@ export async function collectGauges(db: Db): Promise<GaugeSnapshot> {
         broadcast_due: string;
         warehouse_due: string;
         deliveries_dead_24h: string;
+        erasures_unpublished: string;
       }>(
         `SELECT
            (SELECT count(*) FROM messages WHERE status IN ('queued', 'sending')) AS messages_pending,
@@ -278,7 +287,13 @@ export async function collectGauges(db: Db): Promise<GaugeSnapshot> {
               WHERE enabled AND (run_requested OR last_run_at IS NULL OR last_run_at < now() - every_minutes * interval '1 minute'))
              AS warehouse_due,
            (SELECT count(*) FROM deliveries
-              WHERE status = 'dead' AND finished_at > now() - interval '24 hours') AS deliveries_dead_24h`,
+              WHERE status = 'dead' AND finished_at > now() - interval '24 hours') AS deliveries_dead_24h,
+           (SELECT count(*) FROM erasures e
+              WHERE EXISTS (SELECT 1 FROM erasure_keys k
+                             WHERE k.workspace_id = e.workspace_id AND k.erasure_id = e.id AND k.coverage = 'full')
+                AND NOT EXISTS (SELECT 1 FROM erasure_cleanup_jobs j
+                                 WHERE j.workspace_id = e.workspace_id AND j.erasure_id = e.id
+                                   AND j.published_at IS NOT NULL)) AS erasures_unpublished`,
       ),
       'queue gauges',
     );
@@ -291,6 +306,7 @@ export async function collectGauges(db: Db): Promise<GaugeSnapshot> {
       gauges.broadcastDue = Number(row.broadcast_due);
       gauges.warehouseDue = Number(row.warehouse_due);
       gauges.deliveriesDead24h = Number(row.deliveries_dead_24h);
+      gauges.erasuresUnpublished = Number(row.erasures_unpublished);
     }
   } catch {
     // No schema yet, no permission, or too slow: the other metrics are still worth returning.

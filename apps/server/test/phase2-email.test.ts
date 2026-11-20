@@ -10,7 +10,7 @@ let t: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let ws: string;
 /** Decision and delivery events are outbox rows now (#978 part 2); publish them before reading ClickHouse. */
-const flushOutbox = () => dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 100 });
+const flushOutbox = () => dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 100 });
 const inbox: { to: string[]; data: string }[] = [];
 const smtp = new SMTPServer({
   authOptional: true,

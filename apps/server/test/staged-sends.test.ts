@@ -100,7 +100,7 @@ const checkNow = async (artifactId: string) => {
  * production but makes a forced check race CI timing.
  */
 const flushOutbox = async (artifactId: string) => {
-  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 1000 });
   await eventually(
     async () =>
       Number(
@@ -352,7 +352,7 @@ describe('staged send', () => {
         WHERE workspace_id = $1 AND subject_ref = $2`,
       [ws, id],
     );
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 500 });
     await flushOutbox(id);
     await checkNow(id);
     const stopped = await eventually(

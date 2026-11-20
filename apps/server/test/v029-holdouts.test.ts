@@ -1,3 +1,4 @@
+import { newId } from '@agentic-marketing/core';
 import { outbox } from '@agentic-marketing/email';
 import { armFor, holdoutHashVersion } from '@agentic-marketing/journeys';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -549,6 +550,29 @@ describe('erasure (#67)', () => {
     await api().call('profiles.erase', { profileId, reason: 'test erasure' });
     expect(await assignmentCount(journeyId)).toBe(0);
     expect((await t.srv.db.admin.query(`SELECT 1 FROM profiles WHERE id = $1`, [profileId])).rowCount).toBe(0);
+  });
+
+  it('stops counting the erased person in the journey holdout report (#1048)', async () => {
+    const journeyId = await createMeasurementJourney('Erasure report', 50, 100);
+    const ids = Array.from({ length: 12 }, () => newId('prf'));
+    await t.srv.db.admin.query('INSERT INTO profiles (workspace_id, id) SELECT $1, x FROM unnest($2::text[]) AS x', [ws, ids]);
+    const hash = holdoutHashVersion(50);
+    const arm = (profileIds: string[], armName: 'control' | 'treatment') =>
+      t.srv.db.admin.query(
+        `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm)
+         SELECT $1, 'journey', $2, $3, x, $4 FROM unnest($5::text[]) AS x`,
+        [ws, journeyId, hash, armName, profileIds],
+      );
+    await arm(ids.slice(0, 6), 'control');
+    await arm(ids.slice(6), 'treatment');
+    const before = await api().call('journeys.holdoutResult', { journeyId });
+    expect([before.control.entered, before.treatment.entered]).toEqual([6, 6]);
+
+    await api().call('profiles.erase', { profileId: ids[0]!, reason: 'test erasure' });
+
+    const after = await api().call('journeys.holdoutResult', { journeyId });
+    expect([after.control.entered, after.treatment.entered]).toEqual([5, 6]);
+    expect(after.suppressed).toBe(false);
   });
 });
 

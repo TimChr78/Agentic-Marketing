@@ -55,6 +55,13 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
        VALUES ($1, $2, 'customer@example.test:purchase-1')`,
       [live.workspace, profile],
     );
+    // A holdout arm is a person-keyed row a report reads; the restored snapshot brings it back
+    // with the profile, so the replay must remove it (#1048).
+    await restored.db.admin.query(
+      `INSERT INTO holdout_assignments (workspace_id, scope_type, scope_id, hash_version, profile_id, arm)
+       VALUES ($1, 'campaign', 'cmp_restore', 'hv_restore', $2, 'control')`,
+      [live.workspace, profile],
+    );
 
     const replayed = await replayErasures(restored.url.toString(), log);
     expect(replayed).toMatchObject({ erasures: 1, profiles: 1, cleanupJobs: 1 });
@@ -63,6 +70,8 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
     expect(left.rowCount).toBe(0);
     const markers = await restored.db.admin.query('SELECT 1 FROM journey_processed_events WHERE workspace_id = $1', [live.workspace]);
     expect(markers.rowCount).toBe(0);
+    const holdouts = await restored.db.admin.query('SELECT 1 FROM holdout_assignments WHERE workspace_id = $1', [live.workspace]);
+    expect(holdouts.rowCount).toBe(0);
     const jobs = await restored.db.admin.query<{
       state: string;
       next_attempt_at: Date;
