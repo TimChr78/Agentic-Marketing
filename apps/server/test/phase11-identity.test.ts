@@ -225,10 +225,34 @@ describe('SCIM provisioning', () => {
     expect((await off.json()).active).toBe(false);
     expect(await roleOf('sam@acme.test')).toBeUndefined();
 
-    // Owners are left to people.
+    // Owners are left to people: no delete, replace or patch may touch them.
     const ownerRow = (await (await scim(`/Users?filter=${encodeURIComponent(`userName eq "${owner.email.toLowerCase()}"`)}`)).json())
       .Resources[0];
     expect((await scim(`/Users/${ownerRow.id}`, { method: 'DELETE' })).status).toBe(403);
+    expect(
+      (
+        await scim(`/Users/${ownerRow.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ userName: 'hijacked@example.test', displayName: 'Hijacked', active: true }),
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await scim(`/Users/${ownerRow.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({
+            schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'],
+            Operations: [{ op: 'replace', path: 'userName', value: 'hijacked@example.test' }],
+          }),
+        })
+      ).status,
+    ).toBe(403);
+    const ownerAccount = await t.srv.db.admin.query<{ email: string; name: string }>('SELECT email, name FROM "user" WHERE id = $1', [
+      owner.id,
+    ]);
+    expect(ownerAccount.rows[0]!.email).toBe(owner.email.toLowerCase());
+    expect(ownerAccount.rows[0]!.name).toBe(owner.email.split('@')[0]);
     expect((await scim(`/Users/${sam.id}`, { method: 'DELETE' })).status).toBe(204);
 
     const audit = await api.call('audit.list', { limit: 50 });
@@ -241,6 +265,161 @@ describe('SCIM provisioning', () => {
     const { cookie } = await ssoSignIn('kim@acme.test');
     expect(cookie).toContain('session_token');
     expect((await t.api(owner).call('members.list', {})).members.some((m) => m.email === 'kim@acme.test')).toBe(false);
+  });
+});
+
+describe('SCIM account safety (#1129)', () => {
+  let unique = 0;
+  const scimCall =
+    (token: string) =>
+    (path: string, init: RequestInit = {}) =>
+      fetch(`${BASE}/scim/v2${path}`, {
+        ...init,
+        headers: { 'content-type': 'application/scim+json', authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+      });
+  const scimWorkspace = async () => {
+    const name = `scim-${++unique}-${Date.now()}`;
+    const own = await t.signUp(`${name}-owner@example.com`);
+    const workspace = await t.workspaceWith([[own, 'owner']], 'none');
+    const api = t.api(own, workspace);
+    const token = (await api.call('scim.rotateToken', {})).token;
+    return { name, own, workspace, api, call: scimCall(token) };
+  };
+  const member = async (workspace: string, role: string) => {
+    const user = await t.signUp(`scim-${++unique}-${role}-${Date.now()}@example.com`);
+    await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)', [
+      workspace,
+      user.id,
+      role,
+    ]);
+    return user;
+  };
+
+  it('refuses an admin overwriting the workspace owner through PUT or PATCH', async () => {
+    const own = await t.signUp(`scim-owner-${++unique}-${Date.now()}@example.com`);
+    const workspace = await t.workspaceWith([[own, 'owner']], 'none');
+    const admin = await member(workspace, 'admin');
+    const token = (await t.api(admin, workspace).call('scim.rotateToken', {})).token;
+    const call = scimCall(token);
+    const ownerRow = (await (await call(`/Users?filter=${encodeURIComponent(`userName eq "${own.email}"`)}`)).json()).Resources[0];
+    const put = await call(`/Users/${ownerRow.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ userName: 'attacker@example.test', displayName: 'Attacker', active: true }),
+    });
+    expect(put.status).toBe(403);
+    const patch = await call(`/Users/${ownerRow.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'],
+        Operations: [{ op: 'replace', value: { userName: 'attacker@example.test' } }],
+      }),
+    });
+    expect(patch.status).toBe(403);
+    const account = await t.srv.db.admin.query<{ email: string }>('SELECT email FROM "user" WHERE id = $1', [own.id]);
+    expect(account.rows[0]!.email).toBe(own.email.toLowerCase());
+  });
+
+  it('refuses to link or rewrite a person who belongs to another workspace', async () => {
+    const a = await scimWorkspace();
+    const domain = `tenant-a-${++unique}-${Date.now()}.test`;
+    const victim = await t.signUp(`victim@${domain}`);
+    await t.srv.db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'viewer')`, [
+      a.workspace,
+      victim.id,
+    ]);
+
+    const b = await scimWorkspace();
+    const denied = await b.call('/Users', {
+      method: 'POST',
+      body: JSON.stringify({ userName: victim.email, name: { givenName: 'A', familyName: 'Person' }, active: true }),
+    });
+    expect(denied.status).toBe(409);
+    expect((await denied.json()).scimType).toBe('uniqueness');
+    // The refused create did not attach the victim to workspace B.
+    const attached = await t.srv.db.admin.query('SELECT 1 FROM workspace_members WHERE workspace_id = $1 AND user_id = $2', [
+      b.workspace,
+      victim.id,
+    ]);
+    expect(attached.rowCount).toBe(0);
+
+    // A verified SSO domain of workspace B is a legitimate claim, so the link is allowed...
+    const providerId = `tenant-a-${++unique}-${Date.now()}`;
+    const registered = await fetch(`${BASE}/api/auth/sso/register`, {
+      method: 'POST',
+      headers: json(b.own.cookie),
+      body: JSON.stringify({
+        providerId,
+        issuer: idpBase,
+        domain,
+        workspaceId: b.workspace,
+        oidcConfig: { clientId: 'agentic-marketing', clientSecret: 's3cret', pkce: true },
+      }),
+    });
+    expect(registered.status).toBe(200);
+    await t.srv.db.admin.query(`UPDATE "ssoProvider" SET "domainVerified" = true WHERE "providerId" = $1`, [providerId]);
+    const linked = await b.call('/Users', {
+      method: 'POST',
+      body: JSON.stringify({ userName: victim.email, name: { givenName: 'A', familyName: 'Person' }, active: true }),
+    });
+    expect(linked.status).toBe(201);
+    const linkedUser = await linked.json();
+
+    // ...but the global e-mail and name stay put: workspace A still has the person.
+    const rewrite = await b.call(`/Users/${linkedUser.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ userName: `moved@${domain}`, displayName: 'Moved Person', active: true }),
+    });
+    expect(rewrite.status).toBe(409);
+    expect((await rewrite.json()).scimType).toBe('mutability');
+    const account = await t.srv.db.admin.query<{ email: string; name: string }>('SELECT email, name FROM "user" WHERE id = $1', [
+      victim.id,
+    ]);
+    expect(account.rows[0]!.email).toBe(victim.email.toLowerCase());
+    expect(account.rows[0]!.name).toBe(victim.email.split('@')[0]);
+
+    // Other attributes still apply.
+    const off = await b.call(`/Users/${linkedUser.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'],
+        Operations: [{ op: 'replace', value: { active: false } }],
+      }),
+    });
+    expect((await off.json()).active).toBe(false);
+  });
+
+  it('still creates, renames and deactivates an account only this workspace manages', async () => {
+    const w = await scimWorkspace();
+    const created = await w.call('/Users', {
+      method: 'POST',
+      body: JSON.stringify({
+        userName: `local-${++unique}-${Date.now()}@example.test`,
+        name: { givenName: 'Local', familyName: 'Person' },
+        externalId: 'okta-2',
+        active: true,
+      }),
+    });
+    expect(created.status).toBe(201);
+    const local = await created.json();
+
+    const renamedEmail = `renamed-${++unique}-${Date.now()}@example.test`;
+    const renamed = await w.call(`/Users/${local.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ userName: renamedEmail, displayName: 'Renamed Person', active: true }),
+    });
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toMatchObject({ userName: renamedEmail, displayName: 'Renamed Person', active: true });
+    const account = await t.srv.db.admin.query<{ email: string; name: string }>('SELECT email, name FROM "user" WHERE id = $1', [local.id]);
+    expect(account.rows[0]).toEqual({ email: renamedEmail, name: 'Renamed Person' });
+
+    const off = await w.call(`/Users/${local.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'],
+        Operations: [{ op: 'replace', value: { active: false } }],
+      }),
+    });
+    expect((await off.json()).active).toBe(false);
   });
 });
 

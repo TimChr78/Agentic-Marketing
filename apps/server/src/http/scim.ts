@@ -141,21 +141,82 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
   const emailOf = (body: Json) =>
     String(body.userName ?? body.emails?.find((e: Json) => e.primary)?.value ?? body.emails?.[0]?.value ?? '').toLowerCase();
 
+  /** Whether the person owns this workspace; SCIM never hands owners to an identity provider. */
+  async function isOwner(ws: string, userId: string) {
+    const { rows } = await deps.db.admin.query<{ role: string }>(
+      'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_id = $2',
+      [ws, userId],
+    );
+    return rows[0]?.role === 'owner';
+  }
+
+  /**
+   * Whether an account is also used outside this workspace, or owns any workspace. A workspace's
+   * SCIM integration may only rename such an account inside its own workspace: the global
+   * `user.email` is the sign-in identity of every workspace at once (#1129).
+   */
+  async function sharedOutside(ws: string, userId: string) {
+    const { rows } = await deps.db.admin.query<{ shared: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM workspace_members WHERE user_id = $1 AND workspace_id <> $2)
+           OR EXISTS (SELECT 1 FROM scim_users WHERE user_id = $1 AND workspace_id <> $2)
+           OR EXISTS (SELECT 1 FROM workspace_members WHERE user_id = $1 AND role = 'owner') AS shared`,
+      [userId, ws],
+    );
+    return rows[0]?.shared === true;
+  }
+
+  /** A verified single sign-on domain of this workspace is the only claim that may link an existing account. */
+  async function verifiedSsoDomain(ws: string, email: string) {
+    const domain = email.split('@')[1];
+    if (!domain) return false;
+    const { rowCount } = await deps.db.admin.query(
+      'SELECT 1 FROM "ssoProvider" WHERE "workspaceId" = $1 AND lower(domain) = $2 AND "domainVerified" LIMIT 1',
+      [ws, domain],
+    );
+    return (rowCount ?? 0) > 0;
+  }
+
   /** Applies SCIM user attributes: the account (name, e-mail) and the workspace side (active, external id). */
   async function saveUser(ws: string, id: string | null, body: Json) {
     const ctx = await deps.auth.$context;
     const email = emailOf(body);
     if (!email.includes('@')) throw new ScimError(400, 'userName must be an e-mail address.', 'invalidValue');
+    const name = nameOf(body, email);
     let userId = id;
     if (!userId) {
       const existing = await ctx.internalAdapter.findUserByEmail(email);
-      if (existing && (await users(ws, 'AND u.id = $2', [existing.user.id])).some((u) => u.active || u.external_id))
-        throw new ScimError(409, `${email} is already provisioned.`, 'uniqueness');
-      userId =
-        existing?.user.id ??
-        (await ctx.internalAdapter.createUser({ email, name: nameOf(body, email), emailVerified: true }, { method: 'scim' })).id;
+      if (existing) {
+        const known = (await users(ws, 'AND u.id = $2', [existing.user.id]))[0];
+        if (known && (known.active || known.external_id)) throw new ScimError(409, `${email} is already provisioned.`, 'uniqueness');
+        // Linking an account this workspace does not already manage needs a verified SSO claim on
+        // its domain. The message says nothing about the other workspace such an account may
+        // belong to; the 409 `uniqueness` is all the caller learns (#1129).
+        if (!known && !(await verifiedSsoDomain(ws, email)))
+          throw new ScimError(
+            409,
+            'This user name cannot be provisioned automatically. The person must sign in through a verified single sign-on domain of this workspace, or be invited.',
+            'uniqueness',
+          );
+        userId = existing.user.id;
+      } else {
+        userId = (await ctx.internalAdapter.createUser({ email, name, emailVerified: true }, { method: 'scim' })).id;
+      }
     } else {
-      await ctx.internalAdapter.updateUser(userId, { name: nameOf(body, email), email });
+      if (await isOwner(ws, userId)) throw new ScimError(403, 'Owners are managed by people, not by SCIM.');
+      const [current] = await users(ws, 'AND u.id = $2', [userId]);
+      if (!current) throw new ScimError(404, `User ${userId} not found.`);
+      // A shared account keeps its global e-mail and name, but the workspace side (active,
+      // externalId) still applies. Compare against the stored account, not the request, so a PUT
+      // that repeats the current values is not blocked.
+      if ((email !== current.email.toLowerCase() || name !== current.name) && (await sharedOutside(ws, userId))) {
+        await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
+        throw new ScimError(
+          409,
+          'This account also belongs to another workspace or owns one, so SCIM here cannot change its e-mail address or name. Change only active and externalId.',
+          'mutability',
+        );
+      }
+      await ctx.internalAdapter.updateUser(userId, { name, email });
     }
     await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
     return userResource(ws, await userById(ws, userId));

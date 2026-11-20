@@ -214,4 +214,55 @@ describe('agent event subscriptions (#312)', () => {
     const after = await agentCall(s.token, 'agents.events', { after: before.body.cursor });
     expect(after.body.events).toHaveLength(0);
   }, 40_000);
+
+  it('refuses a viewer managing subscriptions but lets an editor and a read-only agent', async () => {
+    const s = await setup();
+    const viewer = await t.signUp(`viewer-events-${Date.now()}@example.com`);
+    await t.srv.db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'viewer')`, [s.ws, viewer.id]);
+    const viewerApi = t.api(viewer, s.ws);
+    await expect(viewerApi.call('agents.subscribe', { agentId: s.agentId, eventTypes: ['alert.fired'] })).rejects.toMatchObject({
+      message: expect.stringContaining('artifacts:write'),
+    });
+
+    const editor = await t.signUp(`editor-events-${Date.now()}@example.com`);
+    await t.srv.db.admin.query(`INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'marketer')`, [
+      s.ws,
+      editor.id,
+    ]);
+    const editorApi = t.api(editor, s.ws);
+    const byEditor = await editorApi.call('agents.subscribe', { agentId: s.agentId, eventTypes: ['alert.fired'] });
+    await expect(viewerApi.call('agents.unsubscribe', { id: byEditor.id })).rejects.toMatchObject({
+      message: expect.stringContaining('artifacts:write'),
+    });
+    expect((await editorApi.call('agents.unsubscribe', { id: byEditor.id })).deleted).toBe(true);
+
+    // An agent acts on its own subscriptions with only its read scope.
+    const readToken = (await s.api.call('apiTokens.create', { name: 'Read only', scopes: ['artifacts:read'] })).token as string;
+    const own = await agentCall(readToken, 'agents.subscribe', { eventTypes: ['alert.fired'] });
+    expect(own.status).toBe(200);
+    expect(own.body.agentId).not.toBe(s.agentId);
+    expect((await agentCall(readToken, 'agents.unsubscribe', { id: own.body.id })).body).toEqual({ deleted: true });
+  }, 40_000);
+
+  it('refuses to delete a hosted agent’s trigger subscription directly', async () => {
+    const s = await setup();
+    const hosted = await s.api.call('agents.createHosted', {
+      name: 'Triggered agent',
+      instructions: 'React to alerts.',
+      schedule: 'daily:07:00',
+      scopes: ['artifacts:read'],
+      triggers: ['alert.fired'],
+    });
+    const trigger = await t.srv.db.admin.query<{ trigger_subscription_id: string }>(
+      'SELECT trigger_subscription_id FROM hosted_agents WHERE agent_id = $1',
+      [hosted.agentId],
+    );
+    const id = trigger.rows[0]!.trigger_subscription_id;
+    expect(id).toMatch(/^sub_/);
+    await expect(s.api.call('agents.unsubscribe', { id })).rejects.toMatchObject({
+      message: expect.stringContaining('hosted agent'),
+    });
+    const subscriptions = await s.api.call('agents.subscriptions', { agentId: hosted.agentId });
+    expect(subscriptions.subscriptions.map((sub) => sub.id)).toContain(id);
+  }, 40_000);
 });

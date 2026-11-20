@@ -48,6 +48,15 @@ const subscriptionOut = (row: typeof schema.agentSubscriptions.$inferSelect) => 
   createdAt: row.createdAt.toISOString(),
 });
 
+/** People change subscriptions with artifacts:write; an agent manages its own under artifacts:read. */
+function assertSubscriptionWrite(ctx: CommandContext) {
+  if (ctx.principal.type !== 'agent' && !ctx.principal.permissions.has('artifacts:write'))
+    throw new AppError(
+      'forbidden',
+      `Your role (${ctx.principal.role}) does not include the "artifacts:write" permission needed to change an agent’s event subscriptions.`,
+    );
+}
+
 /** The agent a subscription command acts for: an agent itself, or the one a person names. */
 async function targetAgent(ctx: CommandContext, requested: string | undefined, command: string): Promise<string> {
   if (ctx.principal.type === 'agent') {
@@ -80,6 +89,7 @@ export const subscribeAgent = defineCommand({
   actionClass: 'draft',
   target: (i) => i.agentId,
   handler: async (input, ctx) => {
+    assertSubscriptionWrite(ctx);
     const agentId = await targetAgent(ctx, input.agentId, 'agents.subscribe');
     if (input.webhookId) {
       const [hook] = await ctx.tx
@@ -114,6 +124,16 @@ export const unsubscribeAgent = defineCommand({
   actionClass: 'draft',
   target: (i) => i.id,
   handler: async (input, ctx) => {
+    assertSubscriptionWrite(ctx);
+    const [hosted] = await ctx.tx
+      .select({ agentId: schema.hostedAgents.agentId })
+      .from(schema.hostedAgents)
+      .where(eq(schema.hostedAgents.triggerSubscriptionId, input.id));
+    if (hosted)
+      throw new AppError(
+        'conflict',
+        'This subscription triggers a hosted agent. Change the agent’s triggers with agents.updateHosted instead of deleting the subscription.',
+      );
     const rows = await ctx.tx
       .delete(schema.agentSubscriptions)
       .where(

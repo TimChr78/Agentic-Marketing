@@ -195,6 +195,11 @@ export const submitReview = defineCommand({
   humansOnly: true,
   target: (i) => i.callId,
   handler: async (input, ctx) => {
+    if (!ctx.principal.permissions.has('artifacts:approve') && !ctx.principal.permissions.has('artifacts:write'))
+      throw new AppError(
+        'forbidden',
+        'Reviewing an AI answer needs the "artifacts:approve" permission (or artifacts:write). Your role does not include either.',
+      );
     const done = await ctx.tx
       .update(schema.aiCalls)
       .set({
