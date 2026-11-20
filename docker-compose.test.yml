@@ -85,7 +85,7 @@ services:
     mem_limit: 256m
 
   nats:
-    image: nats:2.15.0-alpine@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
+    image: nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
     labels: ["am-test=1"]
     # -js is JetStream; the monitoring port backs the healthcheck.
     command: ["-js", "-sd", "/data", "-m", "8222"]
