@@ -1,10 +1,7 @@
 import {
-  analyseHoldout,
-  anyArmBelowK,
   artifactTypes,
   DEFAULT_PURPOSES,
   type JourneyDefinition,
-  K,
   publishedSingleton,
   publishValidators,
 } from '@agentic-marketing/artifacts';
@@ -25,7 +22,7 @@ import { compile, JourneyCompileError, unsupported } from './graph';
 import { assignHoldout, computeJourneyHoldout, holdoutDetail, holdoutHashVersion } from './holdout';
 import { conditionSegments, journeyTouches } from './impact';
 import { advance, type ParticipantState } from './interpreter';
-import { attributeSplitOutcomes, splitArmPeople } from './split';
+import { computeJourneySplit } from './splitReport';
 
 const JourneyId = z.string().regex(/^jrn_[0-9a-f]{32}$/);
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
@@ -282,87 +279,8 @@ export const journeySplitResult = defineCommand({
   permission: 'artifacts:read',
   effect: 'read',
   target: (i) => i.journeyId,
-  handler: async (input, ctx) => {
-    const [a] = await ctx.tx
-      .select({ publishedVersion: schema.artifacts.publishedVersion, type: schema.artifacts.type })
-      .from(schema.artifacts)
-      .where(eq(schema.artifacts.id, input.journeyId));
-    if (a?.type !== 'journey') throw new AppError('not_found', `No journey ${input.journeyId}.`);
-    if (!a.publishedVersion) throw new AppError('not_found', `Journey ${input.journeyId} has no published version.`);
-    const [v] = await ctx.tx
-      .select({ content: schema.artifactVersions.content })
-      .from(schema.artifactVersions)
-      .where(and(eq(schema.artifactVersions.artifactId, input.journeyId), eq(schema.artifactVersions.number, a.publishedVersion)));
-    const def = artifactTypes.journey.content.parse(v?.content);
-    const split = def.nodes.find((n) => n.id === input.node);
-    if (split?.kind !== 'split') throw new AppError('invalid_input', `Node ${input.node} is not a split in the published journey.`);
-    const weights = (split.config as { weights?: number[] }).weights ?? [];
-    const range = { ...(input.from ? { from: new Date(input.from) } : {}), ...(input.to ? { to: new Date(input.to) } : {}) };
-    const ws = ctx.principal.workspaceId;
-    const taken = await ctx.services.events.journeySplitArms(ws, { journeyId: input.journeyId, node: input.node, ...range });
-    // Each entry contributes at most one conversion and unsubscribe. Each outcome event
-    // is attributed to exactly one eligible split entry/arm (#369); the previous profile-level sets
-    // were re-applied to every entry a re-entrant had, which counted one conversion in both arms.
-    const outcomes = await ctx.services.events.journeyHoldoutOutcomes(ws, { journeyId: input.journeyId, ...range });
-    const counts = attributeSplitOutcomes(
-      taken,
-      { converted: outcomes.convertedAt, unsubscribed: outcomes.unsubscribedAt },
-      weights.length,
-    );
-    const rate = (n: number, of: number) => (of ? n / of : 0);
-    // The same k floor the holdout read applies, per arm (#757): an arm below k never reports a
-    // count or rate, and no comparison or verdict is computed from a hidden baseline. The floor
-    // counts distinct people, not entries: one person re-entering an arm five times is still one
-    // person (0.14.11 review).
-    const armPeople = splitArmPeople(taken, weights.length).map((n) => ({ entered: n }));
-    const belowK = anyArmBelowK(armPeople);
-    const arms = counts.map((c, i) =>
-      belowK && armPeople[i]!.entered < K
-        ? {
-            arm: i,
-            weight: weights[i],
-            entered: null,
-            converted: null,
-            unsubscribed: null,
-            conversionRate: null,
-            unsubscribeRate: null,
-            suppressed: true,
-          }
-        : {
-            arm: i,
-            weight: weights[i],
-            ...c,
-            conversionRate: rate(c.converted, c.entered),
-            unsubscribeRate: rate(c.unsubscribed, c.entered),
-            suppressed: false,
-          },
-    );
-    const comparisons = belowK
-      ? []
-      : counts.slice(1).map((c, i) => {
-          const r = analyseHoldout(counts[0], c, input.minSampleSize);
-          return {
-            arm: i + 1,
-            versus: 0 as const,
-            absoluteLift: r.absoluteLift,
-            relativeLift: r.relativeLift,
-            ci95: r.ci95,
-            minSampleSizeMet: r.minSampleSizeMet,
-            verdict: r.verdict,
-          };
-        });
-    const better = comparisons.filter((c) => c.verdict === 'treatment_better').map((c) => `arm ${c.arm}`);
-    const note = !taken.length
-      ? 'Nobody has reached this split yet.'
-      : belowK
-        ? `An arm has fewer than k=${K} people, so its counts and rates and every comparison are withheld.`
-        : better.length
-          ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
-          : comparisons.every((c) => c.verdict === 'not_enough_data')
-            ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
-            : 'No arm is clearly better than arm 0 yet.';
-    return { journeyId: input.journeyId, node: input.node, k: K, suppressed: belowK, arms, comparisons, note };
-  },
+  handler: async (input, ctx) =>
+    computeJourneySplit({ tx: ctx.tx, events: ctx.services.events, workspaceId: ctx.principal.workspaceId }, input),
 });
 
 export const enrollProfiles = defineCommand({

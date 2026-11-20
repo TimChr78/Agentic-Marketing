@@ -69,8 +69,8 @@ export interface JourneyHoldoutResult {
  */
 export const JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT = 100_000;
 
-/** Why one winners page could not be resolved to its merge family (#1096). */
-type PageUnresolved = 'over-limit' | 'deep';
+/** Why one page of people could not be resolved to its merge family (#1096). */
+export type PageUnresolved = 'over-limit' | 'deep';
 
 const DEFAULT_JOURNEY_HOLDOUT_PAGE_SIZE = 1_000;
 
@@ -86,7 +86,7 @@ export function setJourneyHoldoutPageSizeForTests(size: number | null): void {
   journeyHoldoutPageSize = size === null ? DEFAULT_JOURNEY_HOLDOUT_PAGE_SIZE : Math.max(1, Math.trunc(size));
 }
 
-interface PageOutcomeScope {
+export interface PageOutcomeScope {
   profileIds: string[];
   byProfile: Map<string, string>;
   /** Null when the page resolved; otherwise the reason it could not, for the report note. */
@@ -94,16 +94,20 @@ interface PageOutcomeScope {
 }
 
 /**
- * The profile ids whose outcomes belong to one page of winners, and which person each resolves to:
+ * The profile ids whose outcomes belong to one page of people, and which person each resolves to:
  * every member of the page people's merge components (#1093), so an outcome stored under a
  * merged-away id is still read for the person it became. The read is bounded by `limit`; above it
  * the page is not resolved, and the caller matches on the stored profile id only. A component row
  * at `MERGE_MAX_HOPS` means the family is corruptly deep, which is unresolved for the same reason.
+ *
+ * The ids are resolved to their person first, so a caller may pass either representatives (the
+ * holdout's winners) or raw ids (a split's participants, which may be merged-away).
  */
-async function pageOutcomeScope(tx: Tx, workspaceId: string, people: readonly string[], limit: number): Promise<PageOutcomeScope> {
+export async function pageOutcomeScope(tx: Tx, workspaceId: string, people: readonly string[], limit: number): Promise<PageOutcomeScope> {
   const { rows } = await tx.execute<{ representative: string; profile_id: string; depth: number }>(sql`
     WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
-      componentOf: sql`SELECT DISTINCT unnest(${sql.param([...people])}::text[]) AS rep`,
+      seeds: sql`SELECT DISTINCT unnest(${sql.param([...people])}::text[]) AS id`,
+      componentOf: sql`SELECT DISTINCT representative COLLATE "default" AS rep FROM merge_representative`,
     })}
     SELECT representative, profile_id, depth FROM merge_component
     LIMIT ${limit + 1}`);
@@ -117,7 +121,7 @@ async function pageOutcomeScope(tx: Tx, workspaceId: string, people: readonly st
 }
 
 /** The note contribution for each unresolved cause, so a deep family never claims an id count. */
-function unresolvedOutcomeNote(reason: PageUnresolved, limit: number): string {
+export function unresolvedOutcomeNote(reason: PageUnresolved, limit: number): string {
   return reason === 'over-limit'
     ? `One page of people has more than ${limit} merge-family profiles to resolve, so its outcomes are matched on the profile id stored with the event.`
     : `A merge family is ${MERGE_MAX_HOPS} or more merges deep and could not be resolved, so its outcomes are matched on the profile id stored with the event.`;

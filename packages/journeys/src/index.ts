@@ -8,3 +8,4 @@ export * from './impact';
 export * from './interpreter';
 export * from './runtime';
 export * from './split';
+export * from './splitReport';
