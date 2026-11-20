@@ -695,7 +695,12 @@ async function variantResults(
     return {
       variant,
       subject,
-      sent: mine.filter((r) => ['sent', 'delivered', 'bounced', 'complained'].includes(r.status)).length,
+      // A queued or sending sample message has already been requested: the test's sample size is
+      // the recipients it selected, not how many had reached the gateway by the instant the
+      // decision read. Excluding in-flight rows made the reason depend on delivery timing and
+      // could say "fewer than 20 sends" for a complete sample (#1099). Suppressed and failed rows
+      // were never sent, so they stay out.
+      sent: mine.filter((r) => r.status !== 'suppressed' && r.status !== 'failed').length,
       delivered: new Set([...deliveredNow.map((r) => r.id), ...(delivered.get(variant) ?? [])]).size,
       opened: opened.get(variant)?.size ?? 0,
       clicked: clicked.get(variant)?.size ?? 0,

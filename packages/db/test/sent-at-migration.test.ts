@@ -191,8 +191,9 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       // The migration role owns the tables the migration files alter or index (profiles for 0099's
       // merged-into index, idempotency_keys for 0103's reversal columns and 0104's retention index,
       // agent_actions for 0103's foreign key, broadcast_runs for 0107's defer counter,
-      // journey_processed_events for 0109's new table and its policy). It is deliberately not a
-      // superuser and has no BYPASSRLS, so FORCE RLS applies to it.
+      // journey_processed_events for 0109's new table and its policy, broadcast_tests for 0116's
+      // decision snapshot). It is deliberately not a superuser and has no BYPASSRLS, so FORCE RLS
+      // applies to it.
       for (const table of [
         'artifacts',
         'artifact_versions',
@@ -210,6 +211,7 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'idempotency_keys',
         'agent_actions',
         'broadcast_runs',
+        'broadcast_tests',
         'erasure_cleanup_jobs',
         'erasure_keys',
         'erasure_generations',
