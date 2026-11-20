@@ -1,5 +1,5 @@
 import { complementarySuppression, K, planComplementarySuppression, publishedSingleton } from '@agentic-marketing/artifacts';
-import { campaignIdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
+import { campaignIdentityMap, type IdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
 import { erasureVisibilityEpoch, schema, type Tx } from '@agentic-marketing/db';
@@ -20,6 +20,7 @@ import {
   SOURCE_FILTERS,
 } from './compile';
 import { DIMENSIONS, type DimensionId, MEASURES, METRIC_CATALOG, type MeasureDef, measureIds, type SourceId } from './registry';
+import { type RevenueRow, summaryCurrency, summaryRevenue } from './revenue';
 
 // The read-only metric layer (#75): one typed query over a fixed catalogue. Nothing here accepts
 // SQL, a table name, a column name or an expression from the caller. The workspace comes from the
@@ -84,6 +85,13 @@ export interface InternalQueryOptions {
    * snapshot, not a stable answer for everyone.
    */
   pendingMessageEvents?: readonly MessageEvent[];
+  /**
+   * Internal: resolve message events' stored profile ids through this campaign identity map before
+   * counting distinct people, so a person reached under a merged-away id counts once (#1049). The
+   * map must already be scoped to the report's recipients. Only `message_events` measures accept
+   * it, and the result is never cached: a public query with the same input counts stored ids.
+   */
+  identity?: IdentityMap;
 }
 
 export const analyticsColumn = z.object({
@@ -94,7 +102,10 @@ export const analyticsColumn = z.object({
 
 export const analyticsMeta = z.object({
   timeZone: z.string(),
-  currency: z.string().nullable().describe('The single currency in the result, or null when there are none or several'),
+  currency: z
+    .string()
+    .nullable()
+    .describe('The single currency when exactly one revenue row has a visible amount and is not UNKNOWN; null otherwise'),
   from: z.string(),
   to: z.string(),
   freshness: z.string().nullable().describe('Newest event in the range, as an ISO date-time'),
@@ -645,9 +656,11 @@ async function execute(
   raw = false,
   pendingMessageEvents?: readonly MessageEvent[],
   protectedRead = true,
+  identityMap?: IdentityMap,
 ) {
   const source = measures[0].source;
   if (source === 'segment_memberships') return segmentQuery(deps, input, filters);
+  if (identityMap && source !== 'message_events') throw new Error('identity resolution is only implemented for message_events measures');
 
   const timeZone = await workspaceTimeZone(deps.tx, deps.workspaceId);
   const campaignSource = source === 'campaign';
@@ -706,6 +719,7 @@ async function execute(
         journeyVersion: input.journeyVersion,
         pendingMessageEvents,
         protectedRead,
+        identity: identityMap,
       });
 
   const started = Date.now();
@@ -755,11 +769,11 @@ async function execute(
   const { suppressed, revenueSuppressed } = shaped;
 
   const currencyIndex = compiled.outputs.findIndex((o) => o.kind === 'dimension' && o.dimension === 'currency');
-  const currencies = new Set(
-    (currencyIndex >= 0 ? rows.map((r) => r[currencyIndex]) : [])
-      .filter((v): v is string => typeof v === 'string')
-      .map((v) => v.toUpperCase()),
-  );
+  // The money measure whose visibility decides whether a single currency may be named. A query
+  // with both `campaign.revenue` and its per-recipient ratio names the same currency row; the
+  // suppression rule hides both together, so the first money output is enough.
+  const revenueIndex = compiled.outputs.findIndex((o) => o.kind === 'measure' && o.measure.unit === 'currency');
+  const revenueRows: RevenueRow[] = currencyIndex >= 0 && revenueIndex >= 0 ? summaryRevenue(rows, currencyIndex, revenueIndex) : [];
 
   const notes: string[] = [];
   if (measures.some((m) => m.id === 'email.opened' || m.id === 'email.open_rate'))
@@ -790,7 +804,7 @@ async function execute(
     rows,
     meta: {
       timeZone,
-      currency: currencies.size === 1 && !currencies.has('UNKNOWN') ? [...currencies][0] : null,
+      currency: summaryCurrency(revenueRows),
       from: input.from,
       to: input.to,
       freshness: await freshness(deps, {
@@ -829,14 +843,14 @@ export async function runAnalyticsQuery(deps: Deps, input: QueryInput, options: 
   const pendingMessageEvents = options.pendingMessageEvents?.length
     ? await deps.events.withoutErasedSubjects(deps.workspaceId, options.pendingMessageEvents)
     : [];
-  const key = raw || pendingMessageEvents.length ? null : cacheKey(deps.workspaceId, input, filters, epoch);
+  const key = raw || pendingMessageEvents.length || options.identity ? null : cacheKey(deps.workspaceId, input, filters, epoch);
   const now = Date.now();
   const hit = key === null ? undefined : cache.get(key);
   if (hit && hit.expires > now) {
     logger.debug({ workspaceId: deps.workspaceId, measures: input.measures }, 'analytics query cache hit');
     return clone(hit.value);
   }
-  const value = await execute(deps, input, measures, dimensions, filters, raw, pendingMessageEvents, protectedRead);
+  const value = await execute(deps, input, measures, dimensions, filters, raw, pendingMessageEvents, protectedRead, options.identity);
   if (key !== null) {
     cache.set(key, { expires: now + CACHE_TTL_MS, value });
     // Keep the map small in a long-running process; the TTL is the point, not an unbounded store.

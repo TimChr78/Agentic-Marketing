@@ -38,6 +38,8 @@ interface PendingSnapshot {
   /** How many of those events sit in a dead-lettered row (`am outbox` requeues them). */
   deadLettered: number;
   truncated: boolean;
+  /** Rows for this subject whose payload this server cannot parse. */
+  unparseable: number;
 }
 
 /**
@@ -46,6 +48,15 @@ interface PendingSnapshot {
  */
 function unboundedReason(): string {
   return `This agent’s guardrails cannot be checked: too many of its message events are waiting to be published or dead-lettered for one check to read, so the metrics would be incomplete. A person decides this send until the queue catches up (or is requeued with \`am outbox\`).`;
+}
+
+/**
+ * Why a check that finds a queued row for the subject it cannot parse refuses instead of deciding:
+ * the row may carry a real bounce or complaint from a newer event shape (a rolling deploy), and
+ * skipping it would compute a rate from a numerator that silently lost evidence (#1079).
+ */
+function unparseableReason(rows: number): string {
+  return `This agent’s guardrails cannot be checked: the queue holds ${rows} ${rows === 1 ? 'row' : 'rows'} for this agent’s sends that this server cannot read, so the metrics could be incomplete. A person decides this send until the queue catches up or those rows are cleared.`;
 }
 
 /**
@@ -109,6 +120,9 @@ export async function mandateGuardrailCheck(
   // A backlog beyond the snapshot bound is not a breach: nothing was measured. Sends wait for a
   // person, but the guardian must not cap for it, or the cap would outlive the backlog (#1008).
   if (snapshot.truncated) return { state: 'unavailable', reason: unboundedReason() };
+  // An unreadable queued row is evidence we cannot count, so it loosens a verdict the same way a
+  // truncated snapshot does: refuse rather than pass on incomplete evidence (#1079).
+  if (snapshot.unparseable) return { state: 'unavailable', reason: unparseableReason(snapshot.unparseable) };
   if (snapshot.events.length)
     logger.info(
       { agent: agentId, workspace: deps.workspaceId, queued: snapshot.events.length, deadLettered: snapshot.deadLettered },
@@ -133,8 +147,9 @@ export async function mandateGuardrailCheck(
 
 /**
  * The agent's queued events, parsed, de-duplicated by the table's replacing key and filtered to the
- * same sends and window the metric read describes. A row whose payload is not a valid batch was
- * never a deliverable event, so it contributes nothing.
+ * same sends and window the metric read describes. A row whose payload is not a valid batch cannot
+ * be silently treated as empty evidence: it may hold a real event shape from a newer server, so it
+ * is counted as unparseable and the verdict fails closed (#1079).
  */
 async function pendingEventsOf(
   tx: Tx,
@@ -152,11 +167,15 @@ async function pendingEventsOf(
   const events: MessageEvent[] = [];
   const seen = new Set<string>();
   let deadLettered = 0;
+  let unparseable = 0;
   for (const batch of batches) {
     let parsed: MessageEvent[];
     try {
       parsed = parseMessageEventPayload(batch.payload);
     } catch {
+      // The row is for this subject (the snapshot query filtered on its events), so skipping it
+      // would drop evidence from the verdict. Count it and let the caller fail closed (#1079).
+      unparseable++;
       continue;
     }
     for (const event of parsed) {
@@ -179,6 +198,7 @@ async function pendingEventsOf(
     events,
     deadLettered,
     truncated: truncated || events.length > GUARDRAIL_PENDING_MESSAGE_LIMIT,
+    unparseable,
   };
 }
 

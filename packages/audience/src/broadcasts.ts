@@ -734,7 +734,6 @@ function canaryBreaches(
   return breaches;
 }
 
-/** The canary share's message rows, recomputed from the deterministic assignment. */
 /**
  * People the send deliberately left out: a campaign control group's holdouts and readers skipped
  * by a send window. They are not delivery attempts, so the canary's size, failure share and rates
@@ -742,6 +741,17 @@ function canaryBreaches(
  */
 const intentionallyNotSent = (m: { status: string; reason: string | null }) =>
   m.status === 'suppressed' && !!m.reason && (m.reason.startsWith('holdout_control') || m.reason.startsWith('outside_send_window'));
+
+/**
+ * The segment member id a broadcast message was requested for. The canary pass decides membership
+ * on `segment_memberships.profile_id`, while the message is stored under the person's canonical id
+ * after a merge; the idempotency key is the row's own record of the member the send selected
+ * (#1053). Only the `bct:` namespace the broadcast sender writes is recognised.
+ */
+export function broadcastMemberOf(idempotencyKey: string, broadcastId: string): string | null {
+  const prefix = `bct:${broadcastId}:`;
+  return idempotencyKey.startsWith(prefix) ? idempotencyKey.slice(prefix.length) : null;
+}
 
 async function canaryMessagesOf(
   tx: Tx,
@@ -751,6 +761,7 @@ async function canaryMessagesOf(
   const rows = await tx
     .select({
       id: schema.messages.id,
+      idempotencyKey: schema.messages.idempotencyKey,
       profileId: schema.messages.profileId,
       status: schema.messages.status,
       reason: schema.messages.reason,
@@ -758,11 +769,16 @@ async function canaryMessagesOf(
     })
     .from(schema.messages)
     .where(and(eq(schema.messages.journeyId, broadcastId), eq(schema.messages.test, false)));
-  return rows.flatMap((r) =>
-    r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent) && !intentionallyNotSent(r)
+  return rows.flatMap((r) => {
+    // Recompute on the id the send used, never on the canonical id it stored: after a merge the
+    // two hash to different shares, and an alias still in a dynamic segment would otherwise hide
+    // a real canary message from the breach thresholds. A row without the broadcast namespace
+    // falls back to its stored id, which is what a send before this change used.
+    const member = broadcastMemberOf(r.idempotencyKey, broadcastId) ?? r.profileId;
+    return member && canaryAssignment(member, broadcastId, canaryPercent) && !intentionallyNotSent(r)
       ? [{ id: r.id, status: r.status, notBefore: r.notBefore }]
-      : [],
-  );
+      : [];
+  });
 }
 
 const Run = z.object({
@@ -1596,6 +1612,8 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     let sampleStartsAt: Date | null = null;
     let canaryLatestStart: Date | null = null;
     for (const m of members) {
+      // The canary check recovers this same member id from the row's idempotency key (#1053): the
+      // message itself is stored under the canonical person after a merge, which is a different id.
       if (canaryPass && stage && !canaryAssignment(m.profileId, broadcastId, stage.canaryPercent)) continue;
       if (test?.state === 'sampling' && !subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length)) continue;
       const person = canonical.get(m.profileId) ?? m.profileId;
