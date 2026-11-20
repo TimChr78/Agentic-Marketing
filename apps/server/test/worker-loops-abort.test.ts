@@ -1,5 +1,5 @@
 import { runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
-import { runAiWorker } from '@agentic-marketing/ai';
+import { runAiWorker, runExpiredHoldSweep } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
 import { runBroadcasts, runOutboxDispatcher, runRetention } from '@agentic-marketing/audience';
 import { runContentFetches } from '@agentic-marketing/content';
@@ -112,6 +112,10 @@ const LOOPS: { name: string; start: (signal: AbortSignal, block: boolean) => Pro
   {
     name: 'idempotency key cleanup',
     start: (signal, block) => runIdempotencyKeyCleanup({ db: { admin: fakeDb(signal, { block }).admin } }, signal, { tickMs: 3_600_000 }),
+  },
+  {
+    name: 'expired AI budget holds',
+    start: (signal, block) => runExpiredHoldSweep({ db: { admin: fakeDb(signal, { block }).admin } }, signal, { tickMs: 3_600_000 }),
   },
   {
     name: 'segment scheduler',

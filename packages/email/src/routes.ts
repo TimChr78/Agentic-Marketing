@@ -14,7 +14,14 @@ import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { bodyLimit } from '@agentic-marketing/ingest';
-import { effectiveTopicStatus, findTopic, recordTopicPreference, topicChoicesOf, withIdentityLock } from '@agentic-marketing/profiles';
+import {
+  effectiveTopicStatus,
+  findTopic,
+  IdentityLockTimeoutError,
+  recordTopicPreference,
+  topicChoicesOf,
+  withIdentityLock,
+} from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
@@ -25,6 +32,7 @@ import type { EmailServices } from './gateway';
 import type { ClickLink, TopicLink, UnsubscribeLink } from './links';
 import { enqueueMessageEvents } from './outbox';
 import { transportFor, webhookTokenHash } from './providers';
+import { PUBLIC_IDENTITY_LOCK_RETRY_AFTER_SECONDS, PUBLIC_IDENTITY_LOCK_WAIT_MS } from './publicLock';
 import { smsRoutes } from './sms/routes';
 
 // Public endpoints that e-mails and providers reach: delivery webhooks, one-click unsubscribe
@@ -60,6 +68,10 @@ export interface EmailRouteDeps {
   email: EmailServices;
   /** Called after consent changed outside the event stream (unsubscribes), e.g. to update segments. */
   consentChanged?: (workspaceId: string, profileIds: string[], cause: string) => Promise<void>;
+  /** How long a public write waits for the identity lock before a retryable 503 (#1074). */
+  identityLockWaitMs?: number;
+  /** The Retry-After a shed public write sends. */
+  identityLockRetryAfterSeconds?: string;
 }
 
 export function emailRoutes(deps: EmailRouteDeps) {
@@ -79,56 +91,76 @@ export function emailRoutes(deps: EmailRouteDeps) {
       .consentChanged(ws, people, cause)
       .catch((err) => logger.warn({ err, workspace: ws }, 'segment update after unsubscribe failed'));
   };
+  const lockWaitMs = deps.identityLockWaitMs ?? PUBLIC_IDENTITY_LOCK_WAIT_MS;
+  const lockRetryAfter = deps.identityLockRetryAfterSeconds ?? PUBLIC_IDENTITY_LOCK_RETRY_AFTER_SECONDS;
+  // A long merge or import held the lock past the public bound: ask the provider to retry rather
+  // than keep the request and a pool connection waiting (#1074).
+  const lockBusy = (c: Context) =>
+    c.text('The request could not be handled right now. Please try again shortly.', 503, { 'retry-after': lockRetryAfter });
+  const retryOnLockTimeout =
+    (handler: (c: Context) => Promise<Response>) =>
+    async (c: Context): Promise<Response> => {
+      try {
+        return await handler(c);
+      } catch (err) {
+        if (err instanceof IdentityLockTimeoutError) return lockBusy(c);
+        throw err;
+      }
+    };
   app.route('/', smsRoutes(deps));
 
-  app.post('/hooks/email/:id/:token', bodyLimit(WEBHOOK_MAX_BODY, WEBHOOK_TOO_LARGE), async (c) => {
-    const { id, token } = c.req.param();
-    const { rows } = await deps.db.admin.query<{ workspace_id: string }>(
-      'SELECT workspace_id FROM email_providers WHERE id = $1 AND webhook_token_hash = $2',
-      [id, webhookTokenHash(token)],
-    );
-    if (!rows[0]) return c.json({ error: 'not_found' }, 404);
-    const ws = rows[0].workspace_id;
-    // A provider webhook URL belongs to its brand: another brand's host must not deliver it.
-    if (crossBrand(c, ws)) return c.json({ error: 'not_found' }, 404);
-    const req = { headers: Object.fromEntries(c.req.raw.headers), body: await c.req.text() };
-    const result = await deps.db.withWorkspace(ws, async (tx) => {
-      const [provider] = await tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.id, id));
-      const transport = await transportFor(tx, provider, deps.kp, deps.email.adapterDeps);
-      try {
-        if (!transport.parseWebhook) return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
-        if (transport.verifyWebhook) {
-          const refusal = webhookVerdict(await transport.verifyWebhook(req));
-          if (refusal) return { status: refusal.status, events: [], escalations: [], retryAfter: refusal.retryAfter };
-        }
-        let parsed: DeliveryEvent[];
+  app.post(
+    '/hooks/email/:id/:token',
+    bodyLimit(WEBHOOK_MAX_BODY, WEBHOOK_TOO_LARGE),
+    retryOnLockTimeout(async (c) => {
+      const { id, token } = c.req.param();
+      const { rows } = await deps.db.admin.query<{ workspace_id: string }>(
+        'SELECT workspace_id FROM email_providers WHERE id = $1 AND webhook_token_hash = $2',
+        [id, webhookTokenHash(token)],
+      );
+      if (!rows[0]) return c.json({ error: 'not_found' }, 404);
+      const ws = rows[0].workspace_id;
+      // A provider webhook URL belongs to its brand: another brand's host must not deliver it.
+      if (crossBrand(c, ws)) return c.json({ error: 'not_found' }, 404);
+      const req = { headers: Object.fromEntries(c.req.raw.headers), body: await c.req.text() };
+      const result = await deps.db.withWorkspace(ws, async (tx) => {
+        const [provider] = await tx.select().from(schema.emailProviders).where(eq(schema.emailProviders.id, id));
+        const transport = await transportFor(tx, provider, deps.kp, deps.email.adapterDeps);
         try {
-          parsed = await transport.parseWebhook(req);
-        } catch {
-          return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
+          if (!transport.parseWebhook) return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
+          if (transport.verifyWebhook) {
+            const refusal = webhookVerdict(await transport.verifyWebhook(req));
+            if (refusal) return { status: refusal.status, events: [], escalations: [], retryAfter: refusal.retryAfter };
+          }
+          let parsed: DeliveryEvent[];
+          try {
+            parsed = await transport.parseWebhook(req);
+          } catch {
+            return { status: 400 as const, events: [], escalations: [], retryAfter: undefined };
+          }
+          const applied = await applyDeliveryEvents(tx, parsed, provider.adapter, { waitMs: lockWaitMs });
+          // The events the delivery recorded are published by the outbox dispatcher after commit
+          // (#978 part 2): ClickHouse is never written inside the transaction that changes consent.
+          await enqueueMessageEvents(tx, ws, applied.events);
+          return {
+            status: 200 as const,
+            events: applied.events,
+            escalations: applied.escalations,
+            retryAfter: undefined,
+          };
+        } finally {
+          await transport.close?.();
         }
-        const applied = await applyDeliveryEvents(tx, parsed, provider.adapter);
-        // The events the delivery recorded are published by the outbox dispatcher after commit
-        // (#978 part 2): ClickHouse is never written inside the transaction that changes consent.
-        await enqueueMessageEvents(tx, ws, applied.events);
-        return {
-          status: 200 as const,
-          events: applied.events,
-          escalations: applied.escalations,
-          retryAfter: undefined,
-        };
-      } finally {
-        await transport.close?.();
-      }
-    });
-    // After the transaction committed: a rolled-back escalation leaves no log behind.
-    for (const escalation of result.escalations) logSuppressionEscalation(escalation);
-    for (const e of result.events)
-      if ((e.type === 'unsubscribed' || e.type === 'complained') && e.profileId)
-        await consentChanged(ws, [e.profileId], `unsubscribe:${e.messageId}`);
-    if (result.retryAfter) c.header('retry-after', result.retryAfter);
-    return c.json({ ok: result.status === 200, events: result.events.length }, result.status);
-  });
+      });
+      // After the transaction committed: a rolled-back escalation leaves no log behind.
+      for (const escalation of result.escalations) logSuppressionEscalation(escalation);
+      for (const e of result.events)
+        if ((e.type === 'unsubscribed' || e.type === 'complained') && e.profileId)
+          await consentChanged(ws, [e.profileId], `unsubscribe:${e.messageId}`);
+      if (result.retryAfter) c.header('retry-after', result.retryAfter);
+      return c.json({ ok: result.status === 200, events: result.events.length }, result.status);
+    }),
+  );
 
   /** The published brand for the workspace a link belongs to; drafts never render. */
   const hostedPage = async (
@@ -160,28 +192,33 @@ export function emailRoutes(deps: EmailRouteDeps) {
     const recorded = await deps.db.withWorkspace(link.w, async (tx) =>
       // The lock comes before the message lookup: a merged-away message still resolves to the
       // survivor, and the withdrawal lands on whoever is canonical when this commits.
-      withIdentityLock(tx, link.w, async () => {
-        const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, link.m));
-        const msg: Msg =
-          m ??
-          ({
-            workspaceId: link.w,
-            id: link.m,
-            profileId: link.p,
-            purpose: link.u,
-            channel: 'email',
-            templateId: null,
-            templateVersion: null,
-            journeyId: null,
-          } as Msg);
-        // A one-click unsubscribe is a synchronous write: the link POST is the person's action.
-        const at = new Date();
-        await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, at);
-        const event = messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() }, '');
-        // The unsubscribe event is published after commit by the outbox dispatcher (#978 part 2).
-        await enqueueMessageEvents(tx, link.w, [event]);
-        return event;
-      }),
+      withIdentityLock(
+        tx,
+        link.w,
+        async () => {
+          const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, link.m));
+          const msg: Msg =
+            m ??
+            ({
+              workspaceId: link.w,
+              id: link.m,
+              profileId: link.p,
+              purpose: link.u,
+              channel: 'email',
+              templateId: null,
+              templateVersion: null,
+              journeyId: null,
+            } as Msg);
+          // A one-click unsubscribe is a synchronous write: the link POST is the person's action.
+          const at = new Date();
+          await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, at);
+          const event = messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() }, '');
+          // The unsubscribe event is published after commit by the outbox dispatcher (#978 part 2).
+          await enqueueMessageEvents(tx, link.w, [event]);
+          return event;
+        },
+        { waitMs: lockWaitMs },
+      ),
     );
     if (recorded.profileId) await consentChanged(link.w, [recorded.profileId], `unsubscribe:${link.m}`);
     return link;
@@ -234,14 +271,17 @@ export function emailRoutes(deps: EmailRouteDeps) {
     return hosted(c, await hostedPage('unsubscribe', link.w), 200);
   });
   // Mail clients POST here directly (RFC 8058 one-click); the page's button does the same.
-  app.post('/u/:token', async (c) => {
-    const token = c.req.param('token');
-    const peek = deps.email.links.verify<UnsubscribeLink>(token);
-    if (!peek || crossBrand(c, peek.w)) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-    const link = await unsubscribe(token);
-    if (!link) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-    return hosted(c, await hostedPage('unsubscribed', link.w, { manageUrl: `${linksBase(c)}/u/p/${token}` }), 200);
-  });
+  app.post(
+    '/u/:token',
+    retryOnLockTimeout(async (c) => {
+      const token = c.req.param('token') ?? '';
+      const peek = deps.email.links.verify<UnsubscribeLink>(token);
+      if (!peek || crossBrand(c, peek.w)) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+      const link = await unsubscribe(token);
+      if (!link) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+      return hosted(c, await hostedPage('unsubscribed', link.w, { manageUrl: `${linksBase(c)}/u/p/${token}` }), 200);
+    }),
+  );
 
   // The preference centre (#84): a GET only shows choices; the POST is the only thing that saves.
   // The token is the same signed payload as the unsubscribe link, so mail scanners that follow
@@ -255,51 +295,63 @@ export function emailRoutes(deps: EmailRouteDeps) {
     const leavePurposeName = (await purposesOf(link.w)).find((p) => p.key === link.u)?.name;
     return hosted(c, renderPreferencesPage(resolveBrand(brand), { action: '', purposes, leavePurposeName }), 200);
   });
-  app.post('/u/p/:token', bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE), async (c) => {
-    const token = c.req.param('token');
-    const link = await preferenceToken(token);
-    if (!link || crossBrand(c, link.w) || !(await profileExists(link.w, link.p)))
-      return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-    const body = await c.req.parseBody();
-    const action = typeof body.action === 'string' ? body.action : '';
-    // "Unsubscribe from <purpose>" is the one-click unsubscribe link's own behaviour.
-    if (action === 'unsubscribe_all') {
-      const done = await unsubscribe(token);
-      if (!done) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-      return hosted(c, await hostedPage('unsubscribed', done.w, { manageUrl: `${linksBase(c)}/u/p/${token}` }), 200);
-    }
-    const purposes = (await purposesOf(link.w)).filter(
-      (p) => p.basis !== 'contract' && p.basis !== 'legal_obligation' && (p.topics ?? []).length > 0,
-    );
-    const choices = await deps.db.withWorkspace(link.w, (tx) => topicChoicesOf(tx, link.w, link.p));
-    const changes: { purpose: string; topic: string; status: 'subscribed' | 'unsubscribed' }[] = [];
-    for (const purpose of purposes)
-      for (const topic of purpose.topics ?? []) {
-        const next = body[`topic:${topic.key}`] === 'subscribed' ? 'subscribed' : 'unsubscribed';
-        if (next !== effectiveTopicStatus(choices, topic)) changes.push({ purpose: purpose.key, topic: topic.key, status: next });
+  app.post(
+    '/u/p/:token',
+    bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE),
+    retryOnLockTimeout(async (c) => {
+      const token = c.req.param('token') ?? '';
+      const link = await preferenceToken(token);
+      if (!link || crossBrand(c, link.w) || !(await profileExists(link.w, link.p)))
+        return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+      const body = await c.req.parseBody();
+      const action = typeof body.action === 'string' ? body.action : '';
+      // "Unsubscribe from <purpose>" is the one-click unsubscribe link's own behaviour.
+      if (action === 'unsubscribe_all') {
+        const done = await unsubscribe(token);
+        if (!done) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+        return hosted(c, await hostedPage('unsubscribed', done.w, { manageUrl: `${linksBase(c)}/u/p/${token}` }), 200);
       }
-    if (changes.length) {
-      await deps.db.withWorkspace(link.w, async (tx) => {
-        for (const change of changes)
-          await recordTopicPreference(tx, link.w, link.p, change.purpose, change.topic, change.status, 'preference_center', {
-            note: 'Changed on the preference centre',
-            proof: { page: 'preference_center' },
-          });
-      });
-      await consentChanged(link.w, [link.p], `preferences:${link.p}`);
-    }
-    const brand = await deps.db.withWorkspace(link.w, (tx) => publishedSingleton(tx, 'brand'));
-    return hosted(
-      c,
-      renderPreferencesPage(resolveBrand(brand), {
-        action: '',
-        purposes: await preferencePurposes(link.w, link.p),
-        saved: true,
-        leavePurposeName: (await purposesOf(link.w)).find((p) => p.key === link.u)?.name,
-      }),
-      200,
-    );
-  });
+      const purposes = (await purposesOf(link.w)).filter(
+        (p) => p.basis !== 'contract' && p.basis !== 'legal_obligation' && (p.topics ?? []).length > 0,
+      );
+      const choices = await deps.db.withWorkspace(link.w, (tx) => topicChoicesOf(tx, link.w, link.p));
+      const changes: { purpose: string; topic: string; status: 'subscribed' | 'unsubscribed' }[] = [];
+      for (const purpose of purposes)
+        for (const topic of purpose.topics ?? []) {
+          const next = body[`topic:${topic.key}`] === 'subscribed' ? 'subscribed' : 'unsubscribed';
+          if (next !== effectiveTopicStatus(choices, topic)) changes.push({ purpose: purpose.key, topic: topic.key, status: next });
+        }
+      if (changes.length) {
+        await deps.db.withWorkspace(link.w, async (tx) => {
+          // The bound covers the whole preference write; recordTopicPreference sees the reentrant lock.
+          await withIdentityLock(
+            tx,
+            link.w,
+            async () => {
+              for (const change of changes)
+                await recordTopicPreference(tx, link.w, link.p, change.purpose, change.topic, change.status, 'preference_center', {
+                  note: 'Changed on the preference centre',
+                  proof: { page: 'preference_center' },
+                });
+            },
+            { waitMs: lockWaitMs },
+          );
+        });
+        await consentChanged(link.w, [link.p], `preferences:${link.p}`);
+      }
+      const brand = await deps.db.withWorkspace(link.w, (tx) => publishedSingleton(tx, 'brand'));
+      return hosted(
+        c,
+        renderPreferencesPage(resolveBrand(brand), {
+          action: '',
+          purposes: await preferencePurposes(link.w, link.p),
+          saved: true,
+          leavePurposeName: (await purposesOf(link.w)).find((p) => p.key === link.u)?.name,
+        }),
+        200,
+      );
+    }),
+  );
 
   // A topic link only turns that finer choice off; the purpose's consent is untouched.
   app.get('/u/t/:token', async (c) => {
@@ -320,31 +372,41 @@ export function emailRoutes(deps: EmailRouteDeps) {
       200,
     );
   });
-  app.post('/u/t/:token', bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE), async (c) => {
-    const token = c.req.param('token');
-    const link = await topicToken(token);
-    if (!link || crossBrand(c, link.w) || !(await profileExists(link.w, link.p)))
-      return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-    const topic = await topicOf(link.w, link.u, link.topic);
-    if (!topic) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
-    await deps.db.withWorkspace(link.w, (tx) =>
-      recordTopicPreference(tx, link.w, link.p, link.u, topic.key, 'unsubscribed', 'unsubscribe_link', {
-        proof: { messageId: link.m, via: 'topic unsubscribe link' },
-      }),
-    );
-    await consentChanged(link.w, [link.p], `topic-unsubscribe:${link.m}`);
-    return hosted(
-      c,
-      await hostedPage('unsubscribed', link.w, {
-        copy: {
-          unsubscribedTitle: `Unsubscribed from ${topic.name}`,
-          unsubscribedBody: `You will no longer receive e-mails about ${topic.name}.`,
-        },
-        manageUrl: `${linksBase(c)}/u/p/${token}`,
-      }),
-      200,
-    );
-  });
+  app.post(
+    '/u/t/:token',
+    bodyLimit(PREFERENCES_MAX_BODY, PREFERENCES_TOO_LARGE),
+    retryOnLockTimeout(async (c) => {
+      const token = c.req.param('token') ?? '';
+      const link = await topicToken(token);
+      if (!link || crossBrand(c, link.w) || !(await profileExists(link.w, link.p)))
+        return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+      const topic = await topicOf(link.w, link.u, link.topic);
+      if (!topic) return hosted(c, await hostedPage('expired', null, invalidLink), 404);
+      await deps.db.withWorkspace(link.w, (tx) =>
+        withIdentityLock(
+          tx,
+          link.w,
+          () =>
+            recordTopicPreference(tx, link.w, link.p, link.u, topic.key, 'unsubscribed', 'unsubscribe_link', {
+              proof: { messageId: link.m, via: 'topic unsubscribe link' },
+            }),
+          { waitMs: lockWaitMs },
+        ),
+      );
+      await consentChanged(link.w, [link.p], `topic-unsubscribe:${link.m}`);
+      return hosted(
+        c,
+        await hostedPage('unsubscribed', link.w, {
+          copy: {
+            unsubscribedTitle: `Unsubscribed from ${topic.name}`,
+            unsubscribedBody: `You will no longer receive e-mails about ${topic.name}.`,
+          },
+          manageUrl: `${linksBase(c)}/u/p/${token}`,
+        }),
+        200,
+      );
+    }),
+  );
 
   app.get('/c/:token', async (c) => {
     const link = deps.email.links.verify<ClickLink>(c.req.param('token'));

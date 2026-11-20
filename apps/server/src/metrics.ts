@@ -187,6 +187,12 @@ export function createMetricsRegistry(): MetricsRegistry {
       sample('am_identity_lock_acquisitions_total', '', identity.acquisitions);
       metric('am_identity_lock_contended_total', 'counter', 'Identity lock acquisitions that had to wait for another transaction.');
       sample('am_identity_lock_contended_total', '', identity.contended);
+      metric(
+        'am_identity_lock_timeouts_total',
+        'counter',
+        'Bounded public acquisitions that gave up at their deadline and answered 503 with a Retry-After (#1074).',
+      );
+      sample('am_identity_lock_timeouts_total', '', identity.timeouts);
       lockHistogram('am_identity_lock_wait_seconds', 'Time spent waiting for the workspace identity lock, in seconds.', identity.wait);
       lockHistogram(
         'am_identity_lock_hold_seconds',

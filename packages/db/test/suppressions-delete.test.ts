@@ -118,6 +118,7 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'erasure_generations',
       'data_keys',
       'journey_processed_events',
+      'writer_protocol',
     ])
       await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
     await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);

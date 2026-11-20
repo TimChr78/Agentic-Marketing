@@ -12,6 +12,7 @@ import { offlineChecks } from './ops/checks';
 import { createShutdown, drainHttpServers, drainWorkers, HTTP_DRAIN_TIMEOUT_MS, type HttpListener } from './shutdown';
 import { COMMIT, VERSION } from './version';
 import { startScheduler, startWorkers } from './workers';
+import { writerProtocolMismatch } from './writerProtocol';
 
 // One image, several roles (ADR-0002): `api` (UI, REST, MCP), `ingest` (event collection),
 // `worker` (event consumers) and `scheduler` (arrives with the journey runtime).
@@ -42,6 +43,15 @@ if (!config.skipMigrations) {
   await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m), config.clickhouse);
+}
+
+// The writer protocol marker (#1066): refuse to start beside a database that expects a newer
+// writer protocol. The drain is documented in UPGRADING.md; this makes a rollback or a mistaken
+// mixed rollout fail fast instead of interleaving two protocol versions.
+const protocolProblem = await writerProtocolMismatch(db.admin);
+if (protocolProblem) {
+  logger.error(protocolProblem);
+  process.exit(1);
 }
 
 // The version this database last ran, so the next pre-upgrade backup knows where its data came from.

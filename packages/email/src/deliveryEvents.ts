@@ -98,13 +98,19 @@ export function logSuppressionEscalation(escalation: SuppressionEscalation): voi
 }
 
 /** Applies a provider's delivery events to the message log, suppressions and consent. */
-export async function applyDeliveryEvents(tx: Tx, events: DeliveryEvent[], provider: string): Promise<DeliveryEventsResult> {
+export async function applyDeliveryEvents(
+  tx: Tx,
+  events: DeliveryEvent[],
+  provider: string,
+  opts: { waitMs?: number } = {},
+): Promise<DeliveryEventsResult> {
   if (!events.length) return { events: [], escalations: [] };
   // The identity lock comes before the first event, including a message status update: a
   // withdrawal in a later event of the same batch then records against the survivor of a merge that
-  // committed first, and a merge that starts later waits for this batch.
+  // committed first, and a merge that starts later waits for this batch. A public webhook passes a
+  // bound so a long merge cannot hold the request indefinitely (#1074).
   const workspaces = await workspacesOfEvents(tx, events);
-  return withIdentityLocks(tx, workspaces, () => applyDeliveryEventsLocked(tx, events, provider));
+  return withIdentityLocks(tx, workspaces, () => applyDeliveryEventsLocked(tx, events, provider), { waitMs: opts.waitMs });
 }
 
 /** The distinct workspaces the batch names, from SQL only. Read before the lock; takes no row lock. */

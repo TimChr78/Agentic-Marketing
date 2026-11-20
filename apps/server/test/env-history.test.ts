@@ -45,6 +45,17 @@ describe('environment variable history', () => {
     expect(envKeysSince('0.15.0', '0.16.0')).toEqual(['POSTGRES_IMAGE']);
   });
 
+  it('records the first release that read each forwarded key (#1058 review)', () => {
+    expect(ENV_SINCE.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT).toBe('0.14.22');
+    expect(ENV_SINCE.OTEL_EXPORTER_OTLP_HEADERS).toBe('0.14.22');
+    expect(ENV_SINCE.OTEL_EXPORTER_OTLP_TRACES_HEADERS).toBe('0.14.22');
+    expect(ENV_SINCE.BETTER_AUTH_TRUSTED_ORIGINS).toBe('0.14.24');
+    expect(envKeysSince('0.14.21', '0.14.22')).toEqual(
+      expect.arrayContaining(['OTEL_EXPORTER_OTLP_HEADERS', 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_EXPORTER_OTLP_TRACES_HEADERS']),
+    );
+    expect(envKeysSince('0.14.23', '0.14.24')).toContain('BETTER_AUTH_TRUSTED_ORIGINS');
+  });
+
   it('compares release versions and rejects non-versions', () => {
     expect(compareVersions('0.2.4', '0.2.3')).toBeGreaterThan(0);
     expect(compareVersions('v0.2.4', '0.2.4')).toBe(0);
