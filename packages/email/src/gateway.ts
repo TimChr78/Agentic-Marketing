@@ -383,7 +383,10 @@ export async function recoverUnhandledDelivery(
     if (!m || m.status !== 'sending') return;
     if (opts.providerCalled) {
       const reason = 'unknown_outcome: the delivery failed after the provider may have been called; check the provider before resending';
-      await tx.update(schema.messages).set({ status: 'failed', reason, updatedAt: new Date() }).where(eq(schema.messages.id, id));
+      await tx
+        .update(schema.messages)
+        .set({ status: 'failed', reason, updatedAt: new Date() })
+        .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')));
       await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'failed', reason)]);
       return;
     }
@@ -394,7 +397,7 @@ export async function recoverUnhandledDelivery(
     await tx
       .update(schema.messages)
       .set({ status: retry ? 'queued' : 'failed', reason, nextAttemptAt, updatedAt: new Date() })
-      .where(eq(schema.messages.id, id));
+      .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')));
     await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason)]);
   });
 }
@@ -525,7 +528,29 @@ async function deliverOne(
   let escalations: SuppressionEscalation[] = [];
   attempt.providerCalled = true;
   try {
-    const { providerMessageId, events: known } = await transport.send(out);
+    // Only the provider call's own failure is a provider error that may retry. Once the provider
+    // accepted the message, a failure while recording it (a database blip on the commit below, or
+    // in applyDeliveryEvents after `sent` committed) must never requeue it: that would send it
+    // twice, or rewrite a settled row. It propagates to the round, whose recovery marks a row that
+    // is still `sending` as `unknown_outcome` and leaves a settled one alone (#1094 review).
+    let sent: Awaited<ReturnType<typeof transport.send>>;
+    try {
+      sent = await transport.send(out);
+    } catch (e) {
+      const reason = `provider_error: ${failureText((e as Error).message)}`;
+      const retry = m.attempts < MAX_ATTEMPTS;
+      const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(out.stream, m.attempts) * 1000) : null;
+      logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'e-mail send failed');
+      await db.withWorkspace(ws, async (tx) => {
+        await tx
+          .update(schema.messages)
+          .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
+          .where(eq(schema.messages.id, id));
+        await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
+      });
+      return;
+    }
+    const { providerMessageId, events: known } = sent;
     // The send outcome and its event commit together (#1008): a decision that reads the metric
     // layer after this commit finds the event, published or still queued. The event store is not
     // written here at all, so a lagging or unavailable one cannot make a send invisible.
@@ -547,18 +572,6 @@ async function deliverOne(
       });
       escalations = applied.escalations;
     }
-  } catch (e) {
-    const reason = `provider_error: ${failureText((e as Error).message)}`;
-    const retry = m.attempts < MAX_ATTEMPTS;
-    const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(out.stream, m.attempts) * 1000) : null;
-    logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'e-mail send failed');
-    await db.withWorkspace(ws, async (tx) => {
-      await tx
-        .update(schema.messages)
-        .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
-        .where(eq(schema.messages.id, id));
-      await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
-    });
   } finally {
     await transport.close?.();
   }

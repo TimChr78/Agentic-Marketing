@@ -146,6 +146,37 @@ describe.skipIf(!hasTestDatabase())('delivery batch isolation (#1054)', () => {
     expect(outbox.map((m) => m.messageId)).toEqual([second]);
   });
 
+  it('never requeues a message whose provider send succeeded but whose outcome failed to commit', async () => {
+    outbox.length = 0;
+    const id = await queuedMessage(await person('accepted'), '2026-01-01T12:00:00Z');
+    // A database blip on the first transaction after the provider accepted the message: the old
+    // provider_error catch turned it back into `queued`, and the next round sent it again.
+    let blipped = false;
+    const db = new Proxy(d.db, {
+      get(target, key, receiver) {
+        const value = Reflect.get(target, key, receiver);
+        if (key !== 'withWorkspace') return typeof value === 'function' ? value.bind(target) : value;
+        return (ws: string, fn: (tx: never) => Promise<unknown>) => {
+          if (!blipped && outbox.length > 0) {
+            blipped = true;
+            return Promise.reject(new Error('connection terminated unexpectedly'));
+          }
+          return target.withWorkspace(ws, fn as never);
+        };
+      },
+    });
+
+    await deliverRound(db, { kp, events: {} as EventStore, email: email() });
+    await d.db.admin.query('UPDATE messages SET next_attempt_at = now() WHERE workspace_id = $1 AND id = $2', [d.workspace, id]);
+    await deliverRound(d.db, { kp, events: {} as EventStore, email: email() });
+
+    expect(blipped).toBe(true);
+    expect(outbox.filter((m) => m.messageId === id)).toHaveLength(1);
+    const row = await message(id);
+    expect(row.status).toBe('failed');
+    expect(row.reason).toMatch(/^unknown_outcome: /);
+  });
+
   it('never retries a message the provider may already have accepted', async () => {
     const id = await queuedMessage(await person('uncertain'), '2026-01-02T00:00:00Z');
     await d.db.admin.query(`UPDATE messages SET status = 'sending', attempts = 1 WHERE workspace_id = $1 AND id = $2`, [d.workspace, id]);

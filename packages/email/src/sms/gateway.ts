@@ -232,24 +232,11 @@ export async function deliverSms(
   if (prepared.kind === 'done') return;
   const { m, provider, transport, out, stream } = prepared;
   attempt.providerCalled = true;
+  // Only the provider call's own failure may retry; a failure while recording an accepted send
+  // propagates to the round's recovery (`unknown_outcome`), never back to `queued` (#1094 review).
+  let sent: Awaited<ReturnType<typeof transport.send>>;
   try {
-    const sent = await transport.send(out);
-    // The outcome and its event commit in one transaction (#1008).
-    await db.withWorkspace(ws, async (tx) => {
-      await tx
-        .update(schema.messages)
-        .set({
-          status: 'sent',
-          reason: null,
-          providerId: provider.id,
-          providerMessageId: sent.providerMessageId,
-          segments: sent.segments ?? prepared.segments,
-          sentAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.messages.id, id));
-      await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
-    });
+    sent = await transport.send(out);
   } catch (e) {
     const reason = `provider_error: ${failureText((e as Error).message)}`;
     const retry = m.attempts < MAX_ATTEMPTS;
@@ -262,5 +249,22 @@ export async function deliverSms(
         .where(eq(schema.messages.id, id));
       await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
     });
+    return;
   }
+  // The outcome and its event commit in one transaction (#1008).
+  await db.withWorkspace(ws, async (tx) => {
+    await tx
+      .update(schema.messages)
+      .set({
+        status: 'sent',
+        reason: null,
+        providerId: provider.id,
+        providerMessageId: sent.providerMessageId,
+        segments: sent.segments ?? prepared.segments,
+        sentAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.messages.id, id));
+    await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
+  });
 }
