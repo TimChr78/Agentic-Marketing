@@ -44,6 +44,8 @@ const metrics = {
   acquisitions: 0,
   contended: 0,
   reentrant: 0,
+  /** Bounded acquisitions that hit their deadline and were refused (#1074). */
+  timeouts: 0,
   wait: histogram(),
   hold: histogram(),
 };
@@ -63,6 +65,8 @@ export interface IdentityLockSnapshot {
   contended: number;
   /** Takes that found the lock already held by the same transaction. */
   reentrant: number;
+  /** Bounded acquisitions that gave up at their deadline; a public request answers 503 for these. */
+  timeouts: number;
   buckets: readonly number[];
   wait: { buckets: number[]; sum: number; count: number };
   hold: { buckets: number[]; sum: number; count: number };
@@ -73,6 +77,7 @@ export function identityLockSnapshot(): IdentityLockSnapshot {
     acquisitions: metrics.acquisitions,
     contended: metrics.contended,
     reentrant: metrics.reentrant,
+    timeouts: metrics.timeouts,
     buckets: BUCKETS,
     wait: { buckets: [...metrics.wait.buckets], sum: metrics.wait.sum, count: metrics.wait.count },
     hold: { buckets: [...metrics.hold.buckets], sum: metrics.hold.sum, count: metrics.hold.count },
@@ -84,6 +89,7 @@ export function resetIdentityLockMetrics(): void {
   metrics.acquisitions = 0;
   metrics.contended = 0;
   metrics.reentrant = 0;
+  metrics.timeouts = 0;
   metrics.wait = histogram();
   metrics.hold = histogram();
 }
@@ -127,13 +133,59 @@ export function assertIdentityLock(tx: Tx, workspaceId: string, what: string): v
   throw new Error(`${what} requires the identity lock for workspace ${workspaceId}; take it with withIdentityLock before writing consent.`);
 }
 
-async function acquire(tx: Tx, workspaceId: string): Promise<boolean> {
+/** How long a caller may wait for the identity lock. Omitted or zero waits without a bound. */
+export interface IdentityLockOptions {
+  waitMs?: number;
+}
+
+/**
+ * A bounded acquisition gave up: another transaction held the workspace lock for longer than the
+ * caller allowed (#1074). Public request paths translate this to `503` with a `Retry-After`, so the
+ * provider retries instead of holding a pool connection behind a long import or merge.
+ */
+export class IdentityLockTimeoutError extends Error {
+  readonly code = 'identity_lock_timeout';
+  constructor(
+    readonly workspaceId: string,
+    readonly waitMs: number,
+  ) {
+    super(`the workspace identity lock was not acquired within ${waitMs} ms`);
+    this.name = 'IdentityLockTimeoutError';
+  }
+}
+
+/**
+ * Takes the workspace lock, or gives up after `opts.waitMs`. The bounded path sets PostgreSQL's
+ * `lock_timeout` for the one statement and restores the caller's value after a successful take. A
+ * timeout cancels the statement and aborts the transaction; `withWorkspace` rolls it back, which is
+ * what a public handler wants before it answers `503`.
+ */
+async function acquire(tx: Tx, workspaceId: string, opts: IdentityLockOptions = {}): Promise<boolean> {
   if (identityLockHeld(tx, workspaceId)) {
     metrics.reentrant++;
     return false;
   }
   const started = performance.now();
-  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
+  const waitMs = opts.waitMs;
+  if (waitMs !== undefined && waitMs > 0) {
+    const original =
+      (await tx.execute<{ lock_timeout: string }>(sql`SELECT current_setting('lock_timeout') AS lock_timeout`)).rows[0]?.lock_timeout ??
+      '0';
+    await tx.execute(sql`SELECT set_config('lock_timeout', ${`${Math.ceil(waitMs)}ms`}, true)`);
+    try {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
+    } catch (err) {
+      // Only the expected lock timeout (55P03 lock_not_available) becomes a refusal; a cancellation
+      // or a real query error must keep propagating.
+      const e = err as { code?: string; cause?: { code?: string } };
+      if ((e.code ?? e.cause?.code) !== '55P03') throw err;
+      metrics.timeouts++;
+      throw new IdentityLockTimeoutError(workspaceId, waitMs);
+    }
+    await tx.execute(sql`SELECT set_config('lock_timeout', ${original}, true)`);
+  } else {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`identity:${workspaceId}`}, 0))`);
+  }
   const waited = (performance.now() - started) / 1_000;
   metrics.acquisitions++;
   if (waited > 0.001) metrics.contended++;
@@ -150,8 +202,8 @@ async function acquire(tx: Tx, workspaceId: string): Promise<boolean> {
 }
 
 /** Takes the identity lock for one workspace for the rest of this transaction. Idempotent. */
-export async function lockIdentity(tx: Tx, workspaceId: string): Promise<void> {
-  await acquire(tx, workspaceId);
+export async function lockIdentity(tx: Tx, workspaceId: string, opts: IdentityLockOptions = {}): Promise<void> {
+  await acquire(tx, workspaceId, opts);
 }
 
 /** Records how long the given workspaces' locks were held by this protected block. */
@@ -172,8 +224,8 @@ function releaseMetrics(tx: Tx, workspaceIds: readonly string[]): void {
  * long the protected block held it. `fn` must be the transaction's work after the lock: the server
  * releases the advisory lock when the transaction commits, so `fn` should end with that work.
  */
-export async function withIdentityLock<T>(tx: Tx, workspaceId: string, fn: () => Promise<T>): Promise<T> {
-  const acquired = await acquire(tx, workspaceId);
+export async function withIdentityLock<T>(tx: Tx, workspaceId: string, fn: () => Promise<T>, opts: IdentityLockOptions = {}): Promise<T> {
+  const acquired = await acquire(tx, workspaceId, opts);
   try {
     return await fn();
   } finally {
@@ -184,12 +236,17 @@ export async function withIdentityLock<T>(tx: Tx, workspaceId: string, fn: () =>
 
 /** Like `withIdentityLock`, for a batch that may name several workspaces. Every missing workspace
  * is locked in sorted order, so two such batches can never deadlock. */
-export async function withIdentityLocks<T>(tx: Tx, workspaceIds: Iterable<string>, fn: () => Promise<T>): Promise<T> {
+export async function withIdentityLocks<T>(
+  tx: Tx,
+  workspaceIds: Iterable<string>,
+  fn: () => Promise<T>,
+  opts: IdentityLockOptions = {},
+): Promise<T> {
   const ids = [...new Set(workspaceIds)].sort();
   if (!ids.length) return fn();
   const acquired: string[] = [];
   try {
-    for (const id of ids) if (await acquire(tx, id)) acquired.push(id);
+    for (const id of ids) if (await acquire(tx, id, opts)) acquired.push(id);
     return await fn();
   } finally {
     if (acquired.length) releaseMetrics(tx, acquired);

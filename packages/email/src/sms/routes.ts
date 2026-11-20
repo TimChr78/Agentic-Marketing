@@ -2,7 +2,7 @@ import { DEFAULT_PURPOSES, type Purposes, publishedSingleton } from '@agentic-ma
 import type { PublicRequest } from '@agentic-marketing/commands';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
-import { personCrypto, recordConsentEvidence, withIdentityLock } from '@agentic-marketing/profiles';
+import { IdentityLockTimeoutError, personCrypto, recordConsentEvidence, withIdentityLock } from '@agentic-marketing/profiles';
 import { type KeyProvider, type PreparedKeys, prepareKeys, withPreparedKeys } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
@@ -11,6 +11,7 @@ import { applyDeliveryEvents, logSuppressionEscalation } from '../deliveryEvents
 import type { EmailServices } from '../gateway';
 import { enqueueMessageEvents } from '../outbox';
 import { isMarketing } from '../policy';
+import { PUBLIC_IDENTITY_LOCK_RETRY_AFTER_SECONDS, PUBLIC_IDENTITY_LOCK_WAIT_MS } from '../publicLock';
 import { classifySmsReply } from './keywords';
 import { billingOf, smsTransportFor } from './providers';
 
@@ -29,6 +30,9 @@ interface Deps {
   db: Db;
   kp: KeyProvider;
   email: EmailServices;
+  /** How long a public callback waits for the identity lock before a retryable 503 (#1074). */
+  identityLockWaitMs?: number;
+  identityLockRetryAfterSeconds?: string;
 }
 
 async function profilesWithPhone(tx: Tx, ws: string, prepared: PreparedKeys, phone: string) {
@@ -52,6 +56,8 @@ export interface SmsOptOutInput {
   receivedAt: Date;
   /** The matching key, unwrapped before the transaction; no provider call runs under the lock. */
   prepared: PreparedKeys;
+  /** How long this public callback may wait for the identity lock; omitted waits without a bound. */
+  lockWaitMs?: number;
 }
 
 export interface SmsOptOutResult {
@@ -71,47 +77,54 @@ export interface SmsOptOutResult {
  */
 export async function applySmsOptOut(tx: Tx, input: SmsOptOutInput): Promise<SmsOptOutResult> {
   const { workspaceId } = input;
-  return withIdentityLock(tx, workspaceId, async () => {
-    const purposes: Purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
-    if (input.intent === 'stop') {
-      const { hash, profileIds } = await profilesWithPhone(tx, workspaceId, input.prepared, input.phone);
-      const smsMarketing = purposes.filter((p) => isMarketing(p.basis) && p.channels.includes('sms'));
-      for (const profileId of profileIds)
-        await recordConsentEvidence(
-          tx,
-          workspaceId,
-          profileId,
-          purposes,
-          smsMarketing.map((p) => ({
-            purpose: p.key,
-            channel: 'sms',
-            status: p.basis === 'legitimate_interest' ? ('objected' as const) : ('withdrawn' as const),
-            source: 'unsubscribe' as const,
-            recordedAt: input.receivedAt,
-            proof: { via: `SMS ${input.keyword}`, provider: input.providerId },
-          })),
-        );
-      // A STOP is the weakest suppression reason: DO NOTHING leaves a hard_bounce or complaint
-      // row in place, so a later START (which deletes only 'stop') cannot unsuppress it (#664,
-      // #750).
-      await tx.insert(schema.suppressions).values({ workspaceId, channel: 'sms', valueHash: hash, reason: 'stop' }).onConflictDoNothing();
-      logger.info({ workspace: workspaceId, profiles: profileIds.length }, 'SMS STOP recorded');
-      return { profileIds, lifted: 0 };
-    }
+  return withIdentityLock(
+    tx,
+    workspaceId,
+    async () => {
+      const purposes: Purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+      if (input.intent === 'stop') {
+        const { hash, profileIds } = await profilesWithPhone(tx, workspaceId, input.prepared, input.phone);
+        const smsMarketing = purposes.filter((p) => isMarketing(p.basis) && p.channels.includes('sms'));
+        for (const profileId of profileIds)
+          await recordConsentEvidence(
+            tx,
+            workspaceId,
+            profileId,
+            purposes,
+            smsMarketing.map((p) => ({
+              purpose: p.key,
+              channel: 'sms',
+              status: p.basis === 'legitimate_interest' ? ('objected' as const) : ('withdrawn' as const),
+              source: 'unsubscribe' as const,
+              recordedAt: input.receivedAt,
+              proof: { via: `SMS ${input.keyword}`, provider: input.providerId },
+            })),
+          );
+        // A STOP is the weakest suppression reason: DO NOTHING leaves a hard_bounce or complaint
+        // row in place, so a later START (which deletes only 'stop') cannot unsuppress it (#664,
+        // #750).
+        await tx.insert(schema.suppressions).values({ workspaceId, channel: 'sms', valueHash: hash, reason: 'stop' }).onConflictDoNothing();
+        logger.info({ workspace: workspaceId, profiles: profileIds.length }, 'SMS STOP recorded');
+        return { profileIds, lifted: 0 };
+      }
 
-    // Only the SMS stop row for this number is removed: a hard bounce or complaint is kept.
-    const { hash, profileIds } = await profilesWithPhone(tx, workspaceId, input.prepared, input.phone);
-    const lifted = await tx
-      .delete(schema.suppressions)
-      .where(and(eq(schema.suppressions.channel, 'sms'), eq(schema.suppressions.valueHash, hash), eq(schema.suppressions.reason, 'stop')))
-      .returning({ reason: schema.suppressions.reason });
-    logger.info({ workspace: workspaceId, lifted: lifted.length }, 'SMS START lifted the stop suppression');
-    return { profileIds, lifted: lifted.length };
-  });
+      // Only the SMS stop row for this number is removed: a hard bounce or complaint is kept.
+      const { hash, profileIds } = await profilesWithPhone(tx, workspaceId, input.prepared, input.phone);
+      const lifted = await tx
+        .delete(schema.suppressions)
+        .where(and(eq(schema.suppressions.channel, 'sms'), eq(schema.suppressions.valueHash, hash), eq(schema.suppressions.reason, 'stop')))
+        .returning({ reason: schema.suppressions.reason });
+      logger.info({ workspace: workspaceId, lifted: lifted.length }, 'SMS START lifted the stop suppression');
+      return { profileIds, lifted: lifted.length };
+    },
+    { waitMs: input.lockWaitMs },
+  );
 }
 
 export function smsRoutes(deps: Deps) {
   const app = new Hono<{ Variables: { publicRequest?: PublicRequest } }>();
+  const lockWaitMs = deps.identityLockWaitMs ?? PUBLIC_IDENTITY_LOCK_WAIT_MS;
+  const lockRetryAfter = deps.identityLockRetryAfterSeconds ?? PUBLIC_IDENTITY_LOCK_RETRY_AFTER_SECONDS;
 
   const load = async (token: string) => {
     const t = deps.email.links.verify<{ w: string; sms: string }>(token);
@@ -154,7 +167,7 @@ export function smsRoutes(deps: Deps) {
           if (!transport.verifyWebhook(req)) return { status: 401 as const };
 
           if (kind === 'status') {
-            const applied = await applyDeliveryEvents(tx, transport.parseStatus(req), provider.adapter);
+            const applied = await applyDeliveryEvents(tx, transport.parseStatus(req), provider.adapter, { waitMs: lockWaitMs });
             await enqueueMessageEvents(tx, target.ws, applied.events);
             return { status: 200 as const, events: applied.events, escalations: applied.escalations };
           }
@@ -172,6 +185,7 @@ export function smsRoutes(deps: Deps) {
               phone: inbound.from,
               receivedAt: receivedAt!,
               prepared: prepared!,
+              lockWaitMs,
             });
           } else if (match?.intent === 'help') reply = billingOf(provider).helpText;
           return { status: 200 as const, reply: transport.reply(reply) };
@@ -180,13 +194,21 @@ export function smsRoutes(deps: Deps) {
       // pair is retried when a key changed in between: the STOP/START block holds the identity lock
       // and must never reach the key provider (#978 part 3). A `status` callback needs no key, so
       // it runs once.
-      const result =
-        kind === 'inbound'
-          ? await withPreparedKeys(
-              () => prepareKeys(deps.db, target.ws, deps.kp, { purposes: ['matching'] }),
-              (prepared) => write(prepared),
-            )
-          : await write(null);
+      let result: Awaited<ReturnType<typeof write>>;
+      try {
+        result =
+          kind === 'inbound'
+            ? await withPreparedKeys(
+                () => prepareKeys(deps.db, target.ws, deps.kp, { purposes: ['matching'] }),
+                (prepared) => write(prepared),
+              )
+            : await write(null);
+      } catch (err) {
+        // A long merge or import held the lock past the public bound: the provider retries on 503.
+        if (err instanceof IdentityLockTimeoutError)
+          return c.text('The request could not be handled right now. Please try again shortly.', 503, { 'retry-after': lockRetryAfter });
+        throw err;
+      }
       if (result.status !== 200) return c.json({ error: result.status === 401 ? 'bad_signature' : 'not_found' }, result.status);
       if ('events' in result) {
         // After the transaction committed: a rolled-back escalation leaves no log behind.

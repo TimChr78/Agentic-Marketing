@@ -207,6 +207,7 @@ In Docker Compose, a Prometheus container on the same project network reaches th
 | `am_agent_decisions_last_hour` | gauge | `decision` | Agent ledger decisions (`allow`, `hold`, `ask`, `deny`) in the last hour. |
 | `am_identity_lock_acquisitions_total` | counter | | Workspace identity-lock acquisitions, including a transaction that already held it. A workspace's consent, identity, merge and erasure writes take this one advisory lock. |
 | `am_identity_lock_contended_total` | counter | | Acquisitions that had to wait for another transaction's lock. |
+| `am_identity_lock_timeouts_total` | counter | | Bounded public acquisitions that gave up at their deadline; each answers `503` with a `Retry-After`. A non-zero rate means a workspace's public links or webhooks are shedding because another writer held the lock too long. |
 | `am_identity_lock_wait_seconds` | histogram | | Time spent waiting for the workspace identity lock; buckets from 1 ms to 30 s. |
 | `am_identity_lock_hold_seconds` | histogram | | Time a protected transaction held the lock; buckets from 1 ms to 30 s. A rising hold with a rising wait means one workspace's writes are queued. |
 | `am_dependency_up` | gauge | `name` | `1` when Postgres, ClickHouse, NATS or Valkey answered on this scrape, else `0`. |

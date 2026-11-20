@@ -9,6 +9,7 @@ import {
   consentStateOf,
   disposeErasure,
   eraseProfileStage,
+  IdentityLockTimeoutError,
   identityLockHeld,
   identityLockSnapshot,
   mergedFamily,
@@ -542,6 +543,29 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
       ),
     ).rejects.toThrow(/identity lock/i);
   });
+
+  it('refuses a bounded identity-lock wait and records the refusal (#1074)', async () => {
+    resetIdentityLockMetrics();
+    const probe = await d.db.admin.connect();
+    const waitMs = 100;
+    try {
+      await probe.query('BEGIN');
+      await probe.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`identity:${ws}`]);
+      const started = Date.now();
+      await expect(d.db.withWorkspace(ws, (tx) => withIdentityLock(tx, ws, async () => undefined, { waitMs }))).rejects.toBeInstanceOf(
+        IdentityLockTimeoutError,
+      );
+      // The bound is the configured timeout plus slack, never a wall-clock constant.
+      expect(Date.now() - started).toBeLessThan(waitMs + 2_000);
+      expect(identityLockSnapshot().timeouts).toBe(1);
+    } finally {
+      await probe.query('ROLLBACK').catch(() => {});
+      probe.release();
+    }
+
+    // Once the holder is gone the same bounded call succeeds.
+    await expect(d.db.withWorkspace(ws, (tx) => withIdentityLock(tx, ws, async () => undefined, { waitMs }))).resolves.toBeUndefined();
+  }, 60_000);
 
   it('reports wait and hold timings without a workspace in the labels', async () => {
     resetIdentityLockMetrics();

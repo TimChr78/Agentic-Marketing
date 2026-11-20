@@ -241,6 +241,41 @@ describe.skipIf(!hasTestDatabase())('delivery, unsubscribe and SMS under the ide
     expect(await stateOf(q)).toMatchObject([{ status: 'withdrawn' }]);
   }, 60_000);
 
+  it('answers a retryable 503 when the identity lock is held past the public bound (#1074)', async () => {
+    const profileId = newId('prf');
+    await seedProfile(profileId, { anonymous: `anon-${profileId}` }, new Date(Date.UTC(2026, 1, 1)));
+    const links = linkSigner('lock-protocol-secret');
+    const waitMs = 100;
+    const app = emailRoutes({
+      db: d.db,
+      kp,
+      events: {} as EventStore,
+      email: { publicUrl: 'https://links.example.com', links, adapterDeps: {} as AdapterDeps, trackClicks: false },
+      identityLockWaitMs: waitMs,
+    });
+    const token = links.sign({ w: ws, p: profileId, u: 'marketing_email', m: newId('msg') });
+
+    const probe = await d.db.admin.connect();
+    try {
+      await probe.query('BEGIN');
+      await probe.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`identity:${ws}`]);
+      const started = Date.now();
+      const blocked = await app.request(`/u/${token}`, { method: 'POST' });
+      expect(blocked.status).toBe(503);
+      expect(Number(blocked.headers.get('retry-after'))).toBeGreaterThan(0);
+      // The configured bound plus slack, not a wall-clock constant.
+      expect(Date.now() - started).toBeLessThan(waitMs + 2_000);
+    } finally {
+      await probe.query('ROLLBACK').catch(() => {});
+      probe.release();
+    }
+
+    // The ESP retries after the hold ends and the same link succeeds.
+    const retried = await app.request(`/u/${token}`, { method: 'POST' });
+    expect(retried.status).toBe(200);
+    expect(await stateOf(profileId)).toMatchObject([{ status: 'withdrawn' }]);
+  }, 60_000);
+
   it('a one-click unsubscribe used after a merge records on the survivor', async () => {
     const q = newId('prf');
     const p = newId('prf');
