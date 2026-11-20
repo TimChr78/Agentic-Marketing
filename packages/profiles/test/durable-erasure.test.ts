@@ -86,6 +86,11 @@ const fakeEvents = () => {
     async erasedSubjectsVisible() {
       return true;
     },
+    // The completion gate (#1037 part 3) asks for the workspace's uncovered count; these tests run
+    // against a workspace with no ClickHouse rows.
+    async subjectKeyCoverage() {
+      return { pending: 0, tables: [] };
+    },
   } as unknown as EventStore;
   return { events, calls, published };
 };
@@ -483,6 +488,9 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
       async publishErasedSubjects() {},
       async erasedSubjectsVisible() {
         return true;
+      },
+      async subjectKeyCoverage() {
+        return { pending: 0, tables: [] };
       },
     } as unknown as EventStore;
     const { hot } = fakeHot();

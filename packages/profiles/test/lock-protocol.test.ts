@@ -431,6 +431,11 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
       async erasedSubjectsVisible() {
         return true;
       },
+      // This workspace has no uncovered historical rows, so the completion gate (#1037 part 3)
+      // clears on the final round; the lock assertions are about publication and the delete.
+      async subjectKeyCoverage() {
+        return { pending: 0, tables: [] };
+      },
       async deleteEventsOf() {
         deleteEntered();
         await deleteMayResolve;

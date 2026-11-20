@@ -98,6 +98,9 @@ These run only when the configuration itself is valid. Each network operation gi
 | `queue.journeys` | Counts journey participants whose next step is due and reports the age of the oldest. Warns above 15 minutes. | Journey steps run in the worker role; check its logs for the journey sweeper. |
 | `queue.broadcasts` | Counts broadcast runs past their send time that the scheduler has not finished, and how long the oldest is overdue. Warns above 10 minutes. | Broadcasts run in the scheduler role; keep it at one replica and check its logs. |
 | `queue.outbox` | Counts transactional-outbox rows still waiting and reports the age of the oldest; counts rows that failed after their retries. Warns when a row has waited more than 15 minutes or any row is failed. | The scheduler role publishes the outbox (message events and double opt-in confirmations); check that `ROLE` includes `scheduler` and its logs, then requeue dead letters with `am outbox`. |
+| `privacy.erasureExclusion` | Every erasure key is published and hashable. Warns when a ledger has publishable keys with no confirmed publication, or when an e-mail/phone identifier could not be recovered and is reported as `exclusion: partial`. | Check that the scheduler role runs the erasure cleanup and can reach ClickHouse. An unavailable key cannot be hashed; `profiles.erasureStatus` names the affected kinds. |
+| `queue.erasurePurge` | No workspace has a physical purge due. Warns with the count and the oldest wait when a workspace's last sweep did not cover its newest publication, or its last sweep is overdue. | The scheduler role physically re-sweeps person-linked ClickHouse tables; reads already exclude erased subjects, so this is about deletion, not visibility. |
+| `clickhouse.subject-keys` | Every historical person-linked row has subject-key coverage, so a protected read can check it. Warns with the remaining count per table. | Leave the scheduler running: it backfills rows into a side table without rewriting them. An erasure cannot report completion while this count is non-zero. |
 | `queue.warehouse` | Reports enabled warehouse exports that are due or were requested (informational; a large warehouse export is expected to be "due" while it runs). | Check the export's schedule and last error in the admin UI. |
 | `deliveries` | Counts webhook and action deliveries that ended `dead` in the last 24 hours and, in the message, the dead share of the last hour. Any dead delivery warns. | A dead delivery stopped after its retries: check the endpoint URL, its response and `EGRESS_ALLOWED_HOSTS`. |
 
@@ -269,6 +272,10 @@ live data. The full procedure, names and manifest are in [Backups and restore](b
   are deleted again (with their push subscriptions), suppression hashes are restored and the keyed
   tombstones are re-inserted. A person erased after the snapshot does not come back. Replay is
   idempotent; if the erasure log cannot be read, the restore stops instead of risking a resurrection.
+- **Exclusions and purge after a restore.** The replayed erasure-key ledger and published generation
+  travel with the log, so protected reads exclude the person again once the cleanup job republishes.
+  A restore may put back a ClickHouse snapshot from before a physical purge, so purge progress is
+  reset and the scheduler sweeps that workspace again; `am doctor`'s purge row shows the backlog.
 - **ClickHouse.** `--clickhouse` reloads the event export as taken. Event rows of a replayed person
   keep their pseudonymous ids and non-personal properties, but the profile key that sealed their
   personal data is deleted by the replay, so that data stays unreadable. Take a `--clickhouse`

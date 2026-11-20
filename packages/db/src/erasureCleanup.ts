@@ -15,6 +15,12 @@ export const ERASURE_CLEANUP_LEASE_MS = 60_000;
 export type ErasureCleanupCheckpoint = 'clickhouse' | 'hotstate';
 
 /**
+ * Why a pending or running erasure cleanup has not completed. Stored on the job so a status read
+ * can explain a wait without re-deriving worker state, and never contains personal data.
+ */
+export type ErasureCompletionReason = 'publication' | 'outbox' | 'final_sweep' | 'subject_key_coverage';
+
+/**
  * The only categories a cleanup failure may store. A provider error can echo the request (and the
  * erased person's identifiers), so the message is never stored or logged; a category, the error
  * class name and an HTTP status are enough for an operator.
@@ -94,6 +100,10 @@ export interface ErasureCleanupClaim {
   /** The generation published to ClickHouse's erased subjects; null until confirmed (#1037 part 2). */
   publishedGeneration: number | null;
   publishedAt: Date | null;
+  /** When a FINAL coverage count reached zero; completion requires it (#1037 part 3). */
+  coverageClearedAt: Date | null;
+  /** Why this job is still waiting, when it is (#1037 part 3). */
+  completionReason: ErasureCompletionReason | null;
   selectors: Buffer | null;
   selectorKey: Buffer | null;
   selectorKek: string | null;
@@ -148,6 +158,8 @@ export async function claimErasureCleanupJobs(
     hotstate_done: boolean;
     published_generation: number | string | null;
     published_at: Date | null;
+    coverage_cleared_at: Date | null;
+    completion_reason: ErasureCompletionReason | null;
     selectors: Buffer | null;
     selector_key: Buffer | null;
     selector_kek: string | null;
@@ -177,7 +189,8 @@ export async function claimErasureCleanupJobs(
                 AND GREATEST(COALESCE(j.final_sweep_at, now()), j.first_sweep_done_at)
                     + make_interval(secs => $3::double precision) <= now()) AS final_due,
                j.claim_token, j.clickhouse_done, j.hotstate_done,
-               j.published_generation, j.published_at, j.selectors, j.selector_key, j.selector_kek`,
+               j.published_generation, j.published_at, j.coverage_cleared_at, j.completion_reason,
+               j.selectors, j.selector_key, j.selector_kek`,
     [limit, leaseMs / 1000, finalSweepSeconds],
   );
   return rows.map((r) => ({
@@ -193,6 +206,8 @@ export async function claimErasureCleanupJobs(
     hotstateDone: r.hotstate_done,
     publishedGeneration: r.published_generation === null ? null : Number(r.published_generation),
     publishedAt: r.published_at,
+    coverageClearedAt: r.coverage_cleared_at,
+    completionReason: r.completion_reason,
     selectors: r.selectors,
     selectorKey: r.selector_key,
     selectorKek: r.selector_kek,
@@ -260,6 +275,7 @@ export async function deferErasureCleanup(
   db: Db,
   claim: Pick<ErasureCleanupClaim, 'workspaceId' | 'erasureId' | 'claimToken'>,
   retrySeconds: number,
+  reason: ErasureCompletionReason | null = null,
 ): Promise<boolean> {
   const { rowCount } = await db.admin.query(
     `UPDATE erasure_cleanup_jobs
@@ -268,10 +284,29 @@ export async function deferErasureCleanup(
          next_attempt_at = now() + make_interval(secs => $4),
          lease_until = NULL,
          claim_token = NULL,
+         completion_reason = $5,
          last_error = NULL,
          updated_at = now()
      WHERE workspace_id = $1 AND erasure_id = $2 AND claim_token = $3 AND state = 'running'`,
-    [claim.workspaceId, claim.erasureId, claim.claimToken, retrySeconds],
+    [claim.workspaceId, claim.erasureId, claim.claimToken, retrySeconds, reason],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/**
+ * Records that the workspace-wide subject-key coverage count reached zero while this claim held
+ * the job (#1037 part 3). Completion requires this record, so a status cannot claim logical
+ * completion while a stored row has no key that a protected read could check.
+ */
+export async function markErasureCoverageClear(
+  db: Db,
+  claim: Pick<ErasureCleanupClaim, 'workspaceId' | 'erasureId' | 'claimToken'>,
+): Promise<boolean> {
+  const { rowCount } = await db.admin.query(
+    `UPDATE erasure_cleanup_jobs
+        SET coverage_cleared_at = COALESCE(coverage_cleared_at, now()), updated_at = now()
+      WHERE workspace_id = $1 AND erasure_id = $2 AND claim_token = $3 AND state = 'running'`,
+    [claim.workspaceId, claim.erasureId, claim.claimToken],
   );
   return (rowCount ?? 0) > 0;
 }
@@ -279,6 +314,10 @@ export async function deferErasureCleanup(
 /**
  * Marks the job complete and purges the sealed selectors and their service key: neither is needed
  * again, and both name the erased person. The completed row stays as the erasure's status record.
+ *
+ * Completion is gated in SQL as well as in the worker: a job that never published its exclusions,
+ * or whose workspace still has rows a protected read cannot check, cannot be marked complete even
+ * by a caller that skipped the worker's checks (#1037 part 3).
  */
 export async function completeErasureCleanup(
   db: Db,
@@ -288,6 +327,8 @@ export async function completeErasureCleanup(
     `UPDATE erasure_cleanup_jobs
      SET state = 'complete',
          completed_at = now(),
+         coverage_cleared_at = COALESCE(coverage_cleared_at, now()),
+         completion_reason = NULL,
          selectors = NULL,
          selector_key = NULL,
          selector_kek = NULL,
@@ -295,7 +336,8 @@ export async function completeErasureCleanup(
          claim_token = NULL,
          last_error = NULL,
          updated_at = now()
-     WHERE workspace_id = $1 AND erasure_id = $2 AND claim_token = $3 AND state = 'running'`,
+     WHERE workspace_id = $1 AND erasure_id = $2 AND claim_token = $3 AND state = 'running'
+       AND published_at IS NOT NULL AND coverage_cleared_at IS NOT NULL`,
     [claim.workspaceId, claim.erasureId, claim.claimToken],
   );
   return (rowCount ?? 0) > 0;
@@ -326,6 +368,7 @@ export async function failErasureCleanup(
        lease_until = NULL,
        claim_token = NULL,
        last_error = $6,
+       completion_reason = NULL,
        updated_at = now()
      WHERE workspace_id = $1 AND erasure_id = $2 AND claim_token = $3 AND state = 'running'
      RETURNING state`,
@@ -589,6 +632,48 @@ export async function erasureLedgerKeys(db: Db, workspaceId: string, erasureId: 
   return rows;
 }
 
+/** The exclusion-coverage summary a status read reports (#1037 part 3). Counts only, never values. */
+export interface ErasureLedgerCoverage {
+  /** Ledger rows whose value is HMAC_exclusion and can be published. */
+  full: number;
+  /** Ledger rows whose plaintext could not be recovered; they cannot match a stored key. */
+  unavailable: number;
+  /** The distinct kinds of those unavailable rows, sorted. */
+  unavailableKinds: string[];
+}
+
+/**
+ * One erasure's ledger coverage, read under the caller's workspace transaction. The status API uses
+ * it to say `partial` explicitly instead of implying that an unrecoverable e-mail or phone was
+ * excluded. It reads at most the erasure's own ledger rows.
+ */
+export async function erasureLedgerCoverage(tx: Tx, workspaceId: string, erasureId: string): Promise<ErasureLedgerCoverage> {
+  const rows = await tx
+    .select({ kind: schema.erasureKeys.kind, coverage: schema.erasureKeys.coverage })
+    .from(schema.erasureKeys)
+    .where(and(eq(schema.erasureKeys.workspaceId, workspaceId), eq(schema.erasureKeys.erasureId, erasureId)));
+  let full = 0;
+  const unavailableKinds = new Set<string>();
+  let unavailable = 0;
+  for (const row of rows) {
+    if (row.coverage === 'full') full++;
+    else {
+      unavailable++;
+      unavailableKinds.add(row.kind);
+    }
+  }
+  return { full, unavailable, unavailableKinds: [...unavailableKinds].sort() };
+}
+
+/** Every full-coverage exclusion key the workspace retains; the physical purge matches these. */
+export async function erasureWorkspaceKeys(db: Db, workspaceId: string): Promise<string[]> {
+  const { rows } = await db.admin.query<{ key_value: string }>(
+    `SELECT DISTINCT key_value FROM erasure_keys WHERE workspace_id = $1 AND coverage = 'full' ORDER BY key_value`,
+    [workspaceId],
+  );
+  return rows.map((row) => row.key_value);
+}
+
 /**
  * The next publication generation for a workspace (#1037 part 2). The upsert increments in one
  * statement, so two workers publishing for the same workspace can never take the same value and a
@@ -621,4 +706,147 @@ export async function markErasureCleanupPublished(
     [claim.workspaceId, claim.erasureId, claim.claimToken, generation],
   );
   return (rowCount ?? 0) > 0;
+}
+
+/** How often a workspace with retained exclusion keys is swept again, even after a completed pass. */
+export const ERASURE_PURGE_INTERVAL_SECONDS = 5 * 60;
+/** How long one worker may hold a workspace purge claim. */
+export const ERASURE_PURGE_LEASE_MS = 60_000;
+
+export interface ErasurePurgeClaim {
+  workspaceId: string;
+  /** The publication generation whose keys this sweep covers. */
+  generation: number;
+  purgedGeneration: number;
+  claimToken: string;
+}
+
+export interface ErasurePurgeSweep {
+  generation: number;
+  deletedRows: number;
+  /** True when the sweep reached the end of every table's matching rows. */
+  complete: boolean;
+}
+
+/**
+ * Claims due workspace purges. A workspace is due when its last completed sweep did not cover the
+ * current publication generation, or when its last sweep is older than `intervalSeconds` — late
+ * writes keep arriving after a completed erasure, so a purge is a recurring obligation, not a
+ * one-off. `FOR UPDATE SKIP LOCKED` and a fencing token make several scheduler replicas safe.
+ */
+export async function claimErasurePurges(
+  db: Db,
+  opts: { limit?: number; leaseMs?: number; intervalSeconds?: number } = {},
+): Promise<ErasurePurgeClaim[]> {
+  const limit = opts.limit ?? 10;
+  const leaseMs = opts.leaseMs ?? ERASURE_PURGE_LEASE_MS;
+  const intervalSeconds = opts.intervalSeconds ?? ERASURE_PURGE_INTERVAL_SECONDS;
+  const { rows } = await db.admin.query<{
+    workspace_id: string;
+    generation: number | string;
+    purged_generation: number | string;
+    purge_claim_token: string;
+  }>(
+    `WITH ready AS (
+       SELECT workspace_id FROM erasure_generations
+        WHERE (purge_lease_until IS NULL OR purge_lease_until <= now())
+          AND (purged_generation < generation
+               OR purge_last_sweep_at IS NULL
+               OR purge_last_sweep_at <= now() - make_interval(secs => $3::double precision))
+        ORDER BY COALESCE(purge_last_sweep_at, to_timestamp(0)), workspace_id
+        LIMIT $1
+        FOR UPDATE SKIP LOCKED
+     )
+     UPDATE erasure_generations g
+        SET purge_claim_token = gen_random_uuid()::text,
+            purge_lease_until = now() + make_interval(secs => $2),
+            updated_at = now()
+       FROM ready
+      WHERE g.workspace_id = ready.workspace_id
+      RETURNING g.workspace_id, g.generation, g.purged_generation, g.purge_claim_token`,
+    [limit, leaseMs / 1000, intervalSeconds],
+  );
+  return rows.map((row) => ({
+    workspaceId: row.workspace_id,
+    generation: Number(row.generation),
+    purgedGeneration: Number(row.purged_generation),
+    claimToken: row.purge_claim_token,
+  }));
+}
+
+/** Extends a purge claim. False when another worker took it over. */
+export async function renewErasurePurgeLease(
+  db: Db,
+  claim: Pick<ErasurePurgeClaim, 'workspaceId' | 'claimToken'>,
+  leaseMs = ERASURE_PURGE_LEASE_MS,
+): Promise<boolean> {
+  const { rowCount } = await db.admin.query(
+    `UPDATE erasure_generations SET purge_lease_until = now() + make_interval(secs => $3), updated_at = now()
+      WHERE workspace_id = $1 AND purge_claim_token = $2`,
+    [claim.workspaceId, claim.claimToken, leaseMs / 1000],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/**
+ * Records one sweep. `complete` advances `purged_generation` to the generation the sweep covered;
+ * an incomplete pass only records progress and time, so the next round continues from the same
+ * obligation. A stale claim changes nothing.
+ */
+export async function recordErasurePurgeSweep(
+  db: Db,
+  claim: Pick<ErasurePurgeClaim, 'workspaceId' | 'claimToken'>,
+  sweep: ErasurePurgeSweep,
+): Promise<boolean> {
+  const { rowCount } = await db.admin.query(
+    `UPDATE erasure_generations
+        SET purged_generation = CASE WHEN $4 THEN GREATEST(purged_generation, $3) ELSE purged_generation END,
+            purge_last_sweep_at = now(),
+            purge_deleted_rows = purge_deleted_rows + $5,
+            purge_claim_token = NULL,
+            purge_lease_until = NULL,
+            updated_at = now()
+      WHERE workspace_id = $1 AND purge_claim_token = $2`,
+    [claim.workspaceId, claim.claimToken, sweep.generation, sweep.complete, sweep.deletedRows],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/** Releases a purge claim without recording a completed obligation (a failure or a stop). */
+export async function releaseErasurePurge(db: Db, claim: Pick<ErasurePurgeClaim, 'workspaceId' | 'claimToken'>): Promise<boolean> {
+  const { rowCount } = await db.admin.query(
+    `UPDATE erasure_generations SET purge_claim_token = NULL, purge_lease_until = NULL, updated_at = now()
+      WHERE workspace_id = $1 AND purge_claim_token = $2`,
+    [claim.workspaceId, claim.claimToken],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+/** Physical-purge progress for a status read (#1037 part 3). Reads under the workspace transaction. */
+export interface ErasurePurgeProgress {
+  state: 'pending' | 'running' | 'done';
+  lastSweepAt: Date | null;
+  deletedRows: number;
+}
+
+export async function erasurePurgeProgress(tx: Tx, workspaceId: string, publishedGeneration: number | null): Promise<ErasurePurgeProgress> {
+  const [row] = await tx
+    .select({
+      purgedGeneration: schema.erasureGenerations.purgedGeneration,
+      lastSweepAt: schema.erasureGenerations.purgeLastSweepAt,
+      deletedRows: schema.erasureGenerations.purgeDeletedRows,
+      leaseUntil: schema.erasureGenerations.purgeLeaseUntil,
+    })
+    .from(schema.erasureGenerations)
+    .where(eq(schema.erasureGenerations.workspaceId, workspaceId));
+  if (!row) return { state: publishedGeneration === 0 ? 'done' : 'pending', lastSweepAt: null, deletedRows: 0 };
+  // A null generation means publication has not been confirmed yet, so there is nothing honest to
+  // call purged. Zero means the erasure had no publishable key: no physical obligation.
+  const done = publishedGeneration === 0 || (publishedGeneration !== null && Number(row.purgedGeneration) >= publishedGeneration);
+  const running = Boolean(row.leaseUntil && row.leaseUntil.getTime() > Date.now());
+  return {
+    state: done ? 'done' : running ? 'running' : 'pending',
+    lastSweepAt: row.lastSweepAt ?? null,
+    deletedRows: Number(row.deletedRows),
+  };
 }

@@ -11,6 +11,7 @@ import {
   noteSubjectKeyFailure,
   SUBJECT_KEY_BACKFILL_TABLES,
   SUBJECT_KEY_COLUMNS,
+  SUBJECT_KEY_KINDS,
   type SubjectCoverage,
   type SubjectKeyBackfillOptions,
   type SubjectKeyBackfillResult,
@@ -80,6 +81,18 @@ export interface EventStore {
   eventsOfAnonymousIds(workspaceId: string, anonymousIds: string[], perId: number): Promise<StoredEvent[]>;
   /** Deletes a person's events (erasure). */
   deleteEventsOf(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[]; profileIds?: string[] }): Promise<void>;
+  /**
+   * The recurring physical purge (#1037 part 3): deletes stored rows whose effective subject keys
+   * match any retained exclusion key, per person-linked table, in bounded batches. It uses the same
+   * keyed matching as the protected views (including `events.profile_id`, through its subject
+   * hash), never the raw identifiers and never the ledger or selector rows themselves. `complete`
+   * is false when the batch bound was reached with matching rows left.
+   */
+  purgeErasedSubjects(
+    workspaceId: string,
+    keys: readonly string[],
+    opts?: { batchSize?: number; maxBatches?: number },
+  ): Promise<{ deleted: number; complete: boolean; tables: { table: string; deleted: number; remaining: boolean }[] }>;
   /** Matching events per identifier (segments): name, property equality, time window, optional id scope. */
   countEvents(
     workspaceId: string,
@@ -642,6 +655,39 @@ function identityValues(spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number], row:
 }
 
 /**
+ * The effective subject keys of one row, exactly as the protected views compute them: its own
+ * columns when coverage is `full`, otherwise coalesced with the identity-keyed side entry. Used by
+ * the physical purge so it deletes precisely the rows a protected read would hide (#1037 part 3).
+ */
+function effectiveSubjectKeys(row = 't', side = 's'): string {
+  return SUBJECT_KEY_KINDS.map((kind) => {
+    const column = SUBJECT_KEY_COLUMNS[kind];
+    return `if(${row}.subject_coverage = 'full', ${row}.${column}, coalesce(nullIf(${row}.${column}, ''), ${side}.side_${column}))`;
+  }).join(', ');
+}
+
+/** The purge's side-table join: the same identity key and substitution the protected views use. */
+function purgeSideJoin(spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number]): string {
+  const columns = SUBJECT_KEY_KINDS.map(
+    (kind) => `subject_${SUBJECT_KEY_COLUMNS[kind].replace('subject_', '')} AS side_${SUBJECT_KEY_COLUMNS[kind]}`,
+  );
+  return `LEFT JOIN (
+    SELECT workspace_id AS side_workspace_id, ${spec.identity.map((identity) => `${identity.key} AS side_${identity.key}`).join(', ')},
+           ${columns.join(', ')}
+      FROM subject_key_backfill FINAL
+     WHERE workspace_id = {ws:UUID} AND table_name = {table:String}
+  ) AS s
+    ON s.side_workspace_id = t.workspace_id AND ${spec.identity
+      .map((identity) => `s.side_${identity.key} = toString(t.${identity.column})`)
+      .join(' AND ')}`;
+}
+
+/** The purge's exclusion predicate: any effective subject key is a retained exclusion key. */
+function purgeMatch(): string {
+  return `arrayExists(k -> k != '' AND k IN {keys:Array(String)}, [${effectiveSubjectKeys()}])`;
+}
+
+/**
  * Logical rows that still lack coverage: their own writer did not fill the subject columns and the
  * side table has no result for their identity. FINAL is deliberate — it sees one logical row per
  * replacing key, so a complete concurrent redelivery is never counted as missing.
@@ -910,6 +956,97 @@ export function clickHouseStore(opts: {
       if (!ids.anonymousIds.length && !ids.userIds.length) return;
       // Lightweight delete: rows disappear from queries at once and from disk on the next merge.
       await command(workspaceId, { query: `DELETE FROM events WHERE ${idFilter}`, query_params: params(workspaceId, ids) });
+    },
+    async purgeErasedSubjects(workspaceId, keys, opts = {}) {
+      const batchSize = Math.max(1, Math.trunc(opts.batchSize ?? 10_000));
+      const maxBatches = Math.max(1, Math.trunc(opts.maxBatches ?? 4));
+      const unique = [...new Set(keys.filter((key) => key.length > 0))];
+      const tables: { table: string; deleted: number; remaining: boolean }[] = [];
+      let deleted = 0;
+      let complete = true;
+      for (const spec of SUBJECT_KEY_BACKFILL_TABLES) {
+        let tableDeleted = 0;
+        let remaining = false;
+        // No keys means there is nothing to match; do not issue a query whose predicate cannot be true.
+        if (unique.length) {
+          const identity = spec.identity.map((entry) => `t.${entry.column}`).join(', ');
+          const deleteIdentity = spec.identity.map((entry) => entry.column).join(', ');
+          const join = purgeSideJoin(spec);
+          const match = purgeMatch();
+          const queryParams = { ws: workspaceId, keys: unique, table: spec.table, batch: batchSize };
+          for (let batch = 0; batch < maxBatches; batch++) {
+            const rs = await query(workspaceId, {
+              query: `SELECT count() AS n FROM ${spec.table} AS t FINAL ${join} WHERE ${match}`,
+              query_params: queryParams,
+              format: 'JSONEachRow',
+            });
+            const [row] = await rs.json<{ n: number | string }>();
+            const matching = Number(row?.n ?? 0);
+            if (matching === 0) {
+              remaining = false;
+              break;
+            }
+            // Bounded: the subquery picks at most one batch of stable identities; the delete removes
+            // exactly those logical rows. `mutations_sync=2` makes the next count observe the result
+            // rather than a queued mutation, so progress is real, not optimistic.
+            await command(workspaceId, {
+              query: `DELETE FROM ${spec.table}
+                       WHERE workspace_id = {ws:UUID}
+                         AND (${deleteIdentity}) IN (
+                           SELECT ${identity} FROM ${spec.table} AS t FINAL ${join}
+                            WHERE ${match} LIMIT {batch:UInt32}
+                         )`,
+              query_params: queryParams,
+              clickhouse_settings: { mutations_sync: '2' },
+            });
+            tableDeleted += Math.min(matching, batchSize);
+            remaining = matching > batchSize;
+            if (!remaining) break;
+          }
+
+          // The backfill side table is keyed by the row's raw identity. Once the base rows are gone
+          // it is the last raw trace of the person, so the same purge round deletes the matching
+          // side entries. Only do this once the base table has no matching row left: deleting a
+          // side entry while its base row still exists would make that row visible again.
+          if (!remaining) {
+            const sideMatch = `arrayExists(k -> k != '' AND k IN {keys:Array(String)}, [${SUBJECT_KEY_KINDS.map(
+              (kind) => SUBJECT_KEY_COLUMNS[kind],
+            ).join(', ')}])`;
+            for (let batch = 0; batch < maxBatches; batch++) {
+              const rs = await query(workspaceId, {
+                query: `SELECT count() AS n FROM subject_key_backfill FINAL
+                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}`,
+                query_params: queryParams,
+                format: 'JSONEachRow',
+              });
+              const [row] = await rs.json<{ n: number | string }>();
+              const matching = Number(row?.n ?? 0);
+              if (matching === 0) {
+                remaining = false;
+                break;
+              }
+              await command(workspaceId, {
+                query: `DELETE FROM subject_key_backfill
+                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String}
+                           AND (key1, key2, key3, key4) IN (
+                             SELECT key1, key2, key3, key4 FROM subject_key_backfill FINAL
+                              WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}
+                              LIMIT {batch:UInt32}
+                           )`,
+                query_params: queryParams,
+                clickhouse_settings: { mutations_sync: '2' },
+              });
+              tableDeleted += Math.min(matching, batchSize);
+              remaining = matching > batchSize;
+              if (!remaining) break;
+            }
+          }
+        }
+        deleted += tableDeleted;
+        if (remaining) complete = false;
+        tables.push({ table: spec.table, deleted: tableDeleted, remaining });
+      }
+      return { deleted, complete, tables };
     },
     async countEvents(workspaceId, q) {
       const rs = await query(workspaceId, countQuery(workspaceId, q, await protectedReadFor(workspaceId)));

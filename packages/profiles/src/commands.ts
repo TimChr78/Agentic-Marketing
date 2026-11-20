@@ -1,7 +1,7 @@
 import { DEFAULT_PURPOSES, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
-import { erasureCleanupJob, type IdentifierType, schema } from '@agentic-marketing/db';
+import { erasureCleanupJob, erasureLedgerCoverage, erasurePurgeProgress, type IdentifierType, schema } from '@agentic-marketing/db';
 import type {} from '@agentic-marketing/hotstate';
 import { and, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -875,7 +875,7 @@ export const eraseProfile = defineCommand({
   name: 'profiles.erase',
   title: 'Erase a person (erasure request)',
   description:
-    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again. The person’s SQL rows and keys are gone when this returns `pending`; a durable job then sweeps ClickHouse events and the decision API’s hot state, and `profiles.erasureStatus` reports it. The sweep is a mitigation, not a general guarantee: a ClickHouse write already in flight, or an eligibility check that ran before the erasure, can still land later; 0.17.0 adds read-time exclusion (#1037).',
+    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again. The person’s SQL rows and keys are gone when this returns `pending`; a durable job publishes their exclusion keys to ClickHouse, sweeps events and the decision API’s hot state, and `profiles.erasureStatus` reports logical completion separately from physical purge progress. Once status reports complete, every application query started afterwards excludes the erased subject, including rows written later (#1037).',
   input: z.object({ profileId: ProfileId, reason: z.string().min(1).max(500).describe('E.g. "Erasure request by e-mail on 2026-10-22"') }),
   output: z.object({
     erasureId: z.string(),
@@ -883,7 +883,7 @@ export const eraseProfile = defineCommand({
     status: z
       .literal('pending')
       .describe(
-        'External cleanup is queued; poll profiles.erasureStatus for complete, which means ClickHouse was swept twice (not a general no-later-write guarantee, #1037)',
+        'External cleanup is queued; poll profiles.erasureStatus for complete, which means the exclusion keys are published and visible and every stored row has coverage',
       ),
   }),
   permission: 'profiles:erase',
@@ -912,23 +912,45 @@ export const erasureStatus = defineCommand({
   name: 'profiles.erasureStatus',
   title: 'Read an erasure’s status',
   description:
-    'Whether an erasure’s cleanup has finished. The person’s SQL rows and keys are already gone when profiles.erase returns. `complete` means ClickHouse was swept twice after the erasure, an immediate pass and a final pass after the mitigation interval. It does not prove that a write already in flight at the ClickHouse server, or one whose eligibility check ran before the erasure, can never land later; 0.17.0 makes such rows invisible to every query (#1037). Erasures recorded before durable cleanup existed have no job and report complete.',
+    'Whether an erasure’s logical completion and physical purge have finished. The person’s SQL rows and keys are already gone when profiles.erase returns. `complete` means the erasure’s exclusion ledger was published to ClickHouse and confirmed visible, and the workspace has no person-linked rows without subject-key coverage, so every application read started afterwards excludes the erased subject — including rows written later. It does not mean the physical rows are gone: `purge` reports that separate, eventual milestone, and late writes keep being swept. `exclusion` is `partial` when an e-mail or phone identifier had no recoverable plaintext and could not be hashed; `unavailableKinds` names those kinds. The scheduler’s subject-key backfill must reach zero uncovered rows before an erasure can complete. Erasures recorded before durable cleanup existed have no job and report complete when they have no publishable ledger row.',
   input: z.object({ erasureId: z.string().regex(/^era_[0-9a-f]{32}$/) }),
   output: z.object({
     erasureId: z.string(),
     status: z
       .enum(['pending', 'running', 'complete', 'failed'])
       .describe(
-        'pending: cleanup is queued or waiting for its final sweep, while the SQL rows and keys are already gone; running: a worker is sweeping; complete: SQL rows and keys deleted and ClickHouse swept twice, but not a general no-later-write guarantee (#1037); failed: the retry budget ran out and rows may remain',
+        'pending: waiting for publication, an in-flight outbox row, the final sweep or subject-key coverage, while the SQL rows and keys are already gone; running: a worker is sweeping; complete: the published exclusions are visible and every stored row has coverage, so reads exclude the erased subject; failed: the retry budget ran out and rows may remain',
       ),
+    reason: z
+      .enum(['publication', 'outbox', 'final_sweep', 'subject_key_coverage'])
+      .nullable()
+      .describe('Why a pending or running erasure has not completed yet; null once it is complete or failed'),
+    exclusion: z
+      .enum(['full', 'partial'])
+      .describe('partial when an e-mail/phone identifier could not be recovered and is therefore not hashed for exclusion'),
+    unavailableKinds: z.array(z.string()).describe('The kinds behind `exclusion: partial`; empty when full'),
     counts: z.record(z.string(), z.number()),
     profiles: z.number().int().describe('Profiles in the erased merged family'),
     attempts: z.number().int(),
     lastError: z.string().nullable(),
     checkpoints: z.object({
-      clickhouse: z.boolean().describe('The most recent ClickHouse sweep finished; complete also requires the final sweep'),
+      clickhouse: z.boolean().describe('The most recent ClickHouse sweep finished; completion also requires the final sweep'),
       hotState: z.boolean().describe('The decision API hot-state deletion finished'),
     }),
+    purge: z
+      .object({
+        state: z
+          .enum(['pending', 'running', 'done'])
+          .describe(
+            'Physical deletion progress, separate from logical completion: pending, a sweep running, or a sweep covered this erasure’s published keys',
+          ),
+        lastSweepAt: z.string().nullable().describe('When the last physical sweep of this workspace finished'),
+        deletedRows: z
+          .number()
+          .int()
+          .describe('Rows the recurring purge has physically deleted for this workspace over its lifetime, not for this erasure alone'),
+      })
+      .describe('Physical purge progress; an empty cleanup queue is not evidence that rows are gone'),
     requestedAt: z.string(),
     completedAt: z.string().nullable(),
   }),
@@ -942,11 +964,35 @@ export const erasureStatus = defineCommand({
       .where(and(eq(schema.erasures.workspaceId, ctx.principal.workspaceId), eq(schema.erasures.id, erasureId)));
     if (!erasure)
       throw new AppError('not_found', `No erasure ${erasureId}. It may belong to another workspace or never have been recorded.`);
+    const ledger = await erasureLedgerCoverage(ctx.tx, ctx.principal.workspaceId, erasureId);
     const job = await erasureCleanupJob(ctx.tx, ctx.principal.workspaceId, erasureId);
-    const complete = !job || job.state === 'complete';
+    // A job with an unpublished ledger row is not complete under the activated contract. An erasure
+    // with no job and nothing publishable (a legacy erasure, or one with only unavailable rows) is.
+    const awaitingPublication = !job && ledger.full > 0;
+    const complete = !awaitingPublication && (!job || job.state === 'complete');
+    const status = job
+      ? job.state === 'pending_external'
+        ? ('pending' as const)
+        : job.state
+      : awaitingPublication
+        ? ('pending' as const)
+        : ('complete' as const);
+    const reason =
+      complete || status === 'failed'
+        ? null
+        : (job?.completionReason ?? (job?.publishedAt === null || awaitingPublication ? 'publication' : null));
+    const purgeProgress = await erasurePurgeProgress(ctx.tx, ctx.principal.workspaceId, job ? job.publishedGeneration : 0);
+    const purge = {
+      state: purgeProgress.state,
+      lastSweepAt: purgeProgress.lastSweepAt?.toISOString() ?? null,
+      deletedRows: purgeProgress.deletedRows,
+    };
     return {
       erasureId,
-      status: job ? (job.state === 'pending_external' ? ('pending' as const) : job.state) : ('complete' as const),
+      status,
+      reason,
+      exclusion: ledger.unavailable > 0 ? ('partial' as const) : ('full' as const),
+      unavailableKinds: ledger.unavailableKinds,
       counts: erasure.counts,
       profiles: erasure.profileIds.length,
       attempts: job?.attempts ?? 0,
@@ -955,6 +1001,7 @@ export const erasureStatus = defineCommand({
         clickhouse: complete || Boolean(job?.clickhouseDone),
         hotState: complete || Boolean(job?.hotstateDone),
       },
+      purge,
       requestedAt: erasure.at.toISOString(),
       completedAt: job?.completedAt?.toISOString() ?? null,
     };

@@ -4,7 +4,7 @@ import { readdir } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
-import { appRoleReach, createDb, type Db, normalizeHost } from '@agentic-marketing/db';
+import { appRoleReach, createDb, type Db, ERASURE_PURGE_INTERVAL_SECONDS, normalizeHost } from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { endpointFailure, endpointOrigin, splitUrlCredentials } from '@agentic-marketing/telemetry';
@@ -863,6 +863,10 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
         erasure_cleanup_pending: string;
         erasure_cleanup_oldest_seconds: string;
         erasure_cleanup_failed: string;
+        erasure_unpublished: string;
+        erasure_unavailable: string;
+        erasure_purge_backlog: string;
+        erasure_purge_oldest_seconds: string | null;
       }
     | undefined;
   try {
@@ -898,7 +902,32 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
               WHERE state IN ('pending_external', 'running')) AS erasure_cleanup_pending,
            (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM erasure_cleanup_jobs
               WHERE state IN ('pending_external', 'running')) AS erasure_cleanup_oldest_seconds,
-           (SELECT count(*) FROM erasure_cleanup_jobs WHERE state = 'failed') AS erasure_cleanup_failed`,
+           (SELECT count(*) FROM erasure_cleanup_jobs WHERE state = 'failed') AS erasure_cleanup_failed,
+           (SELECT count(*) FROM erasures e
+              WHERE EXISTS (SELECT 1 FROM erasure_keys k
+                             WHERE k.workspace_id = e.workspace_id
+                               AND k.erasure_id = e.id
+                               AND k.coverage = 'full')
+                AND NOT EXISTS (SELECT 1 FROM erasure_cleanup_jobs j
+                                 WHERE j.workspace_id = e.workspace_id
+                                   AND j.erasure_id = e.id
+                                   AND j.published_at IS NOT NULL)) AS erasure_unpublished,
+           (SELECT count(*) FROM erasure_keys WHERE coverage = 'unavailable') AS erasure_unavailable,
+           (SELECT count(*) FROM erasure_generations g
+              WHERE g.generation > 0
+                AND EXISTS (SELECT 1 FROM erasure_keys k WHERE k.workspace_id = g.workspace_id)
+                AND (g.purged_generation < g.generation
+                     OR g.purge_last_sweep_at IS NULL
+                     OR g.purge_last_sweep_at <= now() - make_interval(secs => ${3 * ERASURE_PURGE_INTERVAL_SECONDS})))
+             AS erasure_purge_backlog,
+           (SELECT EXTRACT(EPOCH FROM now() - min(COALESCE(g.purge_last_sweep_at, g.updated_at)))
+              FROM erasure_generations g
+             WHERE g.generation > 0
+               AND EXISTS (SELECT 1 FROM erasure_keys k WHERE k.workspace_id = g.workspace_id)
+               AND (g.purged_generation < g.generation
+                    OR g.purge_last_sweep_at IS NULL
+                    OR g.purge_last_sweep_at <= now() - make_interval(secs => ${3 * ERASURE_PURGE_INTERVAL_SECONDS})))
+             AS erasure_purge_oldest_seconds`,
       ),
       'queue health',
     );
@@ -1046,6 +1075,39 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
               status: 'ok',
               message: `${erasurePending} erasure cleanup job(s) running; the oldest has waited ${duration(erasureOldest)}`,
             },
+  );
+  // Exclusion coverage is not the cleanup queue. A job can be empty while a ledger row is still
+  // unpublished, and an unrecoverable e-mail/phone can never be excluded by a hash (#1037 part 3).
+  const unpublished = Number(row.erasure_unpublished);
+  const unavailable = Number(row.erasure_unavailable);
+  checks.push(
+    unpublished > 0 || unavailable > 0
+      ? {
+          id: 'privacy.erasureExclusion',
+          status: 'warn',
+          message: [
+            unpublished > 0 ? `${unpublished} erasure(s) have ledger keys that are not published yet` : '',
+            unavailable > 0 ? `${unavailable} erasure key(s) are unavailable to exclude (unrecovered e-mail/phone plaintext)` : '',
+          ]
+            .filter(Boolean)
+            .join('; '),
+          hint: 'Check that the scheduler role runs the erasure cleanup and can reach ClickHouse. An unavailable key cannot be hashed; the erasure status reports `exclusion: partial` with the affected kinds.',
+        }
+      : { id: 'privacy.erasureExclusion', status: 'ok', message: 'every erasure key is published and hashable for read-time exclusion' },
+  );
+  // Physical purge is a separate, eventual milestone: an empty cleanup queue does not mean the
+  // rows are gone, and late writes can always add more.
+  const purgeBacklog = Number(row.erasure_purge_backlog);
+  const purgeOldest = row.erasure_purge_oldest_seconds === null ? 0 : Number(row.erasure_purge_oldest_seconds);
+  checks.push(
+    purgeBacklog > 0
+      ? {
+          id: 'queue.erasurePurge',
+          status: 'warn',
+          message: `${purgeBacklog} workspace(s) have a physical purge due; the oldest has waited ${purgeOldest ? duration(purgeOldest) : 'since the workspace was created'}`,
+          hint: 'The scheduler role sweeps person-linked ClickHouse tables for retained exclusion keys. Reads already exclude erased subjects; this row tracks physical deletion only.',
+        }
+      : { id: 'queue.erasurePurge', status: 'ok', message: 'no workspace has a physical purge due' },
   );
   return checks;
 }
@@ -1528,7 +1590,7 @@ export async function checkSubjectKeyCoverage(config: Config, db: Db, deps: Subj
       id: 'clickhouse.subject-keys',
       status: 'warn',
       message: `${coverage.pending} historical row(s) still lack subject-key coverage (${byTable})`,
-      hint: 'The scheduler backfills them; the read-time exclusion contract stays inactive until the count is zero.',
+      hint: 'The scheduler backfills them; an erasure cannot report complete while the count is non-zero.',
     };
   } catch (err) {
     const timedOut = /timed out/.test(messageOf(err));

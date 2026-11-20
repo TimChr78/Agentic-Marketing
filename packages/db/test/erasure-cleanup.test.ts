@@ -88,6 +88,14 @@ const expireLease = (id: string) =>
     [d.workspace, id],
   );
 
+/** The completion gate (#1037 part 3): publication confirmed and coverage cleared. */
+const passCompletionGate = (id: string) =>
+  d.db.admin.query(
+    `UPDATE erasure_cleanup_jobs SET published_at = now(), coverage_cleared_at = now()
+     WHERE workspace_id = $1 AND erasure_id = $2`,
+    [d.workspace, id],
+  );
+
 const claimFor = async (id: string, opts: { limit?: number } = {}) => {
   const claims = await claimErasureCleanupJobs(d.db, { limit: opts.limit ?? 100, leaseMs: 60_000 });
   return claims.find((c) => c.erasureId === id);
@@ -135,6 +143,8 @@ describe.skipIf(!hasTestDatabase())('durable erasure cleanup (#978 part 2b)', ()
     await expect(markErasureCleanupCheckpoint(d.db, claim, 'hotstate')).resolves.toBe(true);
     expect((await row('era_claim'))?.hotstate_done).toBe(true);
 
+    await expect(completeErasureCleanup(d.db, claim)).resolves.toBe(false);
+    await passCompletionGate('era_claim');
     await expect(completeErasureCleanup(d.db, claim)).resolves.toBe(true);
     const done = (await row('era_claim'))!;
     expect(done.state).toBe('complete');
@@ -160,6 +170,7 @@ describe.skipIf(!hasTestDatabase())('durable erasure cleanup (#978 part 2b)', ()
     expect(second.claimToken).not.toBe(first.claimToken);
     expect(second.clickhouseDone).toBe(true);
     expect(second.hotstateDone).toBe(false);
+    await passCompletionGate('era_crash');
     await expect(completeErasureCleanup(d.db, second)).resolves.toBe(true);
   });
 
@@ -179,6 +190,7 @@ describe.skipIf(!hasTestDatabase())('durable erasure cleanup (#978 part 2b)', ()
     expect(owned.claim_token).toBe(second.claimToken);
     expect(owned.last_error).toBeNull();
 
+    await passCompletionGate('era_stale');
     await expect(completeErasureCleanup(d.db, second)).resolves.toBe(true);
     expect((await row('era_stale'))?.state).toBe('complete');
   });
