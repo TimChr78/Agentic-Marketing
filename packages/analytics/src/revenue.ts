@@ -25,10 +25,13 @@ export function summaryRevenue(rows: readonly (readonly unknown[])[], currencyIn
 /**
  * The currency `meta.currency` may name (#958, #1050): exactly one revenue row, with a visible
  * amount and not `UNKNOWN`. A suppressed amount is withheld, so publishing its currency would tell
- * a client the campaign is measurable in it, and `UNKNOWN` is not a currency at all.
+ * a client the campaign is measurable in it, and `UNKNOWN` is not a currency at all. Currency cells
+ * are normalised to upper case so both surfaces answer `EUR` for an `eur` cell and reject any case
+ * of `unknown`, as the query layer did before the rule was shared.
  */
 export function summaryCurrency(revenue: readonly RevenueRow[]): string | null {
   if (revenue.length !== 1) return null;
   const row = revenue[0]!;
-  return row.amount === null || row.currency === 'UNKNOWN' ? null : row.currency;
+  const currency = row.currency.toUpperCase();
+  return row.amount === null || currency === 'UNKNOWN' ? null : currency;
 }

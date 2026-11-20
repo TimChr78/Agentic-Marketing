@@ -221,6 +221,11 @@ describe('campaign summary currency suppression (#909)', () => {
     expect(summaryCurrency([{ currency: 'EUR', amount: null }])).toBeNull();
     // UNKNOWN is not a currency, matching analytics.query's meta.currency.
     expect(summaryCurrency([{ currency: 'UNKNOWN', amount: 10 }])).toBeNull();
+    // Both surfaces normalise case: a fixed-rule `eur` names EUR, and any case of unknown is not
+    // a currency.
+    expect(summaryCurrency([{ currency: 'eur', amount: 10 }])).toBe('EUR');
+    expect(summaryCurrency([{ currency: 'unknown', amount: 10 }])).toBeNull();
+    expect(summaryCurrency([{ currency: 'Unknown', amount: 10 }])).toBeNull();
     expect(summaryCurrency([{ currency: 'EUR', amount: 400 }])).toBe('EUR');
     // Two currency rows can never be added; even one suppressed row keeps it null (#909).
     expect(

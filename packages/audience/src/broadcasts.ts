@@ -746,11 +746,30 @@ const intentionallyNotSent = (m: { status: string; reason: string | null }) =>
  * The segment member id a broadcast message was requested for. The canary pass decides membership
  * on `segment_memberships.profile_id`, while the message is stored under the person's canonical id
  * after a merge; the idempotency key is the row's own record of the member the send selected
- * (#1053). Only the `bct:` namespace the broadcast sender writes is recognised.
+ * (#1053). Only the `bct:` namespace the broadcast sender writes is recognised, and a failed
+ * conflict row's `:conflict` suffix is stripped: the member is still the id the send selected
+ * (#1099). Anything else falls back to the stored id, so a malformed key cannot invent a member.
  */
+const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
 export function broadcastMemberOf(idempotencyKey: string, broadcastId: string): string | null {
   const prefix = `bct:${broadcastId}:`;
-  return idempotencyKey.startsWith(prefix) ? idempotencyKey.slice(prefix.length) : null;
+  if (!idempotencyKey.startsWith(prefix)) return null;
+  const member = idempotencyKey.slice(prefix.length).replace(/:conflict$/, '');
+  return PROFILE_ID.test(member) ? member : null;
+}
+
+/** Whether one message row belongs to the canary share the send selected (#1053). */
+export function canaryMessageOf(
+  row: { idempotencyKey: string; profileId: string | null; status: string; reason: string | null },
+  broadcastId: string,
+  canaryPercent: number,
+): boolean {
+  // Recompute on the id the send used, never on the canonical id it stored: after a merge the two
+  // hash to different shares, and an alias still in a dynamic segment would otherwise hide a real
+  // canary message from the breach thresholds. A row without a usable key falls back to its
+  // stored id, which is what a send before this change used.
+  const member = broadcastMemberOf(row.idempotencyKey, broadcastId) ?? row.profileId;
+  return !!member && canaryAssignment(member, broadcastId, canaryPercent) && !intentionallyNotSent(row);
 }
 
 async function canaryMessagesOf(
@@ -769,16 +788,9 @@ async function canaryMessagesOf(
     })
     .from(schema.messages)
     .where(and(eq(schema.messages.journeyId, broadcastId), eq(schema.messages.test, false)));
-  return rows.flatMap((r) => {
-    // Recompute on the id the send used, never on the canonical id it stored: after a merge the
-    // two hash to different shares, and an alias still in a dynamic segment would otherwise hide
-    // a real canary message from the breach thresholds. A row without the broadcast namespace
-    // falls back to its stored id, which is what a send before this change used.
-    const member = broadcastMemberOf(r.idempotencyKey, broadcastId) ?? r.profileId;
-    return member && canaryAssignment(member, broadcastId, canaryPercent) && !intentionallyNotSent(r)
-      ? [{ id: r.id, status: r.status, notBefore: r.notBefore }]
-      : [];
-  });
+  return rows.flatMap((r) =>
+    canaryMessageOf(r, broadcastId, canaryPercent) ? [{ id: r.id, status: r.status, notBefore: r.notBefore }] : [],
+  );
 }
 
 const Run = z.object({
@@ -973,7 +985,11 @@ export const broadcastStatus = defineCommand({
     const delivery = (await deliveryCounts(ctx.tx, r ? [input.artifactId] : [])).get(input.artifactId) ?? {};
     let test: z.output<typeof Test> | null = null;
     if (t) {
-      const variants = await variantResults(ctx.tx, ctx.services.events, ctx.principal.workspaceId, input.artifactId, t.subjects);
+      // After the decision, report the counts the decision used: the rest of the audience carries
+      // the winner's variant, so a fresh read would describe a different, larger sample than the
+      // recorded reason (#1099). Before the decision there is no snapshot, so read live.
+      const variants =
+        t.decidedVariants ?? (await variantResults(ctx.tx, ctx.services.events, ctx.principal.workspaceId, input.artifactId, t.subjects));
       const rate = (n: number, sent: number) => (sent ? Math.round((n / sent) * 10_000) / 100 : null);
       test = {
         state: t.state,
@@ -1554,9 +1570,12 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         );
       const variants = await variantResults(tx, deps.events, ws, broadcastId, test.subjects);
       const picked = pickWinner(test.metric, variants);
+      // The counts the reason was computed from travel with it: the rest of the audience is sent
+      // under the winner's variant, so recomputing later would report counts the reason never saw
+      // and could put "fewer than 20 sends" beside 20 or more (#1099).
       await tx
         .update(schema.broadcastTests)
-        .set({ state: 'winner_sent', winner: picked.winner, reason: picked.reason, decidedAt: now })
+        .set({ state: 'winner_sent', winner: picked.winner, reason: picked.reason, decidedAt: now, decidedVariants: variants })
         .where(eq(schema.broadcastTests.broadcastId, broadcastId));
       // The rest starts from the top, and the audience is rebuilt now; do both in this
       // transaction so a crash cannot leave the winner marked sent but the rest unsent.

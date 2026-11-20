@@ -452,8 +452,11 @@ describe('subject A/B test', () => {
       20_000,
     );
     expect(done.test?.winner).toBe('A');
+    // The report is the decision's own snapshot, so the reason and the counts beside it describe
+    // the same sample: the winner's rest sends carry its variant but are not part of the test.
+    expect(done.test?.variants.reduce((n, v) => n + v.sent, 0)).toBe(sample.length);
     // The split is random: a variant can end up under the 20-send minimum, which also picks A,
-    // with its own reason. Assert the reason that matches the actual split.
+    // with its own reason. Assert the reason that matches the split the decision recorded.
     const fewest = Math.min(...(done.test?.variants.map((v) => v.sent) ?? [0]));
     expect(done.test?.reason).toContain(fewest >= 20 ? 'tie' : 'fewer than 20 sends');
   }, 60_000);
