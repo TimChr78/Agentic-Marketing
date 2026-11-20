@@ -211,4 +211,34 @@ describe.skipIf(!hasTestDatabase())('delivery batch isolation (#1054)', () => {
     expect(row).toMatchObject({ status: 'failed', next_attempt_at: null });
     expect(row.reason).toMatch(/^delivery_error: /);
   });
+
+  it('records a decision event when the stale sweep gives up on a stuck send (#1098)', async () => {
+    // A worker stopped mid-send and never came back. The sweep is the only writer that settles
+    // this row, so its outcome must be as visible to reports and guardrails as a per-message
+    // recovery: the status and its event commit together.
+    const id = await queuedMessage(await person('stale'), '2026-01-05T00:00:00Z');
+    await d.db.admin.query(
+      `UPDATE messages SET status = 'sending', attempts = 1, updated_at = now() - interval '11 minutes'
+       WHERE workspace_id = $1 AND id = $2`,
+      [d.workspace, id],
+    );
+    await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1', [d.workspace]);
+
+    await deliverRound(d.db, { kp, events: {} as EventStore, email: email() });
+
+    const row = await message(id);
+    expect(row).toMatchObject({ status: 'failed', next_attempt_at: null });
+    expect(row.reason).toMatch(/^unknown_outcome: /);
+    const { rows } = await d.db.admin.query<{ payload: { events: { messageId: string; type: string; reason: string }[] } }>(
+      `SELECT payload FROM outbox WHERE workspace_id = $1 AND kind = 'message_event'`,
+      [d.workspace],
+    );
+    const recorded = rows
+      .flatMap((entry) => entry.payload.events)
+      .filter((event) => event.messageId === id)
+      .map((event) => ({ type: event.type, reason: event.reason }));
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.type).toBe('failed');
+    expect(recorded[0]!.reason).toMatch(/^unknown_outcome: /);
+  });
 });

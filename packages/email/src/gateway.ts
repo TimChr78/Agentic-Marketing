@@ -13,7 +13,7 @@ import {
 } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, eq, lt, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
 import type { DeliveryAttempt } from './attempt';
 import { blockResolver } from './blocks';
@@ -309,17 +309,35 @@ export async function deliverRound(
   const utmCache: CampaignUtmCache = new Map();
   for (const { workspace_id: ws } of workspaces) {
     // A message stuck in "sending" means a worker stopped mid-send: the outcome is unknown, and
-    // sending again could duplicate it, so it is marked failed for a person to look at.
-    await db.withWorkspace(ws, (tx) =>
-      tx
+    // sending again could duplicate it, so it is marked failed for a person to look at. The status
+    // and its decision event commit together (#1098), so reports and guardrails see the same
+    // outcome whichever writer recorded it.
+    await db.withWorkspace(ws, async (tx) => {
+      const stale = await tx
+        .select()
+        .from(schema.messages)
+        .where(and(eq(schema.messages.status, 'sending'), lt(schema.messages.updatedAt, new Date(Date.now() - STALE_SENDING_MS))))
+        .for('update', { skipLocked: true });
+      if (!stale.length) return;
+      const reason = 'unknown_outcome: the worker stopped while sending; check the provider before resending';
+      await tx
         .update(schema.messages)
-        .set({
-          status: 'failed',
-          reason: 'unknown_outcome: the worker stopped while sending; check the provider before resending',
-          updatedAt: new Date(),
-        })
-        .where(and(eq(schema.messages.status, 'sending'), lt(schema.messages.updatedAt, new Date(Date.now() - STALE_SENDING_MS)))),
-    );
+        .set({ status: 'failed', reason, updatedAt: new Date() })
+        .where(
+          and(
+            inArray(
+              schema.messages.id,
+              stale.map((message) => message.id),
+            ),
+            eq(schema.messages.status, 'sending'),
+          ),
+        );
+      await enqueueMessageEvents(
+        tx,
+        ws,
+        stale.map((message) => decisionEvent(message, 'failed', reason)),
+      );
+    });
     const claimed = await db.withWorkspace(ws, async (tx) => {
       const res = await tx.execute<{ id: string; channel: string }>(sql`
         UPDATE messages SET status = 'sending', attempts = attempts + 1, updated_at = now(), next_attempt_at = NULL
