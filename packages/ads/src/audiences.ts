@@ -1,4 +1,10 @@
-import { type AudienceSync, DEFAULT_PURPOSES, publishedSingleton, publishValidators } from '@agentic-marketing/artifacts';
+import {
+  type AudienceSync,
+  canonicalProfileIds,
+  DEFAULT_PURPOSES,
+  publishedSingleton,
+  publishValidators,
+} from '@agentic-marketing/artifacts';
 import { defineCommand, type Impact } from '@agentic-marketing/commands';
 import { AppError, isAbortError, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
@@ -996,7 +1002,12 @@ async function processCurrentIntents(
   return writePlans(db, ws, syncId, platform, ref, plans, deps, { stopOnError: false });
 }
 
-async function processMergeRepair(
+/**
+ * Re-points audience rows whose profile was merged away at the survivor's row. Resolves the
+ * survivor through the shared merge walk (#1093), so a member 21+ merges deep is repaired instead
+ * of being treated as unresolved. Exported so a test can exercise the walk without a platform.
+ */
+export async function processMergeRepair(
   db: Db,
   ws: string,
   syncId: string,
@@ -1017,6 +1028,12 @@ async function processMergeRepair(
       WHERE m.workspace_id = ${ws} AND m.sync_id = ${syncId} AND m.platform = ${platform}
         AND m.destination_key = ${destinationKey} AND p.merged_into IS NOT NULL
       ORDER BY m.profile_id LIMIT ${limit}`);
+    // Resolve every row's merged-away id in one walk, not one query per row (#1096 review).
+    const survivors = await canonicalProfileIds(
+      tx,
+      ws,
+      rows.map((row) => row.merged_into),
+    );
     const out: MemberWritePlan[] = [];
     for (const row of rows) {
       const [mergedIntent] = await tx
@@ -1031,19 +1048,7 @@ async function processMergeRepair(
             eq(schema.audienceWriteIntents.profileId, row.profile_id),
           ),
         );
-      let survivor: string | null = row.merged_into;
-      for (let i = 0; i < 20 && survivor; i++) {
-        const [p] = await tx
-          .select({ mergedInto: schema.profiles.mergedInto })
-          .from(schema.profiles)
-          .where(and(eq(schema.profiles.workspaceId, ws), eq(schema.profiles.id, survivor)));
-        if (!p) {
-          survivor = null;
-          break;
-        }
-        if (!p.mergedInto) break;
-        survivor = p.mergedInto;
-      }
+      const survivor = survivors.get(row.merged_into) ?? null;
       if (!survivor) {
         const plan = planMemberWrite({
           profileId: row.profile_id,

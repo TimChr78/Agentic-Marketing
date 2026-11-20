@@ -186,10 +186,14 @@ export interface EventStore {
   ): Promise<Record<string, number>>;
   /** Per node and event type counts for a journey (analytics, canvas overlays). */
   journeyCounts(workspaceId: string, journeyId: string): Promise<{ node: string; type: string; count: number }[]>;
-  /** Profiles that reached the journey's goal or unsubscribed from its e-mail, in a time window. */
+  /**
+   * Profiles that reached the journey's goal or unsubscribed from its e-mail, in a time window.
+   * Pass `profileIds` to scope the read to one page of people (and their merged-away ids); the
+   * holdout report does that, so its memory is a page rather than the journey's whole history.
+   */
   journeyHoldoutOutcomes(
     workspaceId: string,
-    q: { journeyId: string; from?: Date; to?: Date },
+    q: { journeyId: string; from?: Date; to?: Date; profileIds?: string[] },
   ): Promise<{
     converted: string[];
     unsubscribed: string[];
@@ -1425,20 +1429,50 @@ export function clickHouseStore(opts: {
       const from = q.from?.toISOString().replace('Z', '');
       const to = q.to?.toISOString().replace('Z', '');
       const protectedRead = await protectedReadFor(workspaceId);
+      if (q.profileIds !== undefined && !q.profileIds.length)
+        return { converted: [], unsubscribed: [], convertedAt: [], unsubscribedAt: [] };
+      // Scope the read to one page of people when the caller has one (#1096). The ids include the
+      // page's merged-away profile ids, so an outcome stored under an old id is still read for its
+      // page. Chunk the array like conversionEvents: one form field stays below the transport limit.
+      const profileScopes: string[] = [];
+      const profileParams: Record<string, unknown> = {};
+      if (q.profileIds) {
+        let chunk: string[] = [];
+        let bytes = 2;
+        const flush = () => {
+          if (!chunk.length) return;
+          const name = `profiles${profileScopes.length}`;
+          profileScopes.push(`profile_id IN {${name}:Array(String)}`);
+          profileParams[name] = chunk;
+          chunk = [];
+          bytes = 2;
+        };
+        for (const value of q.profileIds) {
+          const size = Buffer.byteLength(JSON.stringify(value)) * 2 + 3;
+          if (size > 64 * 1024) throw new Error('Measurement identifier exceeds the query parameter size limit');
+          if (bytes + size > 64 * 1024) flush();
+          chunk.push(value);
+          bytes += size;
+        }
+        flush();
+      }
+      const profileScope = profileScopes.length ? `AND (${profileScopes.join(' OR ')})` : '';
       const converted = await query(workspaceId, {
         query: `SELECT DISTINCT profile_id, participant_id, at FROM ${personReadSource('journey_events', protectedRead)} FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'converted'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
-                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
-        query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}
+                ${profileScope}`,
+        query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}), ...profileParams },
         format: 'JSONEachRow',
       });
       const unsubscribed = await query(workspaceId, {
         query: `SELECT DISTINCT profile_id, at FROM ${personReadSource('message_events', protectedRead)} FINAL
                 WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND type = 'unsubscribed' AND channel = 'email'
                 ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
-                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}`,
-        query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}
+                ${profileScope}`,
+        query_params: { ws: workspaceId, j: q.journeyId, ...(from ? { from } : {}), ...(to ? { to } : {}), ...profileParams },
         format: 'JSONEachRow',
       });
       const convertedRows = await converted.json<{ profile_id: string; participant_id: number | string; at: string }>();

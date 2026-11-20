@@ -1,4 +1,4 @@
-import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
+import { canonicalProfileId, DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { AppError, redactCredentials, safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { HotState } from '@agentic-marketing/hotstate';
@@ -59,26 +59,18 @@ export type DeliveryRow = Row;
 /**
  * The purpose gate at send time (#405): a queued delivery can wait hours in the retry backoff, so
  * consent is re-read for the canonical profile (following merges) immediately before the request.
- * A missing profile (erased) also suppresses: nothing personal may leave after an erasure.
+ * A missing profile (erased) also suppresses: nothing personal may leave after an erasure. The
+ * shared merge walk (#1093) resolves a person 21+ merges deep instead of suppressing them.
+ *
+ * Exported so the merge-depth test can call it without a platform round trip.
  */
-async function purposeStillAllowed(tx: Tx, workspaceId: string, profileId: string, purpose: string): Promise<boolean> {
-  let id = profileId;
-  for (let i = 0; i < 20; i++) {
-    const [p] = await tx
-      .select({ mergedInto: schema.profiles.mergedInto })
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
-    if (!p) return false;
-    if (p.mergedInto) {
-      id = p.mergedInto;
-      continue;
-    }
-    const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
-    const basis = purposes.find((x) => x.key === purpose)?.basis ?? 'consent';
-    const state = currentConsent(await consentStateOf(tx, workspaceId, id), purpose);
-    return purposeAllowed(basis, state?.status);
-  }
-  return false;
+export async function purposeStillAllowed(tx: Tx, workspaceId: string, profileId: string, purpose: string): Promise<boolean> {
+  const id = await canonicalProfileId(tx, workspaceId, profileId);
+  if (!id) return false;
+  const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+  const basis = purposes.find((x) => x.key === purpose)?.basis ?? 'consent';
+  const state = currentConsent(await consentStateOf(tx, workspaceId, id), purpose);
+  return purposeAllowed(basis, state?.status);
 }
 
 async function attempt(db: Db, d: Row, deps: DeliveryDeps): Promise<Outcome | 'later'> {
