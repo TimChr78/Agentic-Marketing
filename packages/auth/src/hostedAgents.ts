@@ -591,6 +591,15 @@ function assertMemoryScope(ctx: CommandContext, agentId: string) {
     throw new AppError('forbidden', 'An agent can only read and change its own memory.');
 }
 
+/** People change hosted-agent memory with artifacts:write; a hosted agent keeps its own under artifacts:read. */
+function assertMemoryWrite(ctx: CommandContext) {
+  if (ctx.principal.type !== 'agent' && !ctx.principal.permissions.has('artifacts:write'))
+    throw new AppError(
+      'forbidden',
+      `Your role (${ctx.principal.role}) does not include the "artifacts:write" permission needed to change a hosted agent’s memory.`,
+    );
+}
+
 function assertNoPersonalData(text: string) {
   // Strict: a note is never the place for an 8-digit DK/NO phone number (0.14.11 round 3).
   const found = personalDataInText(text, { strict: true });
@@ -666,6 +675,7 @@ export const addHostedMemory = defineCommand({
   actionClass: 'draft',
   target: (i) => i.agentId,
   handler: async (input, ctx) => {
+    assertMemoryWrite(ctx);
     await assertHostedForMemory(ctx, input.agentId);
     assertMemoryScope(ctx, input.agentId);
     assertNoPersonalData(input.text);
@@ -751,6 +761,7 @@ export const deleteHostedMemory = defineCommand({
   actionClass: 'draft',
   target: (i) => i.id,
   handler: async (input, ctx) => {
+    assertMemoryWrite(ctx);
     const [row] = await ctx.tx.select().from(schema.hostedAgentMemory).where(eq(schema.hostedAgentMemory.id, input.id));
     if (!row) throw new AppError('not_found', `No memory note ${input.id}.`);
     assertMemoryScope(ctx, row.agentId);

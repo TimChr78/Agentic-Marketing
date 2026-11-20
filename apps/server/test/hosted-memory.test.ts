@@ -102,6 +102,13 @@ async function createSkill(s: Setup, name: string, instructions: string) {
   });
 }
 
+let memberNumber = 0;
+async function member(s: Setup, role: 'viewer' | 'marketer') {
+  const user = await t.signUp(`memory-${role}-${++memberNumber}-${Date.now()}@example.com`);
+  await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)', [s.ws, user.id, role]);
+  return user;
+}
+
 beforeAll(async () => {
   llm = await fakeLlm(answer);
   t = await startTestServer('test_hosted_memory', PORT);
@@ -317,6 +324,31 @@ describe('hosted memory and skills (#340)', () => {
     });
     expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).characters).toBe(10000);
   }, 30_000);
+
+  it('requires artifacts:write for a person but lets a read-only agent keep its own memory', async () => {
+    const s = await setup('[remember] Note what works.', ['artifacts:read']);
+    const viewer = await member(s, 'viewer');
+    const editor = await member(s, 'marketer');
+
+    await expect(t.api(viewer, s.ws).call('agents.memory.add', { agentId: s.agentId, text: 'Written by a viewer.' })).rejects.toMatchObject(
+      { message: expect.stringContaining('artifacts:write') },
+    );
+    const note = await t.api(editor, s.ws).call('agents.memory.add', { agentId: s.agentId, text: 'Written by an editor.' });
+    await expect(t.api(viewer, s.ws).call('agents.memory.delete', { id: note.id })).rejects.toMatchObject({
+      message: expect.stringContaining('artifacts:write'),
+    });
+    await t.api(editor, s.ws).call('agents.memory.delete', { id: note.id });
+    expect((await s.api.call('agents.memory.list', { agentId: s.agentId })).count).toBe(0);
+
+    // A hosted agent with only artifacts:read still writes memory for itself during a run.
+    memoryTarget = s.agentId;
+    await onlyDue(s.agentId);
+    const summary = await runAt(DUE());
+    expect(summary.ok).toBe(1);
+    const memory = await s.api.call('agents.memory.list', { agentId: s.agentId });
+    expect(memory.notes).toHaveLength(1);
+    expect(memory.notes[0]).toMatchObject({ text: expect.stringContaining('Tuesday issue'), createdBy: { type: 'run' } });
+  }, 60_000);
 
   it('never lets another agent write to this agent’s memory', async () => {
     const s = await setup('Keep notes.');
