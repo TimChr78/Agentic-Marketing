@@ -1,11 +1,12 @@
-import { artifactTypes, durationSeconds, MAX_DURATION_SECONDS, segmentCondition } from '@agentic-marketing/artifacts';
+import { artifactTypes, segmentCondition } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import { personCrypto } from '@agentic-marketing/profiles';
-import { and, desc, eq, gt, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { audienceListCommands } from './audiences';
+import { invalidDefinitionError, parseSegmentDefinition } from './definition';
 import { contextFor, type PublishedSegment, publishedSegments, publishInSlices, refreshSegment } from './membership';
 import { materialize } from './sql';
 
@@ -33,31 +34,7 @@ async function segmentContent(ctx: { tx: Tx }, artifactId: string, version?: num
   const raw = await segmentContentRaw(ctx, artifactId, version);
   const parsed = artifactTypes.segment.content.safeParse(raw);
   if (parsed.success) return parsed.data;
-  if (hasOverlongWindow(raw.condition))
-    throw new AppError('invalid_input', 'This segment has a window longer than 10 years; re-save it with a window of at most 10 years');
-  throw new AppError(
-    'invalid_input',
-    `This segment's saved definition can no longer be read: ${parsed.error.issues[0]?.message ?? 'it does not match the schema'}. Re-save it to continue.`,
-  );
-}
-
-/** Whether a condition names a look-back longer than ClickHouse can bind (the schema's 10-year cap). */
-function hasOverlongWindow(condition: unknown): boolean {
-  let found = false;
-  const walk = (node: unknown) => {
-    if (found || !node || typeof node !== 'object') return;
-    if (Array.isArray(node)) {
-      for (const child of node) walk(child);
-      return;
-    }
-    const c = node as Record<string, unknown>;
-    if (typeof c.within === 'string' && durationSeconds(c.within) > MAX_DURATION_SECONDS) found = true;
-    if (Array.isArray(c.all)) for (const child of c.all) walk(child);
-    if (Array.isArray(c.any)) for (const child of c.any) walk(child);
-    if (c.not) walk(c.not);
-  };
-  walk(condition);
-  return found;
+  throw invalidDefinitionError(raw, parsed.error);
 }
 
 /**
@@ -332,7 +309,25 @@ export const refreshSegmentCommand = defineCommand({
   handler: async (input, ctx) => {
     const all = await publishedSegments(ctx.tx);
     const seg = all.find((s) => s.id === input.artifactId);
-    if (!seg) throw new AppError('not_found', `Segment ${input.artifactId} has no published version. Publish it first.`);
+    if (!seg) {
+      // `publishedSegments` skips a published definition that no longer parses (a window over 10
+      // years, saved by an older release), so this would otherwise say it was never published.
+      // Name the real problem and the fix instead (#1102).
+      const [artifact] = await ctx.tx
+        .select({ publishedVersion: schema.artifacts.publishedVersion })
+        .from(schema.artifacts)
+        .where(
+          and(
+            eq(schema.artifacts.workspaceId, ctx.principal.workspaceId),
+            eq(schema.artifacts.id, input.artifactId),
+            eq(schema.artifacts.type, 'segment'),
+            isNotNull(schema.artifacts.publishedVersion),
+            eq(schema.artifacts.archived, false),
+          ),
+        );
+      if (artifact?.publishedVersion) parseSegmentDefinition(await segmentContentRaw(ctx, input.artifactId, artifact.publishedVersion));
+      throw new AppError('not_found', `Segment ${input.artifactId} has no published version. Publish it first.`);
+    }
     const r = await refreshSegment(ctx.tx, ctx.principal.workspaceId, seg, ctx.services.events, all);
     await publishInSlices(ctx.services.bus, r.changes);
     return { members: r.members, entered: r.entered, exited: r.exited };

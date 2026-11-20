@@ -1,3 +1,4 @@
+import { audienceTestHooks } from '@agentic-marketing/segments';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
 
@@ -226,6 +227,67 @@ describe('static and snapshot audiences', () => {
     expect(micros(after) - micros(before)).toBeGreaterThanOrEqual(BigInt(people.length));
     expect((await api().call('segments.members', { artifactId: concurrent })).total).toBe(4);
   });
+
+  it('counts a merge that folds two resolved ids during the call, so added and existing add up (#1102)', async () => {
+    // Two ids for one person that are not merged yet. The add resolves both, then a merge commits
+    // in the window before the profile rows are locked.
+    await send([{ type: 'identify', anonymousId: 'v028-count-anon' }]);
+    await send([{ type: 'identify', userId: 'v028-count-user' }]);
+    const anon = (
+      await eventually(
+        () => api().call('profiles.find', { type: 'anonymous_id', value: 'v028-count-anon' }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    const user = (
+      await eventually(
+        () => api().call('profiles.find', { type: 'user_id', value: 'v028-count-user' }),
+        (r) => !!r.profileId,
+      )
+    ).profileId!;
+    const { rows } = await t.srv.db.admin.query<{ id: string }>(
+      'SELECT id FROM profiles WHERE workspace_id = $1 AND id = ANY($2::text[]) ORDER BY created_at, id',
+      [ws, [anon, user]],
+    );
+    expect(rows).toHaveLength(2);
+    const loser = rows.at(-1)!.id;
+    const survivor = rows[0]!.id;
+    const list = await createSegment('Counted list', { mode: 'static' });
+
+    let reached!: () => void;
+    let release!: () => void;
+    const atGate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    audienceTestHooks.beforeRowLocks = async () => {
+      reached();
+      await gate;
+    };
+    try {
+      const add = api().call('audiences.add', { segmentId: list, profileIds: [loser, survivor] });
+      await atGate;
+      const merge = send([{ type: 'identify', userId: 'v028-count-user', anonymousId: 'v028-count-anon' }]);
+      await eventually(
+        () => t.srv.db.admin.query<{ merged_into: string | null }>('SELECT merged_into FROM profiles WHERE id = $1', [loser]),
+        (r) => !!r.rows[0]?.merged_into,
+        20_000,
+      );
+      release();
+      const result = await add;
+      await merge;
+
+      // One row was inserted and one matched id resolved to the same person, so the two counts add
+      // up to the two selectors that matched. Before the fix `existing` counted survivors only.
+      expect(result).toMatchObject({ added: 1, existing: 1, unmatched: [] });
+      expect((await api().call('segments.members', { artifactId: list })).total).toBe(1);
+    } finally {
+      delete audienceTestHooks.beforeRowLocks;
+      release();
+    }
+  }, 120_000);
 
   it('reports no reference stamp to a caller that cannot read the segment (#771 review)', async () => {
     const hidden = await createSegment('Hidden list', { mode: 'static' });

@@ -3,11 +3,13 @@ import { artifactTypes, canonicalProfileIds, createArtifact, type SegmentDefinit
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
 import { enqueueOutbox, schema, type Tx } from '@agentic-marketing/db';
-import type { BusEvent } from '@agentic-marketing/events';
+import { type BusEvent, busEventSchema } from '@agentic-marketing/events';
 import { personCrypto } from '@agentic-marketing/profiles';
 import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { parseCsv } from './csv';
+import { parseSegmentDefinition } from './definition';
+import { lockSegmentMemberships } from './locks';
 import { listChangeEvents, type PublishedSegment } from './membership';
 
 // Static and snapshot audiences (#83): membership is data, not an artifact version, so editing a
@@ -17,11 +19,12 @@ import { listChangeEvents, type PublishedSegment } from './membership';
 
 /**
  * The payload a `segment_change` outbox row carries: the Segment Entered/Exited events of one list
- * change, chunked so a large snapshot never writes one huge row. Only the workspace is checked; the
- * events were built by `listChangeEvents` and are published as they are.
+ * change, chunked so a large snapshot never writes one huge row. Validated in full, like a
+ * `message_event` row: a payload that is not a complete bus event is corrupt and is failed
+ * permanently instead of being published half-formed (#1102).
  */
 export const segmentChangePayloadSchema = z.object({
-  events: z.array(z.object({ workspaceId: z.string().min(1) }).catchall(z.unknown())).min(1),
+  events: z.array(busEventSchema).min(1),
 });
 
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
@@ -36,9 +39,9 @@ type Resolved = { profileId: string } | { reason: UnmatchedReason };
 type Unmatched = { value: string; reason: UnmatchedReason };
 
 /**
- * A test seam, set only by the concurrency test for #1068: it runs after the unlocked follow and
- * before the profile rows are locked, so the test can commit a merge in exactly that window.
- * Production never sets it.
+ * A test seam, set only by the concurrency tests for #1068 and #1102: it runs after the unlocked
+ * follow and before the profile rows are locked, so a test can commit a merge in exactly that
+ * window. Production never sets it.
  */
 export const audienceTestHooks: { beforeRowLocks?: () => Promise<void> } = {};
 
@@ -54,7 +57,7 @@ async function latestSegment(tx: Tx, workspaceId: string, id: string): Promise<L
     .from(schema.artifactVersions)
     .where(and(eq(schema.artifactVersions.artifactId, id), eq(schema.artifactVersions.number, a.latestVersion)));
   if (!v) throw new AppError('not_found', `Segment ${id} has no content.`);
-  return { id, name: a.name, version: a.latestVersion, definition: artifactTypes.segment.content.parse(v.content) };
+  return { id, name: a.name, version: a.latestVersion, definition: parseSegmentDefinition(v.content) };
 }
 
 /**
@@ -345,7 +348,12 @@ export const addAudienceMembers = defineCommand({
     .refine((v) => selectorCount(v) > 0, 'Pass at least one profileId, e-mail or user id.'),
   output: z.object({
     added: z.number().int(),
-    existing: z.number().int().describe('People who were already on the list'),
+    existing: z
+      .number()
+      .int()
+      .describe(
+        'Matched people who did not add a new row: already on the list, or folded into another matched person by a merge during the call. `added + existing` counts distinct resolved people, which can be fewer than the matched selectors',
+      ),
     unmatched: z.array(z.object({ value: z.string(), reason: z.enum(['not_found', 'ambiguous', 'invalid']) })),
   }),
   permission: 'profiles:write',
@@ -362,6 +370,10 @@ export const addAudienceMembers = defineCommand({
     const at = new Date();
     const people = await lockedSurvivors(ctx.tx, ws, resolved);
     if (!people.length) return { added: 0, existing: 0, unmatched };
+    // Profile rows are held, and every writer of this segment's memberships waits here: a merge
+    // that lands mid-call cannot strand a row, and no concurrent refresh or import can interleave
+    // with these inserts (#1104).
+    await lockSegmentMemberships(ctx.tx, [seg.id]);
     const added: string[] = [];
     for (let i = 0; i < people.length; i += MAX_BATCH) {
       const rows = await ctx.tx
@@ -399,7 +411,11 @@ export const addAudienceMembers = defineCommand({
       const events = await listChangeEvents(ctx.tx, ws, published, entered, [], cause);
       await enqueueSegmentChanges(ctx.tx, ws, events, cause);
     }
-    return { added: added.length, existing: people.length - added.length, unmatched };
+    // Count every resolved person once. `added` is the rows this call inserted, and `existing` is
+    // the rest of the matched people, so the two always add up to the number of selectors that
+    // resolved. Counting the survivors instead under-reported `existing` when a merge that landed
+    // mid-call folded two resolved ids into one person (#1102).
+    return { added: added.length, existing: resolved.length - added.length, unmatched };
   },
 });
 
@@ -427,6 +443,9 @@ export const removeAudienceMembers = defineCommand({
 
     const people = await lockedSurvivors(ctx.tx, ws, resolved);
     if (!people.length) return { removed: 0, notMembers: 0, unmatched };
+    // The profile rows are held; the membership lock serialises this delete with a refresh or an
+    // incremental update of the same segment (#1104).
+    await lockSegmentMemberships(ctx.tx, [seg.id]);
     const removedRows = await ctx.tx
       .delete(schema.segmentListMembers)
       .where(and(eq(schema.segmentListMembers.segmentId, seg.id), inArray(schema.segmentListMembers.profileId, people)))
@@ -543,6 +562,9 @@ export const importAudienceCsv = defineCommand({
     }
 
     const people = await lockedSurvivors(ctx.tx, ws, resolved);
+    // After the profile rows, before the list and membership writes, as every membership writer
+    // does (#1104).
+    await lockSegmentMemberships(ctx.tx, [seg.id]);
     const existing = await existingMembers(ctx.tx, seg.id, people);
     const fresh = people.filter((p) => !existing.has(p));
     const added: string[] = [];
@@ -682,6 +704,9 @@ async function replaceList(
   cause: string,
 ): Promise<{ added: number; removed: number; entered: number; exited: number; members: number; events: BusEvent[] }> {
   const ws = ctx.principal.workspaceId;
+  // The snapshot's own membership lock, after the profile rows `lockedSurvivors` took (#1104): a
+  // refresh of one snapshot is a writer of that snapshot, like any other list command.
+  await lockSegmentMemberships(ctx.tx, [seg.id]);
   const want = new Set(target);
   const currentRows = await ctx.tx
     .select({ profileId: schema.segmentListMembers.profileId })

@@ -72,7 +72,7 @@ const msg = (profileId: string, kind: MessageEvent['type'], at: string, over: Pa
 });
 
 /** A published segment written directly, so a definition an older release saved can be replayed. */
-async function seedPublishedSegment(workspaceId: string, content: unknown, mode: 'dynamic' | 'static' = 'dynamic'): Promise<string> {
+async function seedRawSegment(workspaceId: string, content: unknown): Promise<string> {
   const id = `seg_${randomUUID().replaceAll('-', '')}`;
   await t.srv.db.admin.query(
     `INSERT INTO artifacts (workspace_id, id, type, name, latest_version, published_version)
@@ -82,9 +82,13 @@ async function seedPublishedSegment(workspaceId: string, content: unknown, mode:
   await t.srv.db.admin.query(
     `INSERT INTO artifact_versions (workspace_id, artifact_id, number, state, content, content_hash, author_type, author_id)
      VALUES ($1, $2, 1, 'published', $3::jsonb, 'hash', 'user', 'test')`,
-    [workspaceId, id, JSON.stringify({ description: '', mode, condition: content })],
+    [workspaceId, id, JSON.stringify(content)],
   );
   return id;
+}
+
+async function seedPublishedSegment(workspaceId: string, content: unknown, mode: 'dynamic' | 'static' = 'dynamic'): Promise<string> {
+  return seedRawSegment(workspaceId, { description: '', mode, condition: content });
 }
 
 describe('saving a message window (#1073, #1076)', () => {
@@ -290,6 +294,27 @@ describe('the scheduler isolates a failing segment (#1073)', () => {
       expect(members.rowCount).toBe(1);
     }
   }, 120_000);
+});
+
+describe('a definition an older release saved, on the paths that act on it (#1102)', () => {
+  it('refreshing an unreadable published segment says to re-save it, not that it is unpublished', async () => {
+    const legacy = await seedPublishedSegment(ws, { message: 'opened', within: 'P99999999D' });
+    const error = await rejects(api().call('segments.refresh', { artifactId: legacy }));
+    expect(error.status).toBe(400);
+    expect(error.message).toMatch(/re-save it/);
+  }, 60_000);
+
+  it('editing a list whose saved definition no longer parses answers invalid_input, not a server error', async () => {
+    // An older release's word for a list. It does not parse any more, but the stored rows are
+    // still readable; only an edit needs the definition.
+    const legacy = await seedRawSegment(ws, { description: 'a list from an old release', mode: 'list' });
+    const error = await rejects(
+      api().call('audiences.add', { segmentId: legacy, profileIds: [`prf_${randomUUID().replaceAll('-', '')}`] }),
+    );
+    expect(error.status).toBe(400);
+    expect(error.message).toMatch(/older release/);
+    expect(error.message).toMatch(/Re-save it/);
+  }, 60_000);
 });
 
 describe('a static list write follows a merge that lands in between (#1068)', () => {
