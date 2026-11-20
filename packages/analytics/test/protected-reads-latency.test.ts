@@ -42,8 +42,13 @@ async function timedTogether(runs: (() => Promise<unknown>)[]): Promise<number[]
   return best;
 }
 
-/** Below this, a difference is scheduling noise rather than a slower read (#1089). */
+/**
+ * Below this, two runs of the same query differ by scheduling noise, not by plan (#1089). Only the
+ * fast-path check uses it; the ledger check keeps a 1 ms floor so a slower protected read on a
+ * point lookup still fails.
+ */
 const NOISE_FLOOR_MS = 5;
+const LEDGER_FLOOR_MS = 1;
 
 const runSql = (sql: string, queryParams: Record<string, unknown>, workspace: string) => async () => {
   await (
@@ -129,7 +134,7 @@ describe('protected reads stay close to the base read (#1037 part 2)', () => {
           baseMs: Number(base!.toFixed(1)),
           fastMs: Number(fast!.toFixed(1)),
           ledgerMs: Number(ledger!.toFixed(1)),
-          ledgerRatio: Number((ledger! / Math.max(base!, NOISE_FLOOR_MS)).toFixed(1)),
+          ledgerRatio: Number((ledger! / Math.max(base!, LEDGER_FLOOR_MS)).toFixed(1)),
         })}`,
       );
     };
@@ -179,7 +184,7 @@ describe('protected reads stay close to the base read (#1037 part 2)', () => {
       expect(result.fast / Math.max(result.base, NOISE_FLOOR_MS), `${result.path} fast path`).toBeLessThan(1.5);
       // The protected path stays within a factor of the base read on a workspace with a large
       // ledger. This is a ratio on a shared table, not an absolute-millisecond assertion.
-      expect(result.ledger / Math.max(result.base, NOISE_FLOOR_MS), `${result.path} protected path`).toBeLessThan(40);
+      expect(result.ledger / Math.max(result.base, LEDGER_FLOOR_MS), `${result.path} protected path`).toBeLessThan(40);
     }
   }, 300_000);
 });

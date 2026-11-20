@@ -230,12 +230,14 @@ jobs:
       - if: needs.changes.outputs.code == 'true'
         run: >-
           pnpm exec vitest run --merge-reports reports/blob --coverage
-          --reporter=dot --reporter=junit --outputFile.junit=reports/junit.xml || true
+          --reporter=dot --reporter=junit --outputFile.junit=reports/junit.xml
+          || echo "::warning::the merged report has failures or could not be built; the shard logs have the details"
       # JUnit results for every run, so a flaky test shows up as a pattern across runs.
       - if: needs.changes.outputs.code == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results
+          if-no-files-found: warn
           path: |
             reports/junit.xml
             reports/coverage/
