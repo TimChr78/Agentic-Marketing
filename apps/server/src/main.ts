@@ -37,7 +37,7 @@ try {
 }
 
 const srv = createServer(config);
-const { app, db } = srv;
+const { app, db, requestAborts } = srv;
 if (!config.skipMigrations) {
   await preUpgradeBackup(db, config);
   await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
@@ -93,7 +93,7 @@ const shutdown = createShutdown({
   steps: [
     {
       name: 'http',
-      close: () => drainHttpServers(servers, HTTP_DRAIN_TIMEOUT_MS),
+      close: () => drainHttpServers(servers, HTTP_DRAIN_TIMEOUT_MS, { aborts: requestAborts }),
     },
     {
       name: 'workers',

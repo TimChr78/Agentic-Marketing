@@ -44,6 +44,7 @@ import { consentPage, invitePage, loginPage, pageNonce, pagesCsp } from './http/
 import { passwordResetRoutes } from './http/password-reset';
 import { DOMAIN_CHALLENGE, isBrandPath } from './http/public-only';
 import { rejectUnsafeRawPath } from './http/raw-path';
+import { createRequestAborts, withRequestAborts } from './http/request-aborts';
 import { restApi } from './http/rest';
 import { scimApi } from './http/scim';
 import { securityHeaders } from './http/security-headers';
@@ -241,6 +242,11 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const metricsPath = new WeakMap<Request, string>();
 
   const app = new Hono();
+  // Every request is abortable: the http shutdown aborts what it force-closes, so a handler that
+  // outlives its client stops starting new work and its cleanup runs before the pools close
+  // (#1098). A copilot turn keeps its hold until its own finally has stored the turn.
+  const requestAborts = createRequestAborts();
+  app.use('*', withRequestAborts(requestAborts));
   // What a cookie-authenticated browser write must prove: the app's own origin, or one the operator
   // trusts (TRUSTED_ORIGINS). Shared by the REST surface, the form endpoints and the copilot.
   const origin: BrowserRequestPolicy = { publicUrl: config.publicUrl, trustedOrigins: config.trustedOrigins };
@@ -620,7 +626,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       (c) => mcp(c.req.raw),
     );
   }
-  if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider, origin }));
+  if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider, origin, aborts: requestAborts }));
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
   app.route('/', restApi({ auth, db, executor, assetMaxBytes: config.assetMaxBytes, origin }));
 
@@ -644,6 +650,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   return {
     app,
     db,
+    requestAborts,
     auth,
     executor,
     keyProvider,

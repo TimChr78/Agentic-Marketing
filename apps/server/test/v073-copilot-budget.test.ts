@@ -15,8 +15,12 @@ let providerId = '';
 const MAX_STEPS = 12;
 const TURN_CAP = 20_000;
 
+/** Released by the shutdown test, so its abort lands while one provider call is on the wire. */
+let releaseShutdownTurn: (() => void) | undefined;
+
 /** A model that keeps calling a tool and always writes its whole output cap. */
 async function answer(r: FakeRequest) {
+  if (r.user.includes('shutdown-turn')) await new Promise<void>((resolve) => (releaseShutdownTurn = resolve));
   if (r.user.includes('cancel-turn')) await new Promise((resolve) => setTimeout(resolve, 80));
   return {
     toolCalls: [{ name: 'artifacts__list', input: { type: 'prompt' } }],
@@ -151,5 +155,37 @@ describe('a copilot turn is capped by its reservation (#356)', () => {
       providerId,
     ]);
     expect(held.rows[0].n).toBe(0);
+    // The cancelled turn released its request hold, so a later drain never waits on it.
+    expect(t.srv.requestAborts.count()).toBe(0);
+  }, 30_000);
+});
+
+describe('a copilot turn the shutdown aborts (#1098)', () => {
+  it('stops before the next step and still stores the turn and its usage', async () => {
+    const marker = `shutdown-turn-${Date.now()}`;
+    const pending = copilot(owner, `List the prompts ${marker}`);
+    // Wait until the first model call is on the wire, then abort the request as the force-close
+    // would. The call itself finishes (#1043); only the next step is refused.
+    await eventually(
+      async () => llm.requests.filter((r) => r.user.includes(marker)).length,
+      (n) => n >= 1,
+      15_000,
+    );
+    t.srv.requestAborts.abortAll();
+    releaseShutdownTurn?.();
+    const r = await pending;
+
+    expect(r.status).toBe(200);
+    expect(r.events.some((e) => e.type === 'delta' && String(e.text).includes('restarting'))).toBe(true);
+    expect(r.events.some((e) => e.type === 'done')).toBe(true);
+    // A shutdown is a normal end, not a failed turn.
+    expect(r.events.some((e) => e.type === 'error')).toBe(false);
+    const conversation = r.events.find((e) => e.type === 'conversation')!.id as string;
+    const turns = await t.srv.db.admin.query<{ n: number }>('SELECT count(*)::int AS n FROM copilot_turns WHERE conversation_id = $1', [
+      conversation,
+    ]);
+    expect(turns.rows[0]!.n).toBe(1);
+    // The turn released its hold, so a real drain would not wait on it afterwards.
+    expect(t.srv.requestAborts.count()).toBe(0);
   }, 30_000);
 });

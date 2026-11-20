@@ -1,3 +1,5 @@
+import type { RequestAborts } from './http/request-aborts';
+
 // Ordered shutdown for the server process (#1014).
 //
 // Every close step runs even when an earlier one rejects: a pool that cannot close must not keep
@@ -24,6 +26,21 @@ export interface HttpListener {
  */
 export const HTTP_DRAIN_TIMEOUT_MS = 20_000;
 
+/**
+ * How long the http step waits, after the force-close, for the aborted handlers to run their own
+ * cleanup (#1098). A copilot turn writes its turn and settles its AI reservation here, so the
+ * pools that follow close after that write instead of underneath it. It is short: a handler that
+ * is still waiting on a provider finishes nothing new, and its store is skipped with a log line.
+ */
+export const HTTP_INFLIGHT_SETTLE_MS = 5_000;
+
+export interface HttpDrainOptions {
+  /** The requests to abort when the bound is hit; omitted by a caller that has no registry. */
+  aborts?: RequestAborts;
+  /** Overrides {@link HTTP_INFLIGHT_SETTLE_MS}; tests use a small value. */
+  settleMs?: number;
+}
+
 export interface ShutdownStep {
   /** A short, stable name for the log line; never includes workspace or connection data. */
   name: string;
@@ -37,10 +54,10 @@ export interface ShutdownStep {
  * ended. Idle keep-alive sockets are closed at once (Node does this inside `close()` since v19;
  * the explicit call keeps the intent readable and covers an older runtime), so only requests that
  * are actually being answered hold the step. If one is still running at `timeoutMs`, the listener
- * force-closes what is left and the step resolves, so the pools and clients that follow close
- * after the requests rather than underneath them.
+ * aborts it through `aborts` (so a handler that outlived its client stops starting new work) and
+ * force-closes what is left, then waits for those handlers' own cleanup before resolving (#1098).
  */
-export async function drainHttpServer(server: HttpListener, timeoutMs: number): Promise<void> {
+export async function drainHttpServer(server: HttpListener, timeoutMs: number, opts: HttpDrainOptions = {}): Promise<void> {
   let closed = false;
   const whenClosed = new Promise<void>((resolve) => {
     server.close(() => {
@@ -52,6 +69,7 @@ export async function drainHttpServer(server: HttpListener, timeoutMs: number): 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const bound = new Promise<void>((resolve) => {
     timer = setTimeout(() => {
+      opts.aborts?.abortAll();
       server.closeAllConnections?.();
       resolve();
     }, timeoutMs);
@@ -61,11 +79,14 @@ export async function drainHttpServer(server: HttpListener, timeoutMs: number): 
   // it keeps the promise's meaning: the listener is down when this resolves.
   if (!closed) await whenClosed;
   clearTimeout(timer);
+  // The sockets are down, but a handler the abort just woke still has its own cleanup to run. The
+  // pools and clients that follow must close after that write, not across it.
+  await opts.aborts?.settle(opts.settleMs ?? HTTP_INFLIGHT_SETTLE_MS);
 }
 
 /** Drains every listener in parallel; the whole step stays within one `timeoutMs`. */
-export async function drainHttpServers(servers: readonly HttpListener[], timeoutMs: number): Promise<void> {
-  await Promise.all(servers.map((server) => drainHttpServer(server, timeoutMs)));
+export async function drainHttpServers(servers: readonly HttpListener[], timeoutMs: number, opts: HttpDrainOptions = {}): Promise<void> {
+  await Promise.all(servers.map((server) => drainHttpServer(server, timeoutMs, opts)));
 }
 
 export interface ShutdownLog {

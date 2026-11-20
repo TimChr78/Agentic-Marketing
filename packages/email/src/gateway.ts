@@ -13,7 +13,7 @@ import {
 } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, eq, lt, sql } from 'drizzle-orm';
+import { and, eq, inArray, lt, sql } from 'drizzle-orm';
 import { type AdapterDeps, MESSAGE_ID_HEADER } from './adapters';
 import type { DeliveryAttempt } from './attempt';
 import { blockResolver } from './blocks';
@@ -309,17 +309,47 @@ export async function deliverRound(
   const utmCache: CampaignUtmCache = new Map();
   for (const { workspace_id: ws } of workspaces) {
     // A message stuck in "sending" means a worker stopped mid-send: the outcome is unknown, and
-    // sending again could duplicate it, so it is marked failed for a person to look at.
-    await db.withWorkspace(ws, (tx) =>
-      tx
-        .update(schema.messages)
-        .set({
-          status: 'failed',
-          reason: 'unknown_outcome: the worker stopped while sending; check the provider before resending',
-          updatedAt: new Date(),
+    // sending again could duplicate it, so it is marked failed for a person to look at. The status
+    // and its decision event commit together (#1098), so reports and guardrails see the same
+    // outcome whichever writer recorded it.
+    await db.withWorkspace(ws, async (tx) => {
+      // Only the fields its decision event records: the sweep never reads a body or address.
+      const stale = await tx
+        .select({
+          workspaceId: schema.messages.workspaceId,
+          id: schema.messages.id,
+          attempts: schema.messages.attempts,
+          profileId: schema.messages.profileId,
+          channel: schema.messages.channel,
+          purpose: schema.messages.purpose,
+          templateId: schema.messages.templateId,
+          templateVersion: schema.messages.templateVersion,
+          journeyId: schema.messages.journeyId,
+          variant: schema.messages.variant,
         })
-        .where(and(eq(schema.messages.status, 'sending'), lt(schema.messages.updatedAt, new Date(Date.now() - STALE_SENDING_MS)))),
-    );
+        .from(schema.messages)
+        .where(and(eq(schema.messages.status, 'sending'), lt(schema.messages.updatedAt, new Date(Date.now() - STALE_SENDING_MS))))
+        .for('update', { skipLocked: true });
+      if (!stale.length) return;
+      const reason = 'unknown_outcome: the worker stopped while sending; check the provider before resending';
+      await tx
+        .update(schema.messages)
+        .set({ status: 'failed', reason, updatedAt: new Date() })
+        .where(
+          and(
+            inArray(
+              schema.messages.id,
+              stale.map((message) => message.id),
+            ),
+            eq(schema.messages.status, 'sending'),
+          ),
+        );
+      await enqueueMessageEvents(
+        tx,
+        ws,
+        stale.map((message) => decisionEvent(message, 'failed', reason)),
+      );
+    });
     const claimed = await db.withWorkspace(ws, async (tx) => {
       const res = await tx.execute<{ id: string; channel: string }>(sql`
         UPDATE messages SET status = 'sending', attempts = attempts + 1, updated_at = now(), next_attempt_at = NULL
@@ -542,10 +572,17 @@ async function deliverOne(
       const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(out.stream, m.attempts) * 1000) : null;
       logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'e-mail send failed');
       await db.withWorkspace(ws, async (tx) => {
-        await tx
+        const settled = await tx
           .update(schema.messages)
           .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
-          .where(eq(schema.messages.id, id));
+          .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+          .returning({ id: schema.messages.id });
+        if (!settled.length) {
+          // The stale sweep settled this attempt as unknown_outcome while the provider was slow.
+          // A retry could duplicate a send we cannot prove was not made, so the sweep's row stands.
+          logger.warn({ messageId: id, provider: provider.adapter }, 'e-mail failure arrived after the stale sweep settled the row');
+          return;
+        }
         await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
       });
       return;
@@ -555,10 +592,21 @@ async function deliverOne(
     // layer after this commit finds the event, published or still queued. The event store is not
     // written here at all, so a lagging or unavailable one cannot make a send invisible.
     await db.withWorkspace(ws, async (tx) => {
-      await tx
+      const settled = await tx
         .update(schema.messages)
         .set({ status: 'sent', reason: null, providerId: provider.id, providerMessageId, sentAt: new Date(), updatedAt: new Date() })
-        .where(eq(schema.messages.id, id));
+        .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+        .returning({ id: schema.messages.id });
+      if (!settled.length) {
+        // The provider accepted the message, but the sweep already recorded the attempt as
+        // unknown_outcome. Keep that for a person to check rather than show a phantom `sent`
+        // beside the sweep's `failed` (#1098 review).
+        logger.warn(
+          { messageId: id, provider: provider.adapter, providerMessageId },
+          'e-mail send finished after the stale sweep settled the row; the sweep outcome stays',
+        );
+        return;
+      }
       await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
     });
     if (known?.length) {

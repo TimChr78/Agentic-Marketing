@@ -53,12 +53,16 @@ export function retryDelaySeconds(stream: 'marketing' | 'transactional', attempt
   return RETRY_SECONDS[stream][attempts - 1] ?? 30 * attempts * attempts;
 }
 
-export function decisionEvent(
-  m: typeof schema.messages.$inferSelect,
-  type: MessageEvent['type'],
-  reason = '',
-  provider = '',
-): MessageEvent {
+/**
+ * The message fields a decision event records, so a caller that settles a row can select only
+ * these instead of the whole row (the stale sweep only needs them to write its event).
+ */
+export type DecisionMessage = Pick<
+  typeof schema.messages.$inferSelect,
+  'workspaceId' | 'id' | 'attempts' | 'profileId' | 'channel' | 'purpose' | 'templateId' | 'templateVersion' | 'journeyId' | 'variant'
+>;
+
+export function decisionEvent(m: DecisionMessage, type: MessageEvent['type'], reason = '', provider = ''): MessageEvent {
   return {
     workspaceId: m.workspaceId,
     messageId: m.id,

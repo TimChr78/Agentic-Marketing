@@ -43,6 +43,7 @@ import {
 } from './copilot-tools';
 import { type BrowserRequestPolicy, csrfRefusal } from './csrf';
 import { mcpServerFor } from './mcp';
+import { type RequestAborts, requestAbortOf } from './request-aborts';
 
 // The in-app copilot (agents-and-mcp.md §6) is just another MCP client: it acts as an agent
 // principal for the signed-in person, sees the tools of the same MCP server an external agent
@@ -119,6 +120,17 @@ const PROMPT_TOKEN_MARGIN = 1.2;
 
 /** Thrown by prepareStep when the turn cannot pay for another model call; a normal, quiet stop. */
 class CopilotBudgetStop extends Error {}
+
+/**
+ * Thrown when the shutdown stops the turn (#1098). Like the budget stop it is a normal end, not a
+ * failure: the turn is stored and its usage settled. #1043: a step already sent to the provider
+ * finishes on its own; this only refuses to start another one.
+ */
+class CopilotShutdownStop extends Error {}
+
+/** What a turn says when the shutdown ended it before its next step. */
+const SHUTDOWN_TEXT =
+  'The server is restarting, so this turn stopped before its next step. It was saved; ask again when the server is back.';
 
 /**
  * The agent a conversation acts as (#339), after checking that the person may do so (the agent's
@@ -221,7 +233,15 @@ async function builtinCopilotAgent(tx: Tx, workspaceId: string, user: { userId: 
   return created;
 }
 
-export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: KeyProvider; origin: BrowserRequestPolicy }) {
+export function copilotApi(deps: {
+  auth: Auth;
+  db: Db;
+  executor: Executor;
+  kp: KeyProvider;
+  origin: BrowserRequestPolicy;
+  /** The shutdown's request registry; a turn keeps its request registered until its own cleanup. */
+  aborts?: RequestAborts;
+}) {
   const app = new Hono();
   app.post('/api/copilot', bodyLimit(COPILOT_MAX_BODY, COPILOT_TOO_LARGE), async (c) => {
     const user = await principalFromSession(deps.auth, deps.db, c.req.raw.headers);
@@ -348,8 +368,23 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
         let error: string | null = null;
         // Set when prepareStep refuses another model call; the person is told why the turn ended.
         let budgetStopped = false;
+        // Set when the shutdown refused the next step; the person is told why the turn ended.
+        let shutdownStopped = false;
         const usedTools: string[] = [];
         emit({ type: 'conversation', id: conversation.id, title: conversation.title });
+        // The turn may outlive its handler: it keeps the request registered until the finally below
+        // has stored it, so the shutdown waits for that write before closing the pools (#1098). The
+        // hold is taken here, immediately before the `try`, so nothing can throw while it is held
+        // and leak it.
+        const request = deps.aborts ? requestAbortOf(c)?.retain() : undefined;
+        let shuttingDown = request?.signal.aborted ?? false;
+        request?.signal.addEventListener(
+          'abort',
+          () => {
+            shuttingDown = true;
+          },
+          { once: true },
+        );
         try {
           await server.connect(serverSide);
           await client.connect(clientSide);
@@ -434,6 +469,9 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
             },
           });
 
+          // A stop prevents new work (#1043): when the shutdown already landed, no model call is
+          // made at all. Later steps are refused in prepareStep; one already sent finishes.
+          if (shuttingDown) throw new CopilotShutdownStop();
           providerCalled = true;
           const r = streamText({
             model: model.model,
@@ -450,6 +488,9 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
               ({ steps }) => stepBudget({ allowance, used: tokensOfSteps(steps), maxOutputTokens: COPILOT_MAX_OUTPUT_TOKENS }).stop,
             ],
             prepareStep: ({ steps, messages: next, instructions }) => {
+              // The shutdown aborts the request at the force-close; stop here rather than start a
+              // step whose answer no one will read. The step already in flight is left to finish.
+              if (shuttingDown) throw new CopilotShutdownStop();
               // Re-estimate every step with the messages it will carry and only the schemas that
               // will actually be sent; discovery may have enabled more (or the turn may have none
               // of its allowance left).
@@ -483,6 +524,10 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
                 budgetStopped = true;
                 break;
               }
+              if (e instanceof CopilotShutdownStop) {
+                shutdownStopped = true;
+                break;
+              }
               throw e;
             }
           }
@@ -505,7 +550,8 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
           } catch {
             finishReason = undefined;
           }
-          if (budgetStopped || usage.inputTokens + usage.outputTokens >= allowance - MIN_STEP_TOKENS)
+          if (shutdownStopped) emit({ type: 'delta', text: SHUTDOWN_TEXT });
+          else if (budgetStopped || usage.inputTokens + usage.outputTokens >= allowance - MIN_STEP_TOKENS)
             emit({
               type: 'delta',
               text: 'I stopped at the AI budget for this turn. Tell me how to continue, or narrow the task.',
@@ -525,7 +571,14 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
           messages = [{ role: 'user', content: message }, ...responseMessages];
           emit({ type: 'done', conversationId: conversation.id, usage });
         } catch (err) {
-          if (err instanceof CopilotBudgetStop) {
+          if (err instanceof CopilotShutdownStop) {
+            // Nothing was sent to the provider, so there is no usage to recover and no failure to
+            // report: the turn ends normally with the reason the person can act on.
+            emit({ type: 'delta', text: SHUTDOWN_TEXT });
+            flush();
+            messages = [{ role: 'user', content: message }];
+            emit({ type: 'done', conversationId: conversation.id, usage });
+          } else if (err instanceof CopilotBudgetStop) {
             // The allowance ran out before any step could be paid for; the turn still ends
             // normally, with the reason the person can act on.
             emit({
@@ -587,7 +640,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
                 ...usage,
               });
             })
-            .catch((err) => logger.error({ err }, 'copilot turn not stored'));
+            .catch((err) => logger.error({ err }, shuttingDown ? 'copilot turn not stored during shutdown' : 'copilot turn not stored'));
           // The usage row commits in the same transaction that releases the reservation (#355),
           // including the partial usage of a failed or cancelled turn. If that write fails, it is
           // retried on its own before the hold is released; if it cannot be recorded at all the
@@ -620,7 +673,7 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
               providerId: model.providerId,
               label: 'copilot turn',
             },
-          );
+          ).catch((err) => logger.error({ err }, 'copilot usage could not be settled'));
           if (!cancelled) {
             try {
               controller.close();
@@ -628,6 +681,9 @@ export function copilotApi(deps: { auth: Auth; db: Db; executor: Executor; kp: K
               // The consumer already went away.
             }
           }
+          // Last, so the shutdown's wait covers the turn's store as well as its provider work. The
+          // pools may close after this; anything the store still needs has been written.
+          request?.release();
         }
       },
       cancel() {

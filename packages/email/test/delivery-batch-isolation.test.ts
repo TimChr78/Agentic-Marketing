@@ -10,6 +10,7 @@ import { outbox } from '../src/adapters';
 import { deliverRound, recoverUnhandledDelivery } from '../src/gateway';
 import { linkSigner } from '../src/links';
 import { MAX_ATTEMPTS } from '../src/outbox';
+import { sealSecrets, webhookTokenHash } from '../src/providers';
 
 // #1054: one message whose handling throws an unexpected error must not abandon the messages
 // claimed after it. A failure before any provider call goes back to `queued` with backoff and is
@@ -96,7 +97,7 @@ beforeAll(async () => {
       fromEmail: 'hej@example.test',
       fromName: 'Test',
       useFor: ['transactional'],
-      webhookTokenHash: 'hash',
+      webhookTokenHash: webhookTokenHash(`held-${newId('prv')}`),
     });
   });
 }, 120_000);
@@ -211,4 +212,130 @@ describe.skipIf(!hasTestDatabase())('delivery batch isolation (#1054)', () => {
     expect(row).toMatchObject({ status: 'failed', next_attempt_at: null });
     expect(row.reason).toMatch(/^delivery_error: /);
   });
+
+  it('records a decision event when the stale sweep gives up on a stuck send (#1098)', async () => {
+    // A worker stopped mid-send and never came back. The sweep is the only writer that settles
+    // this row, so its outcome must be as visible to reports and guardrails as a per-message
+    // recovery: the status and its event commit together.
+    const id = await queuedMessage(await person('stale'), '2026-01-05T00:00:00Z');
+    await d.db.admin.query(
+      `UPDATE messages SET status = 'sending', attempts = 1, updated_at = now() - interval '11 minutes'
+       WHERE workspace_id = $1 AND id = $2`,
+      [d.workspace, id],
+    );
+    await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1', [d.workspace]);
+
+    await deliverRound(d.db, { kp, events: {} as EventStore, email: email() });
+
+    const row = await message(id);
+    expect(row).toMatchObject({ status: 'failed', next_attempt_at: null });
+    expect(row.reason).toMatch(/^unknown_outcome: /);
+    const { rows } = await d.db.admin.query<{ payload: { events: { messageId: string; type: string; reason: string }[] } }>(
+      `SELECT payload FROM outbox WHERE workspace_id = $1 AND kind = 'message_event'`,
+      [d.workspace],
+    );
+    const recorded = rows
+      .flatMap((entry) => entry.payload.events)
+      .filter((event) => event.messageId === id)
+      .map((event) => ({ type: event.type, reason: event.reason }));
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.type).toBe('failed');
+    expect(recorded[0]!.reason).toMatch(/^unknown_outcome: /);
+  });
+});
+
+/** The decision events recorded for one message, oldest first. */
+async function decisionEvents(messageId: string) {
+  const { rows } = await d.db.admin.query<{ payload: { events: { messageId: string; type: string; reason: string }[] } }>(
+    `SELECT payload FROM outbox WHERE workspace_id = $1 AND kind = 'message_event'`,
+    [d.workspace],
+  );
+  return rows
+    .flatMap((entry) => entry.payload.events)
+    .filter((event) => event.messageId === messageId)
+    .map((event) => ({ type: event.type, reason: event.reason }));
+}
+
+/** Replaces the enabled providers with one Postmark provider whose send the caller holds. */
+async function slowProvider(): Promise<void> {
+  await d.db.admin.query('UPDATE email_providers SET enabled = false WHERE workspace_id = $1', [d.workspace]);
+  await d.db.withWorkspace(d.workspace, async (tx) => {
+    const sealed = await sealSecrets(tx, d.workspace, kp, { serverToken: 'pm-server-token-1234567890' });
+    await tx.insert(schema.emailProviders).values({
+      workspaceId: d.workspace,
+      id: newId('prv'),
+      name: 'Postmark held',
+      adapter: 'postmark',
+      config: { transactionalStream: 'outbound' },
+      ...sealed,
+      fromEmail: 'hej@example.test',
+      fromName: 'Test',
+      useFor: ['transactional'],
+      webhookTokenHash: webhookTokenHash(`held-${newId('prv')}`),
+    });
+  });
+}
+
+/**
+ * A send that is still on the wire past the stale bound. A second delivery round then settles the
+ * row as `unknown_outcome`; the first one finishes the send afterwards.
+ */
+async function sweptWhileSending(response: () => Response) {
+  const id = await queuedMessage(await person(`slow-${Date.now()}`), '2026-01-06T00:00:00Z');
+  await d.db.admin.query(`DELETE FROM messages WHERE workspace_id = $1 AND status = 'queued' AND id <> $2`, [d.workspace, id]);
+  await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1', [d.workspace]);
+  await slowProvider();
+
+  let releaseSend!: () => void;
+  const held = new Promise<void>((resolve) => (releaseSend = resolve));
+  let reachedProvider!: () => void;
+  const sending = new Promise<void>((resolve) => (reachedProvider = resolve));
+  const fetchImpl = (async () => {
+    reachedProvider();
+    await held;
+    return response();
+  }) as typeof fetch;
+
+  const round = deliverRound(d.db, { kp, events: {} as EventStore, email: { ...email(), adapterDeps: { fetch: fetchImpl } } });
+  await sending;
+  // The worker has been in the provider call longer than the stale bound, so a second round's
+  // sweep settles the attempt as unknown_outcome while the first still holds the send.
+  await d.db.admin.query(`UPDATE messages SET updated_at = now() - interval '11 minutes' WHERE workspace_id = $1 AND id = $2`, [
+    d.workspace,
+    id,
+  ]);
+  await deliverRound(d.db, { kp, events: {} as EventStore, email: email() });
+  const swept = await message(id);
+  expect(swept).toMatchObject({ status: 'failed', next_attempt_at: null });
+  expect(swept.reason).toMatch(/^unknown_outcome: /);
+
+  releaseSend();
+  await round;
+  return id;
+}
+
+describe.skipIf(!hasTestDatabase())('a send that finished after the stale sweep (#1098)', () => {
+  it('keeps the sweep’s unknown_outcome when the provider then accepts the message', async () => {
+    const id = await sweptWhileSending(
+      () => new Response(JSON.stringify({ MessageID: 'pm-accepted' }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+
+    const row = await message(id);
+    expect(row.status).toBe('failed');
+    expect(row.reason).toMatch(/^unknown_outcome: /);
+    // No phantom `sent` beside the sweep's `failed`: the sweep's row is all a person sees.
+    expect((await decisionEvents(id)).map((event) => event.type)).toEqual(['failed']);
+  }, 120_000);
+
+  it('does not requeue a failure that arrived after the sweep', async () => {
+    const id = await sweptWhileSending(
+      () => new Response(JSON.stringify({ ErrorCode: 422, Message: 'provider refused' }), { status: 422 }),
+    );
+
+    const row = await message(id);
+    expect(row.status).toBe('failed');
+    expect(row.reason).toMatch(/^unknown_outcome: /);
+    // A `queued` event would have scheduled a retry of a send that may already have happened.
+    expect((await decisionEvents(id)).map((event) => event.type)).toEqual(['failed']);
+  }, 120_000);
 });
