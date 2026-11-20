@@ -106,11 +106,18 @@ jobs:
         with:
           fail-on-severity: high
 
-  test:
+  # The suite in three shards on three runners: one runner took 14-20 minutes, against a 20-minute
+  # limit. Vitest splits the test files between the shards; each writes a blob report that the
+  # `test` job below merges.
+  test-shard:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       postgres:
         image: postgres:18@sha256:2ea8630df176ad090ec92136dee850397c5af8781e4bcf2e4162593691c61bbc
@@ -179,9 +186,53 @@ jobs:
           /usr/lib/postgresql/18/bin/pg_dump --version | grep -Eq '\(PostgreSQL\) 18\.'
           /usr/lib/postgresql/18/bin/pg_restore --version | grep -Eq '\(PostgreSQL\) 18\.'
       - run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
-      - run: pnpm test:ci
-      # JUnit results for every run, so a flaky test shows up as a pattern across runs.
+      # `pnpm test:ci` is the same run on one machine; here the blob carries results and coverage.
+      - run: >-
+          pnpm exec vitest run --coverage --coverage.reporter=text-summary
+          --reporter=default --reporter=blob --outputFile.blob=reports/blob/blob-${{ matrix.shard }}.json
+          --shard=${{ matrix.shard }}/3
       - if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-blob-${{ matrix.shard }}
+          path: reports/blob/
+          retention-days: 1
+
+  # The required `test` check: passes when every shard passed, or when no shard had to run (a
+  # documentation-only change). It merges the shards into one JUnit report and one coverage report.
+  test:
+    needs: [changes, test-shard]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          package-manager-cache: false
+      - if: needs.changes.outputs.code == 'true'
+        name: Install pnpm
+        run: |
+          version="$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")"
+          npm install -g --ignore-scripts "pnpm@$version"
+      - if: needs.changes.outputs.code == 'true'
+        run: pnpm install --frozen-lockfile --filter "./packages/**" --filter "./apps/**" --filter "agentic-marketing"
+      - if: needs.changes.outputs.code == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: test-blob-*
+          path: reports/blob
+          merge-multiple: true
+      # The merged report lists every failure from every shard in one place.
+      - if: needs.changes.outputs.code == 'true'
+        run: >-
+          pnpm exec vitest run --merge-reports reports/blob --coverage
+          --reporter=dot --reporter=junit --outputFile.junit=reports/junit.xml || true
+      # JUnit results for every run, so a flaky test shows up as a pattern across runs.
+      - if: needs.changes.outputs.code == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results
@@ -189,6 +240,16 @@ jobs:
             reports/junit.xml
             reports/coverage/
           retention-days: 30
+      - name: Every shard passed
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          CODE: ${{ needs.changes.outputs.code }}
+          SHARDS: ${{ needs.test-shard.result }}
+        run: |
+          [ "$CHANGES" = "success" ] || { echo "the changes job did not succeed: $CHANGES"; exit 1; }
+          if [ "$CODE" != "true" ]; then echo "No code changed: the suite did not need to run"; exit 0; fi
+          echo "test shards: $SHARDS"
+          [ "$SHARDS" = "success" ]
 
   # The admin UI in a real browser against the production build and a seeded server
   # (apps/server/test/e2e/server.ts), so browser-only regressions such as #115 fail the build.
