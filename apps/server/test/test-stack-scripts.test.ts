@@ -45,6 +45,7 @@ describe('test stack exposure (#605)', () => {
     const compose = await read('docker-compose.test.yml');
     const published = compose.split('\n').filter((line) => /\$\{AM_TEST_BIND_IP:/.test(line));
     expect(published.length).toBeGreaterThanOrEqual(5);
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: this is the literal Compose interpolation text
     for (const line of published) expect(line).toContain('${AM_TEST_BIND_IP:-127.0.0.1}');
     expect(compose).not.toMatch(/\$\{AM_TEST_BIND_IP:-0\.0\.0\.0\}/);
     expect(compose).not.toMatch(/\$\{AM_TEST_BIND_IP:-::\}/);
