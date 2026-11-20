@@ -199,7 +199,9 @@ const Env = z.object({
     .int()
     .min(1)
     .default(30)
-    .describe('Days after which signups that were never confirmed (no consent recorded) are counted by retention; removing them is paused since 0.15.0 (#978 part 2)'),
+    .describe(
+      'Days after which signups that were never confirmed (no consent recorded) are counted by retention; removing them is paused since 0.15.0 (#978 part 2)',
+    ),
   RETENTION_LOG_DAYS: z.coerce
     .number()
     .int()
