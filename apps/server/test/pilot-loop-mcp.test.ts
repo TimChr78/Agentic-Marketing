@@ -263,7 +263,7 @@ describe('the pilot loop over MCP', () => {
 
     // ClickHouse is written asynchronously; analytics.query caches per input for a minute, so
     // clear it between attempts instead of re-reading a stale zero.
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 200 });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 200 });
     const from = new Date(Date.now() - 3_600_000).toISOString();
     const byBroadcast = await eventually(
       () => {

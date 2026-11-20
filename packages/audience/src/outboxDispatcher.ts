@@ -13,8 +13,9 @@ import {
   sanitiseOutboxError,
 } from '@agentic-marketing/db';
 import { type EmailRequest, requestEmail } from '@agentic-marketing/email';
-import { type EventStore, messageEventPayloadSchema } from '@agentic-marketing/events';
+import { type BusEvent, type EventBus, type EventStore, messageEventPayloadSchema } from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
+import { segmentChangePayloadSchema } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
 import { z } from 'zod';
 
@@ -26,6 +27,7 @@ export interface OutboxDispatcherDeps {
   db: Db;
   kp: KeyProvider;
   events: EventStore;
+  bus: EventBus;
 }
 
 export interface OutboxDispatchOptions {
@@ -96,6 +98,13 @@ async function deliver(deps: OutboxDispatcherDeps, claim: OutboxClaim): Promise<
         { outboxId: claim.id, messageId: decision.messageId, status: decision.status, reason: decision.reason },
         'confirmation e-mail not queued',
       );
+    return;
+  }
+  if (claim.kind === 'segment_change') {
+    const { events } = parseOrPermanent(segmentChangePayloadSchema, claim.payload, 'segment_change');
+    if (events.some((event) => event.workspaceId !== claim.workspaceId))
+      throw new PermanentOutboxError('segment_change payload names another workspace');
+    await deps.bus.publish(events as unknown as BusEvent[]);
     return;
   }
   // A row this version cannot understand would otherwise be retried forever after a rollback to

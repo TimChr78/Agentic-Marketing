@@ -1,4 +1,4 @@
-import { DEFAULT_PURPOSES, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
+import { DEFAULT_PURPOSES, mergeRepresentative, type Purposes, publishedSingleton } from '@agentic-marketing/artifacts';
 import { personalDataInText } from '@agentic-marketing/core';
 import {
   type ConsentSource,
@@ -508,19 +508,19 @@ export async function recordTopicPreference(
   // Serialize topic writes with identity merges, then resolve again in the write transaction.
   // Otherwise an old signed preference link can recreate a choice on a merged-away profile.
   await lockIdentity(tx, workspaceId);
-  let canonicalId = profileId;
-  for (let i = 0; i < 20; i++) {
-    const [profile] = await tx
-      .select({ mergedInto: schema.profiles.mergedInto })
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, canonicalId)));
-    // The person was erased while the link was still out: record nothing rather than recreating a
-    // choice (or a row) for a profile that no longer exists.
-    if (!profile) return false;
-    if (!profile.mergedInto) break;
-    canonicalId = profile.mergedInto;
-    if (i === 19) throw new Error('Profile merge chain exceeds the supported depth.');
-  }
+  // The shared merge walk (#1093): 256 hops and cycle-safe, so a link 21+ merges deep still lands
+  // on the person. A representative that is still merged is a corrupted cycle or a chain past the
+  // bound, which the old walk reported as this same depth error.
+  const representative = await mergeRepresentative(tx, workspaceId, profileId);
+  const [profile] = await tx
+    .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
+    .from(schema.profiles)
+    .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, representative)));
+  // The person was erased while the link was still out: record nothing rather than recreating a
+  // choice (or a row) for a profile that no longer exists.
+  if (!profile) return false;
+  if (profile.mergedInto) throw new Error('Profile merge chain exceeds the supported depth.');
+  const canonicalId = profile.id;
   const [current] = await tx
     .select({ status: schema.topicPreferences.status })
     .from(schema.topicPreferences)

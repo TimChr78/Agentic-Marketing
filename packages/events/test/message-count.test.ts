@@ -103,6 +103,26 @@ describe('message event counts', () => {
     expect(await store.countMessageEvents(wsA, { type: 'clicked' })).toEqual([{ profileId: first!.profileId, count: first!.count }]);
   });
 
+  it('counts distinct messages, not engagement events (#1072)', async () => {
+    const ws = newUuid();
+    const oneMessage = `msg_${ws.slice(0, 8)}_issue_41`;
+    await store.insertMessageEvents([
+      // A mailbox prefetches the pixel twice for one issue: two rows, one message.
+      msg(ws, { profileId: 'prf_ada', type: 'opened', at: daysAgo(1), messageId: oneMessage, eventId: `evt_${ws}_open_1` }),
+      msg(ws, { profileId: 'prf_ada', type: 'opened', at: daysAgo(1), messageId: oneMessage, eventId: `evt_${ws}_open_2` }),
+      // A different issue is a second message.
+      msg(ws, {
+        profileId: 'prf_ada',
+        type: 'opened',
+        at: daysAgo(2),
+        messageId: `msg_${ws.slice(0, 8)}_issue_42`,
+        eventId: `evt_${ws}_open_3`,
+      }),
+    ]);
+    expect(await store.countMessageEvents(ws, { type: 'opened' })).toEqual([{ profileId: 'prf_ada', count: 2 }]);
+    expect(await store.countMessageEvents(ws, { type: 'opened', sinceSeconds: 7 * 86_400 })).toEqual([{ profileId: 'prf_ada', count: 2 }]);
+  });
+
   it('streams the counts in batches for a whole workspace', async () => {
     const sizes: number[] = [];
     for await (const batch of store.countMessageEventsBatches(wsA, { type: 'opened' }, 1)) sizes.push(batch.length);

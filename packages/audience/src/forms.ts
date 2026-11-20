@@ -23,6 +23,7 @@ import type { EventBus } from '@agentic-marketing/events';
 import type { HotState } from '@agentic-marketing/hotstate';
 import { acceptInternalItems, bodyLimit, PLATFORM_EVENT, sourceLookups } from '@agentic-marketing/ingest';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
+import { erasureLedgerHasIdentifiers } from '@agentic-marketing/profiles';
 import { type KeyProvider, readSecret } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, isNotNull } from 'drizzle-orm';
@@ -335,18 +336,31 @@ export function formsApi(deps: FormsDeps) {
     const t = tokenOf(token);
     return t && t.x > Date.now() ? t : null;
   };
+  /**
+   * A confirm link lives for seven days while an erasure's own tombstones only guard 24 hours. A
+   * click after that window would otherwise pass the resolver's grace check, create a fresh
+   * profile from the erased anonymous id and record a consent grant on it (#1067). The durable
+   * ledger still names the id, so a token whose key is in it records nothing and shows the
+   * expired page. A workspace with no exclusion key never wrote a ledger row, so the read is free
+   * there.
+   */
+  const tokenErased = async (t: DoiToken) =>
+    deps.db.withWorkspace(t.w, (tx) => erasureLedgerHasIdentifiers(tx, t.w, deps.kp, [{ kind: 'anonymous_id', value: t.a }]));
   app.get('/f/confirm/:token', async (c) => {
     const t = tokenOf(c.req.param('token'));
     // Another brand's link on this host is not found, and shows nothing of that brand (#185).
     if (t && crossBrand(c, t.w)) return hosted(c, await hostedPage('expired', null), 404);
-    if (!verified(c.req.param('token'))) return hosted(c, await hostedPage('expired', t), 410);
-    return hosted(c, await hostedPage('confirm', t), 200);
+    const valid = verified(c.req.param('token'));
+    if (!valid) return hosted(c, await hostedPage('expired', t), 410);
+    if (await tokenErased(valid)) return hosted(c, await hostedPage('expired', valid), 410);
+    return hosted(c, await hostedPage('confirm', valid), 200);
   });
   app.post('/f/confirm/:token', async (c) => {
     const t = verified(c.req.param('token'));
     const any = tokenOf(c.req.param('token'));
     if (any && crossBrand(c, any.w)) return hosted(c, await hostedPage('expired', null), 404);
     if (!t) return hosted(c, await hostedPage('expired', any), 410);
+    if (await tokenErased(t)) return hosted(c, await hostedPage('expired', t), 410);
     const form = await deps.db.withWorkspace(t.w, (tx) => publishedForm(tx, t.f, t.v));
     if (!form)
       return hosted(

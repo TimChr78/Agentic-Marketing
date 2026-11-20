@@ -6,6 +6,7 @@ import { consentStateOf, currentConsent, profileForMessage, purposeAllowed } fro
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, or } from 'drizzle-orm';
+import type { DeliveryAttempt } from '../attempt';
 import type { Decision, EmailServices } from '../gateway';
 import { idempotencyKeyReused, legacySameSend, lockSendKey, topicSuppression } from '../gateway';
 import type { ClickLink } from '../links';
@@ -175,7 +176,13 @@ function withoutDeliveredDevices(data: Record<string, unknown>): Record<string, 
   return out;
 }
 
-export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: KeyProvider; events: EventStore; email: EmailServices }) {
+export async function deliverPush(
+  db: Db,
+  ws: string,
+  id: string,
+  deps: { kp: KeyProvider; events: EventStore; email: EmailServices },
+  attempt: DeliveryAttempt = { providerCalled: false },
+) {
   const prepared = await db.withWorkspace(ws, async (tx) => {
     const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
     const finish = async (status: 'suppressed' | 'failed', reason: string) => {
@@ -258,6 +265,8 @@ export async function deliverPush(db: Db, ws: string, id: string, deps: { kp: Ke
   // One message fans out to every device, so a retry must reach only the devices that have not
   // received it yet (#639). Delivered ids are kept on the message row between attempts.
   const alreadyDelivered = new Set(deliveredDevices(m.data));
+  // Any device send below may reach its provider; a failure after this point must not be retried.
+  attempt.providerCalled = true;
   for (const s of sends) {
     if (alreadyDelivered.has(s.device.id)) continue;
     try {

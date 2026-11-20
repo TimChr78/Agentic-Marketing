@@ -1,3 +1,4 @@
+import { mergeRepresentative } from '@agentic-marketing/artifacts';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, type ErasureKeyKind, enqueueErasureCleanupJob, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, newDataKey, open, type PreparedKeys, prepareKeys, seal } from '@agentic-marketing/secrets';
@@ -106,6 +107,8 @@ export async function removeProfiles(
   await tx.delete(schema.journeyProcessedEvents).where(inArray(schema.journeyProcessedEvents.profileId, family));
   // Out of every segment's materialised membership; static list rows cascade with the profile below.
   await tx.delete(schema.segmentMemberships).where(inArray(schema.segmentMemberships.profileId, family));
+  // Holdout arms (`holdout_assignments`) go with the profile rows below: their foreign key to
+  // profiles cascades, and the table is append-only for the app role (#1048).
   const suppress = opts.suppress ? identifiers.filter((i) => i.type === 'email' || i.type === 'phone') : [];
   if (suppress.length)
     await tx
@@ -166,22 +169,15 @@ export async function eraseProfileStage(tx: Tx, input: ErasureStageInput): Promi
 
 async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promise<ErasureStageResult> {
   const { workspaceId, prepared } = input;
-  let id = input.profileId;
-  let found = false;
-  for (let i = 0; i < 20; i++) {
-    const [p] = await tx
-      .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
-    if (!p) break;
-    if (!p.mergedInto) {
-      id = p.id;
-      found = true;
-      break;
-    }
-    id = p.mergedInto;
-  }
-  if (!found) throw new AppError('not_found', `No profile ${input.profileId}. Find people with profiles.find or profiles.list.`);
+  // The shared merge walk (#1093) reaches a person beyond the old 20-hop bound. A representative
+  // that is still merged is a corrupted cycle or a chain past the bound: not a person to erase.
+  const id = await mergeRepresentative(tx, workspaceId, input.profileId);
+  const [p] = await tx
+    .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
+    .from(schema.profiles)
+    .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
+  if (!p || p.mergedInto)
+    throw new AppError('not_found', `No profile ${input.profileId}. Find people with profiles.find or profiles.list.`);
 
   const family = await mergedFamily(tx, workspaceId, id);
   const identifiers = await tx

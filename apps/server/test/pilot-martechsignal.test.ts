@@ -30,7 +30,7 @@ const mailTo = (to: string) => outbox.filter((m) => m.to === to);
  * the send by a dispatcher round; `delivery` is the live status and needs no wait.
  */
 const flushOutbox = async (artifactId: string) => {
-  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 1000 });
   await eventually(
     async () =>
       Number(

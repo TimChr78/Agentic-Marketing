@@ -9,7 +9,7 @@ import { prefixOf } from './domains';
 import { publicOnly } from './http/public-only';
 import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
 import { offlineChecks } from './ops/checks';
-import { createShutdown, drainWorkers } from './shutdown';
+import { createShutdown, drainHttpServers, drainWorkers, HTTP_DRAIN_TIMEOUT_MS, type HttpListener } from './shutdown';
 import { COMMIT, VERSION } from './version';
 import { startScheduler, startWorkers } from './workers';
 
@@ -50,7 +50,7 @@ await recordServerVersion(db.admin, VERSION).catch((err) =>
   logger.warn({ reason: (err as Error).message }, 'could not record the server version'),
 );
 
-const servers: { close: () => void }[] = [];
+const servers: HttpListener[] = [];
 if (config.roles.has('api') || config.roles.has('ingest')) {
   servers.push(
     serve({ fetch: app.fetch, port: config.port }, () =>
@@ -75,15 +75,15 @@ const workers = [
 
 // Stop accepting traffic first, then drain the workers, then close the pools and clients. Every
 // step runs even when an earlier one fails; the exit code says whether anything was left behind.
+// The http step waits, bounded, for the requests already being answered (#1059), so a request in
+// flight finishes before the workers, pools and clients that serve it close underneath it.
 const shutdown = createShutdown({
   log: logger,
   exit: (code) => process.exit(code),
   steps: [
     {
       name: 'http',
-      close: () => {
-        for (const s of servers) s.close();
-      },
+      close: () => drainHttpServers(servers, HTTP_DRAIN_TIMEOUT_MS),
     },
     {
       name: 'workers',

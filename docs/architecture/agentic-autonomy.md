@@ -116,6 +116,8 @@ Commands are grouped into **action classes** by what they change in the world, n
 
 `destructive`, `settings` changes to consent/purposes/delivery caps, and anything touching credentials **never run autonomously**: they always ask, whatever the mandate says. That is a fixed rule, not a default.
 
+The spend class gates the direct commands that call or queue the provider (`prompts.test`, `ai.classify`, `ai.score`); AI steps inside a journey spend the provider's `monthlyTokenBudget` when a participant reaches them and need no spend mandate. Enrolling people into a journey or publishing one is a `journey.live` action, so an agent with that class can start runs whose AI steps spend the budget (#1081).
+
 ### 3.3 Autonomy levels
 
 Each action class gets a level in the mandate:

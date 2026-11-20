@@ -3,7 +3,7 @@ import { AppError, newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { aiAllowed } from './context';
+import { aiAllowed, redact } from './context';
 import { promptVersion } from './prompts';
 
 // ai.classify: label a text (an inbound reply, a form message, a review) with one of a classify
@@ -17,6 +17,18 @@ import { promptVersion } from './prompts';
 
 const PromptId = z.string().regex(/^prm_[0-9a-f]{32}$/);
 const CallId = z.string().regex(/^aic_[0-9a-f]{32}$/);
+
+/**
+ * The kept copy of a classify request. The model may see the caller's raw text, but `ai_calls.input`
+ * is the scrubbed log behind `ai.calls` and `ai.reviews`, so it may hold only contact details
+ * redacted — the rule #352 set for a score's questions. The worker replaces the raw text with this
+ * copy when the call settles, and the read commands apply it as well, so even a pending call never
+ * returns the raw text.
+ */
+export function classifyInputForLog(input: Record<string, unknown>): Record<string, unknown> {
+  const text = input.text;
+  return typeof text === 'string' ? { ...input, text: redact(text) } : input;
+}
 
 export const classify = defineCommand({
   name: 'ai.classify',
@@ -41,6 +53,8 @@ export const classify = defineCommand({
     if (!p) throw new AppError('not_found', `${input.artifactId} is not a published prompt.`);
     if (p.def.kind !== 'classify')
       throw new AppError('invalid_input', `${input.artifactId} is a ${p.def.kind} prompt; ai.classify needs a classify prompt.`);
+    // The gate is consulted when a person is named. Without a profileId there is no person to
+    // check: the text is not attached to a profile, and the log keeps only its redacted copy.
     if (input.profileId) {
       const consent = await aiAllowed(ctx.tx, ctx.principal.workspaceId, input.profileId);
       if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
@@ -54,6 +68,8 @@ export const classify = defineCommand({
       promptId: input.artifactId,
       promptVersion: p.version,
       profileId: input.profileId ?? null,
+      // The worker needs the raw text to send to the model; it replaces this with the redacted
+      // copy when the call settles (#1057).
       input: { text: input.text },
       principalId: ctx.principal.userId,
     });
@@ -154,7 +170,7 @@ export const listReviews = defineCommand({
         promptId: r.promptId,
         promptVersion: r.promptVersion,
         journeyId: r.journeyId,
-        input: r.input,
+        input: r.kind === 'classify' ? classifyInputForLog(r.input) : r.input,
         output: r.output,
         rationale: r.rationale,
         status: r.reviewStatus ?? 'pending',

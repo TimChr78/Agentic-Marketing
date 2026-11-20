@@ -87,7 +87,7 @@ const decideNow = async (artifactId: string) => {
 
 /** Publish this broadcast's queued events before a forced decision reads ClickHouse. */
 const flushOutbox = async (artifactId: string) => {
-  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 1000 });
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 1000 });
   await eventually(
     async () =>
       Number(
@@ -338,7 +338,7 @@ describe('subject A/B test', () => {
     expect(mailTo(withdrawnEmail)).toHaveLength(0);
 
     // messages.stats can narrow to a variant.
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 500 });
     const stats = await eventually(
       () => api().call('messages.stats', { days: 1, templateId: template, variant: 'B' }),
       (s) => (s.counts.clicked ?? 0) >= b.length,
@@ -409,7 +409,7 @@ describe('subject A/B test', () => {
       await releasePublication();
     }
 
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 500 });
     await flushOutbox(id);
     // The winner is picked from the clicks now that they are published.
     expect(await clicksPublished(id, clicked)).toBeGreaterThan(0);

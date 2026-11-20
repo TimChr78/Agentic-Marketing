@@ -1,4 +1,4 @@
-import { DEFAULT_PURPOSES, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
+import { DEFAULT_PURPOSES, mergeRepresentative, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { erasureCleanupJob, erasureLedgerCoverage, erasurePurgeProgress, type IdentifierType, schema } from '@agentic-marketing/db';
@@ -41,17 +41,16 @@ const cursorTimestamp = (field: string) =>
     .describe(`ISO 8601 with a time zone, e.g. 2026-10-30T07:00:00Z; pass nextCursor.${field} unchanged for the next page`);
 
 async function canonical(ctx: CommandContext, profileId: string) {
-  let id = profileId;
-  for (let i = 0; i < 20; i++) {
-    const [p] = await ctx.tx
-      .select()
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, ctx.principal.workspaceId), eq(schema.profiles.id, id)));
-    if (!p) throw new AppError('not_found', `No profile ${profileId}. Find people with profiles.find or profiles.list.`);
-    if (!p.mergedInto) return p;
-    id = p.mergedInto;
-  }
-  throw new Error('merge chain too long');
+  // The shared merge walk (#985, #1071) resolves 256 hops and cycles; a representative that is
+  // still merged is a corrupted cycle or a chain past the bound, and is not a person.
+  const id = await mergeRepresentative(ctx.tx, ctx.principal.workspaceId, profileId);
+  const [p] = await ctx.tx
+    .select()
+    .from(schema.profiles)
+    .where(and(eq(schema.profiles.workspaceId, ctx.principal.workspaceId), eq(schema.profiles.id, id)));
+  if (!p) throw new AppError('not_found', `No profile ${profileId}. Find people with profiles.find or profiles.list.`);
+  if (p.mergedInto) throw new Error('merge chain too long');
+  return p;
 }
 
 async function purposesOf(ctx: CommandContext) {
@@ -1030,17 +1029,14 @@ export const profileCommands = [
  * key provider and can run under the identity lock in part 3.
  */
 export async function canonicalProfile(tx: CommandContext['tx'], workspaceId: string, profileId: string): Promise<{ id: string } | null> {
-  let id = profileId;
-  for (let i = 0; i < 20; i++) {
-    const [p] = await tx
-      .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
-    if (!p) return null;
-    if (!p.mergedInto) return { id: p.id };
-    id = p.mergedInto;
-  }
-  return null;
+  const id = await mergeRepresentative(tx, workspaceId, profileId);
+  const [p] = await tx
+    .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
+    .from(schema.profiles)
+    .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
+  // Still merged means a corrupted cycle or a chain past the shared bound; neither is a person.
+  if (!p || p.mergedInto) return null;
+  return { id: p.id };
 }
 
 /**
@@ -1053,36 +1049,30 @@ export async function profileForMessage(
   profileId: string,
   kp: CommandContext['services']['keyProvider'],
 ) {
-  let id = profileId;
-  for (let i = 0; i < 20; i++) {
-    const [p] = await tx
-      .select()
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
-    if (!p) return null;
-    if (p.mergedInto) {
-      id = p.mergedInto;
-      continue;
-    }
-    const crypto = personCrypto(tx, workspaceId, kp);
-    const pii = (await crypto.open<Record<string, unknown>>(p.id, p.pii)) ?? {};
-    const ids = await tx
-      .select()
-      .from(schema.identifiers)
-      .where(and(eq(schema.identifiers.workspaceId, workspaceId), eq(schema.identifiers.profileId, p.id)));
-    const sealedEmail = ids.find((i) => i.type === 'email');
-    const email = sealedEmail ? await crypto.open<string>(p.id, sealedEmail.valueEnc) : undefined;
-    const sealedPhone = ids.find((i) => i.type === 'phone');
-    const phone = sealedPhone ? await crypto.open<string>(p.id, sealedPhone.valueEnc) : undefined;
-    return {
-      id: p.id,
-      email: email ?? null,
-      emailHash: sealedEmail?.value ?? null,
-      phone: phone ?? null,
-      phoneHash: sealedPhone?.value ?? null,
-      userId: ids.find((i) => i.type === 'user_id')?.value ?? null,
-      vars: { ...p.traits, ...pii, ...(email ? { email } : {}), id: p.id },
-    };
-  }
-  return null;
+  const id = await mergeRepresentative(tx, workspaceId, profileId);
+  const [p] = await tx
+    .select()
+    .from(schema.profiles)
+    .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, id)));
+  // Still merged means a corrupted cycle or a chain past the shared bound (see `mergeRepresentative`).
+  if (!p || p.mergedInto) return null;
+  const crypto = personCrypto(tx, workspaceId, kp);
+  const pii = (await crypto.open<Record<string, unknown>>(p.id, p.pii)) ?? {};
+  const ids = await tx
+    .select()
+    .from(schema.identifiers)
+    .where(and(eq(schema.identifiers.workspaceId, workspaceId), eq(schema.identifiers.profileId, p.id)));
+  const sealedEmail = ids.find((i) => i.type === 'email');
+  const email = sealedEmail ? await crypto.open<string>(p.id, sealedEmail.valueEnc) : undefined;
+  const sealedPhone = ids.find((i) => i.type === 'phone');
+  const phone = sealedPhone ? await crypto.open<string>(p.id, sealedPhone.valueEnc) : undefined;
+  return {
+    id: p.id,
+    email: email ?? null,
+    emailHash: sealedEmail?.value ?? null,
+    phone: phone ?? null,
+    phoneHash: sealedPhone?.value ?? null,
+    userId: ids.find((i) => i.type === 'user_id')?.value ?? null,
+    vars: { ...p.traits, ...pii, ...(email ? { email } : {}), id: p.id },
+  };
 }

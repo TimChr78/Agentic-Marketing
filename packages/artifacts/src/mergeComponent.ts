@@ -1,3 +1,4 @@
+import type { Tx } from '@agentic-marketing/db';
 import { type SQL, sql } from 'drizzle-orm';
 
 // One notion of a person's merge component (#985, #1015 review).
@@ -98,4 +99,49 @@ export function mergeComponentCtes(workspaceId: string, opts: { seeds?: SQL; com
       WHERE c.depth < ${MERGE_MAX_HOPS}
     ) CYCLE profile_id SET is_cycle USING cycle_path`);
   return sql.join(parts, sql`, `);
+}
+
+/**
+ * The end of a profile's merge chain, through the component walk above: 256 hops and cycle-safe.
+ * A corrupted cycle resolves to its lowest id and a chain deeper than `MERGE_MAX_HOPS` resolves to
+ * the profile itself, so the result can still be a merged profile in both cases. A caller that
+ * needs a person checks `profiles.merged_into` on the result, or uses {@link canonicalProfileId}.
+ */
+export async function mergeRepresentative(tx: Tx, workspaceId: string, profileId: string): Promise<string> {
+  const { rows } = await tx.execute<{ id: string }>(sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, { seeds: sql`SELECT ${profileId}::text AS id` })}
+    SELECT representative AS id FROM merge_representative WHERE origin = ${profileId}::text`);
+  // The walk always seeds the profile, so this fallback only covers a database that returned no
+  // row at all; the caller's own read then decides whether the profile exists.
+  return rows[0]?.id ?? profileId;
+}
+
+/**
+ * The profile a reference points at today, or null when there is no such person: the profile is
+ * missing or erased, or its representative is still merged (a corrupted cycle or a chain past
+ * `MERGE_MAX_HOPS`). Reads ids only, never personal data, so it is safe under the identity lock.
+ */
+export async function canonicalProfileId(tx: Tx, workspaceId: string, profileId: string): Promise<string | null> {
+  return (await canonicalProfileIds(tx, workspaceId, [profileId])).get(profileId) ?? null;
+}
+
+/**
+ * {@link canonicalProfileId} for many references in one walk: every input maps to its person, or to
+ * null when it has no unmerged representative. A batch resolves through one seeded walk, so a
+ * selector list of a thousand ids costs one query rather than a chain per id.
+ */
+export async function canonicalProfileIds(tx: Tx, workspaceId: string, profileIds: readonly string[]): Promise<Map<string, string | null>> {
+  const result = new Map<string, string | null>();
+  const ids = [...new Set(profileIds)];
+  if (!ids.length) return result;
+  const { rows } = await tx.execute<{ origin: string; id: string | null; merged_into: string | null }>(sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
+      seeds: sql`SELECT DISTINCT unnest(${sql.param(ids)}::text[]) AS id`,
+    })}
+    SELECT mr.origin, p.id, p.merged_into
+    FROM merge_representative mr
+    LEFT JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = mr.representative COLLATE "default"`);
+  for (const id of ids) result.set(id, null);
+  for (const row of rows) result.set(row.origin, row.id !== null && row.merged_into === null ? row.id : null);
+  return result;
 }

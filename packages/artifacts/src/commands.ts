@@ -32,6 +32,7 @@ import {
   isSingleton,
   publishValidators,
   referencesOf,
+  segmentContentProblems,
 } from './types';
 
 // Generic, versioned artifacts with a configurable approval pipeline (journeys-and-editors.md §5).
@@ -137,6 +138,11 @@ export async function validateContent(type: ArtifactType, content: unknown, mode
     );
   }
   const problems = (await contentValidators.get(type)?.(parsed.data)) ?? [];
+  // A new message window longer than the stored history is refused when it is saved or published,
+  // before the ClickHouse TTL can silently clamp it (#1076). This check never runs on a stored
+  // definition: an older window stays readable unless the schema's own 10-year cap rejects it,
+  // and the commands that read such a segment report that as a clean refusal.
+  if (type === 'segment') problems.push(...segmentContentProblems(parsed.data as { condition?: unknown }));
   if (problems.length) throw new AppError('invalid_input', `The content is not a valid ${type}: ${problems.join('; ')}`, { problems });
   return parsed.data as Record<string, unknown>;
 }
@@ -231,6 +237,7 @@ async function checkPublishable(ctx: CommandContext, type: string, content: unkn
       type,
       workspaceId: ctx.principal.workspaceId,
     })) ?? [];
+  if (type === 'segment') problems.push(...segmentContentProblems(content as { condition?: unknown }));
   if (problems.length) throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, { problems });
 }
 
@@ -1013,7 +1020,7 @@ export const requestPublish = defineCommand({
   name: 'artifacts.requestPublish',
   title: 'Submit for review (or publish)',
   description:
-    "Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get.",
+    "Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get. Publishing a journey is a journey.live action; its AI steps spend the provider's monthly token budget when participants reach them and need no spend mandate.",
   input: z.object({ artifactId: ArtifactId, note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer') }),
   output: z.object({
     status: z

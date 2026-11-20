@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto';
-import { type Db, schema, type Tx } from '@agentic-marketing/db';
+import { type Db, type ErasureKeyKind, schema, type Tx } from '@agentic-marketing/db';
 import type { SubjectKeyHasher, SubjectKeyHasherFactory, SubjectKeyKind } from '@agentic-marketing/events';
 import { activeDataKey, type KeyProvider } from '@agentic-marketing/secrets';
 import { and, eq, sql } from 'drizzle-orm';
@@ -106,6 +106,48 @@ export async function ensureExclusionKeys(deps: { db: Pick<Db, 'admin' | 'withWo
 export async function exclusionHasher(tx: Tx, workspaceId: string, kp: KeyProvider): Promise<ExclusionHasher> {
   const { id, key } = await ensureExclusionKey(tx, workspaceId, kp);
   return { version: id, hash: (kind, value) => exclusionHash(key, kind, value) };
+}
+
+/**
+ * Whether any of these identifiers is in the workspace's durable erasure ledger (#1067). The
+ * ledger survives the resolver's grace window, so this is the check a token or link that outlives
+ * an erasure needs: a value that hashes to a published exclusion belongs to an erased person even
+ * when their profile row and tombstones are long gone.
+ *
+ * Read-only: it never provisions a key. A workspace without an exclusion data key has no ledger
+ * rows either (the two are written together), so the lookup is a no-op there. Every retained key
+ * version is tried, because a ledger row keeps the HMAC of the key it was written under.
+ */
+export async function erasureLedgerHasIdentifiers(
+  tx: Tx,
+  workspaceId: string,
+  kp: KeyProvider,
+  identifiers: { kind: ErasureKeyKind; value: string }[],
+): Promise<boolean> {
+  if (!identifiers.length) return false;
+  const keys = await tx
+    .select()
+    .from(schema.dataKeys)
+    .where(and(eq(schema.dataKeys.workspaceId, workspaceId), eq(schema.dataKeys.purpose, 'exclusion')));
+  if (!keys.length) return false;
+  const hashes = new Set<string>();
+  for (const row of keys) {
+    const borrowed = await kp.unwrap(row.wrappedKey, row.kekId);
+    // The provider may hand out a shared cached buffer; do not zero that.
+    const own = Buffer.from(borrowed);
+    try {
+      for (const identifier of identifiers) hashes.add(exclusionHash(own, identifier.kind, identifier.value));
+    } finally {
+      own.fill(0);
+    }
+  }
+  const { rows } = await tx.execute<{ present: number }>(sql`
+    SELECT 1 AS present FROM erasure_keys
+    WHERE workspace_id = ${workspaceId}
+      AND coverage = 'full'
+      AND key_value = ANY(${sql.param([...hashes])}::text[])
+    LIMIT 1`);
+  return rows.length > 0;
 }
 
 /**

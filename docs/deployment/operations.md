@@ -128,7 +128,7 @@ called while a consent write holds its locks. Delivery is at-least-once with sta
   retried for about 27 hours before the row is marked `failed`; malformed payloads fail at once.
   `am doctor` warns on `queue.outbox` when rows are waiting too long or any row is failed.
 - **Requeue.** After an outage is fixed, `am outbox` puts failed rows back in the queue with a fresh
-  attempt budget; `am outbox --kind message_event` (or `doi_send`) limits it to one kind. Rows that
+  attempt budget; `am outbox --kind message_event` (or `doi_send`, or `segment_change` for audience Segment Entered/Exited events) limits it to one kind. Rows that
   failed permanently (a payload the dispatcher cannot parse, such as a malformed event) are skipped
   and counted; `--permanent` requeues those too, which is only useful after a payload was repaired
   by hand. The scheduler publishes requeued rows at its next round; duplicates are harmless (message
@@ -204,6 +204,7 @@ In Docker Compose, a Prometheus container on the same project network reaches th
 | `am_broadcast_runs_due` | gauge | | Broadcast runs past their send time that the scheduler has not finished. |
 | `am_warehouse_exports_due` | gauge | | Enabled warehouse exports that are due or were asked to run. |
 | `am_deliveries_dead_24h` | gauge | | Webhook/action deliveries that ended `dead` in the last 24 hours. |
+| `am_erasures_unpublished` | gauge | | Erasures with publishable (`full`-coverage) exclusion keys that are committed but not yet published to ClickHouse. While this is non-zero, reads still return those people; the scheduler re-opens their publication on a periodic pass. An erasure whose only keys are `unavailable` is not counted here: `privacy.erasureExclusion` in `am doctor` reports it. |
 | `am_agent_decisions_last_hour` | gauge | `decision` | Agent ledger decisions (`allow`, `hold`, `ask`, `deny`) in the last hour. |
 | `am_identity_lock_acquisitions_total` | counter | | Workspace identity-lock acquisitions, including a transaction that already held it. A workspace's consent, identity, merge and erasure writes take this one advisory lock. |
 | `am_identity_lock_contended_total` | counter | | Acquisitions that had to wait for another transaction's lock. |

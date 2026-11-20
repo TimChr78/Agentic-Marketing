@@ -1,5 +1,6 @@
 import {
   type BrandCopy,
+  canonicalProfileId,
   DEFAULT_PURPOSES,
   HOSTED_PAGE_HEADERS,
   type HostedPageKind,
@@ -207,21 +208,13 @@ export function emailRoutes(deps: EmailRouteDeps) {
       }));
   };
   // Links issued before a merge still name the old id. Resolve them inside their workspace so
-  // preference reads, writes and the segment update all refer to the surviving person.
+  // preference reads, writes and the segment update all refer to the surviving person. The shared
+  // merge walk (#1093) follows 256 hops, so a link older than 20 merges still names its person.
   const canonicalLink = async <T extends { w: string; p: string }>(link: T | null): Promise<T | null> => {
     if (!link) return null;
     return deps.db.withWorkspace(link.w, async (tx) => {
-      let id = link.p;
-      for (let i = 0; i < 20; i++) {
-        const [row] = await tx
-          .select({ mergedInto: schema.profiles.mergedInto })
-          .from(schema.profiles)
-          .where(and(eq(schema.profiles.workspaceId, link.w), eq(schema.profiles.id, id)));
-        if (!row) return null;
-        if (!row.mergedInto) return { ...link, p: id };
-        id = row.mergedInto;
-      }
-      return null;
+      const id = await canonicalProfileId(tx, link.w, link.p);
+      return id ? { ...link, p: id } : null;
     });
   };
   const preferenceToken = (token: string) => canonicalLink(deps.email.links.verify<UnsubscribeLink>(token));

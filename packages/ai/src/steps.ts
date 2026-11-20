@@ -7,6 +7,7 @@ import { canonicalProfile, lockProfileRows } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
+import { classifyInputForLog } from './classify';
 import { aiAllowed, personContext, redact } from './context';
 import {
   type DecisionAnswer,
@@ -616,6 +617,10 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
 async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
   c = await settleStaleReservation(db, c);
   const { record, recordIn } = rowRecorder(db, c);
+  // The model sees the raw text; every write-back keeps only the redacted copy (#1057). Computed
+  // once, before any early failure path can record the call, so no failure leaves raw text behind.
+  const text = String((c.input as { text?: string }).text ?? '');
+  const storedInput = classifyInputForLog(c.input as Record<string, unknown>);
   const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
     const p = await promptVersion(tx, c.promptId ?? '', c.promptVersion ?? undefined);
     if (p?.def.kind !== 'classify') return { error: 'no_prompt: the classify prompt version is gone' };
@@ -630,14 +635,13 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
       throw err;
     }
   });
-  if ('error' in ready) return record({ status: 'failed', error: ready.error ?? null });
-  const text = String((c.input as { text?: string }).text ?? '');
+  if ('error' in ready) return record({ status: 'failed', error: ready.error ?? null, input: storedInput });
   const estimate = estimateTokens({ def: ready.def, text }, ready.def.maxOutputTokens);
   let reservation: string;
   try {
     reservation = await reserveForStep(db, c.workspaceId, ready.model.providerId, estimate);
   } catch (err) {
-    if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}` });
+    if (err instanceof AiUnavailable) return record({ status: 'failed', error: `${err.reason}: ${err.message}`, input: storedInput });
     throw err;
   }
   if (!(await rememberReservation(db, c, reservation, ready.model.providerId))) return;
@@ -650,6 +654,7 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
     out = {
       status: 'failed',
       error: modelErrorText(err),
+      input: storedInput,
       latencyMs: Date.now() - started,
       ...usageFromErrorOrEstimate(err, estimate, ready.def.maxOutputTokens),
     };
@@ -678,8 +683,10 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
         status: 'done',
         providerId: ready.model.providerId,
         model: ready.model.modelId,
+        input: storedInput,
         output: { label: r.label, ...(trait ? { trait } : {}) },
-        rationale: r.rationale,
+        // The model may quote the text it classified; keep the same scrubbed copy as the input.
+        rationale: typeof r.rationale === 'string' ? (redact(r.rationale) as string) : r.rationale,
         ...r.usage,
         usageEstimated: false,
         latencyMs: Date.now() - started,
@@ -691,6 +698,7 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
         status: 'failed',
         providerId: ready.model.providerId,
         model: ready.model.modelId,
+        input: storedInput,
         error: modelErrorText(err),
         ...r.usage,
         usageEstimated: false,

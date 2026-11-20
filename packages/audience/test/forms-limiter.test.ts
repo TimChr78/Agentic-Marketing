@@ -1,6 +1,8 @@
 import { linkSigner } from '@agentic-marketing/email';
 import type { EventBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
+import { subjectKeyHasher } from '@agentic-marketing/profiles';
+import { localKeyProvider } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { seededRandom } from '../../../test-support/index';
 import { createDisposableDb, type DisposableDb, hasTestDatabase } from '../../db/test/disposable';
@@ -11,6 +13,7 @@ import { type DoiToken, formsApi, takeFormSubmission } from '../src/forms';
 // honestly instead of resetting every bucket or falling back to an unbounded local allowance.
 
 const VALKEY_URL = process.env.VALKEY_URL;
+const MASTER_KEY = Buffer.alloc(32, 41).toString('base64');
 const random = seededRandom();
 const prefix = `am-forms-test-${Date.now()}-${random().toString(36).slice(2, 8)}`;
 const formId = `frm_${'a'.repeat(32)}`;
@@ -20,6 +23,7 @@ type Server = ReturnType<typeof formsApi>;
 
 let t: DisposableDb;
 let hot!: ReturnType<typeof valkeyHotState>;
+let kp!: ReturnType<typeof localKeyProvider>;
 const links = linkSigner('forms-test-secret');
 
 const env = { incoming: { socket: { remoteAddress: '127.0.0.1' } } } as never;
@@ -45,7 +49,7 @@ function app(ratePerMinute = 2, extra: { hot?: typeof hot } = {}) {
         return { accepted: items.length, duplicates: 0 };
       },
     } as unknown as EventBus,
-    kp: {} as never,
+    kp,
     links,
     egress: { allowedHosts: [] } as never,
     hot: 'hot' in extra ? (extra.hot as typeof hot) : hot,
@@ -79,6 +83,7 @@ async function publishForm(id: string) {
 beforeAll(async () => {
   if (!hasTestDatabase() || !VALKEY_URL) return;
   t = await createDisposableDb('forms');
+  kp = localKeyProvider(MASTER_KEY);
   hot = valkeyHotState({ url: VALKEY_URL, prefix });
   await publishForm(formId);
   await publishForm(otherFormId);
@@ -180,6 +185,43 @@ describe.skipIf(!live)('shared form submission limiter (#380)', () => {
     const res = await a.server.request(`/f/confirm/${token}`, { method: 'POST' }, env);
     expect(res.status).toBe(200);
     expect(a.events.some((e) => (e as { name?: string }).name === 'Subscription Confirmed')).toBe(true);
+  });
+
+  it('refuses a confirm link whose anonymous id is in the erasure ledger (#1067)', async () => {
+    const a = app(10);
+    const anonymousId = `anon-erased-${Date.now()}`;
+    // The ledger row an erasure commits in its own transaction, under the workspace exclusion key.
+    const hasher = await subjectKeyHasher({ db: t.db, kp })(t.workspace);
+    let keyValue = '';
+    let keyVersion = '';
+    try {
+      keyValue = await hasher.hash('anonymous_id', anonymousId);
+      keyVersion = hasher.version;
+    } finally {
+      hasher.dispose();
+    }
+    await t.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage, recorded_at)
+       VALUES ($1, 'anonymous_id', $2, $3, 'era_forms_test', 'full', now() - interval '30 days')`,
+      [t.workspace, keyValue, keyVersion],
+    );
+    // The link outlives the 24-hour grace window: the erasure was 30 days ago, so the resolver's
+    // tombstones no longer block the identifier, but the token itself is still valid.
+    const token = links.sign({
+      k: 'doi',
+      w: t.workspace,
+      f: formId,
+      v: 1,
+      a: anonymousId,
+      s: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      x: Date.now() + 60_000,
+    } satisfies DoiToken);
+    const posted = await a.server.request(`/f/confirm/${token}`, { method: 'POST' }, env);
+    expect(posted.status).toBe(410);
+    // Nothing was recorded: no Subscription Confirmed event reached the bus.
+    expect(a.events).toEqual([]);
+    // The page a scanner or the person opens does not offer the button either.
+    expect((await a.server.request(`/f/confirm/${token}`, { method: 'GET' }, env)).status).toBe(410);
   });
 
   it('refuses honestly when the shared store is missing or failing', async () => {

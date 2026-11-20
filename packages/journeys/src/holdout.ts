@@ -2,19 +2,20 @@ import {
   type ArmResult,
   analyseHoldout,
   artifactTypes,
-  canonicalPeople,
   type HoldoutVerdict,
   holdoutBelowK,
   holdoutHashVersion,
   holdoutWinners,
   K,
+  MERGE_MAX_HOPS,
+  mergeComponentCtes,
   type SuppressedArmResult,
   suppressHoldout,
 } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 // Holdout helpers moved to @agentic-marketing/artifacts so campaigns measure with the same
 // assignment and statistics. Re-exported here because journeys.holdoutResult and its tests use
@@ -60,11 +61,83 @@ export interface JourneyHoldoutResult {
 }
 
 /**
+ * The most profiles one winners page may expand to when its outcomes are resolved (#1096). A page
+ * is 1,000 people, so a page past this bound has an enormous merge family; like the campaign
+ * report's identity-map guard (#986), the page is then matched on the profile id stored with the
+ * event instead of holding the family in memory. Tests inject a smaller bound through
+ * `computeJourneyHoldout`'s `pageProfileLimit`.
+ */
+export const JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT = 100_000;
+
+/** Why one winners page could not be resolved to its merge family (#1096). */
+type PageUnresolved = 'over-limit' | 'deep';
+
+const DEFAULT_JOURNEY_HOLDOUT_PAGE_SIZE = 1_000;
+
+/** The winners page size; tests override it, production keeps the default (never env). */
+let journeyHoldoutPageSize = DEFAULT_JOURNEY_HOLDOUT_PAGE_SIZE;
+
+/**
+ * Test-only override for the holdout report's winners page size (#1096). The value is an internal
+ * bound, not configuration, so it is not read from the environment; a test sets it to cross a page
+ * boundary without a large fixture and passes null to restore the default.
+ */
+export function setJourneyHoldoutPageSizeForTests(size: number | null): void {
+  journeyHoldoutPageSize = size === null ? DEFAULT_JOURNEY_HOLDOUT_PAGE_SIZE : Math.max(1, Math.trunc(size));
+}
+
+interface PageOutcomeScope {
+  profileIds: string[];
+  byProfile: Map<string, string>;
+  /** Null when the page resolved; otherwise the reason it could not, for the report note. */
+  unresolved: PageUnresolved | null;
+}
+
+/**
+ * The profile ids whose outcomes belong to one page of winners, and which person each resolves to:
+ * every member of the page people's merge components (#1093), so an outcome stored under a
+ * merged-away id is still read for the person it became. The read is bounded by `limit`; above it
+ * the page is not resolved, and the caller matches on the stored profile id only. A component row
+ * at `MERGE_MAX_HOPS` means the family is corruptly deep, which is unresolved for the same reason.
+ */
+async function pageOutcomeScope(tx: Tx, workspaceId: string, people: readonly string[], limit: number): Promise<PageOutcomeScope> {
+  const { rows } = await tx.execute<{ representative: string; profile_id: string; depth: number }>(sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, {
+      componentOf: sql`SELECT DISTINCT unnest(${sql.param([...people])}::text[]) AS rep`,
+    })}
+    SELECT representative, profile_id, depth FROM merge_component
+    LIMIT ${limit + 1}`);
+  if (rows.length > limit) return { profileIds: [...people], byProfile: new Map(), unresolved: 'over-limit' };
+  if (rows.some((row) => row.depth >= MERGE_MAX_HOPS)) return { profileIds: [...people], byProfile: new Map(), unresolved: 'deep' };
+  return {
+    profileIds: rows.map((row) => row.profile_id),
+    byProfile: new Map(rows.map((row) => [row.profile_id, row.representative])),
+    unresolved: null,
+  };
+}
+
+/** The note contribution for each unresolved cause, so a deep family never claims an id count. */
+function unresolvedOutcomeNote(reason: PageUnresolved, limit: number): string {
+  return reason === 'over-limit'
+    ? `One page of people has more than ${limit} merge-family profiles to resolve, so its outcomes are matched on the profile id stored with the event.`
+    : `A merge family is ${MERGE_MAX_HOPS} or more merges deep and could not be resolved, so its outcomes are matched on the profile id stored with the event.`;
+}
+
+/**
  * The computation behind journeys.holdoutResult, exported so campaign evaluation can report a
  * journey member's uplift without reimplementing the statistics or the assignment query.
  */
 export async function computeJourneyHoldout(
-  deps: { tx: Tx; events: EventStore; workspaceId: string },
+  deps: {
+    tx: Tx;
+    events: EventStore;
+    workspaceId: string;
+    /**
+     * The most profiles one winners page may expand to when resolving outcomes (#1096). Internal,
+     * never environment configuration; tests inject a small value to exercise the guard.
+     */
+    pageProfileLimit?: number;
+  },
   journeyId: string,
   range: { from?: string; to?: string } = {},
 ): Promise<JourneyHoldoutResult> {
@@ -116,29 +189,45 @@ export async function computeJourneyHoldout(
   // Outcomes come from ClickHouse (the journey's goal events and the e-mail unsubscribe
   // guardrail), joined in code to the Postgres winners. The event store applies the row policies
   // through settingsFor, so a query never crosses workspaces. An outcome recorded before a merge
-  // still carries the alias id, so resolve the outcome through the same component map as the
-  // assignment side before matching it to a winner.
-  const outcomes = await deps.events.journeyHoldoutOutcomes(deps.workspaceId, {
-    journeyId,
-    ...(from ? { from } : {}),
-    ...(to ? { to } : {}),
-  });
-  const outcomeIds = [...new Set([...outcomes.converted, ...outcomes.unsubscribed])];
-  const canonical = await canonicalPeople(deps.tx, deps.workspaceId, outcomeIds);
-  const converted = new Set(outcomes.converted.map((id) => canonical.get(id) ?? id));
-  const unsubscribed = new Set(outcomes.unsubscribed.map((id) => canonical.get(id) ?? id));
-  const PAGE = 1000;
+  // still carries the alias id, so each page of winners reads its own merge family and resolves the
+  // outcome through that page's map before matching it to a winner (#1096). Reading per page keeps
+  // memory and the ClickHouse read at a page, not the journey's whole outcome history.
+  const pageProfileLimit = deps.pageProfileLimit ?? JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT;
+  const unresolved = new Set<PageUnresolved>();
   for (let after: string | undefined; ; ) {
-    const page = await winners.page(after, PAGE);
+    const page = await winners.page(after, journeyHoldoutPageSize);
+    if (!page.length) break;
+    const people = new Set(page.map((winner) => winner.person));
+    const scope = await pageOutcomeScope(deps.tx, deps.workspaceId, [...people], pageProfileLimit);
+    if (scope.unresolved) unresolved.add(scope.unresolved);
+    const outcomes = await deps.events.journeyHoldoutOutcomes(deps.workspaceId, {
+      journeyId,
+      ...(from ? { from } : {}),
+      ...(to ? { to } : {}),
+      profileIds: scope.profileIds,
+    });
+    // An outcome id belongs to the person whose component this page read; over the guard the page
+    // is read by stored profile id only, so an alias outcome is not counted for it.
+    const personOf = (id: string) => scope.byProfile.get(id) ?? (people.has(id) ? id : undefined);
+    const converted = new Set<string>();
+    for (const id of outcomes.converted) {
+      const person = personOf(id);
+      if (person) converted.add(person);
+    }
+    const unsubscribed = new Set<string>();
+    for (const id of outcomes.unsubscribed) {
+      const person = personOf(id);
+      if (person) unsubscribed.add(person);
+    }
     for (const winner of page) {
       if (converted.has(winner.person)) counts[winner.arm].converted++;
       if (unsubscribed.has(winner.person)) counts[winner.arm].unsubscribed++;
     }
-    if (page.length < PAGE) break;
+    if (page.length < journeyHoldoutPageSize) break;
     after = page[page.length - 1]!.person;
   }
   const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
-  const note =
+  const verdictNote =
     analysis.verdict === 'not_enough_data'
       ? `Need at least ${cg.minSampleSize} people in each arm; ${counts.control.entered} control and ${counts.treatment.entered} treatment so far.`
       : analysis.verdict === 'no_clear_difference'
@@ -146,6 +235,10 @@ export async function computeJourneyHoldout(
         : analysis.verdict === 'treatment_better'
           ? 'Treatment converted at a higher rate and the 95% interval excludes zero; the journey looks incremental.'
           : 'Treatment converted at a lower rate and the 95% interval excludes zero; the journey looks harmful.';
+  const note =
+    unresolved.size === 0
+      ? verdictNote
+      : `${verdictNote} ${[...unresolved].map((reason) => unresolvedOutcomeNote(reason, pageProfileLimit)).join(' ')}`;
   return {
     journeyId,
     controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },

@@ -58,7 +58,8 @@ _Last updated: 2026-11-20_
   - **0.15.3** (erasure mitigation for events reappearing in ClickHouse, #1034 — full read-time exclusion in 0.17.0, #1037; the outbox barrier sees mixed-subject batches, #1038) is released and verified.
   - **0.16.0** (PostgreSQL 18 for new installs with an upgrade path from 16, #1001; message-engagement segment conditions, #441; unsubscribe CSS warning, #872) is released and verified.
   - **0.16.1** (every worker and scheduler loop stops promptly on shutdown without cancelling provider calls already sent, a 45 s shutdown grace in Compose and Helm, #1028/#1043; deterministic close-budget test, #1041) is released and verified.
-  - **0.17.0** (the erasure completion contract, #1037: erasure-key ledger #1045, protected reads #1046, activation and recurring purge #1047; drained upgrade) is released.
+  - **0.17.0** (the erasure completion contract, #1037: erasure-key ledger #1045, protected reads #1046, activation and recurring purge #1047; drained upgrade) is released and verified.
+  - **0.17.1** (fixes from the 2026-11-18 audit, #1048–#1087: delivery batch isolation and the shutdown request drain #1094; erasure publication retry, stale DOI links and classify redaction #1095; segment window caps, distinct-message counts and audience locking #1097; journey wake idempotency and holdout merge families #1092; documentation #1091; CI in three shards #1090) is released. Next: 0.17.2 (#1099 analytics, #1100 merge walks and paged holdout outcomes, #1101 writer-protocol guard and bounded identity-lock waits). Follow-ups: #1098, #1102.
   - Follow-ups filed: #936 (an unchanged-status signup leaves no ledger row) and #937 (redaction value shapes the rules do not consume).
   - Decisions taken with the recommended options: #906 documents the same-key retry rule and adds an optional key to MCP tools; #904 documents the header-copying limit; #917 keeps `unattributed` and adds `unmatched` and `spendTruncated`; #911 archives the older of two active mandates; #900 hides archived artifacts from `artifacts.list` unless `includeArchived` is set.
   - **Follow-ups filed (S3):** #671, #672 and #673.
@@ -106,4 +107,4 @@ The Wave 5 epic #439 is closed (complete in code); these checks are tracked in #
 ## Last green
 
 - `main` at `9fbe296` (Phase 28 merged; CI green on `6332572`).
-- The last release is v0.17.0, released from `main`; v0.16.1 is verified (v0.15.1 was tagged but never published).
+- The last release is v0.17.1, released from `main`; v0.17.0 is verified (v0.15.1 was tagged but never published).

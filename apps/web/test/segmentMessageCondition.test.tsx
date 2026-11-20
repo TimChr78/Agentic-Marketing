@@ -179,6 +179,34 @@ describe('the segment builder’s message engagement condition', () => {
     expect(lastCondition()).toEqual({ message: 'opened' });
     expect(screen.getByRole('combobox', { name: 'Message event, condition 1' })).toBeTruthy();
   });
+
+  it('names an unresolved purpose without printing its key in the label (#1060)', () => {
+    renderEditor({ message: 'opened', purpose: 'webinar_alerts_2026' });
+    const option = screen.getByRole('option', { name: 'Unavailable purpose' }) as HTMLOptionElement;
+    expect(option.textContent).toBe('Unavailable purpose');
+    expect(option.textContent).not.toContain('webinar_alerts_2026');
+    // The key stays available, behind the same copy control the consent row uses.
+    expect(screen.getByRole('button', { name: 'Copy purpose key webinar_alerts_2026' })).toBeTruthy();
+  });
+
+  it('says that membership moves at the next refresh, not as messages arrive (#1078)', () => {
+    renderEditor({ message: 'clicked', within: 'P7D' });
+    expect(document.body.textContent).toContain(
+      'A message-engagement rule changes who is in the segment only at the next scheduled refresh',
+    );
+    expect(screen.getByText('Estimated size from live data')).toBeTruthy();
+    expect(screen.getByText('Membership updates at the next scheduled refresh, not as messages arrive.')).toBeTruthy();
+    // The estimate panel only carries the refresh caveat for a rule that has a message leaf.
+    cleanup();
+    renderEditor({ trait: 'city', op: 'eq', value: 'Aarhus' });
+    expect(screen.getByText('Estimated size from live data')).toBeTruthy();
+    expect(screen.queryByText('Membership updates at the next scheduled refresh, not as messages arrive.')).toBeNull();
+    // A segment reference is shown with the caveat too: its definition is not loaded here, and it
+    // may hold a message rule.
+    cleanup();
+    renderEditor({ segment: SEG });
+    expect(screen.getByText('Membership updates at the next scheduled refresh, not as messages arrive.')).toBeTruthy();
+  });
 });
 
 describe('a message condition in the preview', () => {
@@ -186,11 +214,18 @@ describe('a message condition in the preview', () => {
     render(
       <ConditionView condition={{ message: 'opened', count: { gte: 2 }, within: 'P30D', channel: 'email', purpose: 'marketing_email' }} />,
     );
-    expect(document.body.textContent).toContain('Opened a message by e-mail for marketing_email at least 2 times in the last 30 days');
+    expect(document.body.textContent).toContain('Opened a message by e-mail for marketing_email at least 2 messages in the last 30 days');
   });
 
   it('names the send it counts', () => {
     render(<ConditionView condition={{ not: { message: 'clicked', broadcast: BCT } }} />);
-    expect(document.body.textContent).toContain('Clicked a link in a message from broadcast');
+    expect(document.body.textContent).toContain(
+      'Clicked a link in a message in the last 25 months (how long message history is kept) from broadcast',
+    );
+  });
+
+  it('says a condition without a window reads the 25 months of history that is kept (#1076)', () => {
+    render(<ConditionView condition={{ message: 'opened' }} />);
+    expect(document.body.textContent).toContain('Opened a message in the last 25 months (how long message history is kept)');
   });
 });

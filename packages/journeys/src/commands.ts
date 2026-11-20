@@ -369,7 +369,7 @@ export const enrollProfiles = defineCommand({
   name: 'journeys.enroll',
   title: 'Put people into a journey',
   description:
-    'Enter people into a published journey directly (an API or agent trigger), regardless of its trigger. Re-entry rules still apply.',
+    "Enter people into a published journey directly (an API or agent trigger), regardless of its trigger. Re-entry rules still apply. AI steps in the journey spend the provider's monthly token budget when a participant reaches them and need no spend mandate.",
   input: z.object({
     artifactId: JourneyId,
     profileIds: z
@@ -490,7 +490,7 @@ export const enrollSegment = defineCommand({
   name: 'journeys.enrollSegment',
   title: 'Enroll a segment into a journey',
   description:
-    'Enroll the current members of a published segment into a published journey, in chunks of 500, and return a job id. Re-entry rules, consent and suppression are checked for each person; people who cannot enter are counted with a reason. The job is resumable and the same idempotency key returns the same job. Use limit to cap how many members it tries.',
+    "Enroll the current members of a published segment into a published journey, in chunks of 500, and return a job id. Re-entry rules, consent and suppression are checked for each person; people who cannot enter are counted with a reason. The job is resumable and the same idempotency key returns the same job. Use limit to cap how many members it tries. AI steps in the journey spend the provider's monthly token budget when a participant reaches them and need no spend mandate.",
   input: z.object({
     artifactId: JourneyId,
     segmentId: SegmentId,
