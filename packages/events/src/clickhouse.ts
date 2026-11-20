@@ -57,6 +57,14 @@ export interface ConversionEvent {
   properties: Record<string, unknown>;
 }
 
+/** One participant's first take of a split node, with the arm it selected. */
+export interface JourneySplitArm {
+  participantId: number;
+  profileId: string;
+  arm: number;
+  at: number;
+}
+
 export interface EventStore {
   insert(events: BusEvent[]): Promise<void>;
   /**
@@ -201,11 +209,25 @@ export interface EventStore {
     convertedAt: { profileId: string; participantId: number | null; at: number }[];
     unsubscribedAt: { profileId: string; at: number }[];
   }>;
-  /** Which arm of a split node each participant took (the step's detail, "variant N"), for split results (#313). */
+  /**
+   * Which arm of a split node each participant took (the step's detail, "variant N"), for split
+   * results (#313). Pass `onPage` to walk it one page of participants at a time, in participant-id
+   * order, so a split with a large history is never one read (#1108); the pages are at most
+   * `pageSize` entries and the method returns []. Without `onPage` the historical unbounded read
+   * is kept.
+   */
   journeySplitArms(
     workspaceId: string,
-    q: { journeyId: string; node: string; from?: Date; to?: Date },
-  ): Promise<{ participantId: number; profileId: string; arm: number; at: number }[]>;
+    q: {
+      journeyId: string;
+      node: string;
+      from?: Date;
+      to?: Date;
+      onPage?: (rows: JourneySplitArm[]) => void | Promise<void>;
+      /** Entries per page when `onPage` is used. Defaults to 10,000. */
+      pageSize?: number;
+    },
+  ): Promise<JourneySplitArm[]>;
   /**
    * Goal events by name in a time window, with the identifiers that tie them to a profile. Every
    * matching event is returned: the query pages with a stable keyset over the table's full
@@ -1414,25 +1436,64 @@ export function clickHouseStore(opts: {
       // participant that loops back through the same split keeps that first arm, so its outcomes
       // cannot be counted twice or attributed to two arms (#369).
       const protectedRead = await protectedReadFor(workspaceId);
-      const rows = await query(workspaceId, {
-        query: `SELECT participant_id, profile_id, variant, at FROM (
-                  SELECT participant_id, profile_id, detail AS variant, at FROM ${personReadSource('journey_events', protectedRead)} FINAL
-                  WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
-                    AND startsWith(detail, 'variant ')
-                  ORDER BY at ASC, seq ASC, detail ASC LIMIT 1 BY participant_id
-                ) WHERE 1
-                ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
-                ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}
-                ORDER BY at ASC, participant_id ASC`,
-        query_params: { ws: workspaceId, j: q.journeyId, n: q.node, ...(from ? { from } : {}), ...(to ? { to } : {}) },
-        format: 'JSONEachRow',
-      });
-      return (await rows.json<{ participant_id: number | string; profile_id: string; variant: string; at: string }>()).map((r) => ({
+      const parse = (r: { participant_id: number | string; profile_id: string; variant: string; at: string }) => ({
         participantId: Number(r.participant_id),
         profileId: r.profile_id,
         arm: Number(r.variant.slice('variant '.length)) - 1,
         at: Date.parse(`${String(r.at).replace(' ', 'T')}Z`),
-      }));
+      });
+      if (!q.onPage) {
+        const rows = await query(workspaceId, {
+          query: `SELECT participant_id, profile_id, variant, at FROM (
+                    SELECT participant_id, profile_id, detail AS variant, at FROM ${personReadSource('journey_events', protectedRead)} FINAL
+                    WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
+                      AND startsWith(detail, 'variant ')
+                    ORDER BY at ASC, seq ASC, detail ASC LIMIT 1 BY participant_id
+                  ) WHERE 1
+                  ${from ? "AND at >= {from:DateTime64(3, 'UTC')}" : ''}
+                  ${to ? "AND at <= {to:DateTime64(3, 'UTC')}" : ''}
+                  ORDER BY at ASC, participant_id ASC`,
+          query_params: { ws: workspaceId, j: q.journeyId, n: q.node, ...(from ? { from } : {}), ...(to ? { to } : {}) },
+          format: 'JSONEachRow',
+        });
+        return (await rows.json<{ participant_id: number | string; profile_id: string; variant: string; at: string }>()).map(parse);
+      }
+      // A split may hold hundreds of thousands of takes, so walk it with a stable keyset over the
+      // participant id, a bounded page at a time (#1108). The window is applied here rather than in
+      // SQL: a page is a page of deduped participants before the window, so a page that is wholly
+      // outside it cannot end the walk early. The first take of a participant is chosen before the
+      // window, exactly as the unbounded read does.
+      const pageSize = Math.max(1, Math.trunc(q.pageSize ?? 10_000));
+      const fromMs = q.from?.getTime();
+      const toMs = q.to?.getTime();
+      let after: number | undefined;
+      for (;;) {
+        const rows = await query(workspaceId, {
+          query: `SELECT participant_id, profile_id, variant, at FROM (
+                    SELECT participant_id, profile_id, detail AS variant, at FROM ${personReadSource('journey_events', protectedRead)} FINAL
+                    WHERE workspace_id = {ws:UUID} AND journey_id = {j:String} AND node = {n:String} AND type = 'step'
+                      AND startsWith(detail, 'variant ')
+                      ${after === undefined ? '' : 'AND participant_id > {after:UInt64}'}
+                    ORDER BY at ASC, seq ASC, detail ASC LIMIT 1 BY participant_id
+                  ) WHERE 1
+                  ${after === undefined ? '' : 'AND participant_id > {after:UInt64}'}
+                  ORDER BY participant_id ASC LIMIT {pageSize:UInt32}`,
+          query_params: {
+            ws: workspaceId,
+            j: q.journeyId,
+            n: q.node,
+            pageSize,
+            ...(after === undefined ? {} : { after }),
+          },
+          format: 'JSONEachRow',
+        });
+        const page = (await rows.json<{ participant_id: number | string; profile_id: string; variant: string; at: string }>()).map(parse);
+        const inRange = page.filter((row) => (fromMs === undefined || row.at >= fromMs) && (toMs === undefined || row.at <= toMs));
+        if (inRange.length) await q.onPage(inRange);
+        if (page.length < pageSize) break;
+        after = page[page.length - 1]!.participantId;
+      }
+      return [];
     },
 
     async journeyHoldoutOutcomes(workspaceId, q) {

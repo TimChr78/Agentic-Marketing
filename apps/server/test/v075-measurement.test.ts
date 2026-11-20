@@ -383,6 +383,31 @@ describe('journey split attribution (#369)', () => {
     // Filtering cannot turn participant 107's later loop into its first split take.
     expect(later.map((a) => a.participantId).sort()).toEqual([102, 108, 112]);
 
+    // The split-arms read can also be walked page by page (#1108). Two takes per page crosses the
+    // keyset several times, and an out-of-range first page must not end the walk early.
+    const paged: typeof arms = [];
+    await t.srv.events.journeySplitArms(ws, {
+      journeyId,
+      node: 'split',
+      pageSize: 2,
+      onPage: (page) => {
+        paged.push(...page);
+      },
+    });
+    expect(paged.map((a) => a.participantId).sort((a, b) => a - b)).toEqual(arms.map((a) => a.participantId).sort((a, b) => a - b));
+    const pagedLater: typeof arms = [];
+    await t.srv.events.journeySplitArms(ws, {
+      journeyId,
+      node: 'split',
+      from: new Date(base + 500),
+      to: new Date(base + 5_000),
+      pageSize: 1,
+      onPage: (page) => {
+        pagedLater.push(...page);
+      },
+    });
+    expect(pagedLater.map((a) => a.participantId).sort((a, b) => a - b)).toEqual([102, 108, 112]);
+
     const result = await api.call('journeys.splitResult', {
       journeyId,
       node: 'split',

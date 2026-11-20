@@ -40,10 +40,21 @@ let converted: { profileId: string; participantId: number | null; at: number }[]
 let unsubscribed: { profileId: string; at: number }[] = [];
 /** The profileIds each event-store call was scoped to, so a test can prove the read is per page. */
 const outcomeScopes: (string[] | undefined)[] = [];
+/** The size of each split-arms page the report asked for, so a test can prove the read is paged. */
+const armPages: number[] = [];
 
 const events = {
-  async journeySplitArms() {
-    return entries;
+  async journeySplitArms(_workspaceId: string, q: { pageSize?: number; onPage?: (rows: EntryRow[]) => void | Promise<void> }) {
+    // Answer the report the way the ClickHouse store does: bounded pages when it supplies an
+    // `onPage` consumer, the whole list for the historical unbounded call (#1108).
+    if (!q.onPage) return entries;
+    const size = Math.max(1, Math.trunc(q.pageSize ?? 10_000));
+    for (let at = 0; at < entries.length; at += size) {
+      const page = entries.slice(at, at + size);
+      armPages.push(page.length);
+      await q.onPage(page);
+    }
+    return [];
   },
   async journeyHoldoutOutcomes(_workspaceId: string, q: { profileIds?: string[] }) {
     outcomeScopes.push(q.profileIds);
@@ -113,6 +124,7 @@ function reset(rows: EntryRow[]): void {
   converted = [];
   unsubscribed = [];
   outcomeScopes.length = 0;
+  armPages.length = 0;
 }
 
 const splitResult = (journeyId: string, limits: { pageProfileLimit?: number } = {}) =>
@@ -184,6 +196,32 @@ describe.skipIf(!hasTestDatabase())('journeys.splitResult reads its outcomes one
       [6, 0, 1],
     ]);
     expect(report.note).not.toContain('merge-family');
+  }, 120_000);
+
+  it('reads the split arms one page at a time and keeps the counts (#1108)', async () => {
+    const journeyId = await publishJourney();
+    const ids = Array.from({ length: 12 }, () => newId('prf'));
+    await seedPeople(ids);
+    reset(ids.map((id, i) => ({ participantId: 700 + i, profileId: id, arm: i % 2, at: at(i) })));
+    converted = ids.map((profileId, i) => ({ profileId, participantId: 700 + i, at: at(i + 100) })).filter((_, i) => i % 2 === 0);
+    unsubscribed = ids.slice(0, 2).map((profileId, i) => ({ profileId, at: at(i + 200) }));
+
+    let report: Awaited<ReturnType<typeof splitResult>>;
+    setJourneySplitPageSizeForTests(5);
+    try {
+      report = await splitResult(journeyId);
+    } finally {
+      setJourneySplitPageSizeForTests(null);
+    }
+
+    // Twelve split takes in pages of five: three reads (5, 5, 2), never the whole list at once.
+    expect(armPages).toEqual([5, 5, 2]);
+    // Paging the read does not change the counts.
+    expect(report.suppressed).toBe(false);
+    expect(report.arms.map((arm) => [arm.entered, arm.converted, arm.unsubscribed])).toEqual([
+      [6, 6, 1],
+      [6, 0, 1],
+    ]);
   }, 120_000);
 
   it('counts an outcome stored under a merged-away id for its person', async () => {

@@ -1,10 +1,11 @@
+import { randomBytes } from 'node:crypto';
 import { analyseHoldout, anyArmBelowK, artifactTypes, K } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT, type PageUnresolved, pageOutcomeScope, unresolvedOutcomeNote } from './holdout';
-import { attributeSplitOutcomes, type SplitCounts, type SplitEntry, splitArmPeople } from './split';
+import { attributeSplitOutcomes, type SplitCounts, type SplitEntry } from './split';
 
 // journeys.splitResult (#313), split out of the command so the paging can be tested against a
 // fake event store (#1105). Each outcome is attributed to exactly one split entry; the rule
@@ -64,18 +65,14 @@ export interface JourneySplitInput {
   minSampleSize: number;
 }
 
-/** Chunks a list into pages without copying the whole list again. */
-function* pages<T>(items: readonly T[], size: number): Generator<T[]> {
-  for (let at = 0; at < items.length; at += size) yield items.slice(at, at + size);
-}
-
 /**
  * The computation behind journeys.splitResult.
  *
- * A journey can have a large outcome history, so the split reads its outcomes one page of
- * participants at a time, scoped to that page's merge family, the way the holdout report does
- * (#1096, #1105). A page is a group of people and never splits one person's entries, so an
- * outcome is read in exactly one page and each arm's counts stay the whole journey's counts.
+ * A journey can have a large split and outcome history, so the split reads its takes and its
+ * outcomes one page of participants at a time, scoped to that page's merge family, the way the
+ * holdout report does (#1096, #1105, #1108). A page is a group of people and never splits one
+ * person's entries, so an outcome is read in exactly one page and each arm's counts stay the whole
+ * journey's counts.
  */
 export async function computeJourneySplit(
   deps: {
@@ -108,52 +105,122 @@ export async function computeJourneySplit(
   const to = input.to ? new Date(input.to) : undefined;
   const range = { ...(from ? { from } : {}), ...(to ? { to } : {}) };
   const ws = deps.workspaceId;
-  const taken = await deps.events.journeySplitArms(ws, { journeyId: input.journeyId, node: input.node, ...range });
-  const counts: SplitCounts[] = Array.from({ length: weights.length }, () => ({ entered: 0, converted: 0, unsubscribed: 0 }));
   const pageProfileLimit = deps.pageProfileLimit ?? JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT;
   const unresolved = new Set<PageUnresolved>();
 
-  // Resolve the participants to their person once, a page at a time. A split entry may carry an id
-  // the person was later merged away from, so the raw id is resolved before it is grouped. Only
-  // the participant ids are kept (O(participants)); a merge family is resolved again for each
-  // outcome page and dropped with it, so memory stays a page rather than every family (#1105).
-  const personOf = new Map<string, string>();
-  const personKey = (id: string) => personOf.get(id) ?? id;
-  const participants = [...new Set(taken.map((entry) => entry.profileId))];
-  for (const page of pages(participants, journeySplitPageSize)) {
-    const scope = await pageOutcomeScope(deps.tx, ws, page, pageProfileLimit);
+  // The split's takes land in a transaction-scoped temporary table, the way the holdout's winners
+  // do (#1108). The ClickHouse read is a bounded keyset page and the report then pages the takes by
+  // person, so the API process holds a page, not the journey's whole split history.
+  const table = `split_arms_${randomBytes(6).toString('hex')}`;
+  const temp = sql.raw(table);
+  await deps.tx.execute(sql`
+    CREATE TEMP TABLE ${temp} (
+      participant_id bigint PRIMARY KEY,
+      profile_id text NOT NULL,
+      person text,
+      arm integer NOT NULL,
+      at_ms bigint NOT NULL
+    ) ON COMMIT DROP`);
+  // Both keyset walks below read this table a page at a time, and the id update must not scan it.
+  await deps.tx.execute(sql`CREATE INDEX ON ${temp} (profile_id)`);
+  await deps.tx.execute(sql`CREATE INDEX ON ${temp} (person)`);
+  let takeCount = 0;
+  await deps.events.journeySplitArms(ws, {
+    journeyId: input.journeyId,
+    node: input.node,
+    ...range,
+    pageSize: journeySplitPageSize,
+    onPage: async (page) => {
+      if (!page.length) return;
+      takeCount += page.length;
+      await deps.tx.execute(sql`
+        INSERT INTO ${temp} (participant_id, profile_id, arm, at_ms)
+        VALUES ${sql.join(
+          page.map((entry) => sql`(${entry.participantId}, ${entry.profileId}, ${entry.arm}, ${entry.at})`),
+          sql`, `,
+        )}
+        ON CONFLICT (participant_id) DO NOTHING`);
+    },
+  });
+
+  // Resolve the stored ids to their person one page of distinct ids at a time. A split entry may
+  // carry an id the person was later merged away from, so the raw id is resolved before it is
+  // grouped; a page over the family guard keeps its stored ids (#1096, #1105).
+  let afterProfile: string | undefined;
+  for (;;) {
+    const { rows } = await deps.tx.execute<{ profile_id: string }>(sql`
+      SELECT DISTINCT profile_id FROM ${temp}
+      ${afterProfile === undefined ? sql`` : sql`WHERE profile_id > ${afterProfile}`}
+      ORDER BY profile_id LIMIT ${journeySplitPageSize}`);
+    if (!rows.length) break;
+    const ids = rows.map((row) => row.profile_id);
+    afterProfile = ids[ids.length - 1];
+    const scope = await pageOutcomeScope(deps.tx, ws, ids, pageProfileLimit);
     if (scope.unresolved) unresolved.add(scope.unresolved);
-    // An unresolved page (or an unknown profile) keeps the stored id, so the report matches on it.
-    for (const id of page) personOf.set(id, scope.byProfile.get(id) ?? id);
+    // Each id's own resolution decides its person, so an over-limit page keeps its stored id and
+    // cannot leak a family resolution into another page.
+    const persons = ids.map((id) => scope.byProfile.get(id) ?? id);
+    await deps.tx.execute(sql`
+      UPDATE ${temp} t SET person = v.person
+      FROM (
+        SELECT unnest(${sql.param(ids)}::text[]) AS profile_id,
+               unnest(${sql.param(persons)}::text[]) AS person
+      ) v
+      WHERE t.profile_id = v.profile_id`);
+    if (rows.length < journeySplitPageSize) break;
+  }
+  await deps.tx.execute(sql`UPDATE ${temp} SET person = profile_id WHERE person IS NULL`);
+
+  // Entrants and the k floor's distinct people stay in SQL: one person re-entering an arm five
+  // times is still one person, and a person whose two ids were merged is one person too (#1105).
+  const summary = await deps.tx.execute<{ arm: number; entered: number; people: number }>(sql`
+    SELECT arm, count(*)::int AS entered, count(DISTINCT person)::int AS people
+    FROM ${temp}
+    WHERE arm >= 0 AND arm < ${weights.length}
+    GROUP BY arm`);
+  const counts: SplitCounts[] = Array.from({ length: weights.length }, () => ({ entered: 0, converted: 0, unsubscribed: 0 }));
+  const armPeople: number[] = Array.from({ length: weights.length }, () => 0);
+  for (const row of summary.rows) {
+    const arm = Number(row.arm);
+    if (arm < 0 || arm >= weights.length) continue;
+    counts[arm]!.entered = Number(row.entered);
+    armPeople[arm] = Number(row.people);
   }
 
-  // Group the entries by person, so one person's re-entries stay in one page and the
-  // "latest entry at or before the outcome" rule sees the same entries it always did.
-  const groups = new Map<string, SplitEntry[]>();
-  for (const entry of taken) {
-    const person = personKey(entry.profileId);
-    const group = groups.get(person);
-    const normalized = { ...entry, profileId: person };
-    if (group) group.push(normalized);
-    else groups.set(person, [normalized]);
-  }
-  const resolved = [...groups.values()].flat();
-  for (const page of pages([...groups.entries()], journeySplitPageSize)) {
-    const entries = page.flatMap(([, group]) => group);
-    const people = page.map(([person]) => person);
+  // Attribute outcomes one page of people at a time. A page is a group of people and never splits
+  // one person's entries, so an outcome is read in exactly one page and each arm's counts stay the
+  // whole journey's counts (#1096, #1105, #1108).
+  let afterPerson: string | undefined;
+  for (;;) {
+    const { rows } = await deps.tx.execute<{ person: string }>(sql`
+      SELECT DISTINCT person FROM ${temp}
+      ${afterPerson === undefined ? sql`` : sql`WHERE person > ${afterPerson}`}
+      ORDER BY person LIMIT ${journeySplitPageSize}`);
+    if (!rows.length) break;
+    const people = rows.map((row) => row.person);
+    afterPerson = people[people.length - 1];
+    const entryRows = await deps.tx.execute<{ participant_id: string; person: string; arm: number; at_ms: string }>(sql`
+      SELECT participant_id::text AS participant_id, person, arm, at_ms::text AS at_ms
+      FROM ${temp}
+      WHERE person = ANY(${sql.param(people)}::text[]) AND arm >= 0 AND arm < ${weights.length}`);
+    const entries: SplitEntry[] = entryRows.rows.map((row) => ({
+      participantId: Number(row.participant_id),
+      profileId: row.person,
+      arm: Number(row.arm),
+      at: Number(row.at_ms),
+    }));
     // The family is resolved for this page of people only and dropped with it, as the holdout
     // report does (#1096, #1105).
     const scope = await pageOutcomeScope(deps.tx, ws, people, pageProfileLimit);
     if (scope.unresolved) unresolved.add(scope.unresolved);
     const outcomes = await deps.events.journeyHoldoutOutcomes(ws, {
       journeyId: input.journeyId,
-      ...(from ? { from } : {}),
-      ...(to ? { to } : {}),
+      ...range,
       profileIds: scope.profileIds,
     });
     // A page that resolved reads its whole family, so an outcome stored under a merged-away id
     // still lands on the person's entry. Over the guard the page is read by stored id only.
-    const outcomePerson = (id: string) => scope.byProfile.get(id) ?? personKey(id);
+    const outcomePerson = (id: string) => scope.byProfile.get(id) ?? id;
     const pageCounts = attributeSplitOutcomes(
       entries,
       {
@@ -166,25 +233,23 @@ export async function computeJourneySplit(
       },
       weights.length,
     );
-    // Every entry belongs to exactly one page, so the pages' counts add up.
+    // Every entry belongs to exactly one page, so the pages' counts add up. `entered` comes from
+    // the SQL aggregate above; only outcomes are attributed here.
     for (let i = 0; i < counts.length; i++) {
       const count = counts[i]!;
-      count.entered += pageCounts[i]?.entered ?? 0;
       count.converted += pageCounts[i]?.converted ?? 0;
       count.unsubscribed += pageCounts[i]?.unsubscribed ?? 0;
     }
+    if (rows.length < journeySplitPageSize) break;
   }
 
   const rate = (n: number, of: number) => (of ? n / of : 0);
   // The same k floor the holdout read applies, per arm (#757): an arm below k never reports a
   // count or rate, and no comparison or verdict is computed from a hidden baseline. The floor
-  // counts distinct people, not entries: one person re-entering an arm five times is still one
-  // person (0.14.11 review), and a person whose two ids were merged is one person too, which is
-  // why the entries are counted after their ids resolve to their person (#1105 review).
-  const armPeople = splitArmPeople(resolved, weights.length).map((n) => ({ entered: n }));
-  const belowK = anyArmBelowK(armPeople);
+  // counts distinct people, not entries, after their ids resolve to their person (#1105 review).
+  const belowK = anyArmBelowK(armPeople.map((n) => ({ entered: n })));
   const arms = counts.map((c, i) =>
-    belowK && armPeople[i]!.entered < K
+    belowK && armPeople[i]! < K
       ? {
           arm: i,
           weight: weights[i],
@@ -219,7 +284,7 @@ export async function computeJourneySplit(
         };
       });
   const better = comparisons.filter((c) => c.verdict === 'treatment_better').map((c) => `arm ${c.arm}`);
-  const baseNote = !taken.length
+  const baseNote = !takeCount
     ? 'Nobody has reached this split yet.'
     : belowK
       ? `An arm has fewer than k=${K} people, so its counts and rates and every comparison are withheld.`
