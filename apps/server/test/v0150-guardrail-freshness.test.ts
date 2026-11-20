@@ -371,6 +371,31 @@ describe('guardrails read unpublished message events (#1008)', () => {
     expect(refused.body.message).toMatch(/dead-lettered/);
   }, 90_000);
 
+  it('refuses when a queued outbox row for the agent cannot be parsed (#1079)', async () => {
+    const s = await setup({ complaintRate: 0.01 });
+    await holdPublication(s.ws);
+    const sent = await sendDirect(s);
+    // A rolling deploy can leave a row in a shape this server does not know: the strict schema
+    // rejects it, but it may carry a real bounce or complaint. Skipping it would measure a rate
+    // from a numerator that silently lost evidence, so the check must refuse instead.
+    await t.srv.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key)
+       VALUES ($1, 'obx_unparseable', 'message_event',
+               jsonb_build_object('events', jsonb_build_array(jsonb_build_object(
+                 'workspaceId', $2::text, 'messageId', $3::text, 'eventId', 'future:1', 'type', 'future_event',
+                 'at', now(), 'profileId', $4::text, 'channel', 'email', 'purpose', 'marketing_email',
+                 'provider', 'log', 'templateId', $5::text, 'templateVersion', 1, 'journeyId', '',
+                 'reason', '', 'url', ''))),
+               'unparseable:1')`,
+      [s.ws, s.ws, sent[0].id, s.profiles[0], s.templateId],
+    );
+
+    const refused = await agentCall(s.token, 'messages.sendEmail', { profileId: s.profiles[2], templateId: s.templateId });
+    expect(refused.status).toBe(403);
+    expect(refused.body.message).toMatch(/cannot be checked/);
+    expect(refused.body.message).toMatch(/holds 1 row .* cannot read/);
+  }, 90_000);
+
   it('fails safe when the agent has more queued events than one check may read', async () => {
     const s = await setup({ complaintRate: 0.01 });
     await holdPublication(s.ws);

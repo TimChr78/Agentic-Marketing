@@ -317,7 +317,12 @@ describe('a person reached as two profiles (#590)', () => {
     expect(summary.state).toBe('measured');
     if (summary.state !== 'measured') return;
     expect(summary.headline.recipients).toBe(5);
+    // #1049: the e-mail headline reads the same identity map as the member rows and the recipients
+    // total, so E and F are one person here too, not two.
+    expect(summary.headline.emailSent).toBe(5);
+    expect(summary.headline.emailSent).toBe(summary.headline.recipients);
     expect(summary.members[0]).toMatchObject({ sent: 5, converters: 1 });
+    expect(summary.members[0]!.sent).toBe(summary.headline.emailSent);
   });
 });
 

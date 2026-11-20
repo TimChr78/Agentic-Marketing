@@ -1,4 +1,6 @@
+import type { IdentityMap } from '@agentic-marketing/campaigns';
 import { type MessageEvent, messageEventsWithPending, personReadSource } from '@agentic-marketing/events';
+import { identityQueryParams } from './identityParams';
 import type { DimensionId, MeasureDef, SourceId, Unit } from './registry';
 import { MEASURES } from './registry';
 
@@ -57,6 +59,12 @@ export interface BuildInput {
    * caught up. Only `message_events` measures accept them.
    */
   pendingMessageEvents?: readonly MessageEvent[];
+  /**
+   * Internal: resolve a message event's stored profile id through this identity map before
+   * counting distinct people (#1049), so a person reached under a merged-away id counts once. Only
+   * message_events measures accept it; the caller scopes the map to the report's recipients.
+   */
+  identity?: IdentityMap;
   /** Whether this workspace's reads go through the protected views (#1037 part 2). Default: true. */
   protectedRead?: boolean;
 }
@@ -219,12 +227,12 @@ export function dimensionExpression(source: SourceId, dimension: DimensionId): s
 
 const alias = (prefix: string, id: string) => `${prefix}_${id.replace(/[^A-Za-z0-9_]/g, '_')}`;
 
-function baseExpression(base: MeasureDef, valueExpression: string): string {
+function baseExpression(base: MeasureDef, valueExpression: string, profileExpression = 'profile_id'): string {
   if (base.kind !== 'base') throw new Error(`ratio ${base.id} has no base expression`);
   const types = (base.eventTypes ?? []).map((t) => `type = '${t}'`).join(' OR ');
   switch (base.counting) {
     case 'profiles':
-      return `uniqExactIf(profile_id, profile_id != '' AND (${types}))`;
+      return `uniqExactIf(${profileExpression}, ${profileExpression} != '' AND (${types}))`;
     case 'participants':
       return `uniqExactIf(participant_id, (${types}))`;
     case 'events':
@@ -244,9 +252,9 @@ function baseExpression(base: MeasureDef, valueExpression: string): string {
   }
 }
 
-function kExpression(source: SourceId): string {
+function kExpression(source: SourceId, profileExpression = 'profile_id'): string {
   if (source === 'events') return "uniqExact(if(anonymous_id != '', anonymous_id, if(user_id != '', concat('u:', user_id), event_id)))";
-  return "uniqExactIf(profile_id, profile_id != '')";
+  return `uniqExactIf(${profileExpression}, ${profileExpression} != '')`;
 }
 
 /** Value and currency expressions for the conversion map's rules, with their parameters. */
@@ -304,6 +312,17 @@ export function buildQuery(input: BuildInput): CompiledQuery {
     throw new Error('pending message events can only be read with message_events measures');
   const revenue = measures.some((m) => m.id === 'revenue');
   const conversion = revenueExpressions(input.conversionRules, params);
+  // #1049: an internal named report may resolve a message event's stored profile id through the
+  // same campaign identity map its recipients use. Only a complete map is applied (never a partial
+  // one above the bound), and only the profile pairs matter for a stored profile id. With no map
+  // the query compiles exactly as before.
+  const identityPairs =
+    source === 'message_events' && input.identity && !input.identity.overLimit
+      ? input.identity.pairs.filter((pair) => pair.kind === 'profile')
+      : [];
+  const identityParams = identityPairs.length ? identityQueryParams(identityPairs) : null;
+  if (identityParams) Object.assign(params, identityParams.params);
+  const profileExpression = identityParams ? "coalesce(nullIf(by_profile.identity_profile, ''), profile_id)" : 'profile_id';
 
   // Campaign ids never travel as SQL text: the map is a pair of bounded Array(String) parameters.
   if (dimensions.includes('campaign') || input.filters.campaign?.length) {
@@ -332,8 +351,10 @@ export function buildQuery(input: BuildInput): CompiledQuery {
 
   const inner: string[] = [
     ...dimExpressions.map((e, i) => `${e} AS ${dimAliases[i]}`),
-    ...[...baseById.entries()].map(([id, base]) => `${baseExpression(base, conversion.value)} AS ${baseAliases.get(id)}`),
-    `${kExpression(source)} AS k_group`,
+    ...[...baseById.entries()].map(
+      ([id, base]) => `${baseExpression(base, conversion.value, profileExpression)} AS ${baseAliases.get(id)}`,
+    ),
+    `${kExpression(source, profileExpression)} AS k_group`,
   ];
   const groupBy = [...dimExpressions];
 
@@ -397,7 +418,23 @@ export function buildQuery(input: BuildInput): CompiledQuery {
   // With queued events the FROM is published rows UNION ALL the snapshot; without them it stays the
   // plain table, so every ordinary query compiles exactly as before.
   const from = pending.length ? messageEventsWithPending(pending, params, protectedRead) : `${table} FINAL`;
-  const innerSql = `SELECT ${inner.join(', ')} FROM ${from} WHERE ${where.join(' AND ')} ${
+  // The identity pairs travel as the same chunked arrays the campaign builder uses (#590), so a
+  // large map cannot exceed ClickHouse's per-field limit. The CTE's columns avoid the source's
+  // `profile_id`, so the join condition stays unambiguous.
+  const identityCte = identityParams
+    ? `WITH identity AS (
+        SELECT
+          arrayElement(${identityParams.keys}, number + 1) AS identity_key,
+          arrayElement(${identityParams.profiles}, number + 1) AS identity_profile,
+          arrayElement(${identityParams.kinds}, number + 1) AS identity_kind
+        FROM numbers({identity_count:UInt32})
+      ) `
+    : '';
+  if (identityParams) params.identity_count = identityParams.count;
+  const identityJoin = identityParams
+    ? " LEFT JOIN identity by_profile ON by_profile.identity_key = profile_id AND by_profile.identity_kind = 'profile'"
+    : '';
+  const innerSql = `SELECT ${inner.join(', ')} FROM ${from}${identityJoin} WHERE ${where.join(' AND ')} ${
     groupBy.length ? `GROUP BY ${groupBy.join(', ')}` : ''
   }`;
 
@@ -435,7 +472,7 @@ export function buildQuery(input: BuildInput): CompiledQuery {
   else orderSql = alias('measure', primary);
   const tieBreak = dimAliases.filter((a) => a !== orderSql).map((a) => `${a} ASC`);
 
-  const sql = `SELECT ${outer.join(', ')} FROM (${innerSql}) ORDER BY ${orderSql} ${dir.toUpperCase()}${
+  const sql = `${identityCte}SELECT ${outer.join(', ')} FROM (${innerSql}) ORDER BY ${orderSql} ${dir.toUpperCase()}${
     tieBreak.length ? `, ${tieBreak.join(', ')}` : ''
   } LIMIT {limit:UInt32}`;
 

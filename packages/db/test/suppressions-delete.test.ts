@@ -95,8 +95,9 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
     // ai_token_reservations for 0097's billing columns and 0098's index, profiles for 0099's
     // merged-into index, idempotency_keys for 0103's reversal columns and 0104's retention index,
     // agent_actions for 0103's foreign key, broadcast_runs for 0107's defer counter,
-    // journey_processed_events for 0109's new table and its policy); FORCE RLS applies to it as
-    // well, which is the small-install path this guards.
+    // journey_processed_events for 0109's new table and its policy, broadcast_tests for 0116's
+    // decision snapshot); FORCE RLS applies to it as well, which is the small-install path this
+    // guards.
     for (const table of [
       'artifacts',
       'artifact_versions',
@@ -111,6 +112,7 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'idempotency_keys',
       'agent_actions',
       'broadcast_runs',
+      'broadcast_tests',
       'erasure_cleanup_jobs',
       'erasure_keys',
       'erasure_generations',

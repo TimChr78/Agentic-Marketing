@@ -17,6 +17,7 @@ let ws = '';
 let key = '';
 let template = '';
 let segment = '';
+let members: string[] = [];
 
 const mjml = (body: string) =>
   `<mjml><mj-body><mj-section><mj-column><mj-text>${body}</mj-text><mj-text><a href="{{ unsubscribe_url | raw }}">Unsubscribe</a></mj-text></mj-column></mj-section></mj-body></mjml>`;
@@ -167,6 +168,7 @@ beforeAll(async () => {
     20_000,
   );
   for (const row of ids) await client.call('consent.record', { profileId: row.id, purpose: 'marketing_email', status: 'granted' });
+  members = ids.map((row) => row.id);
 
   template = await createPublished('email_template', 'staged newsletter', {
     purpose: 'marketing_email',
@@ -695,4 +697,100 @@ describe('staged send', () => {
       }),
     ).rejects.toThrow(/staged send cannot be combined/i);
   }, 30_000);
+});
+
+// #1053: the canary pass selects members by their segment member id, while the message row is
+// stored under the person's canonical id after a merge. The check has to recover the id the send
+// used, or it recomputes a different share and loses a real canary message's evidence.
+describe('a canary share and a merged-away alias (#1053)', () => {
+  it('counts a canary message the send selected by the segment member id', async () => {
+    const aliasSegment = await createPublished('segment', `canary alias ${Date.now()}`, { mode: 'static' });
+    // Create the broadcast as a draft first: its id decides the hash pair below, and publishing
+    // schedules the run immediately. The audience must be complete before that, or the canary pass
+    // can finish an empty segment before the alias is inserted.
+    const draft = await api().call('artifacts.create', {
+      type: 'broadcast',
+      name: `canary alias ${Date.now()}`,
+      content: {
+        template,
+        segment: aliasSegment,
+        stagedSend: { canaryPercent: 20, wait: 'PT2H', minCanary: 1, maxUnsubscribeRate: 0.01 },
+      },
+    });
+    const id = draft.artifactId;
+    // The alias is in the canary share and the survivor it merges into is not: recomputing from
+    // the stored survivor id would drop the message, while the send picked the alias.
+    const survivor = members.find((p) => !canaryAssignment(p, id, 20));
+    expect(survivor).toBeDefined();
+    let alias = '';
+    for (let i = 0; i < 10_000 && !alias; i++) {
+      const candidate = `prf_${(0x50000000 + i).toString(16).padStart(32, '0')}`;
+      if (canaryAssignment(candidate, id, 20)) alias = candidate;
+    }
+    expect(alias).not.toBe('');
+    await t.srv.db.admin.query('INSERT INTO profiles (workspace_id, id, merged_into) VALUES ($1, $2, $3)', [ws, alias, survivor]);
+    // A static segment owns its list: the scheduler's recompute leaves it alone, so the audience
+    // stays exactly this one merged-away alias instead of every consenting person in the fixture.
+    await t.srv.db.admin.query(
+      `INSERT INTO segment_list_members (workspace_id, segment_id, profile_id, source) VALUES ($1, $2, $3, 'manual')
+       ON CONFLICT DO NOTHING`,
+      [ws, aliasSegment, alias],
+    );
+    await t.srv.db.admin.query(
+      'INSERT INTO segment_memberships (workspace_id, segment_id, profile_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+      [ws, aliasSegment, alias],
+    );
+    await api().call('artifacts.requestPublish', { artifactId: id, note: 'canary alias broadcast' });
+
+    await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
+      20_000,
+    );
+    // One message for this alias pair, even if the fixture ever grows another member of the run.
+    const forAlias = async () => (await messagesOf(id)).filter((r) => r.profile_id === survivor);
+    const rows = await forAlias();
+    if (rows.length !== 1)
+      throw new Error(
+        `expected one message for ${survivor} (alias ${alias}): ${JSON.stringify({
+          stage: (await status(id)).stage,
+          messages: await messagesOf(id),
+        })}`,
+      );
+    // The message is stored under the survivor, even though the send selected the segment's alias.
+    expect(rows[0]!.profile_id).toBe(survivor);
+
+    // The canary's sent event must reach ClickHouse before the forced check reads its counts.
+    const stats = () =>
+      t.srv.events.messageStats(ws, {
+        since: new Date(Date.now() - 3_600_000),
+        journeyId: id,
+        messageIds: [rows[0]!.id],
+      });
+    await eventually(
+      async () => (await stats()).sent ?? 0,
+      (n) => n >= 1,
+      30_000,
+    );
+    await t.srv.events.insertMessageEvents([event(rows[0]!, 'unsubscribed', id, 0)]);
+    await flushOutbox(id);
+    await eventually(
+      async () => (await stats()).unsubscribed ?? 0,
+      (n) => n >= 1,
+      10_000,
+    );
+    await checkNow(id);
+
+    // One unsubscribe from the only canary message is 100%, over the 1% limit. Before the fix the
+    // check saw no canary messages, skipped for size and released the rest.
+    const stopped = await eventually(
+      () => status(id),
+      (s) => s.stage?.stage === 'stopped',
+      30_000,
+    );
+    expect(stopped.run.status).toBe('stopped');
+    expect(stopped.stage?.stopReason).toContain('unsubscribe rate');
+    expect(stopped.stage?.unsubscribed).toBeGreaterThanOrEqual(1);
+    expect(await forAlias()).toHaveLength(1);
+  }, 90_000);
 });

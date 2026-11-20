@@ -695,7 +695,12 @@ async function variantResults(
     return {
       variant,
       subject,
-      sent: mine.filter((r) => ['sent', 'delivered', 'bounced', 'complained'].includes(r.status)).length,
+      // A queued or sending sample message has already been requested: the test's sample size is
+      // the recipients it selected, not how many had reached the gateway by the instant the
+      // decision read. Excluding in-flight rows made the reason depend on delivery timing and
+      // could say "fewer than 20 sends" for a complete sample (#1099). Suppressed and failed rows
+      // were never sent, so they stay out.
+      sent: mine.filter((r) => r.status !== 'suppressed' && r.status !== 'failed').length,
       delivered: new Set([...deliveredNow.map((r) => r.id), ...(delivered.get(variant) ?? [])]).size,
       opened: opened.get(variant)?.size ?? 0,
       clicked: clicked.get(variant)?.size ?? 0,
@@ -734,7 +739,6 @@ function canaryBreaches(
   return breaches;
 }
 
-/** The canary share's message rows, recomputed from the deterministic assignment. */
 /**
  * People the send deliberately left out: a campaign control group's holdouts and readers skipped
  * by a send window. They are not delivery attempts, so the canary's size, failure share and rates
@@ -742,6 +746,42 @@ function canaryBreaches(
  */
 const intentionallyNotSent = (m: { status: string; reason: string | null }) =>
   m.status === 'suppressed' && !!m.reason && (m.reason.startsWith('holdout_control') || m.reason.startsWith('outside_send_window'));
+
+/**
+ * The segment member id a broadcast message was requested for. The canary pass decides membership
+ * on `segment_memberships.profile_id`, while the message is stored under the person's canonical id
+ * after a merge; the idempotency key is the row's own record of the member the send selected
+ * (#1053). Only the `bct:` namespace the broadcast sender writes is recognised, and a failed
+ * conflict row's `:conflict` suffix is stripped (#1099).
+ *
+ * A conflict row is recorded after the recipient check, with the canonical person
+ * (`recordSendConflict`), so its key names the survivor even when the segment selected a
+ * merged-away alias. That is the pre-existing residual this does not change: the key backs the
+ * person-level #944/#945 dedupe, and a conflict row for an alias is therefore classified by the
+ * survivor's share. Anything else falls back to the stored id, so a malformed key cannot invent a
+ * member.
+ */
+const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
+export function broadcastMemberOf(idempotencyKey: string, broadcastId: string): string | null {
+  const prefix = `bct:${broadcastId}:`;
+  if (!idempotencyKey.startsWith(prefix)) return null;
+  const member = idempotencyKey.slice(prefix.length).replace(/:conflict$/, '');
+  return PROFILE_ID.test(member) ? member : null;
+}
+
+/** Whether one message row belongs to the canary share the send selected (#1053). */
+export function canaryMessageOf(
+  row: { idempotencyKey: string; profileId: string | null; status: string; reason: string | null },
+  broadcastId: string,
+  canaryPercent: number,
+): boolean {
+  // Recompute on the id the send used, never on the canonical id it stored: after a merge the two
+  // hash to different shares, and an alias still in a dynamic segment would otherwise hide a real
+  // canary message from the breach thresholds. A row without a usable key falls back to its
+  // stored id, which is what a send before this change used.
+  const member = broadcastMemberOf(row.idempotencyKey, broadcastId) ?? row.profileId;
+  return !!member && canaryAssignment(member, broadcastId, canaryPercent) && !intentionallyNotSent(row);
+}
 
 async function canaryMessagesOf(
   tx: Tx,
@@ -751,6 +791,7 @@ async function canaryMessagesOf(
   const rows = await tx
     .select({
       id: schema.messages.id,
+      idempotencyKey: schema.messages.idempotencyKey,
       profileId: schema.messages.profileId,
       status: schema.messages.status,
       reason: schema.messages.reason,
@@ -759,9 +800,7 @@ async function canaryMessagesOf(
     .from(schema.messages)
     .where(and(eq(schema.messages.journeyId, broadcastId), eq(schema.messages.test, false)));
   return rows.flatMap((r) =>
-    r.profileId && canaryAssignment(r.profileId, broadcastId, canaryPercent) && !intentionallyNotSent(r)
-      ? [{ id: r.id, status: r.status, notBefore: r.notBefore }]
-      : [],
+    canaryMessageOf(r, broadcastId, canaryPercent) ? [{ id: r.id, status: r.status, notBefore: r.notBefore }] : [],
   );
 }
 
@@ -788,18 +827,22 @@ const Test = z.object({
   restAt: z.string().nullable().describe('When the rest of the audience gets the winner'),
   winner: z.string().nullable(),
   reason: z.string().nullable().describe('Why this winner, or why there was no clear winner'),
-  variants: z.array(
-    z.object({
-      variant: z.string(),
-      subject: z.string(),
-      sent: z.number(),
-      delivered: z.number(),
-      opened: z.number(),
-      clicked: z.number(),
-      clickRate: z.number().nullable().describe('Percent of sent messages with a click'),
-      openRate: z.number().nullable(),
-    }),
-  ),
+  variants: z
+    .array(
+      z.object({
+        variant: z.string(),
+        subject: z.string(),
+        sent: z.number(),
+        delivered: z.number(),
+        opened: z.number(),
+        clicked: z.number(),
+        clickRate: z.number().nullable().describe('Percent of sent messages with a click'),
+        openRate: z.number().nullable(),
+      }),
+    )
+    .describe(
+      'Variant counts and rates. After the decision these are the counts the decision used, so later sends are in run and delivery instead',
+    ),
 });
 
 const Stage = z.object({
@@ -922,7 +965,7 @@ export const broadcastStatus = defineCommand({
   name: 'broadcasts.status',
   title: 'Broadcast status and results',
   description:
-    'Where a broadcast is (scheduled, running, done, cancelled, stopped) with how many people it reached and skipped, and what became of the e-mails: sent, delivered, bounced, complained, clicked, unsubscribed. A subject test reports its state, the variants with counts and rates, the winner and when the rest goes out. A staged send reports its stage, the canary’s counts and rates against the thresholds, and why it stopped.',
+    'Where a broadcast is (scheduled, running, done, cancelled, stopped) with how many people it reached and skipped, and what became of the e-mails: sent, delivered, bounced, complained, clicked, unsubscribed. A subject test reports its state, the variants with counts and rates, the winner and when the rest goes out; after the decision the variant counts are the ones the decision used, and later sends appear in run and delivery. A staged send reports its stage, the canary’s counts and rates against the thresholds, and why it stopped.',
   input: z.object({ artifactId: BroadcastId }),
   output: z.object({
     run: Run,
@@ -957,7 +1000,11 @@ export const broadcastStatus = defineCommand({
     const delivery = (await deliveryCounts(ctx.tx, r ? [input.artifactId] : [])).get(input.artifactId) ?? {};
     let test: z.output<typeof Test> | null = null;
     if (t) {
-      const variants = await variantResults(ctx.tx, ctx.services.events, ctx.principal.workspaceId, input.artifactId, t.subjects);
+      // After the decision, report the counts the decision used: the rest of the audience carries
+      // the winner's variant, so a fresh read would describe a different, larger sample than the
+      // recorded reason (#1099). Before the decision there is no snapshot, so read live.
+      const variants =
+        t.decidedVariants ?? (await variantResults(ctx.tx, ctx.services.events, ctx.principal.workspaceId, input.artifactId, t.subjects));
       const rate = (n: number, sent: number) => (sent ? Math.round((n / sent) * 10_000) / 100 : null);
       test = {
         state: t.state,
@@ -1538,9 +1585,12 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         );
       const variants = await variantResults(tx, deps.events, ws, broadcastId, test.subjects);
       const picked = pickWinner(test.metric, variants);
+      // The counts the reason was computed from travel with it: the rest of the audience is sent
+      // under the winner's variant, so recomputing later would report counts the reason never saw
+      // and could put "fewer than 20 sends" beside 20 or more (#1099).
       await tx
         .update(schema.broadcastTests)
-        .set({ state: 'winner_sent', winner: picked.winner, reason: picked.reason, decidedAt: now })
+        .set({ state: 'winner_sent', winner: picked.winner, reason: picked.reason, decidedAt: now, decidedVariants: variants })
         .where(eq(schema.broadcastTests.broadcastId, broadcastId));
       // The rest starts from the top, and the audience is rebuilt now; do both in this
       // transaction so a crash cannot leave the winner marked sent but the rest unsent.
@@ -1596,6 +1646,8 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
     let sampleStartsAt: Date | null = null;
     let canaryLatestStart: Date | null = null;
     for (const m of members) {
+      // The canary check recovers this same member id from the row's idempotency key (#1053): the
+      // message itself is stored under the canonical person after a merge, which is a different id.
       if (canaryPass && stage && !canaryAssignment(m.profileId, broadcastId, stage.canaryPercent)) continue;
       if (test?.state === 'sampling' && !subjectAssignment(m.profileId, broadcastId, test.samplePercent, test.subjects.length)) continue;
       const person = canonical.get(m.profileId) ?? m.profileId;
