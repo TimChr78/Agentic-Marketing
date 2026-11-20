@@ -88,9 +88,17 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
 
     // A ledger row with no publication is a real exclusion backlog even when no cleanup job waits.
     await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, 'era_ops_unpublished', '{prf_ops_unpublished}', 'tester', 'ops test', '{"profiles":1}'),
+              ($1, 'era_ops_unavailable', '{prf_ops_unavailable}', 'tester', 'ops test', '{"profiles":1}'),
+              ($1, 'era_ops_jobless', '{prf_ops_jobless}', 'tester', 'ops test', '{"profiles":1}')`,
+      [d.workspace],
+    );
+    await d.db.admin.query(
       `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
        VALUES ($1, 'profile', 'hash-unpublished', 'dk_ops', 'era_ops_unpublished', 'full'),
-              ($1, 'email', 'matching-only', 'dk_ops', 'era_ops_unavailable', 'unavailable')`,
+              ($1, 'email', 'matching-only', 'dk_ops', 'era_ops_unavailable', 'unavailable'),
+              ($1, 'profile', 'hash-jobless', 'dk_ops', 'era_ops_jobless', 'full')`,
       [d.workspace],
     );
     await d.db.admin.query(
@@ -100,7 +108,8 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     );
     const exclusion = await check('privacy.erasureExclusion');
     expect(exclusion).toMatchObject({ status: 'warn' });
-    expect(exclusion?.message).toContain('not published');
+    // The job-less ledger erasure counts too: publication, not a cleanup queue row, is the signal.
+    expect(exclusion?.message).toContain('2 erasure(s) have ledger keys that are not published yet');
     expect(exclusion?.message).toContain('unavailable');
 
     await d.db.admin.query('INSERT INTO erasure_generations (workspace_id, generation, purged_generation) VALUES ($1, 2, 0)', [
@@ -110,9 +119,15 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     expect(purge).toMatchObject({ status: 'warn' });
     expect(purge?.message).toContain('1 workspace(s) have a physical purge due');
 
-    await d.db.admin.query('UPDATE erasure_generations SET purged_generation = 2, purge_last_sweep_at = now() WHERE workspace_id = $1', [
-      d.workspace,
-    ]);
+    // A completed generation is not enough: a sweep that stopped running is stale and must warn.
+    await d.db.admin.query(
+      `UPDATE erasure_generations
+          SET purged_generation = 2, purge_last_sweep_at = now() - interval '1 hour'
+        WHERE workspace_id = $1`,
+      [d.workspace],
+    );
+    expect((await check('queue.erasurePurge'))?.status).toBe('warn');
+    await d.db.admin.query('UPDATE erasure_generations SET purge_last_sweep_at = now() WHERE workspace_id = $1', [d.workspace]);
     expect((await check('queue.erasurePurge'))?.status).toBe('ok');
   });
 });

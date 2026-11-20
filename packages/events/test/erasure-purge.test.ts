@@ -176,8 +176,82 @@ describe('recurring physical purge (#1037 part 3)', () => {
     const key = hmac('profile', 'prf_legacy_erased');
     expect(key).not.toContain('prf_legacy_erased');
     const result = await store.purgeErasedSubjects(legacyWs, [key], { batchSize: 10 });
-    expect(result).toMatchObject({ complete: true, deleted: 1 });
+    expect(result).toMatchObject({ complete: true, deleted: 2 });
     expect(await rows<{ name: string }>('SELECT name FROM events FINAL', {}, legacyWs)).toEqual([{ name: 'Live' }]);
+    // The side entry is keyed by the raw identity, so it must go with the base row: it is otherwise
+    // the last raw trace of the erased person.
+    expect(
+      await rows<{ key4: string }>(
+        `SELECT key4 FROM subject_key_backfill FINAL
+          WHERE workspace_id = {ws:UUID} AND table_name = 'events' AND key4 = {id:String}`,
+        { id: 'legacy-purge-Erased' },
+        legacyWs,
+      ),
+    ).toEqual([]);
+
+    // A later redelivery of the same legacy row re-backfills harmlessly: the next purge removes the
+    // base row and its side entry again, and the protected read never resurrects the person.
+    await store.client.insert({ table: 'events', values: [legacy('Erased', 'prf_legacy_erased')], format: 'JSONEachRow' });
+    let again = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 10 });
+    for (let i = 0; i < 4 && !again.done; i++) again = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 10 });
+    expect(again.done).toBe(true);
+    expect(
+      await rows<{ key4: string }>(
+        `SELECT key4 FROM subject_key_backfill FINAL
+          WHERE workspace_id = {ws:UUID} AND table_name = 'events' AND key4 = {id:String}`,
+        { id: 'legacy-purge-Erased' },
+        legacyWs,
+      ),
+    ).toEqual([{ key4: 'legacy-purge-Erased' }]);
+    expect(await store.purgeErasedSubjects(legacyWs, [key], { batchSize: 10 })).toMatchObject({ complete: true, deleted: 2 });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL', {}, legacyWs)).toEqual([{ n: 1 }]);
+    expect(
+      await rows<{ key4: string }>(
+        `SELECT key4 FROM subject_key_backfill FINAL
+          WHERE workspace_id = {ws:UUID} AND table_name = 'events' AND key4 = {id:String}`,
+        { id: 'legacy-purge-Erased' },
+        legacyWs,
+      ),
+    ).toEqual([]);
+  }, 60_000);
+
+  it('keeps a side entry until its base row is gone when the batch bound stops the sweep', async () => {
+    const boundedWs = newUuid();
+    const legacy = (id: string) => ({
+      workspace_id: boundedWs,
+      event_id: id,
+      source_id: 'src_bounded_side',
+      received_at: '2026-08-02 12:00:00',
+      timestamp: '2026-08-02 12:00:00',
+      type: 'track',
+      name: 'Bounded',
+      anonymous_id: '',
+      user_id: '',
+      profile_id: 'prf_bounded_side',
+      properties: {},
+      traits: {},
+      context: {},
+      consent: {},
+    });
+    await store.client.insert({ table: 'events', values: [legacy('one'), legacy('two')], format: 'JSONEachRow' });
+    let step = await store.backfillSubjectKeys({ workspaceIds: [boundedWs], batchSize: 10 });
+    for (let i = 0; i < 4 && !step.done; i++) step = await store.backfillSubjectKeys({ workspaceIds: [boundedWs], batchSize: 10 });
+    expect(step.done).toBe(true);
+
+    const key = hmac('profile', 'prf_bounded_side');
+    const first = await store.purgeErasedSubjects(boundedWs, [key], { batchSize: 1, maxBatches: 1 });
+    expect(first).toMatchObject({ complete: false });
+    // One base row remains, so both side entries stay: removing one would make its row visible.
+    expect(
+      await rows<{ n: number }>("SELECT count() AS n FROM subject_key_backfill FINAL WHERE table_name = 'events'", {}, boundedWs),
+    ).toEqual([{ n: 2 }]);
+
+    const second = await store.purgeErasedSubjects(boundedWs, [key], { batchSize: 10, maxBatches: 2 });
+    expect(second).toMatchObject({ complete: true });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL', {}, boundedWs)).toEqual([{ n: 0 }]);
+    expect(
+      await rows<{ n: number }>("SELECT count() AS n FROM subject_key_backfill FINAL WHERE table_name = 'events'", {}, boundedWs),
+    ).toEqual([{ n: 0 }]);
   }, 60_000);
 
   it('stops at the batch bound and reports that a later round must continue', async () => {

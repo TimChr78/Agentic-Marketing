@@ -945,7 +945,10 @@ export const erasureStatus = defineCommand({
             'Physical deletion progress, separate from logical completion: pending, a sweep running, or a sweep covered this erasure’s published keys',
           ),
         lastSweepAt: z.string().nullable().describe('When the last physical sweep of this workspace finished'),
-        deletedRows: z.number().int().describe('Rows the recurring purge has physically deleted and reported'),
+        deletedRows: z
+          .number()
+          .int()
+          .describe('Rows the recurring purge has physically deleted for this workspace over its lifetime, not for this erasure alone'),
       })
       .describe('Physical purge progress; an empty cleanup queue is not evidence that rows are gone'),
     requestedAt: z.string(),

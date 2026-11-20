@@ -1,4 +1,3 @@
-import { clearAnalyticsCache } from '@agentic-marketing/analytics';
 import { newId } from '@agentic-marketing/core';
 import { readErasureLog, replayErasures } from '@agentic-marketing/db';
 import { type BusEvent, type EventBus, type EventStore, type JourneyEvent, type MessageEvent, runSink } from '@agentic-marketing/events';
@@ -217,7 +216,7 @@ beforeAll(async () => {
 afterAll(() => t?.close());
 
 describe('erasure completion contract races (#1037 part 3)', () => {
-  it('keeps a server-side insert that commits after the client timeout and after completion invisible', async () => {
+  it('keeps a server-side insert that commits after the client timeout invisible', async () => {
     const person = await createPerson('held');
     const hashes = await hashesFor(person);
     await t.srv.events.insert([
@@ -455,12 +454,14 @@ describe('erasure completion contract races (#1037 part 3)', () => {
       filters: { name: ['Purchase'] },
     };
     const api = t.api(owner, ws);
+    // Cache the pre-erasure answer: the next post-completion read must not serve it.
     expect((await api.call('analytics.query', query)).rows).toEqual([[2]]);
     const erased = await api.call('profiles.erase', { profileId: person.profileId, reason: 'readers after completion' });
     await completeErasure(erased.erasureId);
-    clearAnalyticsCache();
 
-    // A row written after completion is still excluded from every read shape.
+    // Deliberately no clearAnalyticsCache(): the confirmed-publication epoch moved, so the cached
+    // pre-erasure answer is unreachable even though a late row is written next.
+    expect((await api.call('analytics.query', query)).rows).toEqual([[1]]);
     await t.srv.events.insert([
       event({ name: 'Purchase', profileId: person.profileId, anonymousId: person.anonymousId, userId: person.userId }),
     ]);
@@ -477,14 +478,6 @@ describe('erasure completion contract races (#1037 part 3)', () => {
     const published = await t.srv.events.messageStats(ws, { since: new Date(FROM) });
     const withPending = await t.srv.events.messageStats(ws, { since: new Date(FROM), pendingEvents: pending });
     expect(withPending.sent).toBe((published.sent ?? 0) + 1);
-
-    // A cached aggregate computed before the publication is not served afterwards: the cache epoch
-    // moves only after the FINAL visibility check.
-    const before = (await api.call('analytics.query', query)).rows[0]?.[0];
-    await t.srv.db.admin.query('UPDATE erasure_generations SET visible_publications = visible_publications + 1 WHERE workspace_id = $1', [
-      ws,
-    ]);
-    expect((await api.call('analytics.query', query)).rows[0]?.[0]).toBe(before);
   }, 180_000);
 
   it('reports physical purge separately from logical completion and keeps the selectors', async () => {

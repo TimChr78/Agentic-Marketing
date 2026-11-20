@@ -4,7 +4,7 @@ import { readdir } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
-import { appRoleReach, createDb, type Db, normalizeHost } from '@agentic-marketing/db';
+import { appRoleReach, createDb, type Db, ERASURE_PURGE_INTERVAL_SECONDS, normalizeHost } from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { endpointFailure, endpointOrigin, splitUrlCredentials } from '@agentic-marketing/telemetry';
@@ -903,20 +903,31 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
            (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM erasure_cleanup_jobs
               WHERE state IN ('pending_external', 'running')) AS erasure_cleanup_oldest_seconds,
            (SELECT count(*) FROM erasure_cleanup_jobs WHERE state = 'failed') AS erasure_cleanup_failed,
-           (SELECT count(*) FROM erasure_cleanup_jobs
-              WHERE published_at IS NULL
-                AND EXISTS (SELECT 1 FROM erasure_keys k
-                             WHERE k.workspace_id = erasure_cleanup_jobs.workspace_id
-                               AND k.erasure_id = erasure_cleanup_jobs.erasure_id
-                               AND k.coverage = 'full')) AS erasure_unpublished,
+           (SELECT count(*) FROM erasures e
+              WHERE EXISTS (SELECT 1 FROM erasure_keys k
+                             WHERE k.workspace_id = e.workspace_id
+                               AND k.erasure_id = e.id
+                               AND k.coverage = 'full')
+                AND NOT EXISTS (SELECT 1 FROM erasure_cleanup_jobs j
+                                 WHERE j.workspace_id = e.workspace_id
+                                   AND j.erasure_id = e.id
+                                   AND j.published_at IS NOT NULL)) AS erasure_unpublished,
            (SELECT count(*) FROM erasure_keys WHERE coverage = 'unavailable') AS erasure_unavailable,
-           (SELECT count(*) FROM erasure_generations
-              WHERE generation > 0
-                AND (purged_generation < generation OR purge_last_sweep_at IS NULL)) AS erasure_purge_backlog,
-           (SELECT EXTRACT(EPOCH FROM now() - min(COALESCE(purge_last_sweep_at, updated_at)))
-              FROM erasure_generations
-             WHERE generation > 0
-               AND (purged_generation < generation OR purge_last_sweep_at IS NULL)) AS erasure_purge_oldest_seconds`,
+           (SELECT count(*) FROM erasure_generations g
+              WHERE g.generation > 0
+                AND EXISTS (SELECT 1 FROM erasure_keys k WHERE k.workspace_id = g.workspace_id)
+                AND (g.purged_generation < g.generation
+                     OR g.purge_last_sweep_at IS NULL
+                     OR g.purge_last_sweep_at <= now() - make_interval(secs => ${3 * ERASURE_PURGE_INTERVAL_SECONDS})))
+             AS erasure_purge_backlog,
+           (SELECT EXTRACT(EPOCH FROM now() - min(COALESCE(g.purge_last_sweep_at, g.updated_at)))
+              FROM erasure_generations g
+             WHERE g.generation > 0
+               AND EXISTS (SELECT 1 FROM erasure_keys k WHERE k.workspace_id = g.workspace_id)
+               AND (g.purged_generation < g.generation
+                    OR g.purge_last_sweep_at IS NULL
+                    OR g.purge_last_sweep_at <= now() - make_interval(secs => ${3 * ERASURE_PURGE_INTERVAL_SECONDS})))
+             AS erasure_purge_oldest_seconds`,
       ),
       'queue health',
     );

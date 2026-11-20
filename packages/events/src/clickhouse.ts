@@ -1003,6 +1003,44 @@ export function clickHouseStore(opts: {
             remaining = matching > batchSize;
             if (!remaining) break;
           }
+
+          // The backfill side table is keyed by the row's raw identity. Once the base rows are gone
+          // it is the last raw trace of the person, so the same purge round deletes the matching
+          // side entries. Only do this once the base table has no matching row left: deleting a
+          // side entry while its base row still exists would make that row visible again.
+          if (!remaining) {
+            const sideMatch = `arrayExists(k -> k != '' AND k IN {keys:Array(String)}, [${SUBJECT_KEY_KINDS.map(
+              (kind) => SUBJECT_KEY_COLUMNS[kind],
+            ).join(', ')}])`;
+            for (let batch = 0; batch < maxBatches; batch++) {
+              const rs = await query(workspaceId, {
+                query: `SELECT count() AS n FROM subject_key_backfill FINAL
+                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}`,
+                query_params: queryParams,
+                format: 'JSONEachRow',
+              });
+              const [row] = await rs.json<{ n: number | string }>();
+              const matching = Number(row?.n ?? 0);
+              if (matching === 0) {
+                remaining = false;
+                break;
+              }
+              await command(workspaceId, {
+                query: `DELETE FROM subject_key_backfill
+                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String}
+                           AND (key1, key2, key3, key4) IN (
+                             SELECT key1, key2, key3, key4 FROM subject_key_backfill FINAL
+                              WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}
+                              LIMIT {batch:UInt32}
+                           )`,
+                query_params: queryParams,
+                clickhouse_settings: { mutations_sync: '2' },
+              });
+              tableDeleted += Math.min(matching, batchSize);
+              remaining = matching > batchSize;
+              if (!remaining) break;
+            }
+          }
         }
         deleted += tableDeleted;
         if (remaining) complete = false;
