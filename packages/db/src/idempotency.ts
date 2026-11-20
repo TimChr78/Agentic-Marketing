@@ -30,6 +30,39 @@ export const IDEMPOTENCY_RETENTION_DAYS = 30;
  * caps at 24 * 30), so an older marker suppresses nothing, and the retention round prunes it.
  */
 export const JOURNEY_EVENT_RETENTION_DAYS = 30;
+
+/**
+ * How long after receipt a journey event may still be applied (#1027), measured from the server's
+ * receive time.
+ *
+ * The processed markers suppress a redelivery only while they exist, and retention prunes them 30
+ * days after the event was applied. Refusing a delivery by age closes that gap: an event is applied
+ * only within this window, and the marker written then lives `JOURNEY_EVENT_RETENTION_DAYS` from
+ * that moment, which is longer than whatever is left of the window. A later redelivery is refused
+ * by age, so a pruned marker can never re-enable the same event.
+ *
+ * Seven days leaves 23 days of margin inside the retention: room for a skewed process clock, for
+ * the hourly retention tick to run late, and for a replay after a long weekend or a multi-day
+ * outage. A longer outage is a deliberate trade-off, not a case the bound has to serve.
+ */
+export const JOURNEY_EVENT_MAX_AGE_DAYS = 7;
+
+/**
+ * Fails at startup when the age bound is not strictly inside the marker retention (#1027): outside
+ * it, a redelivery can be applied after its marker was pruned, which is exactly the duplicate the
+ * markers exist to stop. The hook calls this when it is built, so a drifted constant cannot ship.
+ */
+export function assertJourneyEventAgeBound(
+  maxAgeDays: number = JOURNEY_EVENT_MAX_AGE_DAYS,
+  retentionDays: number = JOURNEY_EVENT_RETENTION_DAYS,
+): void {
+  if (!(maxAgeDays > 0) || maxAgeDays >= retentionDays)
+    throw new Error(
+      `JOURNEY_EVENT_MAX_AGE_DAYS (${maxAgeDays}) must be positive and smaller than JOURNEY_EVENT_RETENTION_DAYS (${retentionDays}): ` +
+        'otherwise a redelivered event can be applied after retention pruned its processed marker (#1027).',
+    );
+}
+
 /** Rows deleted per statement: bounded locks on a table every keyed write touches. */
 export const IDEMPOTENCY_CLEANUP_BATCH_SIZE = 5_000;
 /** The most batches one scheduler tick runs, so a large backlog never monopolises a tick. */
