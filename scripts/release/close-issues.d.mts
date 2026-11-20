@@ -2,6 +2,7 @@
 export function parseCloses(body: string): number[];
 export function parseIssuesComment(section: string | null | undefined): number[];
 export const PR_LIST_LIMIT: number;
+export const OUTPUT_LIMIT: number;
 export function prLimitWarning(count: number): string | null;
 export function localTags(run?: (args: string[]) => string): string[];
 export function resolvePreviousTag(options: {
