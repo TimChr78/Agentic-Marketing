@@ -105,7 +105,7 @@ export const analyticsMeta = z.object({
   currency: z
     .string()
     .nullable()
-    .describe('The single currency when exactly one revenue row has a visible amount and is not UNKNOWN; null otherwise'),
+    .describe('The single known currency when every revenue row has a visible amount and all rows share it (not UNKNOWN); null otherwise'),
   from: z.string(),
   to: z.string(),
   freshness: z.string().nullable().describe('Newest event in the range, as an ISO date-time'),

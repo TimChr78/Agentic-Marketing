@@ -227,6 +227,27 @@ describe('campaign summary currency suppression (#909)', () => {
     expect(summaryCurrency([{ currency: 'unknown', amount: 10 }])).toBeNull();
     expect(summaryCurrency([{ currency: 'Unknown', amount: 10 }])).toBeNull();
     expect(summaryCurrency([{ currency: 'EUR', amount: 400 }])).toBe('EUR');
+    // Several rows that all share one visible currency name it: a dimensioned query over five
+    // all-EUR campaigns is one currency, not "several" (#1099 review).
+    expect(
+      summaryCurrency([
+        { currency: 'EUR', amount: 400 },
+        { currency: 'EUR', amount: 200 },
+      ]),
+    ).toBe('EUR');
+    expect(
+      summaryCurrency([
+        { currency: 'eur', amount: 400 },
+        { currency: 'EUR', amount: 200 },
+      ]),
+    ).toBe('EUR');
+    // One suppressed row withholds the name even when the others are visible.
+    expect(
+      summaryCurrency([
+        { currency: 'EUR', amount: 400 },
+        { currency: 'EUR', amount: null },
+      ]),
+    ).toBeNull();
     // Two currency rows can never be added; even one suppressed row keeps it null (#909).
     expect(
       summaryCurrency([

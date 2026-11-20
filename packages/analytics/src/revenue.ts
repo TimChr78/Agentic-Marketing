@@ -23,15 +23,18 @@ export function summaryRevenue(rows: readonly (readonly unknown[])[], currencyIn
 }
 
 /**
- * The currency `meta.currency` may name (#958, #1050): exactly one revenue row, with a visible
- * amount and not `UNKNOWN`. A suppressed amount is withheld, so publishing its currency would tell
- * a client the campaign is measurable in it, and `UNKNOWN` is not a currency at all. Currency cells
- * are normalised to upper case so both surfaces answer `EUR` for an `eur` cell and reject any case
- * of `unknown`, as the query layer did before the rule was shared.
+ * The currency `meta.currency` may name (#958, #1050): every revenue row has a visible amount and
+ * they all share one known currency (not `UNKNOWN`). A suppressed amount is withheld, so publishing
+ * its currency would tell a client the campaign is measurable in it, and `UNKNOWN` is not a
+ * currency at all. A single-row result (the campaign summary) follows the same rule: exactly one
+ * visible currency that is not `UNKNOWN`. Currency cells are normalised to upper case so both
+ * surfaces answer `EUR` for an `eur` cell and reject any case of `unknown`, as the query layer did
+ * before the rule was shared.
  */
 export function summaryCurrency(revenue: readonly RevenueRow[]): string | null {
-  if (revenue.length !== 1) return null;
-  const row = revenue[0]!;
-  const currency = row.currency.toUpperCase();
-  return row.amount === null || currency === 'UNKNOWN' ? null : currency;
+  if (!revenue.length || revenue.some((row) => row.amount === null)) return null;
+  const currencies = new Set(revenue.map((row) => row.currency.toUpperCase()));
+  if (currencies.size !== 1) return null;
+  const currency = [...currencies][0]!;
+  return currency === 'UNKNOWN' ? null : currency;
 }

@@ -752,8 +752,14 @@ const intentionallyNotSent = (m: { status: string; reason: string | null }) =>
  * on `segment_memberships.profile_id`, while the message is stored under the person's canonical id
  * after a merge; the idempotency key is the row's own record of the member the send selected
  * (#1053). Only the `bct:` namespace the broadcast sender writes is recognised, and a failed
- * conflict row's `:conflict` suffix is stripped: the member is still the id the send selected
- * (#1099). Anything else falls back to the stored id, so a malformed key cannot invent a member.
+ * conflict row's `:conflict` suffix is stripped (#1099).
+ *
+ * A conflict row is recorded after the recipient check, with the canonical person
+ * (`recordSendConflict`), so its key names the survivor even when the segment selected a
+ * merged-away alias. That is the pre-existing residual this does not change: the key backs the
+ * person-level #944/#945 dedupe, and a conflict row for an alias is therefore classified by the
+ * survivor's share. Anything else falls back to the stored id, so a malformed key cannot invent a
+ * member.
  */
 const PROFILE_ID = /^prf_[0-9a-f]{32}$/;
 export function broadcastMemberOf(idempotencyKey: string, broadcastId: string): string | null {
@@ -821,18 +827,22 @@ const Test = z.object({
   restAt: z.string().nullable().describe('When the rest of the audience gets the winner'),
   winner: z.string().nullable(),
   reason: z.string().nullable().describe('Why this winner, or why there was no clear winner'),
-  variants: z.array(
-    z.object({
-      variant: z.string(),
-      subject: z.string(),
-      sent: z.number(),
-      delivered: z.number(),
-      opened: z.number(),
-      clicked: z.number(),
-      clickRate: z.number().nullable().describe('Percent of sent messages with a click'),
-      openRate: z.number().nullable(),
-    }),
-  ),
+  variants: z
+    .array(
+      z.object({
+        variant: z.string(),
+        subject: z.string(),
+        sent: z.number(),
+        delivered: z.number(),
+        opened: z.number(),
+        clicked: z.number(),
+        clickRate: z.number().nullable().describe('Percent of sent messages with a click'),
+        openRate: z.number().nullable(),
+      }),
+    )
+    .describe(
+      'Variant counts and rates. After the decision these are the counts the decision used, so later sends are in run and delivery instead',
+    ),
 });
 
 const Stage = z.object({
@@ -955,7 +965,7 @@ export const broadcastStatus = defineCommand({
   name: 'broadcasts.status',
   title: 'Broadcast status and results',
   description:
-    'Where a broadcast is (scheduled, running, done, cancelled, stopped) with how many people it reached and skipped, and what became of the e-mails: sent, delivered, bounced, complained, clicked, unsubscribed. A subject test reports its state, the variants with counts and rates, the winner and when the rest goes out. A staged send reports its stage, the canary’s counts and rates against the thresholds, and why it stopped.',
+    'Where a broadcast is (scheduled, running, done, cancelled, stopped) with how many people it reached and skipped, and what became of the e-mails: sent, delivered, bounced, complained, clicked, unsubscribed. A subject test reports its state, the variants with counts and rates, the winner and when the rest goes out; after the decision the variant counts are the ones the decision used, and later sends appear in run and delivery. A staged send reports its stage, the canary’s counts and rates against the thresholds, and why it stopped.',
   input: z.object({ artifactId: BroadcastId }),
   output: z.object({
     run: Run,

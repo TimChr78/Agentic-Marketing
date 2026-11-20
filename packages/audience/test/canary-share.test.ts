@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { broadcastMemberOf, canaryMessageOf } from '../src/broadcasts';
 
 // #1053/#1099: a canary message is identified by the segment member id the send selected, which the
-// message's idempotency key records. A failed conflict row appends `:conflict` to that key, and
-// dropping it would lose evidence from the canary share.
+// message's idempotency key records. A failed conflict row appends `:conflict`; it is recorded with
+// the canonical person, and the parser must not treat the suffix as part of the id.
 
 const broadcastId = 'bct_0123456789abcdef0123456789abcdef';
 const person = 'prf_0123456789abcdef0123456789abcdef';
