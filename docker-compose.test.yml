@@ -72,7 +72,7 @@ services:
     mem_limit: 4g
 
   valkey:
-    image: valkey/valkey:8.1.9@sha256:d5e642b89ee060a784f322cad2daad61c35d55530c32b74ce38b73ae01cd9fb3
+    image: valkey/valkey:9.1.3@sha256:3add1a336a920ea54770a001ab6feb3da5fceea96a40373a3a2cd469b815f0b7
     labels: ["am-test=1"]
     command: ["valkey-server", "--save", "", "--appendonly", "no"]
     ports:
@@ -85,7 +85,7 @@ services:
     mem_limit: 256m
 
   nats:
-    image: nats:2.15.0-alpine@sha256:ac8f88a6494bffc2c2a5289a0ca61cb28a9145c11ba5677cf24265d07f46d8d4
+    image: nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
     labels: ["am-test=1"]
     # -js is JetStream; the monitoring port backs the healthcheck.
     command: ["-js", "-sd", "/data", "-m", "8222"]
@@ -101,7 +101,7 @@ services:
     mem_limit: 1g
 
   openbao:
-    image: openbao/openbao:2.6.4@sha256:cf2340fc9a22cb9358ca0defd1f39b65673836bd23fe2bb8984a07e11fe13ef4
+    image: openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
     labels: ["am-test=1"]
     # Dev mode: in-memory, root token `root`, exactly what packages/secrets and phase10-ops expect.
     command: ["server", "-dev", "-dev-root-token-id=root", "-dev-listen-address=0.0.0.0:8200"]
