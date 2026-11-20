@@ -43,12 +43,16 @@ Re-verify each API version when building: all three platforms change these APIs 
 - **`conversion_map` artifact** (versioned and approved like everything else). It maps our events to each platform's conversion action, for example:
   ```json
   {"rules":[
-    {"event":"Order Completed","value":"properties.total","currency":"properties.currency",
-     "google":{"conversionAction":"customers/123/conversionActions/456"},
-     "meta":{"eventName":"Purchase"},"microsoft":{"goal":"Purchase"}},
-    {"event":"Subscription Confirmed","google":{"conversionAction":"…/789"},"meta":{"eventName":"Lead"}}]}
+    {"event":"Order Completed","value":"total","currencyProperty":"currency",
+     "google":{"connection":"con_0123456789abcdef0123456789abcdef","conversionAction":"456"},
+     "meta":{"connection":"con_fedcba9876543210fedcba9876543210","eventName":"Purchase"},
+     "microsoft":{"connection":"con_00112233445566778899aabbccddeeff","conversionName":"Purchase"}},
+    {"event":"Subscription Confirmed",
+     "google":{"connection":"con_0123456789abcdef0123456789abcdef","conversionAction":"789"},
+     "meta":{"connection":"con_fedcba9876543210fedcba9876543210","eventName":"Lead"}}]}
   ```
-- **`audience_sync` artifact**: segment → platform audience (create or attach), with identifiers e-mail, phone, address and mobile id, and whether removals are synced.
+  `value` and `currencyProperty` are bare event property paths (`total`, `currency`, or `order.total`), and `currency` is a fixed three-letter code when the rule has no `currencyProperty`; `conversionAction` is the numeric Google Ads conversion action id. Every platform object names its `connection` (`con_…`).
+- **`audience_sync` artifact**: segment → platform audience (create or attach), with identifiers e-mail and phone, and whether removals are synced.
 
 Both artifacts can be published by an agent, but only inside a mandate that grants `audience.publish` and the `ads` channel: publishing a conversion map touches `channels: ["ads"]` and the `ad_measurement` purpose, and publishing an audience sync touches the synced segment and `channels: ["ads"]`. A mandate without the channel holds the publish for a person; `agents.report` then shows the agent's audience syncs and its conversion uploads. Ad budgets and bids stay outside agent autonomy (#212).
 
@@ -70,7 +74,7 @@ Both artifacts can be published by an agent, but only inside a mandate that gran
    - our attribution (last non-direct touch by click id or UTM within a configurable window, plus "platform-reported" side by side) joins our conversions and revenue;
    - result: CPA, ROAS and conversion lag by campaign and channel. `ads.performance` keeps three conversion figures apart: the campaign rows (which are what `totals` sums), `unattributed` (no campaign touch in the window) and `unmatched` (a last touch naming a campaign with no spend row). A spend import writes each provider page in bounded chunks as it arrives, so a large account's read is a throughput cap rather than an in-memory one; the incomplete-window record is written before the first chunk, so a crash later cannot lose it. A spend read that hits its provider page ceiling stores the incomplete date range with the spend it describes: `ad_spend_gaps` is keyed by workspace, platform and ad account, not by the connection, so renaming, re-pointing or deleting a connection cannot clear an older gap, and concurrent imports serialise on that key with an advisory lock. A later complete refresh removes exactly the days it covered; `ads.performance` matches gaps against the accounts the workspace's connections still read, reports `spendTruncated` and names the account and the affected dates, so a short cost never silently understates CPA or overstates ROAS. A gap whose account no connection reads any more is kept as history but no longer warns; a person can clear it with `ads.spendGaps.clear`. Incomplete-range tracking starts with 0.14.21: spend imported before this release has no recorded ranges, so an import that was cut at the provider page limit before the upgrade is not flagged until that period is imported again.
 4. **Agents (MCP):**
-   - read tools: `ads.performance`, `ads.audiences`, `ads.conversions.status`;
+   - read tools: `ads.performance`, `ads.audiences`, `ads.conversions`;
    - drafts: conversion maps and audience syncs (approval required);
    - **no budget or bid changes in v1**. Proposals are written as notes for a person; write access to campaigns is a later, separately approved step.
 
@@ -82,7 +86,7 @@ Both artifacts can be published by an agent, but only inside a mandate that gran
   - never free-text traits;
   - a per-connection allow-list of which identifiers may leave.
 - **Records of processing:** each ad platform is a recipient with a region and a transfer basis; `profiles.export` lists the uploads made about a person (like AI decisions); erasure queues removals from synced audiences.
-- **Test mode:** Google `validateOnly`, Meta `test_event_code` and Microsoft sandbox are used by `ads.test` before anything is enabled.
+- **Test mode:** `ads.test` checks a sample conversion with Google `validateOnly`, Meta or TikTok's `testEventCode` and Pinterest `test=true` before anything is enabled. Microsoft has no test mode: point its `apiBase` at the sandbox and use a sandbox account. LinkedIn has none either; send to a test conversion rule.
 
 ## For MarTechSignal
 

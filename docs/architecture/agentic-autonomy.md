@@ -103,15 +103,15 @@ Commands are grouped into **action classes** by what they change in the world, n
 |---|---|---|
 | `read` | `analytics.query`, `profiles.get`, `segments.preview` | – |
 | `draft` | `artifacts.create`, `artifacts.updateDraft` | yes (never live) |
-| `content.publish` | publish a template, block, form, hosted page | yes (republish previous version) |
-| `audience.publish` | publish or change a segment, static audience, audience sync | mostly (memberships recompute) |
+| `content.publish` | publish a template, block, form, hosted page, brand | yes (republish previous version) |
+| `audience.publish` | publish or change a segment, static audience, audience sync or conversion map | mostly (memberships recompute; ad platforms receive the change) |
 | `send.broadcast` | publish a broadcast with a send time | **no** once sent; yes before |
 | `send.direct` | `messages.sendEmail`, test sends to real people | no |
 | `journey.live` | publish a journey version, enroll, migrate | partly (messages sent no) |
 | `experience.live` | publish a web experience, change traffic allocation | yes |
-| `spend` | ad audience syncs and conversions; paid LLM commands (`prompts.test`, `ai.classify`, `ai.score`); budgets (later) | no (money) |
+| `spend` | paid LLM commands (`prompts.test`, `ai.classify`, `ai.score`); budgets (later) | no (money) |
 | `data.write` | `profiles.update`, imports, consent recording | partly |
-| `settings` | workspace, delivery policy, purposes, brand, providers | yes, but wide blast radius |
+| `settings` | workspace, delivery policy, purposes, providers | yes, but wide blast radius |
 | `destructive` | erase, delete, revoke | **no** |
 
 `destructive`, `settings` changes to consent/purposes/delivery caps, and anything touching credentials **never run autonomously**: they always ask, whatever the mandate says. That is a fixed rule, not a default.

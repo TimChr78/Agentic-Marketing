@@ -87,7 +87,7 @@ All of these are enforced in the command layer at 0.6.1; the status says when ea
 | Node | Behaviour | Safety |
 |---|---|---|
 | `aiDecide` | Chooses one of the configured next nodes given a minimized profile context, recent events and a versioned prompt. Output is a zod-validated enum + short rationale. | Fallback branch on timeout/error/invalid output; decisions logged to `ai_calls` with rationale; prompts can sample answers for human review (`ai.reviews`, `ai.review`) |
-| `aiGenerate` | Fills declared **content slots** of a template (subject line, intro paragraph, product blurb) within constraints (length, tone, brand guide, forbidden claims). | Output is never sent raw: lint + moderation + length checks; optional pre-approval of generated variants; per-segment caching of generated text is not built |
+| `aiGenerate` | Fills declared **content slots** of a template (subject line, intro paragraph, product blurb) within constraints (length, tone, brand guide, forbidden claims). | Output is never sent raw: lint + moderation + length checks; optional pre-approval of generated variants; `cache: { segments, ttlHours }` reuses text for everyone in the same segments, written once from the segment names alone, instead of generating it per person |
 | `ai.classify` | Tag inbound replies/events (intent, sentiment), as a command outside a journey | Same logging |
 
 - **Prompts are versioned artifacts** with test cases (sample profiles + expected properties), so changing a prompt goes through the same draft → approve → publish flow.

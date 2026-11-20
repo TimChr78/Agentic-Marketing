@@ -144,37 +144,48 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
 
 `am restore` closes the gap for erasures recorded in the live database:
 
-1. Before replacing Postgres it reads every row of `erasures` and `erasure_tombstones` from the
-   current database, together with any pending `erasure_cleanup_jobs`, and saves their union next
-   to the backup directory in a mode-600 file bound to that database (PostgreSQL's
-   `system_identifier` and database name) and that backup. If the log cannot be read, the restore
-   stops rather than risk resurrecting someone. A retry merges the live log with that saved copy
-   (replay is idempotent), so erasures recorded after a failed attempt are still replayed. The copy
-   is removed only after a successful replay; a file bound to another database or backup, or a
-   restore lock left by a crashed process, is refused by name so an operator can remove it
-   deliberately. The captured file holds erasure records (`reason`, `requestedBy`, profile ids and
-   counts), keyed tombstones, and the sealed cleanup selectors with their wrapped service key — no
-   plaintext identifiers. `reason` is operator text and may contain personal data, so do not copy
-   the file off-host.
+1. Before replacing Postgres it reads every row of `erasures`, `erasure_tombstones`, the durable
+   `erasure_keys` ledger, the wrapped exclusion `data_keys` and the per-workspace
+   `erasure_generations` from the current database, together with any `erasure_cleanup_jobs`, and
+   saves their union next to the backup directory in a mode-600 file bound to that database
+   (PostgreSQL's `system_identifier` and database name) and that backup. If the log cannot be read,
+   the restore stops rather than risk resurrecting someone. A retry merges the live log with that
+   saved copy (replay is idempotent), so erasures recorded after a failed attempt are still
+   replayed. The copy is removed only after a successful replay; a file bound to another database
+   or backup, or a restore lock left by a crashed process, is refused by name so an operator can
+   remove it deliberately. The captured file holds erasure records (`reason`, `requestedBy`, profile
+   ids and counts), keyed tombstones, the sealed cleanup selectors with their wrapped service key,
+   the ledger's pseudonymous ids and keyed hashes, and the wrapped exclusion keys — no plaintext
+   identifiers. `reason` is operator text and may contain personal data, so do not copy the file
+   off-host.
 2. It applies pending migrations and then re-applies each erasure: profiles and identifiers the
    erasure names are deleted again (with their profile keys, consent records, messages, journey
    participations, segment memberships and push subscriptions), e-mail and phone suppression hashes
-   are put back, and the erasure row, keyed tombstones and cleanup jobs are re-inserted. The
-   migrations need `APP_DB_PASSWORD`, so a restore that has erasures to replay refuses to replace
-   anything without it. Replay is idempotent, so restoring twice is safe, and entries for workspaces
-   the snapshot no longer contains are skipped.
-3. It then restores ClickHouse, if asked, and reports how many profiles and tombstones were replayed.
+   are put back, and the erasure row, keyed tombstones, ledger rows and cleanup jobs are
+   re-inserted. The wrapped exclusion keys the ledger references are restored and the one it uses is
+   made active, so the stored hashes still match; the publication generation only moves forward.
+   The migrations need `APP_DB_PASSWORD`, so a restore that has erasures to replay refuses to
+   replace anything without it. Replay is idempotent, so restoring twice is safe, and entries for
+   workspaces the snapshot no longer contains are skipped.
+3. It then restores ClickHouse, if asked, and reports how many profiles, tombstones, erasure keys,
+   exclusion keys and generations were replayed. A replayed erasure is not complete again until its
+   exclusion is published: the restored cleanup job starts pending, republishes the workspace's
+   `erased_subjects` rows and cleans the restored ClickHouse and hot state. The restore also resets
+   the workspace's `purged_generation` to `0`, so the scheduler's recurring physical purge sweeps
+   the restored event rows again.
 
 A person erased after the snapshot therefore stays erased: no profile, no identifiers, no profile
 key, no consent, and the tombstones that stop late events from recreating them. Only keyed hashes
-are replayed; no plaintext personal data is copied.
+and wrapped keys are replayed; no plaintext personal data is copied.
 
 The replay covers Postgres. `am restore --clickhouse` inserts the event export as it was at snapshot
 time, so event rows of a replayed person can still be present with their pseudonymous ids and
 non-personal properties; the per-profile key that sealed their personal data is deleted again, so
-that data stays unreadable. If the erasure procedure must also remove event rows, restore
-ClickHouse from a backup taken after the erasure, or re-take the `--clickhouse` backup after applying
-erasures. `am doctor`/`am smoke` and the erasure retention job keep operating on the restored data.
+that data stays unreadable. Protected reads exclude the person once the restored cleanup job has
+republished the exclusion, and the reset purge deletes the matching rows in bounded batches. If the
+erasure procedure must remove event rows before that pass runs, restore ClickHouse from a backup
+taken after the erasure, or re-take the `--clickhouse` backup after applying erasures.
+`am doctor`/`am smoke` and the erasure retention job keep operating on the restored data.
 
 
 ## Listing backups

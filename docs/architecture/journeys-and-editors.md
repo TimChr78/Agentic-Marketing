@@ -6,15 +6,25 @@ A journey is a **directed graph** stored as a versioned artifact (JSON). The sam
 
 ```json
 {
-  "trigger": { "type": "event", "event": "signed_up", "reentry": "once" },
-  "goal":    { "event": "order_completed", "within": "P30D" },
-  "nodes": {
-    "n1": { "type": "send.email", "template": "tpl_welcome@3", "purpose": "onboarding", "next": "n2" },
-    "n2": { "type": "wait.event", "event": "email_clicked", "timeout": "P2D",
-            "next": { "matched": "n4", "timeout": "n3" } },
-    "n3": { "type": "split.ab", "variants": { "a": 50, "b": 50 }, "next": { "a": "n5", "b": "n6" } },
-    "n4": { "type": "ai.decide", "prompt": "prm_next_best@2", "options": ["n5", "n6", "exit"], "fallback": "n5" }
-  }
+  "purpose": "onboarding",
+  "goal": "order_completed",
+  "nodes": [
+    { "id": "n1", "kind": "trigger", "label": "Signed up",
+      "config": { "event": "signed_up", "reentry": "once" }, "next": [{ "to": "n2" }] },
+    { "id": "n2", "kind": "email", "label": "Welcome",
+      "config": { "template": "eml_0123456789abcdef0123456789abcdef" }, "next": [{ "to": "n3" }] },
+    { "id": "n3", "kind": "waitEvent", "label": "Wait for a click",
+      "config": { "event": "email_clicked", "timeout": "P2D" },
+      "next": [{ "to": "n4" }, { "to": "n5" }] },
+    { "id": "n4", "kind": "split", "label": "Two follow-ups",
+      "config": { "weights": [50, 50] }, "next": [{ "to": "n5" }, { "to": "n6" }] },
+    { "id": "n5", "kind": "aiDecide", "label": "Pick the next step",
+      "config": { "prompt": "prm_0123456789abcdef0123456789abcdef", "options": ["continue", "exit"], "fallback": "continue" },
+      "next": [{ "to": "n6" }, { "to": "n7" }] },
+    { "id": "n6", "kind": "goal", "label": "Order completed",
+      "config": { "event": "order_completed", "within": "P30D" } },
+    { "id": "n7", "kind": "exit", "label": "Exit", "config": {} }
+  ]
 }
 ```
 
@@ -25,7 +35,7 @@ A journey is a **directed graph** stored as a versioned artifact (JSON). The sam
 | Triggers | event, segment entered/exited, schedule (one-off/recurring campaign), API/MCP call, date trait (birthday, renewal) |
 | Flow | wait (duration / until time / send-time window), wait for event (with timeout), branch (conditions using segment DSL), A/B/n split, random sample, exit, goal |
 | Actions | send email, show/enable web experience, webhook, update profile trait, add/remove list or tag, emit event |
-| AI | `aiDecide` (choose branch with structured output), `aiGenerate` (fill content slots) — see [agents-and-mcp.md](agents-and-mcp.md) |
+| AI | `aiDecide` (choose branch with structured output), `aiGenerate` (fill content slots), `decision` (one typed question to a decision provider, compared with a threshold) — see [agents-and-mcp.md](agents-and-mcp.md) and [decision-models.md](../decision-models.md) |
 | Automation | webhook, transform (JSONata into `vars`), action (an integration action with ok/error edges); loop over items is not built |
 
 Journey settings: re-entry rule, frequency caps, quiet hours, exit criteria, goal & conversion window, purpose (lawful basis), holdout/control group %.
@@ -84,7 +94,7 @@ Principles:
 
 ## 3. Journey canvas (UI)
 
-- **React Flow (xyflow, MIT)** for the canvas: drag-and-drop nodes, auto layout (ELK.js, EPL-2.0 — or dagre, MIT), mini map, zoom.
+- **React Flow (xyflow, MIT)** for the canvas: drag-and-drop nodes, the platform's own layered auto-layout ([journey/layout.ts](../../apps/web/src/features/journey/layout.ts)) that places nodes by distance from the trigger and siblings side by side, with a stored position always winning, plus mini map and zoom.
 - Node inspector forms are **generated from the node's zod schema** (zod → JSON Schema → form) so a new node type needs one schema + one handler + optional custom UI.
 - Live overlays: participant counts per node, conversion per branch, errors.
 - The canvas edits the same JSON the agent edits; there is no UI-only state.
@@ -114,7 +124,7 @@ artifact_versions(workspace_id, id, artifact_id, number, state, content jsonb, c
 approval_requests(workspace_id, id, version_id, requested_by, status, decided_by, decided_at, comment)
 ```
 
-- States: `draft → in_review → approved → published → superseded/archived`. Published versions are **immutable**; references can pin a version (`tpl_welcome@3`) or follow "latest published".
+- States: `draft → in_review → approved → published → superseded/archived`. Published versions are **immutable**. A reference names an artifact by its id (`eml_…`, `seg_…`, `prm_…`) and uses its published version; there is no `@version` suffix. A campaign records the approved `briefId` and `briefVersion` it was built from.
 - **Diffs:** structural JSON diff + rendered visual diff (email preview side-by-side, journey graph highlight).
 - **Configurable approval policy per workspace** (and overridable per artifact type):
 
