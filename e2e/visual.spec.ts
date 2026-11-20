@@ -79,6 +79,9 @@ for (const name of SUBSET) {
         // The broadcast's pre-send checks also load after the page and print when DNS was checked;
         // masking before they arrive left that date unmasked and moved the rows below it.
         if (name === 'broadcast') await expect(page.getByText(/^DNS checked /)).toBeVisible();
+        // The audience estimate is fetched after the page too; capturing while it still loads froze its
+        // skeleton into the screenshot (#1088), so wait until the busy region is gone.
+        if (name === 'broadcast') await expect(page.locator('section[aria-labelledby="composer-audience-title"] [aria-busy="true"]')).toHaveCount(0);
         const mask = [...(await volatileMasks(page))];
         // People values (e-mail/name, a copied value, consent statuses and last seen) vary between
         // machines. Mask only those text hooks, not whole cells or phone cards, so layout
