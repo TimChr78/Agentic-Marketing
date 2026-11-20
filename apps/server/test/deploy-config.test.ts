@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -588,6 +589,26 @@ describe('image pinning (#870)', () => {
         expect(ref, `${file}: ${ref} lost its tag`).toMatch(/:[^:@/]+@sha256:/);
       }
     }
+  });
+
+  it('tests in CI on exactly the ClickHouse image Compose ships', () => {
+    // CI used the floating 26.8 tag while Compose pinned one build by digest, so CI could test a
+    // different ClickHouse patch than the one released. Every ClickHouse reference names one image.
+    const clickhouse = (text: string) => images(text).filter((ref) => ref.startsWith('clickhouse/clickhouse-server:'));
+    const shipped = clickhouse(compose);
+    expect(shipped).toHaveLength(1);
+    expect(shipped[0]).toMatch(/^clickhouse\/clickhouse-server:26\.8\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
+    for (const [file, text] of [
+      ['docker-compose.test.yml', composeTest],
+      ['.github/workflows/ci.yml', ci],
+    ] as const) {
+      const refs = clickhouse(text);
+      expect(refs.length, `${file} names no ClickHouse image`).toBeGreaterThan(0);
+      for (const ref of refs) expect(ref, `${file} tests a different ClickHouse than docker-compose.yml ships`).toBe(shipped[0]);
+    }
+    // The preflight pulls the images the test stack needs, listed one per line.
+    const preflight = readFileSync(join(root, 'scripts/preflight.sh'), 'utf8');
+    expect(preflight).toContain(`\n  ${shipped[0]}\n`);
   });
 
   it('keeps the released image tag readable beside its version variable', () => {
