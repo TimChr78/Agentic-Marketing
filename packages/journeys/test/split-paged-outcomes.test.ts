@@ -1,8 +1,23 @@
 import { newId } from '@agentic-marketing/core';
 import type { EventStore } from '@agentic-marketing/events';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import { computeJourneySplit, setJourneySplitPageSizeForTests } from '../src/splitReport';
+
+// Every merge-family resolution the report makes, with how many ids it returned: a page that
+// resolved for the whole journey would show one call with every family id (#1105 review).
+const scopeCalls = vi.hoisted(() => [] as { people: number; familyIds: number }[]);
+vi.mock('../src/holdout', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/holdout')>();
+  return {
+    ...actual,
+    pageOutcomeScope: async (...args: Parameters<typeof actual.pageOutcomeScope>) => {
+      const scope = await actual.pageOutcomeScope(...args);
+      scopeCalls.push({ people: args[2].length, familyIds: scope.profileIds.length });
+      return scope;
+    },
+  };
+});
 
 // #1105: journeys.splitResult used to read every converted and unsubscribed id for the journey
 // before attributing them. The split now reads its outcomes one page of participants at a time,
@@ -109,6 +124,36 @@ const BASE = Date.parse('2026-11-01T00:00:00.000Z');
 const at = (offset: number) => BASE + offset;
 
 describe.skipIf(!hasTestDatabase())('journeys.splitResult reads its outcomes one page at a time (#1105)', () => {
+  it('resolves each page’s merge family for that page only, not for the journey', async () => {
+    const journeyId = await publishJourney();
+    // Four people with one merged-away id each: eight profiles, two per person.
+    const survivors = Array.from({ length: 4 }, () => newId('prf'));
+    const aliases = survivors.map(() => newId('prf'));
+    await seedPeople(survivors);
+    await seedPeople(aliases, new Map(aliases.map((id, i) => [id, survivors[i]!])));
+    reset([
+      ...survivors.map((id, i) => ({ participantId: 100 + i, profileId: id, arm: i % 2, at: at(i) })),
+      ...aliases.map((id, i) => ({ participantId: 200 + i, profileId: id, arm: i % 2, at: at(i + 100) })),
+    ]);
+
+    scopeCalls.length = 0;
+    setJourneySplitPageSizeForTests(2);
+    try {
+      await splitResult(journeyId);
+    } finally {
+      setJourneySplitPageSizeForTests(null);
+    }
+
+    // Eight participants in pages of two resolve in four calls, then the four people in pages of
+    // two give two more. A single journey-wide resolution would be one call with eight ids.
+    expect(scopeCalls).toHaveLength(6);
+    for (const call of scopeCalls) {
+      expect(call.people).toBeLessThanOrEqual(2);
+      // Each call resolves the two families of its page (four ids), never all eight.
+      expect(call.familyIds).toBeLessThanOrEqual(4);
+    }
+  }, 120_000);
+
   it('scopes every outcome read to one page of participants and keeps the counts', async () => {
     const journeyId = await publishJourney();
     const ids = Array.from({ length: 12 }, () => newId('prf'));
@@ -246,5 +291,33 @@ describe.skipIf(!hasTestDatabase())('journeys.splitResult reads its outcomes one
     expect(report.arms[0]).toMatchObject({ unsubscribed: 1 });
     expect(report.note).toContain('256 or more merges deep');
     expect(report.note).not.toContain('more than');
+  }, 120_000);
+});
+
+describe.skipIf(!hasTestDatabase())('the split’s k floor counts people (#1105 review)', () => {
+  it('counts a merged person once, so an arm of five entries and four people is hidden', async () => {
+    const journeyId = await publishJourney();
+    const survivor = newId('prf');
+    const alias = newId('prf');
+    const others = Array.from({ length: 3 }, () => newId('prf'));
+    await seedPeople([survivor, ...others]);
+    await seedPeople([alias], new Map([[alias, survivor]]));
+    const treatment = Array.from({ length: 5 }, () => newId('prf'));
+    await seedPeople(treatment);
+    reset([
+      // One person with two entries in arm 0, plus three other people: four people, five entries.
+      { participantId: 1, profileId: survivor, arm: 0, at: at(0) },
+      { participantId: 2, profileId: alias, arm: 0, at: at(1) },
+      ...others.map((id, i) => ({ participantId: 10 + i, profileId: id, arm: 0, at: at(i + 2) })),
+      ...treatment.map((id, i) => ({ participantId: 20 + i, profileId: id, arm: 1, at: at(i + 2) })),
+    ]);
+
+    const report = await splitResult(journeyId);
+
+    expect(report.suppressed).toBe(true);
+    // Five entries would have cleared k=5; four people do not.
+    expect(report.arms[0]).toMatchObject({ entered: null, converted: null, suppressed: true });
+    expect(report.arms[1]).toMatchObject({ entered: 5, suppressed: false });
+    expect(report.comparisons).toEqual([]);
   }, 120_000);
 });

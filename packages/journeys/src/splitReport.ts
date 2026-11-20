@@ -113,31 +113,18 @@ export async function computeJourneySplit(
   const pageProfileLimit = deps.pageProfileLimit ?? JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT;
   const unresolved = new Set<PageUnresolved>();
 
-  // Resolve every participant once, a page at a time. A split entry may carry an id the person
-  // was later merged away from, so the ids are resolved to their person before the components
-  // are read; the family is kept so the outcome read can be scoped to it.
+  // Resolve the participants to their person once, a page at a time. A split entry may carry an id
+  // the person was later merged away from, so the raw id is resolved before it is grouped. Only
+  // the participant ids are kept (O(participants)); a merge family is resolved again for each
+  // outcome page and dropped with it, so memory stays a page rather than every family (#1105).
   const personOf = new Map<string, string>();
-  const familyOf = new Map<string, string[]>();
   const personKey = (id: string) => personOf.get(id) ?? id;
   const participants = [...new Set(taken.map((entry) => entry.profileId))];
   for (const page of pages(participants, journeySplitPageSize)) {
     const scope = await pageOutcomeScope(deps.tx, ws, page, pageProfileLimit);
     if (scope.unresolved) unresolved.add(scope.unresolved);
-    for (const id of scope.profileIds) {
-      const person = scope.byProfile.get(id) ?? id;
-      personOf.set(id, person);
-      const family = familyOf.get(person);
-      if (family) {
-        if (!family.includes(id)) family.push(id);
-      } else familyOf.set(person, [id]);
-    }
-    // A participant the component walk did not return (an unknown profile) is still its own page
-    // and is read by its stored id.
-    for (const id of page) {
-      if (personOf.has(id)) continue;
-      personOf.set(id, id);
-      familyOf.set(id, [id]);
-    }
+    // An unresolved page (or an unknown profile) keeps the stored id, so the report matches on it.
+    for (const id of page) personOf.set(id, scope.byProfile.get(id) ?? id);
   }
 
   // Group the entries by person, so one person's re-entries stay in one page and the
@@ -150,24 +137,32 @@ export async function computeJourneySplit(
     if (group) group.push(normalized);
     else groups.set(person, [normalized]);
   }
+  const resolved = [...groups.values()].flat();
   for (const page of pages([...groups.entries()], journeySplitPageSize)) {
     const entries = page.flatMap(([, group]) => group);
-    const profileIds = page.flatMap(([person]) => familyOf.get(person) ?? [person]);
+    const people = page.map(([person]) => person);
+    // The family is resolved for this page of people only and dropped with it, as the holdout
+    // report does (#1096, #1105).
+    const scope = await pageOutcomeScope(deps.tx, ws, people, pageProfileLimit);
+    if (scope.unresolved) unresolved.add(scope.unresolved);
     const outcomes = await deps.events.journeyHoldoutOutcomes(ws, {
       journeyId: input.journeyId,
       ...(from ? { from } : {}),
       ...(to ? { to } : {}),
-      profileIds,
+      profileIds: scope.profileIds,
     });
+    // A page that resolved reads its whole family, so an outcome stored under a merged-away id
+    // still lands on the person's entry. Over the guard the page is read by stored id only.
+    const outcomePerson = (id: string) => scope.byProfile.get(id) ?? personKey(id);
     const pageCounts = attributeSplitOutcomes(
       entries,
       {
         converted: outcomes.convertedAt.map((outcome) => ({
-          profileId: personKey(outcome.profileId),
+          profileId: outcomePerson(outcome.profileId),
           participantId: outcome.participantId,
           at: outcome.at,
         })),
-        unsubscribed: outcomes.unsubscribedAt.map((outcome) => ({ profileId: personKey(outcome.profileId), at: outcome.at })),
+        unsubscribed: outcomes.unsubscribedAt.map((outcome) => ({ profileId: outcomePerson(outcome.profileId), at: outcome.at })),
       },
       weights.length,
     );
@@ -184,8 +179,9 @@ export async function computeJourneySplit(
   // The same k floor the holdout read applies, per arm (#757): an arm below k never reports a
   // count or rate, and no comparison or verdict is computed from a hidden baseline. The floor
   // counts distinct people, not entries: one person re-entering an arm five times is still one
-  // person (0.14.11 review).
-  const armPeople = splitArmPeople(taken, weights.length).map((n) => ({ entered: n }));
+  // person (0.14.11 review), and a person whose two ids were merged is one person too, which is
+  // why the entries are counted after their ids resolve to their person (#1105 review).
+  const armPeople = splitArmPeople(resolved, weights.length).map((n) => ({ entered: n }));
   const belowK = anyArmBelowK(armPeople);
   const arms = counts.map((c, i) =>
     belowK && armPeople[i]!.entered < K
