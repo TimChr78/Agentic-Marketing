@@ -75,7 +75,7 @@ function addIdempotencyKey(json: Record<string, unknown>): Record<string, unknow
         minLength: 1,
         maxLength: IDEMPOTENCY_KEY_MAX,
         description:
-          'Optional: reuse the same key when retrying this write so it runs once; a new key would run it again. The key is scoped to you and this workspace, so another caller using it answers 409; 1–200 printable characters without spaces (see the idempotency contract in docs/integrations.md).',
+          'Optional: reuse the same key when retrying this write so it runs once; a new key would run it again. The key is scoped to you and this workspace, so another caller using it answers 409; a key whose action a person undid answers 409 idempotency_key_reversed (use a new key only to run it again); 1–200 printable characters without spaces (see the idempotency contract in docs/integrations.md).',
       },
     },
   };

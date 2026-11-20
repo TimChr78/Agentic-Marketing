@@ -12,7 +12,7 @@ docker compose exec app am smoke --public-url https://links.example.com
 
 Create a token in **Settings → Integrations and API tokens** (or with `apiTokens.create`) and grant only `artifacts:read`. That is enough for every token-based check: `system.status` is readable by any authenticated principal, so the provider check no longer needs an admin token (API tokens cannot hold `workspace:admin` anyway). Add `profiles:read` only if you use `--cleanup`, which looks up the profile a signup created. A token is shown once. Read it from `AM_TOKEN` so it does not land in shell history.
 
-`profiles.erase` needs both the `profiles:erase` scope and a person: it is deliberately people-only, so no API token can erase a profile, whatever scopes it carries. `am smoke --cleanup` with a token therefore finds the profile, reports its id, and says what to do next. If the signup was never confirmed, the unconfirmed-signup retention (`RETENTION_UNCONFIRMED_DAYS`, 30 days by default) removes it; a signup that recorded consent is not removed by that retention, so erase it as a person in the admin UI.
+`profiles.erase` needs both the `profiles:erase` scope and a person: it is deliberately people-only, so no API token can erase a profile, whatever scopes it carries. `am smoke --cleanup` with a token therefore finds the profile, reports its id, and says what to do next. Erase it as a person in the admin UI. Retention does not remove it: removing unconfirmed signups is paused since 0.15.0 (#978 part 2), so retention only counts them.
 
 ## Flags
 
@@ -23,7 +23,7 @@ Create a token in **Settings → Integrations and API tokens** (or with `apiToke
 | `--token amk_…` | An API token with `artifacts:read`, plus `profiles:read` for `--cleanup` (which only finds the profile; no token can erase). Read from `AM_TOKEN` when the flag is omitted. |
 | `--form FORM_ID` | A published form (`frm_…`) for the signup round trip. |
 | `--email ADDRESS` | The address to submit to the form. Use an address you can check, preferably a plus address such as `you+smoke@example.com`. |
-| `--cleanup` | After the signup check, look up the profile by e-mail and try to erase it. Needs `--admin-url` and a token with `profiles:read`; `profiles.erase` needs `profiles:erase` and a person, so the detail says when retention removes an unconfirmed signup (`RETENTION_UNCONFIRMED_DAYS`, 30 days by default). |
+| `--cleanup` | After the signup check, look up the profile by e-mail and try to erase it. Needs `--admin-url` and a token with `profiles:read`; `profiles.erase` needs `profiles:erase` and a person, so with a token the detail says to erase it as a person in the admin UI. |
 | `--asset PATH` | A public asset path to fetch, e.g. `/a/ast_…/logo.png`. |
 | `--json` | Print `{ "ok": true|false, "checks": [...] }` instead of the table. |
 
@@ -36,17 +36,17 @@ The form and asset flags are optional; leave them out if you do not have a test 
 - It creates or updates a customer profile, keyed by the form's anonymous id, with the e-mail address as a trait.
 - With a **double opt-in** form it also creates a pending (unconfirmed) signup in the live workspace and sends a real confirmation e-mail through the configured provider. Until someone clicks the link, the profile has no consent for the form's purposes, so it is not in consent-based segments and will not receive consent-based sends.
 - A form **without** double opt-in records consent immediately, because that is what the form promises.
-- The profile and its form identifier stay until they are erased or cleaned up. The unconfirmed-signup retention (`RETENTION_UNCONFIRMED_DAYS`, 30 days by default) removes profiles that still have no consent and only a form anonymous id; the scheduler applies it. A signup that recorded consent is not removed by that retention.
+- The profile and its form identifier stay until they are erased. Removing unconfirmed signups after `RETENTION_UNCONFIRMED_DAYS` is paused since 0.15.0 (#978 part 2): retention counts them and keeps them.
 
 Use an address you own, such as `you+smoke@example.com`. Do not use a stranger's address or a list member.
 
 `--cleanup` runs after the form answers `303`: it retries `profiles.find` for the submitted address (workers create the profile just after the HTTP response), then calls `profiles.erase` with the reason `am smoke signup cleanup`. When erasure is not allowed, the check still passes and its detail says:
 
 ```text
-left in place: profiles.erase is people-only, so an API token cannot erase it; if the signup stays unconfirmed, retention (RETENTION_UNCONFIRMED_DAYS) removes it after 30 days, or erase it as a person in the admin UI
+left in place: profiles.erase is people-only, so an API token cannot erase it; retention keeps unconfirmed signups while their removal is paused, so erase it as a person in the admin UI
 ```
 
-That is the normal result for an API token, because `profiles.erase` needs `profiles:erase` and can only be run by a person. Erase the profile as a person in the admin UI, or let the retention pass remove an unconfirmed signup after `RETENTION_UNCONFIRMED_DAYS` (30 days by default); a signup that recorded consent is not removed by that retention. Smoke signups are not excluded from profile counts or statistics; only consent-based segments and sends ignore an unconfirmed one.
+That is the normal result for an API token, because `profiles.erase` needs `profiles:erase` and can only be run by a person. Erase the profile as a person in the admin UI; retention keeps unconfirmed signups while their removal is paused. Smoke signups are not excluded from profile counts or statistics; only consent-based segments and sends ignore an unconfirmed one.
 
 ## What each check proves
 

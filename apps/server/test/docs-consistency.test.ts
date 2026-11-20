@@ -91,8 +91,14 @@ describe('pilot documentation', () => {
       expect(doc).toMatch(/RETENTION_UNCONFIRMED_DAYS/);
       expect(doc).toMatch(/RETENTION_LOG_DAYS/);
       expect(doc).toMatch(/scheduler runs(?: retention)? hourly/i);
-      expect(doc).toMatch(/without suppression/i);
+      // Removing unconfirmed signups is paused since 0.15.0 (#978 part 2): the docs must say so
+      // instead of promising a removal that does not happen (#1056).
+      expect(doc).toMatch(/paused/i);
+      expect(doc).not.toMatch(/are removed after `RETENTION_UNCONFIRMED_DAYS`/);
+      expect(doc).not.toMatch(/until retention removes it/i);
     }
+    const smoke = await read(join(root, 'docs/deployment/smoke.md'));
+    expect(smoke).not.toMatch(/retention[^.;]*removes (it|profiles)/i);
     expect(pilot).toMatch(/profiles\.erase/);
   });
 
