@@ -106,18 +106,28 @@ const makeDue = (erasureId: string) =>
     [ws, erasureId],
   );
 
-/** Drives the production worker until this erasure is logically complete. */
+/**
+ * Drives the production worker until this erasure is logically complete. A fixed number of
+ * back-to-back rounds was not enough on a loaded CI runner: a ClickHouse timeout retries the job
+ * and the final sweep waits for `finalSweepMs` (#1037 on main, run 44670861267). So rounds repeat,
+ * a little apart, until the erasure completes; the deadline only stops a test that never would.
+ */
 async function completeErasure(erasureId: string, opts: { finalSweepMs?: number } = {}) {
-  for (let round = 0; round < 8; round++) {
+  const deadline = Date.now() + 60_000;
+  const rounds: string[] = [];
+  while (Date.now() < deadline) {
     const result = await runErasureCleanupOnce(cleanupDeps(), {
       finalSweepMs: opts.finalSweepMs ?? 0,
       outboxWaitSeconds: 0,
       coverageWaitSeconds: 0,
+      maxAttempts: Number.MAX_SAFE_INTEGER,
     });
     if (result.completed) return;
+    rounds.push(JSON.stringify(result));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     await makeDue(erasureId);
   }
-  throw new Error(`erasure ${erasureId} did not complete`);
+  throw new Error(`erasure ${erasureId} did not complete after ${rounds.length} rounds: ${rounds.slice(-3).join(' ')}`);
 }
 
 async function status(erasureId: string) {

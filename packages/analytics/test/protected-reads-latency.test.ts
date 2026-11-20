@@ -26,18 +26,29 @@ let store: EventStore;
 /** What the workspace erasure checker answers for the next read; the store consults it per call. */
 let protectedRead = true;
 
-/** Median wall-clock of five runs after one warm-up. */
-async function timed(run: () => Promise<unknown>): Promise<number> {
-  await run();
-  const times: number[] = [];
-  for (let i = 0; i < 5; i++) {
-    const started = performance.now();
-    await run();
-    times.push(performance.now() - started);
-  }
-  times.sort((a, b) => a - b);
-  return times[Math.floor(times.length / 2)]!;
+/**
+ * Best wall-clock of five runs per reader after one warm-up each, with the readers interleaved
+ * round by round, so a slow moment on a shared CI runner lands on every reader alike (#1089).
+ */
+async function timedTogether(runs: (() => Promise<unknown>)[]): Promise<number[]> {
+  for (const run of runs) await run();
+  const best = runs.map(() => Number.POSITIVE_INFINITY);
+  for (let round = 0; round < 5; round++)
+    for (const [index, run] of runs.entries()) {
+      const started = performance.now();
+      await run();
+      best[index] = Math.min(best[index]!, performance.now() - started);
+    }
+  return best;
 }
+
+/**
+ * Below this, two runs of the same query differ by scheduling noise, not by plan (#1089). Only the
+ * fast-path check uses it; the ledger check keeps a 1 ms floor so a slower protected read on a
+ * point lookup still fails.
+ */
+const NOISE_FLOOR_MS = 5;
+const LEDGER_FLOOR_MS = 1;
 
 const runSql = (sql: string, queryParams: Record<string, unknown>, workspace: string) => async () => {
   await (
@@ -107,23 +118,23 @@ describe('protected reads stay close to the base read (#1037 part 2)', () => {
 
     const measure = async (path: string, run: (workspace: string, useProtected: boolean) => () => Promise<unknown>) => {
       // No allocation: the shared read layer chooses the base table, and the fast path is that same
-      // choice for a workspace that never had an erasure.
-      protectedRead = false;
-      const base = await timed(run(CLEAN_WORKSPACE, false));
-      protectedRead = false;
-      const fast = await timed(run(CLEAN_WORKSPACE, false));
-      // A workspace with 100,000 exclusions, through the protected view.
-      protectedRead = true;
-      const ledger = await timed(run(ERASED_WORKSPACE, true));
-      protectedRead = true;
-      results.push({ path, base, fast, ledger });
+      // choice for a workspace that never had an erasure. Then a workspace with 100,000
+      // exclusions, through the protected view.
+      const readers = [run(CLEAN_WORKSPACE, false), run(CLEAN_WORKSPACE, false), run(ERASED_WORKSPACE, true)];
+      const [base, fast, ledger] = await timedTogether(
+        readers.map((reader, index) => async () => {
+          protectedRead = index === 2;
+          await reader();
+        }),
+      );
+      results.push({ path, base: base!, fast: fast!, ledger: ledger! });
       console.log(
         `protected latency: ${JSON.stringify({
           path,
-          baseMs: Number(base.toFixed(1)),
-          fastMs: Number(fast.toFixed(1)),
-          ledgerMs: Number(ledger.toFixed(1)),
-          ledgerRatio: Number((ledger / Math.max(base, 0.1)).toFixed(1)),
+          baseMs: Number(base!.toFixed(1)),
+          fastMs: Number(fast!.toFixed(1)),
+          ledgerMs: Number(ledger!.toFixed(1)),
+          ledgerRatio: Number((ledger! / Math.max(base!, LEDGER_FLOOR_MS)).toFixed(1)),
         })}`,
       );
     };
@@ -170,10 +181,10 @@ describe('protected reads stay close to the base read (#1037 part 2)', () => {
 
     for (const result of results) {
       // The fast path must not pay for the view: same source, same plan, base timing.
-      expect(result.fast / Math.max(result.base, 0.1), `${result.path} fast path`).toBeLessThan(1.5);
+      expect(result.fast / Math.max(result.base, NOISE_FLOOR_MS), `${result.path} fast path`).toBeLessThan(1.5);
       // The protected path stays within a factor of the base read on a workspace with a large
       // ledger. This is a ratio on a shared table, not an absolute-millisecond assertion.
-      expect(result.ledger / Math.max(result.base, 0.1), `${result.path} protected path`).toBeLessThan(40);
+      expect(result.ledger / Math.max(result.base, LEDGER_FLOOR_MS), `${result.path} protected path`).toBeLessThan(40);
     }
   }, 300_000);
 });

@@ -400,7 +400,9 @@ manifest, `pnpm-lock.yaml`, `vitest.config.mts`, `test-support/**`, `.github/**`
 script cannot classify runs the full suite, and the output says why.
 
 This is the quick loop, not the merge gate. The phase PR and the release still run the full suite
-in CI (`pnpm test:ci`, the `test` job in `.github/workflows/ci.yml`), as does `pnpm test` locally.
+in CI, as does `pnpm test` locally. CI splits it into three `test-shard` jobs (`vitest run --shard`)
+on separate runners, and the required `test` job merges their reports into the one JUnit and
+coverage report `pnpm test:ci` writes on a single machine.
 
 
 ### The shared test stack
