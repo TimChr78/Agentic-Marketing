@@ -60,7 +60,6 @@ describe('e2e ports', () => {
   it.each(['playwright.config.ts', 'playwright.visual.config.ts'])('waits for the fixtures /ready in %s', async (name) => {
     const config = await readFile(new URL(`../../../${name}`, import.meta.url), 'utf8');
     expect(config).toContain('e2eFixturesBase');
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: this is the literal source text the config must contain
     expect(config).toContain('url: `${e2eFixturesBase}/ready`');
     expect(config).not.toMatch(/url: `[^`]*healthz`/);
   });

@@ -13,10 +13,14 @@ spec:
   replicas: {{ $r.replicas }}
   {{- end }}
   # Never roll two writer versions at once (#1066): the 0.15.0 lock protocol and the 0.17.0
-  # erasure contract need the old pods gone before the new ones start. Recreate covers api, ingest,
-  # worker and scheduler; a protocol-changing upgrade still starts with a full scale-to-zero drain
-  # (UPGRADING.md), because the four Deployments roll independently.
-  strategy: { type: Recreate }
+  # erasure contract need the old pods gone before the new ones start. Recreate is the default for
+  # every role; RollingUpdate is only for an operator who drains every writer externally first
+  # (UPGRADING.md). A protocol-changing upgrade still needs the full scale-to-zero drain, because
+  # the four Deployments roll independently.
+  {{- if not (has $.Values.upgradeStrategy (list "Recreate" "RollingUpdate")) }}
+  {{- fail "upgradeStrategy must be Recreate or RollingUpdate" }}
+  {{- end }}
+  strategy: { type: {{ $.Values.upgradeStrategy }} }
   selector:
     matchLabels: {{- include "am.selector" (dict "root" $ "role" $role) | nindent 6 }}
   template:

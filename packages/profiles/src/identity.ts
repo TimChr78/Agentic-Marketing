@@ -179,6 +179,9 @@ async function acquire(tx: Tx, workspaceId: string, opts: IdentityLockOptions = 
       // or a real query error must keep propagating.
       const e = err as { code?: string; cause?: { code?: string } };
       if ((e.code ?? e.cause?.code) !== '55P03') throw err;
+      // Record the shed wait too, so the histogram shows the requests that gave up and not just
+      // the ones that eventually acquired the lock (#1074 review).
+      observe(metrics.wait, (performance.now() - started) / 1_000);
       metrics.timeouts++;
       throw new IdentityLockTimeoutError(workspaceId, waitMs);
     }

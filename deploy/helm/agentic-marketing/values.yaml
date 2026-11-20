@@ -17,11 +17,19 @@ imagePullSecrets: []
 # rather than `config.PORT`, which only changes the environment and leaves the Service behind.
 port: 3000
 
+# The rollout strategy for every role. Recreate (the default) stops a role's old pods before its
+# new ones start, so two writer versions never run together; a routine `helm upgrade` therefore
+# briefly takes the api, ingest and worker pods down. Set RollingUpdate only when you drain every
+# writer externally before the upgrade (the protocol-changing drain in UPGRADING.md), and accept
+# that the old and new pods then overlap while Kubernetes rolls them.
+upgradeStrategy: Recreate
+
 # One image, four roles (ADR-0002). Each role is its own Deployment so it scales on its own. Every
-# role uses the Recreate strategy: api, ingest, worker and scheduler all write under the workspace
-# lock protocol, and an old and a new writer must never overlap (#1066). An upgrade that changes
-# the writer protocol still needs the full drain in UPGRADING.md first, because the four
-# Deployments roll independently.
+# role uses the Recreate strategy by default: api, ingest, worker and scheduler all write under the
+# workspace lock protocol, and an old and a new writer must never overlap (#1066). A routine
+# `helm upgrade` therefore briefly takes the api, ingest and worker pods down while their old pods
+# stop; that downtime is the cost of the protocol. An upgrade that changes the writer protocol still
+# needs the full drain in UPGRADING.md first, because the four Deployments roll independently.
 roles:
   api:          # UI, REST, MCP, copilot, e-mail links and webhooks
     replicas: 2

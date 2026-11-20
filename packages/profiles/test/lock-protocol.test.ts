@@ -557,7 +557,10 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
       );
       // The bound is the configured timeout plus slack, never a wall-clock constant.
       expect(Date.now() - started).toBeLessThan(waitMs + 2_000);
-      expect(identityLockSnapshot().timeouts).toBe(1);
+      const snapshot = identityLockSnapshot();
+      expect(snapshot.timeouts).toBe(1);
+      // A shed wait is still observed, so the histogram does not hide refusals.
+      expect(snapshot.wait.count).toBe(1);
     } finally {
       await probe.query('ROLLBACK').catch(() => {});
       probe.release();

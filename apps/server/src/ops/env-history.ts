@@ -105,13 +105,13 @@ export const ENV_SINCE: Record<string, string> = {
   // 0.14.27 (issue #976): how long an idempotency key replays (default 30 days)
   RETENTION_IDEMPOTENCY_DAYS: '0.14.27',
 
-  // 0.14.22 (issue #931): the traces-only OTLP endpoint, read by the telemetry package
+  // 0.14.22 (issues #931): the OTLP traces endpoint and header list, read by the telemetry package
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: '0.14.22',
-  // 0.14.25 (issues #947, #965): read by Better Auth and the telemetry package, never by the Env
-  // schema; .env.example documents them as commented keys so `am doctor` knows them (#1058).
-  BETTER_AUTH_TRUSTED_ORIGINS: '0.14.25',
-  OTEL_EXPORTER_OTLP_HEADERS: '0.14.25',
-  OTEL_EXPORTER_OTLP_TRACES_HEADERS: '0.14.25',
+  OTEL_EXPORTER_OTLP_HEADERS: '0.14.22',
+  OTEL_EXPORTER_OTLP_TRACES_HEADERS: '0.14.22',
+  // 0.14.24 (issue #947): read by Better Auth through config.ts, never by the Env schema;
+  // .env.example documents it as a commented key so `am doctor` knows it (#1058).
+  BETTER_AUTH_TRUSTED_ORIGINS: '0.14.24',
 
   // 0.16.0 (issue #1001): the Postgres image the Compose stack runs
   POSTGRES_IMAGE: '0.16.0',
