@@ -155,6 +155,8 @@ describe('a copilot turn is capped by its reservation (#356)', () => {
       providerId,
     ]);
     expect(held.rows[0].n).toBe(0);
+    // The cancelled turn released its request hold, so a later drain never waits on it.
+    expect(t.srv.requestAborts.count()).toBe(0);
   }, 30_000);
 });
 

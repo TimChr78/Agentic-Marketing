@@ -328,17 +328,6 @@ export function copilotApi(deps: {
       : `${SYSTEM}\n\nYou act as the workspace’s built-in Copilot agent, so your changes are recorded in its activity, count against its limits and follow the agent policy.`;
     const abort = new AbortController();
     let cancelled = false;
-    // The turn may outlive its handler: it keeps the request registered until the finally below
-    // has stored it, so the shutdown waits for that write before closing the pools (#1098).
-    const request = deps.aborts ? requestAbortOf(c)?.retain() : undefined;
-    let shuttingDown = request?.signal.aborted ?? false;
-    request?.signal.addEventListener(
-      'abort',
-      () => {
-        shuttingDown = true;
-      },
-      { once: true },
-    );
 
     const encoder = new TextEncoder();
     const body = new ReadableStream<Uint8Array>({
@@ -383,6 +372,19 @@ export function copilotApi(deps: {
         let shutdownStopped = false;
         const usedTools: string[] = [];
         emit({ type: 'conversation', id: conversation.id, title: conversation.title });
+        // The turn may outlive its handler: it keeps the request registered until the finally below
+        // has stored it, so the shutdown waits for that write before closing the pools (#1098). The
+        // hold is taken here, immediately before the `try`, so nothing can throw while it is held
+        // and leak it.
+        const request = deps.aborts ? requestAbortOf(c)?.retain() : undefined;
+        let shuttingDown = request?.signal.aborted ?? false;
+        request?.signal.addEventListener(
+          'abort',
+          () => {
+            shuttingDown = true;
+          },
+          { once: true },
+        );
         try {
           await server.connect(serverSide);
           await client.connect(clientSide);
