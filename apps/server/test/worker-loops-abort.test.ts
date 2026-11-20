@@ -99,7 +99,9 @@ const LOOPS: { name: string; start: (signal: AbortSignal, block: boolean) => Pro
   {
     name: 'outbox dispatcher',
     start: (signal, block) =>
-      runOutboxDispatcher({ db: fakeDb(signal, { block }), kp: anything(), events: anything() }, signal, { idleMs: 3_600_000 }),
+      runOutboxDispatcher({ db: fakeDb(signal, { block }), kp: anything(), events: anything(), bus: anything() }, signal, {
+        idleMs: 3_600_000,
+      }),
   },
   {
     name: 'sent_at backfill',

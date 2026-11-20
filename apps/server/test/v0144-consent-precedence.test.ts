@@ -432,7 +432,7 @@ describe('an async consent write carries the action time (#928)', () => {
     // The consent transaction writes one durable intent; the dispatcher (or the test server's
     // scheduler) then creates the confirmation message (#978 part 2).
     expect(await intents()).toBe(1);
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus });
     await eventually(count, (n) => n === 1);
 
     // A later hook in the same batch failed before the event was acknowledged; the person is merged
@@ -452,7 +452,7 @@ describe('an async consent write carries the action time (#928)', () => {
        WHERE workspace_id = $1 AND kind = 'doi_send' AND operation_key = $2`,
       [ws, key],
     );
-    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events });
+    await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus });
     await eventually(count, (n) => n === 1);
   });
 

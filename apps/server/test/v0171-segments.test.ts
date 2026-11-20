@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { schema } from '@agentic-marketing/db';
 import type { EventBus, MessageEvent } from '@agentic-marketing/events';
-import { contextFor, evaluate, publishedSegments, runSegmentScheduler } from '@agentic-marketing/segments';
+import { audienceTestHooks, contextFor, evaluate, publishedSegments, runSegmentScheduler } from '@agentic-marketing/segments';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eventually, rejects, startTestServer, testPort, type User } from './harness';
@@ -71,6 +71,22 @@ const msg = (profileId: string, kind: MessageEvent['type'], at: string, over: Pa
   ...over,
 });
 
+/** A published segment written directly, so a definition an older release saved can be replayed. */
+async function seedPublishedSegment(workspaceId: string, content: unknown, mode: 'dynamic' | 'static' = 'dynamic'): Promise<string> {
+  const id = `seg_${randomUUID().replaceAll('-', '')}`;
+  await t.srv.db.admin.query(
+    `INSERT INTO artifacts (workspace_id, id, type, name, latest_version, published_version)
+     VALUES ($1, $2, 'segment', $3, 1, 1)`,
+    [workspaceId, id, `Segment ${id.slice(-6)}`],
+  );
+  await t.srv.db.admin.query(
+    `INSERT INTO artifact_versions (workspace_id, artifact_id, number, state, content, content_hash, author_type, author_id)
+     VALUES ($1, $2, 1, 'published', $3::jsonb, 'hash', 'user', 'test')`,
+    [workspaceId, id, JSON.stringify({ description: '', mode, condition: content })],
+  );
+  return id;
+}
+
 describe('saving a message window (#1073, #1076)', () => {
   it('caps every window at 10 years and a new message window at the 25 months of stored history', async () => {
     let seq = 0;
@@ -98,12 +114,31 @@ describe('saving a message window (#1073, #1076)', () => {
     await expect(create({ event: 'Product Viewed', within: 'P3650D' })).resolves.toMatchObject({
       artifactId: expect.stringMatching(/^seg_/),
     });
-    await expect(create({ message: 'opened', within: 'P760D' })).resolves.toMatchObject({
+    await expect(create({ message: 'opened', within: 'P758D' })).resolves.toMatchObject({
       artifactId: expect.stringMatching(/^seg_/),
     });
+    // 758 days is the shortest 25-month calendar span; one day more is refused.
+    expect(await refusal({ message: 'opened', within: 'P759D' })).toMatch(/25 months/);
     await expect(create({ message: 'clicked', count: { gte: 2 } })).resolves.toMatchObject({
       artifactId: expect.stringMatching(/^seg_/),
     });
+  }, 60_000);
+
+  it('keeps a legacy over-10-year definition readable by members, and refuses preview with the fix (#1073)', async () => {
+    const member = await person('v0171-legacy');
+    const legacy = await seedPublishedSegment(ws, { message: 'opened', within: 'P99999999D' });
+    await t.srv.db.withWorkspace(ws, (tx) =>
+      tx.insert(schema.segmentMemberships).values({ workspaceId: ws, segmentId: legacy, profileId: member }),
+    );
+
+    // Stored membership is data: a definition that no longer parses must not turn this read into a 500.
+    const members = await api().call('segments.members', { artifactId: legacy });
+    expect(members.members.map((m) => m.profileId)).toEqual([member]);
+
+    // Preview by id evaluates the rule, so it says what to fix instead of throwing a ZodError.
+    const error = await rejects(api().call('segments.preview', { artifactId: legacy }));
+    expect(error.status).toBe(400);
+    expect(error.message).toBe('This segment has a window longer than 10 years; re-save it with a window of at most 10 years');
   }, 60_000);
 });
 
@@ -190,22 +225,6 @@ describe('the scheduler isolates a failing segment (#1073)', () => {
     return workspace;
   }
 
-  /** A published segment written directly, so a definition an older release saved can be replayed. */
-  async function seedSegment(workspaceId: string, content: unknown): Promise<string> {
-    const id = `seg_${randomUUID().replaceAll('-', '')}`;
-    await t.srv.db.admin.query(
-      `INSERT INTO artifacts (workspace_id, id, type, name, latest_version, published_version)
-       VALUES ($1, $2, 'segment', $3, 1, 1)`,
-      [workspaceId, id, `Segment ${id.slice(-6)}`],
-    );
-    await t.srv.db.admin.query(
-      `INSERT INTO artifact_versions (workspace_id, artifact_id, number, state, content, content_hash, author_type, author_id)
-       VALUES ($1, $2, 1, 'published', $3::jsonb, 'hash', 'user', 'test')`,
-      [workspaceId, id, JSON.stringify({ description: '', mode: 'dynamic', condition: content })],
-    );
-    return id;
-  }
-
   const runOf = async (workspaceId: string, segmentId: string) => {
     const { rows } = await t.srv.db.admin.query<{ members: number }>(
       'SELECT members FROM segment_runs WHERE workspace_id = $1 AND segment_id = $2',
@@ -220,14 +239,14 @@ describe('the scheduler isolates a failing segment (#1073)', () => {
       const workspace = await seedWorkspace();
       // A syntactically valid purpose that is not published: the segment saves and publishes and
       // throws only when it is evaluated.
-      const broken = await seedSegment(workspace, { message: 'opened', purpose: 'not_a_published_purpose' });
-      const good = await seedSegment(workspace, { trait: 'city', op: 'eq', value: 'Aarhus' });
+      const broken = await seedPublishedSegment(workspace, { message: 'opened', purpose: 'not_a_published_purpose' });
+      const good = await seedPublishedSegment(workspace, { trait: 'city', op: 'eq', value: 'Aarhus' });
       cases.push({ workspace, good, broken });
     }
     // A definition saved before the 10-year cap no longer parses: it must fail only itself.
     const legacy = await seedWorkspace();
-    const legacyGood = await seedSegment(legacy, { trait: 'city', op: 'eq', value: 'Aarhus' });
-    const legacyBad = await seedSegment(legacy, { message: 'opened', within: 'P99999999D' });
+    const legacyGood = await seedPublishedSegment(legacy, { trait: 'city', op: 'eq', value: 'Aarhus' });
+    const legacyBad = await seedPublishedSegment(legacy, { message: 'opened', within: 'P99999999D' });
     cases.push({ workspace: legacy, good: legacyGood, broken: legacyBad });
 
     const stop = new AbortController();
@@ -274,7 +293,7 @@ describe('the scheduler isolates a failing segment (#1073)', () => {
 });
 
 describe('a static list write follows a merge that lands in between (#1068)', () => {
-  it('adds no row on a merged-away id when a merge commits before the insert', async () => {
+  it('locks the canonical rows and follows a merge that commits between the unlocked read and the lock', async () => {
     await send([{ type: 'identify', anonymousId: 'v0171-race-anon' }]);
     await send([{ type: 'identify', userId: 'v0171-race-user' }]);
     const anon = (
@@ -298,59 +317,46 @@ describe('a static list write follows a merge that lands in between (#1068)', ()
     expect(rows).toHaveLength(2);
 
     const list = await api().call('artifacts.create', { type: 'segment', name: 'Race list', content: { mode: 'static' } });
-
-    // Hold the table so the add has resolved its person but cannot insert yet: that is the window
-    // between resolution and insert. A merge then runs; with the identity lock the add blocks the
-    // merge and re-checks under it, without the lock the merge commits first and the insert lands
-    // on the folded id, invisible to every reader.
-    const locker = await t.srv.db.admin.connect();
+    let reached!: () => void;
+    let release!: () => void;
+    const atGate = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Pause the add after its unlocked follow, before `FOR SHARE`, and commit a merge in that window.
+    audienceTestHooks.beforeRowLocks = async () => {
+      reached();
+      await gate;
+    };
     try {
-      await locker.query('BEGIN');
-      await locker.query('LOCK TABLE segment_list_members IN EXCLUSIVE MODE');
       const add = api().call('audiences.add', { segmentId: list.artifactId, profileIds: [loser] });
-      await eventually(
-        () =>
-          t.srv.db.admin.query(
-            `SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
-             WHERE c.relname = 'segment_list_members' AND NOT l.granted LIMIT 1`,
-          ),
-        (r) => r.rowCount === 1,
-        20_000,
-      );
-
+      await atGate;
       const merge = send([{ type: 'identify', userId: 'v0171-race-user', anonymousId: 'v0171-race-anon' }]);
-      // Either the merge committed (the old, unlocked path) or it is waiting for the identity lock
-      // the add now holds (the fixed path). Both say it is safe to let the insert through.
-      await eventually(
-        async () => {
-          const merged = await t.srv.db.admin.query('SELECT 1 FROM profiles WHERE id = $1 AND merged_into IS NOT NULL', [loser]);
-          const waiting = await t.srv.db.admin.query("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted LIMIT 1");
-          return merged.rowCount === 1 || waiting.rowCount === 1;
-        },
-        (done) => done,
+      const merged = await eventually(
+        () => t.srv.db.admin.query<{ merged_into: string | null }>('SELECT merged_into FROM profiles WHERE id = $1', [loser]),
+        (r) => !!r.rows[0]?.merged_into,
         20_000,
       );
-      await locker.query('COMMIT');
+      const survivor = merged.rows[0]!.merged_into!;
+      expect(survivor).not.toBe(loser);
+
+      release();
       await add;
       await merge;
-    } finally {
-      locker.release();
-    }
 
-    const merged = await eventually(
-      () => t.srv.db.admin.query<{ merged_into: string | null }>('SELECT merged_into FROM profiles WHERE id = $1', [loser]),
-      (r) => !!r.rows[0]?.merged_into,
-      20_000,
-    );
-    const survivor = merged.rows[0]!.merged_into!;
-    const listed = await t.srv.db.withWorkspace(ws, (tx) =>
-      tx
-        .select({ profileId: schema.segmentListMembers.profileId })
-        .from(schema.segmentListMembers)
-        .where(eq(schema.segmentListMembers.segmentId, list.artifactId)),
-    );
-    const onList = listed.filter((r) => r.profileId === loser || r.profileId === survivor).map((r) => r.profileId);
-    expect(onList).toEqual([survivor]);
-    expect((await api().call('segments.members', { artifactId: list.artifactId })).total).toBe(1);
+      const listed = await t.srv.db.withWorkspace(ws, (tx) =>
+        tx
+          .select({ profileId: schema.segmentListMembers.profileId })
+          .from(schema.segmentListMembers)
+          .where(eq(schema.segmentListMembers.segmentId, list.artifactId)),
+      );
+      expect(listed.map((r) => r.profileId)).toEqual([survivor]);
+      expect((await api().call('segments.members', { artifactId: list.artifactId })).members.map((m) => m.profileId)).toEqual([survivor]);
+    } finally {
+      delete audienceTestHooks.beforeRowLocks;
+      release();
+    }
   }, 120_000);
 });

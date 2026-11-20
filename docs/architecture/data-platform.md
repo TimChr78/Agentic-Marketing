@@ -116,9 +116,10 @@ what happened to a message it sent, read from ClickHouse `message_events` (#441)
   (`0002_message_events.sql`). A message leaf without `within` reads the whole history that is kept,
   which the builder and this document name as "the last 25 months (how long message history is
   kept)". A new window longer than 25 months is refused when a segment is saved, because the TTL
-  would silently clamp it; a window saved before that check keeps working. Lifetime "ever opened"
-  rules therefore have a 25-month horizon: do not build a segment whose membership must never decay
-  on a message condition without a window.
+  would silently clamp it; a window saved before that check keeps working, and republishing that
+  version is refused until the window is shortened. Lifetime "ever opened" rules therefore have a
+  25-month horizon: do not build a segment whose membership must never decay on a message condition
+  without a window.
 - `broadcast` or `journey` (not both) counts only the messages that send produced.
 - `not`, `all` and `any` compose it like any other leaf, and a merge is followed: messages recorded
   under a profile that was later merged in count for the person it became.

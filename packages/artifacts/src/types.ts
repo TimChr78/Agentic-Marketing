@@ -711,10 +711,11 @@ const Duration = z
 /**
  * How long `message_events` is kept: its ClickHouse TTL is 25 calendar months (`0002_message_events.sql`).
  * A no-window message condition therefore counts all the history that is kept, which is what the
- * builder sentence and the schema description say. About 760 days: the longest windows are refused
- * at save so a rule cannot ask for history the store no longer has.
+ * builder sentence and the schema description say. 758 days is the shortest span 25 calendar months
+ * can cover (a February-to-March span in a non-leap year); a longer window would ask for rows the
+ * store no longer has, so it is refused at save.
  */
-export const MESSAGE_HISTORY_SECONDS = 760 * 86_400;
+export const MESSAGE_HISTORY_SECONDS = 758 * 86_400;
 const PropKey = z.string().regex(/^[A-Za-z0-9_]{1,64}$/, 'Letters, digits and _');
 const Scalar = z.union([z.string().max(500), z.number(), z.boolean()]);
 /**
@@ -858,7 +859,7 @@ export function segmentContentProblems(content: { condition?: unknown }): string
     if (c.not) walk(c.not);
     if (typeof c.message === 'string' && typeof c.within === 'string' && durationSeconds(c.within) > MESSAGE_HISTORY_SECONDS) {
       problems.push(
-        `A message condition’s within "${c.within}" is longer than the 25 months of message history that is kept (about 760 days), so the oldest part of the window would be silently missing. Use a shorter window, or leave within out to count all the history that is kept.`,
+        `A message condition’s within "${c.within}" is longer than the 25 months of message history that is kept (758 days), so the oldest part of the window would be silently missing. Use a shorter window, or leave within out to count all the history that is kept.`,
       );
     }
   };

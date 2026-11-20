@@ -203,7 +203,7 @@ export function startScheduler(
     loop('broadcasts', runBroadcasts({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal, opts.broadcastTickMs)),
     // Post-commit work enqueued by tenant transactions (#978 part 2): message events and DOI
     // confirmation sends. It runs across tenants, as the owner, and claims with SKIP LOCKED.
-    loop('outbox-dispatcher', runOutboxDispatcher({ db: srv.db, kp: srv.keyProvider, events: srv.events }, signal)),
+    loop('outbox-dispatcher', runOutboxDispatcher({ db: srv.db, kp: srv.keyProvider, events: srv.events, bus: srv.bus }, signal)),
     loop(
       'retention',
       runRetention({ db: srv.db, events: srv.events, hot: srv.hot, ...srv.retention, erasureGraceHours: srv.erasureGraceHours }, signal),

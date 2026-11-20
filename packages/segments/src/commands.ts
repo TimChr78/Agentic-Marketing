@@ -1,4 +1,4 @@
-import { artifactTypes, segmentCondition } from '@agentic-marketing/artifacts';
+import { artifactTypes, durationSeconds, MAX_DURATION_SECONDS, segmentCondition } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -11,8 +11,8 @@ import { materialize } from './sql';
 
 const SegmentId = z.string().regex(/^seg_[0-9a-f]{32}$/);
 
-/** The content of a segment version (default: its latest), for mode-aware commands. */
-async function segmentContent(ctx: { tx: Tx }, artifactId: string, version?: number) {
+/** The raw content of a segment version (default: its latest), without validating it. */
+async function segmentContentRaw(ctx: { tx: Tx }, artifactId: string, version?: number): Promise<Record<string, unknown>> {
   const [v] = await ctx.tx
     .select({ content: schema.artifactVersions.content })
     .from(schema.artifactVersions)
@@ -20,7 +20,44 @@ async function segmentContent(ctx: { tx: Tx }, artifactId: string, version?: num
     .orderBy(desc(schema.artifactVersions.number))
     .limit(1);
   if (!v) throw new AppError('not_found', `No segment ${artifactId}${version ? ` version ${version}` : ''}.`);
-  return artifactTypes.segment.content.parse(v.content);
+  return (v.content ?? {}) as Record<string, unknown>;
+}
+
+/**
+ * The content of a segment version, validated. A definition saved by an older release can no longer
+ * parse (the 10-year window cap); that is a clean refusal with the fix, never a raw ZodError and a
+ * 500. `segments.members` deliberately reads the raw mode instead, so stored membership stays
+ * readable (#1073 review).
+ */
+async function segmentContent(ctx: { tx: Tx }, artifactId: string, version?: number) {
+  const raw = await segmentContentRaw(ctx, artifactId, version);
+  const parsed = artifactTypes.segment.content.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  if (hasOverlongWindow(raw.condition))
+    throw new AppError('invalid_input', 'This segment has a window longer than 10 years; re-save it with a window of at most 10 years');
+  throw new AppError(
+    'invalid_input',
+    `This segment's saved definition can no longer be read: ${parsed.error.issues[0]?.message ?? 'it does not match the schema'}. Re-save it to continue.`,
+  );
+}
+
+/** Whether a condition names a look-back longer than ClickHouse can bind (the schema's 10-year cap). */
+function hasOverlongWindow(condition: unknown): boolean {
+  let found = false;
+  const walk = (node: unknown) => {
+    if (found || !node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    const c = node as Record<string, unknown>;
+    if (typeof c.within === 'string' && durationSeconds(c.within) > MAX_DURATION_SECONDS) found = true;
+    if (Array.isArray(c.all)) for (const child of c.all) walk(child);
+    if (Array.isArray(c.any)) for (const child of c.any) walk(child);
+    if (c.not) walk(c.not);
+  };
+  walk(condition);
+  return found;
 }
 
 /**
@@ -250,9 +287,10 @@ export const segmentMembers = defineCommand({
         )
       : [];
     const emailOf = new Map(emails.filter((e) => e.valueEnc).map((e, i) => [e.profileId, opened[i] ?? null]));
-    const content = await segmentContent(ctx, input.artifactId);
+    // Read the raw mode: a definition that no longer parses must still list its stored members.
+    const content = await segmentContentRaw(ctx, input.artifactId);
     let total: number | null;
-    if (content.mode === 'dynamic') {
+    if ((content.mode ?? 'dynamic') === 'dynamic') {
       const [run] = await ctx.tx.select().from(schema.segmentRuns).where(eq(schema.segmentRuns.segmentId, input.artifactId));
       total = run?.members ?? null;
     } else {

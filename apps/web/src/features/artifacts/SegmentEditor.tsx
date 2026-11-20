@@ -959,12 +959,17 @@ export function referencedSegmentIds(condition: unknown): string[] {
   return [...found].sort();
 }
 
-/** Whether a rule holds a message-engagement leaf, whose membership moves only at a refresh. */
+/**
+ * Whether a rule can hold a message-engagement leaf, whose membership moves only at a refresh. A
+ * segment reference is treated as possibly holding one: the builder does not load the referenced
+ * definition here, and showing the caveat is safer than hiding it.
+ */
 export function containsMessage(condition: unknown): boolean {
   if (!condition || typeof condition !== 'object') return false;
   if (Array.isArray(condition)) return condition.some(containsMessage);
   const c = condition as Record<string, unknown>;
   if (typeof c.message === 'string') return true;
+  if (typeof c.segment === 'string') return true;
   if (Array.isArray(c.all) && c.all.some(containsMessage)) return true;
   if (Array.isArray(c.any) && c.any.some(containsMessage)) return true;
   return 'not' in c && containsMessage(c.not);

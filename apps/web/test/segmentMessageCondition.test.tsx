@@ -201,6 +201,11 @@ describe('the segment builder’s message engagement condition', () => {
     renderEditor({ trait: 'city', op: 'eq', value: 'Aarhus' });
     expect(screen.getByText('Estimated size from live data')).toBeTruthy();
     expect(screen.queryByText('Membership updates at the next scheduled refresh, not as messages arrive.')).toBeNull();
+    // A segment reference is shown with the caveat too: its definition is not loaded here, and it
+    // may hold a message rule.
+    cleanup();
+    renderEditor({ segment: SEG });
+    expect(screen.getByText('Membership updates at the next scheduled refresh, not as messages arrive.')).toBeTruthy();
   });
 });
 
@@ -209,7 +214,7 @@ describe('a message condition in the preview', () => {
     render(
       <ConditionView condition={{ message: 'opened', count: { gte: 2 }, within: 'P30D', channel: 'email', purpose: 'marketing_email' }} />,
     );
-    expect(document.body.textContent).toContain('Opened a message by e-mail for marketing_email at least 2 times in the last 30 days');
+    expect(document.body.textContent).toContain('Opened a message by e-mail for marketing_email at least 2 messages in the last 30 days');
   });
 
   it('names the send it counts', () => {

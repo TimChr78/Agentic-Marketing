@@ -138,9 +138,10 @@ export async function validateContent(type: ArtifactType, content: unknown, mode
     );
   }
   const problems = (await contentValidators.get(type)?.(parsed.data)) ?? [];
-  // A message window longer than the stored history is refused when it is saved, not when the
-  // ClickHouse TTL has already clamped it (#1076). Definitions saved before this check stay
-  // readable: the schema's own 10-year cap is what a read sees.
+  // A new message window longer than the stored history is refused when it is saved or published,
+  // before the ClickHouse TTL can silently clamp it (#1076). This check never runs on a stored
+  // definition: an older window stays readable unless the schema's own 10-year cap rejects it,
+  // and the commands that read such a segment report that as a clean refusal.
   if (type === 'segment') problems.push(...segmentContentProblems(parsed.data as { condition?: unknown }));
   if (problems.length) throw new AppError('invalid_input', `The content is not a valid ${type}: ${problems.join('; ')}`, { problems });
   return parsed.data as Record<string, unknown>;
