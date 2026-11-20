@@ -2,6 +2,28 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.17.4] - 2026-11-20
+
+### Changed
+
+- Better Auth moves from 1.7.23 to 1.7.25, with the core, MCP, OAuth provider, CIMD and SSO packages in one step. The update fixes OAuth provider and MCP OAuth 401 challenges not exposing `WWW-Authenticate` to browser clients on another origin, DPoP failures on deployments that keep verification values only in secondary storage, RP-initiated logout and token introspection on hosts that cannot reach their own hostname, and authorization URLs re-encoding query parameters. Verification values are now explicitly kept in the database, which the password-reset flow already relies on. `better-call` stays on the 1.4 line, the version Better Auth 1.7 requires.
+- The bundled Valkey moves from 8.1.9 to 9.1.3, and NATS from 2.15.0 to 2.15.3; the test stack's OpenBao moves from 2.6.4 to 2.7.2. The bundled Valkey keeps no data on disk (no snapshots, no append-only file), so the major version needs no migration and can be rolled back. CI now runs every service on exactly the image Compose pins (a test enforces it), instead of separately named tags.
+
+### Fixed
+
+- `journeys.splitResult` no longer loads every split take for a journey in one read. It walks the takes a bounded page of participants at a time and pages the takes by person, so a large split report holds a page rather than the journey's whole history. The counts are unchanged.
+- `audiences.import` and `audiences.remove` now count matched selectors rather than the people left after a mid-call merge, so `added + existing` and `removed + notMembers` add up when a merge folds two resolved ids into one person. Their output descriptions say what the merge case means, matching `audiences.add`.
+
+### Upgrading from 0.17.3
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none to commands or configuration. The bundled Valkey moves to a new major version (8.1.9 → 9.1.3); it keeps no data on disk, so it needs no migration and can be rolled back. `audiences.import`'s `existing` and `audiences.remove`'s `notMembers` now count distinct resolved people, matching `audiences.add` since 0.17.2, so a call with two rows for one person reports one.
+- **Manual steps:** none.
+- **Upgrade:** download `agentic-marketing-compose-0.17.4.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.17.4 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.17.4` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.17.4). Run `docker compose exec app am doctor`.
+
+<!-- issues: 1108, 1111, 1120 -->
+
 ## [0.17.3] - 2026-11-20
 
 - 0.17.2 was tagged and its image was pushed (`ghcr.io/timchr78/agentic-marketing:0.17.2`, and `:0.17` and `:latest` pointed at it for a while), but its GitHub release (the Helm chart, the Compose bundle and `SHA256SUMS`) was never created: GitHub refused the release with `HTTP 403` because `main` had moved past the tagged commit while the release ran. 0.17.3 is the first complete release with everything listed under 0.17.2 below, plus the ClickHouse update. Coming from 0.17.1, read the 0.17.2 notes as well: they hold four migrations and the breaking changes.
