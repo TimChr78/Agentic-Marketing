@@ -42,6 +42,7 @@ const deps = () => ({
   db: t.srv.db,
   executor: t.srv.executor,
   kp: t.srv.keyProvider,
+  egress: t.srv.egress,
   email: t.srv.email,
   directory: t.srv.directory,
   publicUrl: t.base,
