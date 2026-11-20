@@ -85,6 +85,7 @@ describe('metrics exposition', () => {
       'am_http_request_duration_seconds',
       'am_commands_total',
       'am_redaction_fallbacks_total',
+      'am_journey_events_too_old_total',
       'am_queue_messages_pending',
       'am_queue_messages_oldest_seconds',
       'am_journey_participants_due',

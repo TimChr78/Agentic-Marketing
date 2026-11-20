@@ -201,6 +201,7 @@ In Docker Compose, a Prometheus container on the same project network reaches th
 | `am_queue_messages_oldest_seconds` | gauge | | Age of the oldest unsent message: how far the delivery queue is behind. |
 | `am_journey_participants_due` | gauge | | Journey participants whose next step is due now. |
 | `am_journey_participants_oldest_due_seconds` | gauge | | Age of the oldest due, unprocessed journey step. |
+| `am_journey_events_too_old_total` | counter | | Journey events the hook refused because they were received more than 7 days ago (`JOURNEY_EVENT_MAX_AGE_DAYS`). Per process, and incremented by the worker role that runs the hook: the durable signal for old outbox rows is `queue.outbox` in `am doctor`. |
 | `am_broadcast_runs_due` | gauge | | Broadcast runs past their send time that the scheduler has not finished. |
 | `am_warehouse_exports_due` | gauge | | Enabled warehouse exports that are due or were asked to run. |
 | `am_deliveries_dead_24h` | gauge | | Webhook/action deliveries that ended `dead` in the last 24 hours. |
@@ -216,6 +217,8 @@ In Docker Compose, a Prometheus container on the same project network reaches th
 No label carries a workspace, person, address or command input, and every label has a fixed or registry-bounded set of values, so cardinality cannot grow with traffic. `/metrics` is not counted in its own request metrics.
 
 The queue gauges come from the same queries the workers use to claim work, computed on scrape. If Postgres is unreachable or its schema is not migrated yet, those series are simply absent and the rest of the exposition is still returned. ClickHouse insert lag is not exposed: `received_at` is the ingest time, so an idle install would look "lagging"; `am_dependency_up{name="clickhouse"}` reports reachability instead, and `am_commands_total` plus the `/readyz` probe cover the rest.
+
+Several counters are per process, not per install: `am_redaction_fallbacks_total`, `am_subject_key_failures_total` and `am_journey_events_too_old_total` count what the scraped process itself did. The journey age counter is incremented by the worker role that runs the journey hook, which is usually not the api role Prometheus scrapes, so a zero there does not mean nothing is being dropped. The durable signal for that question is the `queue.outbox` check in `am doctor`: it reads the outbox table, names rows older than the journey delivery-age bound and says how to recover the segment-entry journeys in them.
 
 ### Example alert rules
 

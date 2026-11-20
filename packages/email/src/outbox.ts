@@ -33,7 +33,11 @@ export async function enqueueMessageEvents(tx: Tx, workspaceId: string, events: 
       kind: 'message_event',
       operationKey: `message-event:${hashValue({ subject, events: identities })}`,
       ...(subject ? { subjectRef: subject } : {}),
-      payload: { events: group },
+      // The time the batch is queued travels with it (#1027): the dispatcher publishes the carrier
+      // events with this receive time, so a row retried or requeued days later keeps its delivery
+      // age instead of looking fresh to the journey hook. The operation key does not include it, so
+      // a redelivery of the same events still adds no second row.
+      payload: { events: group, receivedAt: new Date().toISOString() },
     });
   }
 }

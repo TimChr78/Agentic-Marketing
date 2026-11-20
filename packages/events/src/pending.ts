@@ -44,7 +44,15 @@ export const messageEventSchema = z.object({
 });
 
 /** The payload one `message_event` outbox row carries: exactly the events it will publish. */
-export const messageEventPayloadSchema = z.object({ events: z.array(messageEventSchema).min(1) });
+export const messageEventPayloadSchema = z.object({
+  events: z.array(messageEventSchema).min(1),
+  /**
+   * When the batch was queued, so the carrier events it publishes keep the delivery time they had
+   * then even if the row is delivered or requeued days later (#1027). Rows written before this
+   * field existed have none; the dispatcher falls back to the row's `created_at`.
+   */
+  receivedAt: z.string().min(1).optional(),
+});
 
 /**
  * The events an outbox payload carries. Throws when the payload is not a well-formed batch: such a

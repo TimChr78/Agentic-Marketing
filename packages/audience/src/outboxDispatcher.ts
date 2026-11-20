@@ -78,10 +78,17 @@ function parseOrPermanent<T>(schema: z.ZodType<T>, value: unknown, label: string
 /** Runs one handler. Throws when the work has to be retried; the row then backs off. */
 async function deliver(deps: OutboxDispatcherDeps, claim: OutboxClaim): Promise<void> {
   if (claim.kind === 'message_event') {
-    const { events } = parseOrPermanent(messageEventPayload, claim.payload, 'message_event');
+    const { events, receivedAt } = parseOrPermanent(messageEventPayload, claim.payload, 'message_event');
     if (events.some((event) => event.workspaceId !== claim.workspaceId))
       throw new PermanentOutboxError('message_event payload names another workspace');
-    await deps.events.insertMessageEvents(events);
+    // The carrier events keep the time the batch was queued (#1027): a row delivered late, or
+    // requeued by `am outbox` days after it was written, must not look like a fresh delivery to
+    // the journey hook. Rows enqueued before the payload carried that time fall back to the row's
+    // own creation time, never to now, so requeueing cannot revive their journey triggers either.
+    const queued = receivedAt ? new Date(receivedAt) : claim.createdAt;
+    await deps.events.insertMessageEvents(events, {
+      receivedAt: Number.isFinite(queued.getTime()) ? queued : claim.createdAt,
+    });
     return;
   }
   if (claim.kind === 'doi_send') {

@@ -65,7 +65,7 @@ export function withResolvedEventProfiles(store: EventStore, db: Db): EventStore
 /** Wraps an event store so message events are also published to the bus as customer events. */
 export function withEmailProfileEvents(store: EventStore, deps: { db: Db; bus: EventBus }): EventStore {
   const { loadPolicy } = sourceLookups(deps.db);
-  async function publish(events: MessageEvent[]) {
+  async function publish(events: MessageEvent[], receivedAt?: Date) {
     const byWs = new Map<string, MessageEvent[]>();
     for (const e of events) if (EMAIL_EVENTS[e.type] && e.profileId) byWs.set(e.workspaceId, [...(byWs.get(e.workspaceId) ?? []), e]);
     for (const [ws, list] of byWs) {
@@ -100,20 +100,23 @@ export function withEmailProfileEvents(store: EventStore, deps: { db: Db; bus: E
         ];
       });
       if (!items.length) continue;
+      // The outbox passes when its batch was queued, so a late delivery keeps its original age
+      // (#1027); a direct write (a click on its way back to the reader) is received now.
       const { accepted } = acceptInternalItems(
         items,
         { id: 'email', workspaceId: ws, kind: 'server', requiredPurpose: null },
         await loadPolicy(ws),
+        receivedAt ? { receivedAt } : undefined,
       );
       if (accepted.length) await deps.bus.publish(accepted);
     }
   }
   return {
     ...store,
-    async insertMessageEvents(events) {
-      await store.insertMessageEvents(events);
+    async insertMessageEvents(events, opts) {
+      await store.insertMessageEvents(events, opts);
       // Best effort: the message log is the record; the customer events are derived from it.
-      await publish(events).catch((err) => logger.warn({ err }, 'e-mail events not published as customer events'));
+      await publish(events, opts?.receivedAt).catch((err) => logger.warn({ err }, 'e-mail events not published as customer events'));
     },
   };
 }

@@ -39,7 +39,8 @@ let clock = 0;
 const eventStore = { async insertJourneyEvents() {} } as unknown as EventStore;
 const deps = () => ({ kp, events: eventStore });
 
-const at = () => new Date(Date.UTC(2026, 0, 1, 0, clock++)).toISOString();
+/** Recent receive times, so the delivery-age bound (#1027) does not refuse these events. */
+const at = () => new Date(Date.now() - 60_000 + clock++ * 1000).toISOString();
 
 beforeAll(async () => {
   if (!hasTestDatabase()) return;

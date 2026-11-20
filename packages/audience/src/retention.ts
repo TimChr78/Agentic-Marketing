@@ -16,7 +16,9 @@ import { logger } from '@agentic-marketing/telemetry';
 //   queue are recent-window reads, so old rows are not kept (#488).
 // - Unknown input-key evidence after 30 days: recent behaviour is what a strict-mode rollout needs.
 // - The journey hook's per-event markers after the event replay window (30 days, the longest JetStream
-//   keeps an event): older markers can no longer suppress a redelivery (#1011 review).
+//   keeps an event): older markers can no longer suppress a redelivery (#1011 review). The hook's own
+//   delivery-age bound (`JOURNEY_EVENT_MAX_AGE_DAYS`) stays inside this window, so a pruned marker
+//   cannot re-enable an event (#1027).
 
 export interface RetentionDeps {
   db: Db;

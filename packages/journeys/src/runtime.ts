@@ -1,7 +1,7 @@
 import { artifactTypes, canonicalPeople, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
 import { newId, safeErrorText, sleep } from '@agentic-marketing/core';
-import { type Db, schema, type Tx } from '@agentic-marketing/db';
+import { assertJourneyEventAgeBound, type Db, JOURNEY_EVENT_MAX_AGE_DAYS, schema, type Tx } from '@agentic-marketing/db';
 import { fingerprintParts, requestEmail, requestPush, requestSms, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
 import {
@@ -25,6 +25,7 @@ import { duplicateEntryKey, noteEntrySkip, resolveEntryKey } from './entry';
 import { compile, type Graph } from './graph';
 import { assignHoldout, holdoutDetail } from './holdout';
 import { type AiOutcome, advance, type Effect, type ParticipantState, type Step } from './interpreter';
+import { noteJourneyEventTooOld } from './metrics';
 
 // The journey runtime (ADR-0004): trigger matching and wake-ups run as a post-commit hook of the
 // profile workers; the sweeper (worker role) advances due participants in batches.
@@ -244,13 +245,65 @@ export async function wakeWaiters(
 }
 
 /**
+ * How old a delivery may be, measured from the event's receive time (#1027). Kept in the database
+ * package beside the marker retention, because it has to stay strictly inside it.
+ */
+const MAX_EVENT_AGE_MS = JOURNEY_EVENT_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+/**
+ * How far ahead of the local clock a receive time may be before it is treated as a clock problem
+ * (#1027). No ingest path stamps a future time, but replicas' clocks differ by seconds; anything
+ * beyond this cannot be trusted to describe the delivery.
+ */
+const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
+
+/**
+ * Whether an event is young enough to apply (#1027). The age is measured from `receivedAt`, the
+ * server's own receive time: it is written at ingest and every redelivery carries it unchanged. The
+ * event's `timestamp` is the sender's and may be deliberately historical (an import of an old
+ * signup, a backfill), so it says when something happened, not when the delivery arrived, and
+ * cannot prove a redelivery is fresh. A receive time that cannot be read proves nothing at all, and
+ * one more than a few minutes in the future is a clock problem rather than a fresh delivery; both
+ * are treated as too old.
+ */
+export function withinDeliveryAge(receivedAt: string, now: number): boolean {
+  const received = Date.parse(receivedAt);
+  if (!Number.isFinite(received)) return false;
+  const age = now - received;
+  return age <= MAX_EVENT_AGE_MS && age >= -MAX_FUTURE_SKEW_MS;
+}
+
+/**
+ * The batch's events that are young enough to apply (#1027). The others are refused here, before
+ * the transaction and before any write: an event the stream replays after its marker was pruned
+ * must not enrol its person again or satisfy a wait, and a marker is never needed for it because
+ * the age check refuses every later delivery too. They are counted and logged at debug level; no
+ * event id goes into the line, because a caller-supplied id can name the person.
+ */
+function recentEvents(resolved: ResolvedEvent[], now = Date.now()): ResolvedEvent[] {
+  const recent: ResolvedEvent[] = [];
+  for (const r of resolved) {
+    if (withinDeliveryAge(r.event.receivedAt, now)) {
+      recent.push(r);
+      continue;
+    }
+    noteJourneyEventTooOld();
+    const age = now - Date.parse(r.event.receivedAt);
+    logger.debug(
+      { event: r.event.name, ageDays: Number.isFinite(age) ? Math.round(age / (24 * 60 * 60 * 1000)) : null },
+      'journey event ignored: received before the delivery-age bound (#1027)',
+    );
+  }
+  return recent;
+}
+
+/**
  * The events of this batch the journey hook has not applied yet. A redelivered event has a row from
  * the transaction that enrolled someone, or woke someone waiting for it, and is skipped entirely:
  * its enrolment and the wake-up it caused happened exactly once (#1011 review, #1052).
  *
- * The marker's age bound is the same for both kinds (retention prunes them after 30 days, the
- * upstream stream's own replay window); a delivery older than that can be re-applied. Bounding a
- * delivery's age at enrolment is #1027, which would close that window for both markers.
+ * The age bound in `recentEvents` keeps this marker's window honest for both kinds (#1027): an
+ * event is only applied while a delivery of it is young enough that the marker written then still
+ * exists, so a pruned marker can never re-enable the same event.
  */
 async function freshEvents(tx: Tx, workspaceId: string, resolved: ResolvedEvent[]): Promise<ResolvedEvent[]> {
   if (!resolved.length) return [];
@@ -331,8 +384,15 @@ async function wakeWaitUntil(tx: Tx, workspaceId: string, resolved: ResolvedEven
  * batch is delivered.
  */
 export function journeyHook(db: Db, deps: JourneyDeps) {
+  // Startup assertion (#1027): the age bound has to stay inside the marker retention, and a
+  // drifted constant must fail here instead of silently re-enabling duplicate enrolments.
+  assertJourneyEventAgeBound();
   return async (workspaceId: string, resolved: ResolvedEvent[]) => {
     if (!resolved.length) return;
+    // Refused before the transaction: an event past the age bound neither enrols nor wakes anyone,
+    // for this delivery or a later replay (#1027).
+    const recent = recentEvents(resolved);
+    if (!recent.length) return;
     let holdout: JourneyEvent[] = [];
     // One transaction for the writes an event causes: enrolment and the wake-up of the people
     // already waiting for it see the same state, so a participant this event enrols cannot be woken
@@ -340,7 +400,7 @@ export function journeyHook(db: Db, deps: JourneyDeps) {
     // keeps a merge from interleaving, and no network I/O runs under it.
     await db.withWorkspace(workspaceId, (tx) =>
       withIdentityLock(tx, workspaceId, async () => {
-        const fresh = await freshEvents(tx, workspaceId, resolved);
+        const fresh = await freshEvents(tx, workspaceId, recent);
         if (!fresh.length) return;
         const entered = await enterJourneys(tx, workspaceId, fresh);
         holdout = entered.holdout;
@@ -351,8 +411,9 @@ export function journeyHook(db: Db, deps: JourneyDeps) {
       }),
     );
     // Wait-until conditions may reach ClickHouse, so this recheck runs in its own transaction,
-    // without the lock. It is idempotent, and the sweeper rechecks the same conditions later.
-    await db.withWorkspace(workspaceId, (tx) => wakeWaitUntil(tx, workspaceId, resolved, deps));
+    // without the lock. It is idempotent, and the sweeper rechecks the same conditions later. It
+    // sees the same age-filtered batch, so an old replay cannot satisfy a wait here either (#1027).
+    await db.withWorkspace(workspaceId, (tx) => wakeWaitUntil(tx, workspaceId, recent, deps));
     // ClickHouse is outside the transaction: an assignment that committed but whose event did not
     // is still measured from the table, and a lost event only affects the timeline.
     if (holdout.length) {

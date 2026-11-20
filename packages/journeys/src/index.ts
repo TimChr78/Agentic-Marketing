@@ -6,6 +6,7 @@ export * from './graph';
 export * from './holdout';
 export * from './impact';
 export * from './interpreter';
+export * from './metrics';
 export * from './runtime';
 export * from './split';
 export * from './splitReport';

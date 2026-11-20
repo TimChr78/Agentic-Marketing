@@ -146,4 +146,30 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     await d.db.admin.query('UPDATE erasure_generations SET purge_last_sweep_at = now() WHERE workspace_id = $1', [d.workspace]);
     expect((await check('queue.erasurePurge'))?.status).toBe('ok');
   });
+
+  it('names the journey triggers a too-old outbox row can no longer deliver (#1027 review)', async () => {
+    // The journey hook refuses an event received more than seven days ago, and a queued row keeps
+    // the age it had when it was written. `am outbox` can requeue such a row, but the trigger in it
+    // stays refused, so the check has to say so instead of only reporting a backlog.
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts, failure_kind, created_at, last_error)
+       VALUES ($1, 'obx_ops_stale', 'message_event', '{}', 'ops-stale', 'failed', 1, 'exhausted',
+               now() - interval '8 days', 'ClickHouse unavailable')`,
+      [d.workspace],
+    );
+
+    const failed = await outboxCheck();
+    expect(failed).toMatchObject({ status: 'warn' });
+    expect(failed?.message).toContain('outbox row(s) failed after their retries');
+    expect(failed?.message).toContain('1 row(s) are older than the 7-day journey delivery bound');
+    expect(failed?.message).toContain('journey triggers in them will be ignored');
+    expect(failed?.message).toContain('re-enrol segment journeys with `journeys.enrollSegment`');
+
+    // Requeueing resets the attempts, not the row's age: the note must survive it.
+    await expect(requeueFailedOutbox(d.db, { kind: 'message_event' })).resolves.toEqual({ requeued: 1, skippedPermanent: 0 });
+    const pending = await outboxCheck();
+    expect(pending).toMatchObject({ status: 'warn' });
+    expect(pending?.message).toContain('1 row(s) are older than the 7-day journey delivery bound');
+    expect(pending?.message).toContain('journey triggers in them will be ignored');
+  });
 });
