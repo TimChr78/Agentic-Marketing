@@ -1,13 +1,33 @@
 {{- if .Values.migrations.enabled }}
+# The release ConfigMap and Secret are created after a pre-install hook, so the hook carries its
+# own copies. They are deleted when the job succeeds and kept when it fails, so the logs and the
+# configuration can be inspected. The job mounts them in the same order as the role Deployments:
+# ConfigMap first, Secret second, so a Secret value wins over the chart default (#1159).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "am.fullnameFor" (dict "root" . "suffix" "migrate-config") }}
+  labels: {{- include "am.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+{{- if not (hasKey .Values.config "PORT") }}
+  PORT: {{ .Values.port | quote }}
+{{- end }}
+{{- range $k, $v := .Values.config }}
+{{- if ne (toString $v) "" }}
+  {{ $k }}: {{ $v | toString | quote }}
+{{- end }}
+{{- end }}
 {{- if not .Values.secrets.existingSecret }}
-# The release Secret is created after a pre-install hook, so the hook gets its own copy. It is
-# deleted when the job succeeds and kept when it fails, so the logs and the configuration can be
-# inspected. Managed secrets.values roll the roles through checksum/secret in deployments.yaml.
 ---
 apiVersion: v1
 kind: Secret
 metadata:
-  name: {{ include "am.fullname" . }}-migrate-secrets
+  name: {{ include "am.fullnameFor" (dict "root" . "suffix" "migrate-secrets") }}
   labels: {{- include "am.labels" . | nindent 4 }}
   annotations:
     helm.sh/hook: pre-install,pre-upgrade
@@ -23,7 +43,7 @@ stringData:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "am.fullname" . }}-migrate-{{ .Release.Revision }}
+  name: {{ include "am.fullnameFor" (dict "root" . "suffix" (printf "migrate-%d" .Release.Revision)) }}
   labels: {{- include "am.labels" . | nindent 4 }}
   annotations:
     # Pre-install/pre-upgrade, never post-install. Helm runs post-install hooks after the release
@@ -42,6 +62,9 @@ spec:
       labels:
         {{- include "am.labels" . | nindent 8 }}
         app.kubernetes.io/component: migrate
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       restartPolicy: Never
       {{- if not .Values.serviceAccount.create }}
@@ -60,28 +83,29 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
           command: [pnpm, --filter, "@agentic-marketing/server", cli, migrate]
+          {{- with .Values.extraEnv }}
           env:
-            {{- if not (hasKey .Values.config "PORT") }}
-            - name: PORT
-              value: {{ .Values.port | quote }}
-            {{- end }}
-            {{- range $k, $v := .Values.config }}
-            {{- if ne (toString $v) "" }}
-            - name: {{ $k }}
-              value: {{ $v | toString | quote }}
-            {{- end }}
-            {{- end }}
-            {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
-            {{- end }}
+          {{- end }}
           envFrom:
+            - configMapRef:
+                name: {{ include "am.fullnameFor" (dict "root" . "suffix" "migrate-config") }}
             - secretRef:
-                name: {{ if .Values.secrets.existingSecret }}{{ include "am.secretName" . }}{{ else }}{{ include "am.fullname" . }}-migrate-secrets{{ end }}
+                name: {{ if .Values.secrets.existingSecret }}{{ include "am.secretName" . }}{{ else }}{{ include "am.fullnameFor" (dict "root" . "suffix" "migrate-secrets") }}{{ end }}
           resources: {{- toYaml .Values.migrations.resources | nindent 12 }}
           {{- with .Values.extraVolumeMounts }}
           volumeMounts: {{- toYaml . | nindent 12 }}
           {{- end }}
       {{- with .Values.extraVolumes }}
       volumes: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
       {{- end }}
 {{- end }}

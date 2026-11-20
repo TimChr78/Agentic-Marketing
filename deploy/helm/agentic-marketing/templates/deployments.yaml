@@ -4,7 +4,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "am.fullname" $ }}-{{ $role }}
+  name: {{ include "am.fullnameFor" (dict "root" $ "suffix" $role) }}
   labels:
     {{- include "am.labels" $ | nindent 4 }}
     app.kubernetes.io/component: {{ $role }}
@@ -20,7 +20,12 @@ spec:
   {{- if not (has $.Values.upgradeStrategy (list "Recreate" "RollingUpdate")) }}
   {{- fail "upgradeStrategy must be Recreate or RollingUpdate" }}
   {{- end }}
-  strategy: { type: {{ $.Values.upgradeStrategy }} }
+  {{- $strategy := $.Values.upgradeStrategy }}
+  # The scheduler's periodic loops are not leader-elected, so a RollingUpdate would run two of them
+  # during a rollout; it always recreates, whatever upgradeStrategy says (#1159).
+  {{- if eq $role "scheduler" }}{{ $strategy = "Recreate" }}
+  {{- end }}
+  strategy: { type: {{ $strategy }} }
   selector:
     matchLabels: {{- include "am.selector" (dict "root" $ "role" $role) | nindent 6 }}
   template:

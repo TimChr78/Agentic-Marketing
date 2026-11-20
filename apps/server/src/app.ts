@@ -42,7 +42,7 @@ import { MCP_MAX_BODY, mcpEndpoint } from './http/mcp';
 import { metricsHandler } from './http/metrics';
 import { consentPage, invitePage, loginPage, pageNonce, pagesCsp } from './http/pages';
 import { passwordResetRoutes } from './http/password-reset';
-import { DOMAIN_CHALLENGE, isBrandPath } from './http/public-only';
+import { DOMAIN_CHALLENGE, isBrandPath, isBrandSurfacePath, isPublicApiPath } from './http/public-only';
 import { rejectUnsafeRawPath } from './http/raw-path';
 import { createRequestAborts, withRequestAborts } from './http/request-aborts';
 import { restApi } from './http/rest';
@@ -347,7 +347,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     const host = c.req.header('host') ?? '';
     const forwarded = verifyBrandContext(c.req.header(BRAND_CONTEXT_HEADER), host);
     if (forwarded) {
-      if (!isBrandPath(path) && !exactProbe(path)) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      if (!isBrandSurfacePath(path) && !exactProbe(path) && !DOMAIN_CHALLENGE.test(path))
+        return c.json({ error: 'not_found', message: 'Not found.' }, 404);
       (c as unknown as Context<{ Variables: { publicRequest: PublicRequest } }>).set('publicRequest', forwarded);
       return next();
     }
@@ -355,14 +356,14 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     const brandPath = isBrandPath(path);
     const resolved = await domains.resolvePublicRequest(host, path);
     if (!resolved) {
-      if (brandPath) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      if (brandPath || (await domains.isBrandHost(host))) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
       return next();
     }
 
     if (resolved.pathPrefix && path.startsWith(resolved.pathPrefix)) {
       const stripped = path.slice(resolved.pathPrefix.length) || '/';
-      // A brand host serves only public paths; never the admin UI or REST through a prefix.
-      if (!isBrandPath(stripped) && !exactProbe(stripped)) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      // A brand host serves only its public surface; never the admin UI or REST through a prefix.
+      if (!isBrandSurfacePath(stripped) && !exactProbe(stripped)) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
       const url = new URL(c.req.url);
       url.pathname = stripped;
       const headers = new Headers(c.req.raw.headers);
@@ -386,7 +387,17 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       return app.fetch(inner, c.env, executionCtx);
     }
 
-    if (!brandPath) return next();
+    if (!brandPath) {
+      // A verified brand host serves the public surface only. Everything else — the admin UI,
+      // auth, MCP, SCIM, OpenAPI and admin REST — stays on the installation's own host (#1157).
+      // The public /v1 paths are part of that surface, like /f and /hooks.
+      if (isPublicApiPath(path)) {
+        (c as unknown as Context<{ Variables: { publicRequest: PublicRequest } }>).set('publicRequest', resolved);
+        return next();
+      }
+      if (resolved.matched) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      return next();
+    }
     (c as unknown as Context<{ Variables: { publicRequest: PublicRequest } }>).set('publicRequest', resolved);
     await next();
   });
@@ -568,10 +579,14 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     },
   );
 
+  // The public edge runs on api as well as ingest (#1157): a brand domain's path prefix reaches
+  // the api role through the Ingress, and the app strips the prefix here before routing. The
+  // unprefixed paths still go to ingest in a split installation, so both roles can serve them.
+  const publicEdge = config.roles.has('ingest') || config.roles.has('api');
   // The decision API goes first: the ingest routes claim every other /v1/<word> path.
-  if (config.roles.has('ingest')) app.route('/', decideApi({ db, hot }));
-  if (config.roles.has('ingest')) app.route('/', pushRoutes({ db, kp: keyProvider }));
-  if (config.roles.has('ingest'))
+  if (publicEdge) app.route('/', decideApi({ db, hot }));
+  if (publicEdge) app.route('/', pushRoutes({ db, kp: keyProvider }));
+  if (publicEdge)
     app.route('/', ingestApi({ db, bus, hot, clientIpHeaders: config.clientIpHeaders, trustedProxyCidrs: config.trustedProxyCidrs }));
   if (config.roles.has('api'))
     app.route(
@@ -587,14 +602,12 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         },
       }),
     );
-  if (config.roles.has('ingest')) app.route('/', inboundApi({ db, bus, kp: keyProvider, hot }));
+  if (publicEdge) app.route('/', inboundApi({ db, bus, kp: keyProvider, hot }));
   if (config.roles.has('api')) app.route('/', oauthRoutes({ db, kp: keyProvider, egress: config.egress }));
-  // Public asset links, on both roles that front the public edge (like /f and /u).
-  if (config.roles.has('api') || config.roles.has('ingest')) app.route('/', assetRoutes({ db }));
-  // The public newsletter archive and signed web versions, on the same links host (#100).
-  if (config.roles.has('api') || config.roles.has('ingest'))
-    app.route('/', archiveRoutes({ db, kp: keyProvider, links: email.links, linksUrl: config.linksUrl }));
-  if (config.roles.has('ingest'))
+  // The public asset links and newsletter archive, on both roles that front the public edge.
+  if (publicEdge) app.route('/', assetRoutes({ db }));
+  if (publicEdge) app.route('/', archiveRoutes({ db, kp: keyProvider, links: email.links, linksUrl: config.linksUrl }));
+  if (publicEdge)
     app.route(
       '/',
       formsApi({
@@ -628,7 +641,9 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   }
   if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider, origin, aborts: requestAborts }));
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
-  app.route('/', restApi({ auth, db, executor, assetMaxBytes: config.assetMaxBytes, origin }));
+  // Admin REST belongs to the api role (#1157). Ingress routes /v1/<command> here, never to
+  // ingest, so an ingest-only pod must not expose the command surface.
+  if (config.roles.has('api')) app.route('/', restApi({ auth, db, executor, assetMaxBytes: config.assetMaxBytes, origin }));
 
   // API-owned roots answer JSON on every role, even the ones whose implementation is not mounted
   // here (an api-only or ingest-only pod). An unmatched /hooks, /oauth or /scim path must never

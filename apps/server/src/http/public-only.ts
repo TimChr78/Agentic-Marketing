@@ -30,6 +30,28 @@ export function isBrandPath(path: string): boolean {
   return PUBLIC_ROOTS.has(root);
 }
 
+// The public API a brand host serves (#1157): the tracking gateway, the decision API, web push and
+// the consent banner's texts. Admin REST (/v1/<command>) is never one of them.
+const PUBLIC_V1 = new Set(['batch', 'b', 'track', 't', 'page', 'p', 'screen', 's', 'identify', 'i', 'group', 'g', 'alias', 'a', 'decide']);
+const PUBLIC_V1_PUSH = new Set(['config', 'subscribe', 'unsubscribe']);
+
+/** A public API path (`/v1/batch`, `/v1/decide`, `/v1/push/config`, `/v1/consent/purposes`). */
+export function isPublicApiPath(path: string): boolean {
+  const segments = path.split('/');
+  if (segments[0] !== '' || segments[1] !== 'v1') return false;
+  if (segments.length === 3) return PUBLIC_V1.has(segments[2]);
+  if (segments.length === 4) {
+    if (segments[2] === 'push') return PUBLIC_V1_PUSH.has(segments[3]);
+    return segments[2] === 'consent' && segments[3] === 'purposes';
+  }
+  return false;
+}
+
+/** Everything a resolved brand host may serve: its public roots and the public API. */
+export function isBrandSurfacePath(path: string): boolean {
+  return isBrandPath(path) || isPublicApiPath(path);
+}
+
 /**
  * The path prefix a Host serves (a verified brand domain's, or PUBLIC_LINKS_URL's), so a prefixed
  * path is only let through when that prefix is really registered for the host.

@@ -38,6 +38,16 @@ const good: Env = {
 
 const check = (env: Env, id: string): Check | undefined => offlineChecks(env).find((item) => item.id === id);
 
+describe('doctor hints name services that exist', () => {
+  it('points Compose operators at the app service, which runs every role (#1163)', async () => {
+    const source = await readFile(new URL('../src/ops/checks.ts', import.meta.url), 'utf8');
+    expect(source).toContain('docker compose logs app');
+    expect(source).not.toContain('docker compose logs worker');
+    // The Kubernetes note stays, because a split deployment has dedicated worker pods.
+    expect(source).toContain('worker pods');
+  });
+});
+
 afterEach(() => vi.restoreAllMocks());
 
 describe('am doctor offline checks', () => {

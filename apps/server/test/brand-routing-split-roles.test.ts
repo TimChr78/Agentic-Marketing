@@ -1,0 +1,189 @@
+import http from 'node:http';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { startTestServer, testPort, type User } from './harness';
+
+// #1157: split api/ingest roles. The Ingress sends the public paths to ingest and everything else
+// to api, but a brand domain's registered path prefix (/am) reaches api, so api must mount the
+// public routers too. Admin REST belongs to api only; an ingest pod must not serve it.
+
+const API_PORT = testPort(3460);
+const INGEST_PORT = testPort(3462);
+const PREFIXED = 'prefixed-split.example';
+const SITE = 'https://prefixed-split.example';
+
+type Reply = { status: number; body: string; headers: http.IncomingHttpHeaders };
+
+const request = (
+  port: number,
+  path: string,
+  options: { method?: string; host?: string; body?: string; headers?: Record<string, string> } = {},
+) =>
+  new Promise<Reply>((resolve, reject) => {
+    const req = http.request(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method: options.method ?? 'GET',
+        headers: { host: options.host ?? `localhost:${port}`, ...(options.headers ?? {}) },
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body, headers: res.headers }));
+      },
+    );
+    req.on('error', reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+
+let api: Awaited<ReturnType<typeof startTestServer>>;
+let ingest: Awaited<ReturnType<typeof startTestServer>>;
+let owner: User;
+let workspaceId = '';
+let formId = '';
+
+beforeAll(async () => {
+  api = await startTestServer('test_brand_split_api', API_PORT, {
+    ROLE: 'api',
+    PUBLIC_URL: `http://localhost:${API_PORT}`,
+    PUBLIC_LINKS_URL: `http://localhost:${API_PORT}`,
+  });
+  ingest = await startTestServer('test_brand_split_ingest', INGEST_PORT, {
+    ROLE: 'ingest',
+    PUBLIC_URL: `http://localhost:${INGEST_PORT}`,
+    PUBLIC_LINKS_URL: `http://localhost:${INGEST_PORT}`,
+  });
+
+  owner = await api.signUp(`brand-split-${Date.now()}@example.com`);
+  workspaceId = await api.workspaceWith([[owner, 'owner']], 'none');
+
+  api.srv.services.fetchDomainChallenge = async (url) => ({
+    status: 200,
+    body: decodeURIComponent(new URL(url).pathname.split('/').pop() ?? ''),
+  });
+  const added = await api.api(owner, workspaceId).call('workspace.domains.add', { host: PREFIXED, pathPrefix: '/am' });
+  const challenge = await request(API_PORT, `/am/.well-known/am-domain/${added.domain.verificationToken}`, { host: PREFIXED });
+  expect(challenge.status).toBe(200);
+  const verified = await api.api(owner, workspaceId).call('workspace.domains.verify', { id: added.domain.id });
+  expect(verified.domain.status).toBe('verified');
+
+  const created = await api.api(owner, workspaceId).call('artifacts.create', {
+    type: 'form',
+    name: 'Split-role form',
+    content: {
+      purposes: ['marketing_email'],
+      doubleOptIn: false,
+      consentText: 'Send me the newsletter.',
+      successUrl: `${SITE}/thanks`,
+      confirmedUrl: `${SITE}/welcome`,
+      allowedOrigins: [SITE],
+    },
+  });
+  await api.api(owner, workspaceId).call('artifacts.requestPublish', { artifactId: created.artifactId, note: 'split role test' });
+  formId = created.artifactId;
+}, 120_000);
+
+afterAll(async () => {
+  await api?.close();
+  await ingest?.close();
+});
+
+describe('path-prefixed brand routes on an api-only role (#1157)', () => {
+  it('serves a form post under the registered prefix', async () => {
+    const res = await request(API_PORT, `/am/f/${formId}`, {
+      method: 'POST',
+      host: PREFIXED,
+      body: new URLSearchParams({ email: `split-${Date.now()}@example.com` }).toString(),
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: SITE },
+    });
+    expect(res.status).toBe(303);
+    expect(res.headers.location).toBe(`${SITE}/thanks`);
+  });
+
+  it('serves the public /v1 routes under the prefix, not admin REST', async () => {
+    const batch = await request(API_PORT, '/am/v1/batch', {
+      method: 'POST',
+      host: PREFIXED,
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(batch.status).toBe(401);
+    expect(JSON.parse(batch.body)).toMatchObject({ error: 'invalid_write_key' });
+
+    const purposes = await request(API_PORT, '/am/v1/consent/purposes?writeKey=unknown', { host: PREFIXED });
+    expect(purposes.status).toBe(401);
+
+    const decide = await request(API_PORT, '/am/v1/decide', {
+      method: 'POST',
+      host: PREFIXED,
+      body: 'not json',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(decide.status).toBe(400);
+    expect(JSON.parse(decide.body)).toMatchObject({ error: 'invalid_json' });
+
+    const push = await request(API_PORT, '/am/v1/push/subscribe', {
+      method: 'POST',
+      host: PREFIXED,
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect([400, 401]).toContain(push.status);
+
+    // Admin REST is never a brand path, with or without the prefix.
+    for (const path of ['/am/v1/workspace.get', '/v1/workspace.get']) {
+      const res = await request(API_PORT, path, {
+        method: 'POST',
+        host: PREFIXED,
+        body: '{}',
+        headers: { 'content-type': 'application/json' },
+      });
+      expect(res.status, path).toBe(404);
+      expect(JSON.parse(res.body), path).toMatchObject({ error: 'not_found', message: 'Not found.' });
+    }
+  });
+
+  it('reaches the inbound webhook route under the prefix', async () => {
+    const res = await request(API_PORT, '/am/hooks/in/conn_missing/token', {
+      method: 'POST',
+      host: PREFIXED,
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    // The inbound handler answers its own 404; a missing mount would answer "Not found.".
+    expect(res.status).toBe(404);
+    expect(JSON.parse(res.body)).toMatchObject({ error: 'not_found', message: 'Unknown or disabled webhook URL.' });
+  });
+
+  it('keeps admin REST on the api role', async () => {
+    const call = await api.api(owner, workspaceId).call('workspace.get', {});
+    expect(call.id).toBe(workspaceId);
+    expect((await request(API_PORT, '/openapi.json')).status).toBe(200);
+  });
+});
+
+describe('admin REST is api-only (#1157)', () => {
+  it('does not mount the command surface on an ingest pod', async () => {
+    const rest = await request(INGEST_PORT, '/v1/workspace.get', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(rest.status).toBe(404);
+    expect((await request(INGEST_PORT, '/openapi.json')).status).toBe(404);
+  });
+
+  it('still serves the public paths on an ingest pod', async () => {
+    const batch = await request(INGEST_PORT, '/v1/batch', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(batch.status).toBe(401);
+  });
+});

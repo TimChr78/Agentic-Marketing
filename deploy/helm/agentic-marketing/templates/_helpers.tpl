@@ -5,6 +5,21 @@
 {{- else -}}{{ printf "%s-%s" .Release.Name .Chart.Name | trunc 63 | trimSuffix "-" }}{{- end -}}
 {{- end -}}
 
+{{/*
+A name with a role or hook suffix. am.fullname is already at most 63 characters, so appending to
+it can pass Kubernetes's DNS-label limit; truncate the base enough to keep the suffix, so two
+resources never collapse onto the same name (#1159). A name that already fits is unchanged.
+*/}}
+{{- define "am.fullnameFor" -}}
+{{- $base := include "am.fullname" .root }}
+{{- $name := printf "%s-%s" $base .suffix }}
+{{- if gt (len $name) 63 -}}
+{{- printf "%s-%s" (trunc (int (sub 62 (len .suffix))) $base | trimSuffix "-") .suffix -}}
+{{- else -}}
+{{- $name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "am.labels" -}}
 app.kubernetes.io/name: {{ include "am.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -21,7 +36,7 @@ app.kubernetes.io/component: {{ .role }}
 
 {{- define "am.image" -}}{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}{{- end -}}
 
-{{- define "am.secretName" -}}{{ .Values.secrets.existingSecret | default (printf "%s-secrets" (include "am.fullname" .)) }}{{- end -}}
+{{- define "am.secretName" -}}{{ .Values.secrets.existingSecret | default (include "am.fullnameFor" (dict "root" . "suffix" "secrets")) }}{{- end -}}
 
 {{- define "am.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create -}}{{ .Values.serviceAccount.name | default (include "am.fullname" .) }}

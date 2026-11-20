@@ -93,6 +93,59 @@ function helmSection(text: string, name: string): string {
   return end < 0 ? body : body.slice(0, end);
 }
 
+// Render tests run the real chart. CI installs helm; a local checkout may have it on PATH or at
+// the tools directory. Without it the render checks skip, while the template-reading checks above
+// still run everywhere.
+const helm = ['helm', '/mnt/user/appdata/t3code/tools/bin/helm'].find((candidate) => {
+  const probe = spawnSync(candidate, ['version', '--short'], { encoding: 'utf8' });
+  return probe.status === 0;
+});
+
+function helmTemplate(args: string[] = [], release = 'am'): string {
+  const run = spawnSync(
+    helm!,
+    ['template', release, 'deploy/helm/agentic-marketing', '--set', 'secrets.existingSecret=am-secrets', ...args],
+    {
+      cwd: root,
+      encoding: 'utf8',
+    },
+  );
+  if (run.status !== 0) throw new Error(`helm template failed: ${run.stderr || run.stdout}`);
+  return run.stdout;
+}
+
+function helmTemplateError(args: string[] = [], release = 'am'): string {
+  const run = spawnSync(
+    helm!,
+    ['template', release, 'deploy/helm/agentic-marketing', '--set', 'secrets.existingSecret=am-secrets', ...args],
+    {
+      cwd: root,
+      encoding: 'utf8',
+    },
+  );
+  if (run.status === 0) throw new Error('helm template rendered, expected it to fail');
+  return `${run.stdout ?? ''}${run.stderr ?? ''}`;
+}
+
+interface Manifest {
+  kind: string;
+  name: string;
+  text: string;
+}
+
+/** The rendered documents, so a test can name the object it asserts on. */
+function parseManifests(rendered: string): Manifest[] {
+  return rendered
+    .split(/^---$/m)
+    .map((text) => text.trim())
+    .filter(Boolean)
+    .map((text) => ({
+      text,
+      kind: /^kind: (\S+)$/m.exec(text)?.[1] ?? '',
+      name: /^ {2}name: (\S+)$/m.exec(text)?.[1] ?? '',
+    }));
+}
+
 describe('compose deployment configuration', () => {
   const app = service(compose, 'app');
   const clickhouse = service(compose, 'clickhouse');
@@ -189,6 +242,18 @@ describe('compose override example', () => {
     expect(composeOverride).toContain('/srv/am/nats:/data');
     expect(composeOverride).toMatch(/mem_limit:/);
     expect(composeOverride).toMatch(/#\s+command: \["am", "backup", "--schedule"/);
+  });
+
+  it('mounts the PostgreSQL bind directory on the version guard too (#1161)', () => {
+    // The guard selects the volume by service name; a named-volume mount would inspect an empty
+    // volume and let PostgreSQL 18 start on a 16 data directory.
+    expect(composeOverride).toContain('/srv/am/pgdata:/var/lib/postgresql/data:ro');
+    expect(composeOverride).toMatch(/#\s+postgres-check:\n#\s+volumes:\n#\s+- \/srv\/am\/pgdata:\/var\/lib\/postgresql\/data:ro/);
+  });
+
+  it('widens the admin bind by setting AM_BIND, never by editing the release file (#1161)', () => {
+    expect(composeOverride).toContain('set `AM_BIND` in `.env`');
+    expect(composeOverride).not.toMatch(/edit the release file/i);
   });
 });
 
@@ -400,12 +465,11 @@ describe('Helm rollout, migration and replica reporting', () => {
 
   it('recreates every writer role by default and renders RollingUpdate when drained externally (#1066)', () => {
     // The 0.15.0 lock protocol forbids two writers of different versions at once. One strategy line
-    // covers every role in the range; api, ingest, worker and scheduler all write.
-    expect(helmDeployments).toMatch(/strategy: \{ type: \{\{ \$\.Values\.upgradeStrategy \}\} \}/);
-    const strategy = helmDeployments.indexOf('strategy: { type: {{ $.Values.upgradeStrategy }} }');
-    expect(strategy).toBeGreaterThan(0);
-    expect(helmDeployments.slice(0, strategy)).not.toContain('if eq $role "scheduler"');
-    expect(helmDeployments.slice(0, strategy)).toContain('range $role, $r := .Values.roles');
+    // covers every role in the range; api, ingest, worker and scheduler all write. The scheduler
+    // always recreates, because its periodic loops are not leader-elected (#1159).
+    expect(helmDeployments).toContain('strategy: { type: {{ $strategy }} }');
+    expect(helmDeployments).toContain('{{- $strategy := $.Values.upgradeStrategy }}');
+    expect(helmDeployments).toContain('{{- if eq $role "scheduler" }}{{ $strategy = "Recreate" }}');
     expect(helmValues).toMatch(/^upgradeStrategy: Recreate$/m);
     expect(helmValues).toMatch(/RollingUpdate/);
 
@@ -421,8 +485,8 @@ describe('Helm rollout, migration and replica reporting', () => {
     expect(helmMigrateJob).toMatch(/helm\.sh\/hook:\s*pre-install,pre-upgrade/);
     expect(helmMigrateJob).not.toMatch(/helm\.sh\/hook:.*post-install/);
     expect(helmMigrateJob).toContain('range $k, $v := .Values.config');
-    expect(helmMigrateJob).not.toContain('configMapRef');
-    expect(helmMigrateJob).toContain('-migrate-secrets');
+    expect(helmMigrateJob).toContain('configMapRef');
+    expect(helmMigrateJob).toContain('"migrate-secrets"');
     expect(helmMigrateJob).toContain('if not .Values.serviceAccount.create');
     expect(kubeDoc).toContain('pre-install/pre-upgrade');
     expect(kubeDoc).toMatch(/--wait/);
@@ -474,7 +538,7 @@ describe('Helm role ports and probes (#645, #649)', () => {
     expect(helmConfigMap).not.toMatch(/PORT:\s*"3000"/);
     expect(container).not.toMatch(/containerPort:\s*3000/);
     expect(helmServices).toContain('targetPort: {{ $.Values.port }}');
-    expect(helmMigrateJob).toMatch(/value: \{\{ \.Values\.port \| quote \}\}/);
+    expect(helmMigrateJob).toMatch(/PORT: \{\{ \.Values\.port \| quote \}\}/);
     expect(helmMigrateJob).not.toMatch(/value:\s*"3000"/);
   });
 
@@ -501,6 +565,132 @@ describe('Helm refuses a divergent config.PORT (#774)', () => {
   it('renders the mismatch in CI and expects the failure', () => {
     expect(ci).toContain('--set config.PORT=3001');
     expect(ci).toContain("grep -q 'config.PORT is 3001'");
+  });
+});
+
+describe('Helm migrate hook configuration (#1159)', () => {
+  it.skipIf(!helm)('mounts the ConfigMap before the Secret, like the role Deployments', () => {
+    const manifests = parseManifests(helmTemplate());
+    const job = manifests.find((manifest) => manifest.kind === 'Job');
+    expect(job?.name).toMatch(/migrate/);
+    // Explicit env overrides envFrom in Kubernetes, so a release ConfigMap value used to shadow a
+    // Secret-backed CLICKHOUSE_URL and fail the migration. Both sources now go through envFrom.
+    expect(job!.text).not.toMatch(/^\s+- name: CLICKHOUSE_URL$/m);
+    const configMap = job!.text.indexOf('configMapRef:');
+    const secret = job!.text.indexOf('secretRef:');
+    expect(configMap).toBeGreaterThanOrEqual(0);
+    expect(secret).toBeGreaterThan(configMap);
+
+    const hookConfig = manifests.find((manifest) => manifest.kind === 'ConfigMap' && manifest.name.endsWith('-migrate-config'));
+    expect(hookConfig).toBeTruthy();
+    expect(hookConfig!.text).toContain('helm.sh/hook: pre-install,pre-upgrade');
+    expect(hookConfig!.text).toContain('CLICKHOUSE_URL: "http://clickhouse:8123"');
+    expect(hookConfig!.text).toContain('PORT: "3000"');
+  });
+
+  it.skipIf(!helm)('gives the migration Job the roles’ pod placement and annotations', () => {
+    const manifests = parseManifests(
+      helmTemplate([
+        '--set',
+        'nodeSelector.disk=ssd',
+        '--set',
+        'podAnnotations.team=platform',
+        '--set-json',
+        'tolerations=[{"key":"dedicated","operator":"Exists"}]',
+        '--set-json',
+        'affinity={"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[]}}}',
+      ]),
+    );
+    const job = manifests.find((manifest) => manifest.kind === 'Job');
+    expect(job!.text).toContain('team: platform');
+    expect(job!.text).toContain('disk: ssd');
+    expect(job!.text).toContain('key: dedicated');
+    expect(job!.text).toContain('nodeAffinity');
+  });
+});
+
+describe('Helm rollout strategy and names (#1159)', () => {
+  it.skipIf(!helm)('forces the scheduler to Recreate while the other roles follow upgradeStrategy', () => {
+    const manifests = parseManifests(helmTemplate(['--set', 'upgradeStrategy=RollingUpdate']));
+    const deployment = (suffix: string) =>
+      manifests.find((manifest) => manifest.kind === 'Deployment' && manifest.name.endsWith(`-${suffix}`));
+    expect(deployment('scheduler')!.text).toContain('strategy: { type: Recreate }');
+    expect(deployment('api')!.text).toContain('strategy: { type: RollingUpdate }');
+    expect(helmTemplateError(['--set', 'upgradeStrategy=Rolling'])).toContain('upgradeStrategy must be Recreate or RollingUpdate');
+  });
+
+  it.skipIf(!helm)('keeps every suffixed name within the 63-character DNS label limit', () => {
+    const release = `am-${'a'.repeat(47)}`;
+    expect(release.length).toBe(50);
+    const manifests = parseManifests(helmTemplate([], release));
+    const names = manifests.map((manifest) => manifest.name).filter(Boolean);
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) expect(name.length, name).toBeLessThanOrEqual(63);
+    // The suffixes that used to overflow the limit are all still there, and distinct.
+    expect(names.some((name) => name.endsWith('-migrate-1'))).toBe(true);
+    expect(names.some((name) => name.endsWith('-scheduler'))).toBe(true);
+    const managed = parseManifests(helmTemplate(['--set', 'secrets.existingSecret=', '--set', 'secrets.values.AUTH_SECRET=test'], release));
+    const managedNames = managed.map((manifest) => manifest.name).filter(Boolean);
+    expect(managedNames.some((name) => name.endsWith('-migrate-secrets'))).toBe(true);
+    // A truncated base must still leave distinct names for the four roles.
+    for (const kind of ['Deployment', 'Service', 'PodDisruptionBudget']) {
+      const ofKind = managed.filter((manifest) => manifest.kind === kind).map((manifest) => manifest.name);
+      expect(new Set(ofKind).size, kind).toBe(ofKind.length);
+    }
+  });
+});
+
+describe('Helm disruption budgets (#1159)', () => {
+  const pdbs = (args: string[] = []) =>
+    parseManifests(helmTemplate(args))
+      .filter((manifest) => manifest.kind === 'PodDisruptionBudget')
+      .map((manifest) => manifest.name);
+
+  it.skipIf(!helm)('emits one for each replicated role by default', () => {
+    const names = pdbs();
+    expect(names).toHaveLength(3);
+    expect(names.some((name) => name.endsWith('-api'))).toBe(true);
+    expect(names.some((name) => name.endsWith('-ingest'))).toBe(true);
+    expect(names.some((name) => name.endsWith('-worker'))).toBe(true);
+  });
+
+  it.skipIf(!helm)('skips a PDB when the role cannot lose a pod', () => {
+    // The documented ≤100k sizing runs one replica per role; minAvailable 1 would block every drain.
+    expect(pdbs(['--set', 'roles.api.replicas=1', '--set', 'roles.ingest.replicas=1', '--set', 'roles.worker.replicas=1'])).toEqual([]);
+    // An autoscaled role uses its minimum, not the static replica count.
+    const autoscaled = pdbs(['--set', 'roles.ingest.autoscaling.enabled=true', '--set', 'roles.ingest.autoscaling.minReplicas=1']);
+    expect(autoscaled.some((name) => name.endsWith('-ingest'))).toBe(false);
+    // minAvailable at or above the minimum is the same drain block.
+    expect(pdbs(['--set', 'podDisruptionBudget.minAvailable=2'])).toEqual([]);
+  });
+});
+
+describe('Helm Ingress routing (#1157)', () => {
+  it.skipIf(!helm)('sends only the public /v1 paths to ingest and admin REST to api', () => {
+    const manifests = parseManifests(
+      helmTemplate([
+        '--set',
+        'ingress.enabled=true',
+        '--set',
+        'config.TRUSTED_PROXY_CIDRS=10.244.0.0/16',
+        '--set',
+        'ingress.extraHosts={links.example.com}',
+      ]),
+    );
+    const ingress = manifests.find((manifest) => manifest.kind === 'Ingress');
+    const routes = new Map(
+      [...ingress!.text.matchAll(/- path: (\S+)\n\s+pathType: Prefix\n\s+backend: \{ service: \{ name: ([^,]+),/g)].map((match) => [
+        match[1],
+        match[2].trim(),
+      ]),
+    );
+    for (const path of ['/f/', '/hooks/in/', '/v1/batch', '/v1/track', '/v1/decide', '/v1/push', '/v1/consent/purposes']) {
+      expect(routes.get(path), path).toMatch(/-ingest$/);
+    }
+    expect(routes.get('/')).toMatch(/-api$/);
+    // Admin REST stays on api; a blanket /v1/ prefix must never send it to ingest.
+    expect(routes.has('/v1/')).toBe(false);
+    expect(routes.get('/v1/workspace.get')).toBeUndefined();
   });
 });
 

@@ -9,12 +9,12 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "am.fullname" $ }}-{{ $role }}
+  name: {{ include "am.fullnameFor" (dict "root" $ "suffix" $role) }}
   labels:
     {{- include "am.labels" $ | nindent 4 }}
     app.kubernetes.io/component: {{ $role }}
 spec:
-  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "am.fullname" $ }}-{{ $role }} }
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "am.fullnameFor" (dict "root" $ "suffix" $role) }} }
   minReplicas: {{ $min }}
   maxReplicas: {{ .maxReplicas | default $min }}
   metrics:

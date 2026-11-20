@@ -17,7 +17,7 @@
 # published. The release mapping's default host side is 127.0.0.1:3201 (loopback only), so it never
 # takes the admin port. If the tunnel is on another host instead, keep the mapping and set
 # PUBLIC_BIND=0.0.0.0:3001 in .env. The admin mapping stays loopback-only through AM_BIND (default
-# 127.0.0.1); drop `!override` and edit the release file's mapping if you mean to widen it.
+# 127.0.0.1); set `AM_BIND` in `.env` if you mean to widen it.
 #
 # services:
 #   app:
@@ -47,6 +47,11 @@
 #   postgres:
 #     volumes:
 #       - /srv/am/pgdata:/var/lib/postgresql/data
+#   # The one-shot guard inspects the same directory before Postgres 18 starts. Without this it
+#   # checks the named volume (empty) and passes a 16 bind mount to 18 (#1161).
+#   postgres-check:
+#     volumes:
+#       - /srv/am/pgdata:/var/lib/postgresql/data:ro
 #   clickhouse:
 #     volumes:
 #       - /srv/am/clickhouse:/var/lib/clickhouse

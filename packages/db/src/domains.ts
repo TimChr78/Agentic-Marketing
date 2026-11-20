@@ -174,6 +174,8 @@ export interface DomainResolverOptions {
 export interface WorkspaceDomainResolver {
   /** The workspace (and longest matching prefix) for a Host header and request path, or null. */
   resolveWorkspaceForRequest(host: string, path: string): Promise<ResolvedWorkspaceDomain | null>;
+  /** Whether Host is a verified brand host, whatever path it was asked for (#1157). */
+  isBrandHost(host: string): Promise<boolean>;
   /** The origin+prefix a workspace's primary domain serves, or null when it has no primary. */
   linksUrlFor(workspaceId: string): Promise<string | null>;
   /**
@@ -264,6 +266,15 @@ export function createWorkspaceDomainResolver(db: Db, options: DomainResolverOpt
         .sort((a, b) => (b.pathPrefix?.length ?? 0) - (a.pathPrefix?.length ?? 0));
       const domain = matches[0];
       return domain ? { domain, matchedPrefix: domain.pathPrefix } : null;
+    },
+    async isBrandHost(host) {
+      let normalizedHost: string;
+      try {
+        normalizedHost = normalizeHost(host);
+      } catch {
+        return false;
+      }
+      return (await load()).rows.some((row) => row.status === 'verified' && row.host === normalizedHost);
     },
     async linksUrlFor(workspaceId) {
       const domain = (await load()).rows.find((row) => row.workspaceId === workspaceId && row.isPrimary && row.status === 'verified');
