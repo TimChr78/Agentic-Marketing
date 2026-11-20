@@ -11,6 +11,10 @@ import { z } from 'zod';
 import { type CampaignMember, type CampaignRecord, goalEventsFor, loadCampaignRecord } from './campaign';
 import { identityQueryParams } from './identityParams';
 import { type AnalyticsResult, analyticsMeta, K, MAX_RANGE_DAYS, runAnalyticsQuery } from './query';
+import { summaryCurrency, summaryRevenue } from './revenue';
+
+/** The shared currency rule is exported from here for the campaign summary's callers (#958). */
+export { summaryCurrency, summaryRevenue };
 
 // The campaign summary (#66) is a named report over the campaign measures and the existing
 // e-mail measures. It keeps the raw runs out of the UI: the funnel, per-member rows and journey
@@ -494,34 +498,6 @@ export function planMemberSuppression(
 }
 
 /**
- * The headline revenue rows (#909): a currency the query suppressed keeps its row with a null
- * amount, so the reader knows the currency exists and the UI can still see that there is more than
- * one. Only a non-string currency or a value that is neither a number nor null is dropped.
- */
-export function summaryRevenue(
-  rows: readonly (readonly unknown[])[],
-  currencyIndex: number,
-  revenueIndex: number,
-): { currency: string; amount: number | null }[] {
-  return rows.flatMap((row) => {
-    const currency = row[currencyIndex];
-    const amount = row[revenueIndex];
-    return typeof currency === 'string' && (typeof amount === 'number' || amount === null) ? [{ currency, amount }] : [];
-  });
-}
-
-/**
- * The currency `meta.currency` may name (#958): exactly one revenue row, with a visible amount and
- * not `UNKNOWN`. A suppressed amount is withheld, so publishing its currency would tell a client the
- * campaign is measurable in it; the rule matches `analytics.query`'s `meta.currency`.
- */
-export function summaryCurrency(revenue: readonly { currency: string; amount: number | null }[]): string | null {
-  if (revenue.length !== 1) return null;
-  const row = revenue[0]!;
-  return row.amount === null || row.currency === 'UNKNOWN' ? null : row.currency;
-}
-
-/**
  * Progress towards a goal's target (#909). A revenue goal needs exactly one currency in total and a
  * visible amount: with a suppressed second currency the amounts cannot be compared, so progress is
  * withheld instead of computed from the visible one alone.
@@ -626,14 +602,21 @@ export const analyticsCampaignSummary = defineCommand({
       filters: queryFilters,
       limit: 1,
     });
-    const email = await runAnalyticsQuery(deps, {
-      measures: ['email.sent', 'email.delivered', 'email.clicked', 'email.unsubscribed', 'email.complained'],
-      dimensions: [],
-      from,
-      to,
-      filters: queryFilters,
-      limit: 1,
-    });
+    const email = await runAnalyticsQuery(
+      deps,
+      {
+        measures: ['email.sent', 'email.delivered', 'email.clicked', 'email.unsubscribed', 'email.complained'],
+        dimensions: [],
+        from,
+        to,
+        filters: queryFilters,
+        limit: 1,
+      },
+      // The e-mail headline resolves merges through the same campaign identity map as the
+      // recipients and member rows (#1049), so one person reached as an alias and a survivor
+      // counts once and the e-mail total cannot exceed the recipients total.
+      { identity },
+    );
     const revenue = await runAnalyticsQuery(deps, {
       measures: ['campaign.revenue'],
       dimensions: [],

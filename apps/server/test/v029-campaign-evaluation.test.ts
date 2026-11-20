@@ -537,6 +537,32 @@ describe('campaign dimension and filter', () => {
     expect(summary.meta.suppressed).toBe(1);
   });
 
+  it('does not name the currency of a suppressed revenue row in meta.currency (#1050)', async () => {
+    // One campaign, one currency, one buyer: the revenue cell is withheld below the converter floor,
+    // so meta.currency must not tell a client the campaign is measurable in EUR.
+    const broadcast = (
+      await api().call('artifacts.create', { type: 'broadcast', name: 'Single currency broadcast', content: { template, segment } })
+    ).artifactId;
+    await api().call('artifacts.requestPublish', { artifactId: broadcast, note: 'single currency broadcast' });
+    const campaign = await createCampaign('Single currency campaign', [broadcast], {}, '2026-06-01T00:00:00.000Z');
+    await api().call('artifacts.requestPublish', { artifactId: campaign, note: 'single currency campaign' });
+
+    const people = Array.from({ length: 6 }, person);
+    await t.srv.events.insertMessageEvents(messageEvents(wsA, broadcast, '2026-06-02T10:00:00.000Z', people, [6, 0, 0, 0]));
+    await t.srv.events.insert([goal(wsA, people[0]!, 2499, 'EUR', '2026-06-02T11:00:00.000Z')]);
+
+    const revenue = await api().call('analytics.query', {
+      measures: ['campaign.revenue'],
+      dimensions: ['campaign'],
+      from: '2026-06-01T00:00:00.000Z',
+      to: '2026-06-10T00:00:00.000Z',
+      filters: { campaign: [campaign] },
+    });
+    expect(revenue.rows).toEqual([[campaign, 'EUR', null]]);
+    expect(revenue.meta.currency).toBeNull();
+    expect(revenue.meta.suppressed).toBe(1);
+  });
+
   it('shows a currency revenue row with k or more converters (#756)', async () => {
     const revenue = await api().call('analytics.query', {
       measures: ['campaign.recipients', 'campaign.converters', 'campaign.revenue'],
