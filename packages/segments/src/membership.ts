@@ -356,7 +356,8 @@ export async function refreshPeople(tx: Tx, workspaceId: string, profileIds: str
   // the same order, even though the savepoints below can skip a segment (#1104).
   for (const seg of segments) {
     if (seg.definition.mode !== 'dynamic' || !seg.definition.condition) continue;
-    // This runs inside the unsubscribe request's transaction. One segment that cannot be
+    // This runs in its own transaction after the unsubscribe, preference or topic write has
+    // committed (without the identity lock). One segment that cannot be
     // evaluated (a message rule the message store refuses, a purpose that is gone) must not turn
     // the committed withdrawal into an error page, and must not stop the other segments from
     // moving: its own savepoint rolls back and the loop continues (#1073).

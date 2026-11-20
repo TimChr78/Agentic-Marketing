@@ -348,7 +348,12 @@ export const addAudienceMembers = defineCommand({
     .refine((v) => selectorCount(v) > 0, 'Pass at least one profileId, e-mail or user id.'),
   output: z.object({
     added: z.number().int(),
-    existing: z.number().int().describe('People who were already on the list'),
+    existing: z
+      .number()
+      .int()
+      .describe(
+        'Matched people who did not add a new row: already on the list, or folded into another matched person by a merge during the call. `added + existing` counts distinct resolved people, which can be fewer than the matched selectors',
+      ),
     unmatched: z.array(z.object({ value: z.string(), reason: z.enum(['not_found', 'ambiguous', 'invalid']) })),
   }),
   permission: 'profiles:write',
