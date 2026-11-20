@@ -259,7 +259,6 @@ function PeriodReads({
     if (!result) return null;
     return funnelGate({
       basis: result.basis,
-      latestVersion: artifact.latestVersion,
       publishedVersion: artifact.publishedVersion,
       nodes,
       steps: steps.map((step) => ({ step: step.step, reached: step.reached })),
@@ -267,7 +266,7 @@ function PeriodReads({
       suppressed,
       k,
     });
-  }, [artifact.latestVersion, artifact.publishedVersion, nodes, result, steps, suppressed, k]);
+  }, [artifact.publishedVersion, nodes, result, steps, suppressed, k]);
 
   const rows = stepRows({
     nodes,

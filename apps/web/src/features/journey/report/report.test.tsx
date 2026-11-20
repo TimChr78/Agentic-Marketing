@@ -6,7 +6,7 @@ import { JourneyGraph } from '../JourneyGraph';
 import type { JNode } from '../model';
 import { withNodeCounts } from './counts';
 import { JourneyReport } from './JourneyReport';
-import { funnelGate, REACH_NOTICE } from './model';
+import { funnelGate, REACH_NOTICE, VERSION_NOTICE } from './model';
 
 const journeyId = `jrn_${'a'.repeat(32)}`;
 const periodFrom = '2026-10-30T00:00:00.000Z';
@@ -268,9 +268,24 @@ describe('journey report reads (#507)', () => {
     ]);
     expect(screen.getAllByText('Welcome email').length).toBeGreaterThan(0);
     expect(screen.queryByText(/Welcome email draft/)).toBeNull();
-    // Aggregate counts cannot be attributed to one saved version.
-    expect(screen.queryByText('Sequential event reach')).toBeNull();
-    expect(screen.getByText(/Saved versions differ/)).toBeTruthy();
+    // The server pins the counts to the published version, and the straight published topology is
+    // what the chain draws, so an unpublished draft must not stop the funnel.
+    expect(screen.getAllByText('Sequential event reach').length).toBeGreaterThan(0);
+    expect(screen.queryByText(VERSION_NOTICE)).toBeNull();
+  });
+
+  it('draws the funnel for a republished journey whose saved and published versions agree (#1077)', async () => {
+    const nodes = linearNodes();
+    h.artifact = artifact({
+      latestVersion: 2,
+      publishedVersion: 2,
+      version: { number: 2, state: 'published', content: { purpose: 'marketing', goal: 'Signup', nodes } },
+    });
+
+    renderReport();
+    await waitFor(() => expect(screen.getAllByText('Sequential event reach').length).toBeGreaterThan(0));
+    expect(screen.queryByText(VERSION_NOTICE)).toBeNull();
+    expect(screen.getByText('Compatible linear topology; complete monotone steps. Event reach, not an entry cohort.')).toBeTruthy();
   });
 
   it('does not run any read while the Report tab is inactive', async () => {
@@ -337,7 +352,6 @@ describe('funnel gate (#507)', () => {
   const gate = (overrides: Partial<Parameters<typeof funnelGate>[0]> = {}) =>
     funnelGate({
       basis: 'published',
-      latestVersion: 1,
       publishedVersion: 1,
       nodes: linearNodes(),
       steps: [
@@ -442,11 +456,17 @@ describe('funnel gate (#507)', () => {
     expect(result.reason).toBe('nonmonotone');
   });
 
-  it('fails any additional saved version because aggregate provenance is unavailable', () => {
-    const result = gate({ latestVersion: 2 });
+  it('passes a republished journey because counts are pinned to the published version (#1077)', () => {
+    const result = gate({ publishedVersion: 2 });
+    expect(result.pass).toBe(true);
+  });
+
+  it('fails only when no published version exists to attribute the counts to', () => {
+    const result = gate({ publishedVersion: null });
     expect(result.pass).toBe(false);
     if (result.pass) return;
     expect(result.reason).toBe('versioned');
+    expect(result.notice).toBe(VERSION_NOTICE);
   });
 
   it('fails with no participants in the period', () => {

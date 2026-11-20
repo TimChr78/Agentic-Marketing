@@ -13,7 +13,8 @@ export const UNMAPPED_NOTICE = 'Some steps are outside the published topology. S
 export const MISSING_NOTICE = 'Some steps have no recorded reach. Step reach is not a cohort funnel.';
 export const SUPPRESSED_NOTICE = 'Some step counts are suppressed. Step reach is not a cohort funnel.';
 export const NONMONOTONE_NOTICE = 'Step reach is not monotone. Step reach is not a cohort funnel.';
-export const VERSION_NOTICE = 'Saved versions differ, so version-specific counts are unavailable. Step reach is not a cohort funnel.';
+export const VERSION_NOTICE =
+  'This journey has no published version, so version-specific counts are unavailable. Step reach is not a cohort funnel.';
 export const EMPTY_NOTICE = 'No participants entered this period. Step reach is not a cohort funnel.';
 export const REACH_NOTICE =
   'The server reports reach, not a drop-off chain. Drop-off is shown only for linear journeys. A linear journey whose step counts rise (for example after a migration) is reach too.';
@@ -45,7 +46,7 @@ export type FunnelGateResult = { pass: true; stages: FunnelStage[]; notice: stri
 export interface FunnelGateInput {
   /** The server's basis: only a published straight line can carry a drop-off chain. */
   basis?: FunnelResult['basis'];
-  latestVersion: number | null;
+  /** The version the server pinned its counts to; null when there is nothing to attribute them to. */
   publishedVersion: number | null;
   nodes: JNode[];
   steps: { step: string; reached: number | null }[];
@@ -58,10 +59,15 @@ const fail = (reason: GateReason, notice: string): FunnelGateResult => ({ pass: 
 
 /**
  * The funnel gate (#507). A funnel is only honest for one linear published topology whose event
- * steps all map to it, on this phase's single-version provenance, with every stage present,
- * unsuppressed, monotone reach and at least one entrant. Anything else gets independent bars and
- * an explanation; a negative difference is never clamped or hidden. The server's reach basis
- * always wins: it is the one statement that knows the topology it counted (#591).
+ * steps all map to it, with every stage present, unsuppressed, monotone reach and at least one
+ * entrant. Anything else gets independent bars and an explanation; a negative difference is never
+ * clamped or hidden. The server's reach basis always wins: it is the one statement that knows the
+ * topology it counted (#591).
+ *
+ * A later saved version is not a reason to fail: the server pins every count to the published
+ * version whenever one exists (`analytics.journeyFunnel`), and the caller passes that version's
+ * topology, so a republished journey or an unpublished draft still has usable counts (#1077).
+ * Only the absence of a published version leaves nothing to attribute them to.
  */
 export function funnelGate(input: FunnelGateInput): FunnelGateResult {
   const { basis = 'published', nodes, steps, entered, suppressed } = input;
@@ -95,7 +101,7 @@ export function funnelGate(input: FunnelGateInput): FunnelGateResult {
   const stepById = new Map(steps.map((step) => [step.step, step]));
   for (const step of steps) if (!byId.has(step.step)) return fail('unmapped', UNMAPPED_NOTICE);
 
-  if (input.latestVersion !== 1 || input.publishedVersion !== 1) return fail('versioned', VERSION_NOTICE);
+  if (input.publishedVersion === null) return fail('versioned', VERSION_NOTICE);
   if (suppressed > 0) return fail('suppressed', SUPPRESSED_NOTICE);
   if (entered === null || entered <= 0) return fail('empty', EMPTY_NOTICE);
 
