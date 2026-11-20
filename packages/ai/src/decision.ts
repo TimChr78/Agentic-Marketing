@@ -363,8 +363,9 @@ export async function callSystemOne(
  * the month never counts neither the hold nor the tokens (#355). `record` is required: a
  * reservation is never released for a call whose usage was not written. `recordUsage` is the
  * last-resort writer used when that transaction fails; without it, or if it also fails, the
- * reservation is kept and extended through the billing month rather than freeing budget for
- * tokens the provider already billed.
+ * reservation is kept rather than freeing budget for tokens the provider already billed: it was
+ * reserved before the call with a deadline at the start of the month after next
+ * (`billingReservationTtlMs`), and `holdReservationForMonth` never shortens that.
  */
 export async function decisionCall(
   db: Db,

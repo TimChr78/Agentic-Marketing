@@ -397,6 +397,25 @@ describe('Helm rollout, migration and replica reporting', () => {
     expect(kubeDoc).toContain('kubectl rollout restart');
   });
 
+  it('recreates every writer role by default and renders RollingUpdate when drained externally (#1066)', () => {
+    // The 0.15.0 lock protocol forbids two writers of different versions at once. One strategy line
+    // covers every role in the range; api, ingest, worker and scheduler all write.
+    expect(helmDeployments).toMatch(/strategy: \{ type: \{\{ \$\.Values\.upgradeStrategy \}\} \}/);
+    const strategy = helmDeployments.indexOf('strategy: { type: {{ $.Values.upgradeStrategy }} }');
+    expect(strategy).toBeGreaterThan(0);
+    expect(helmDeployments.slice(0, strategy)).not.toContain('if eq $role "scheduler"');
+    expect(helmDeployments.slice(0, strategy)).toContain('range $role, $r := .Values.roles');
+    expect(helmValues).toMatch(/^upgradeStrategy: Recreate$/m);
+    expect(helmValues).toMatch(/RollingUpdate/);
+
+    // Any other value must fail the render, not roll mixed writer versions (#1101 review). The
+    // helm binary is only in CI, which renders a bad value and expects this message.
+    expect(helmDeployments).toMatch(/if not \(has \$\.Values\.upgradeStrategy \(list "Recreate" "RollingUpdate"\)\)/);
+    expect(helmDeployments).toContain('fail "upgradeStrategy must be Recreate or RollingUpdate"');
+    expect(ci).toContain('--set upgradeStrategy=Rolling');
+    expect(ci).toContain("grep -q 'upgradeStrategy must be Recreate or RollingUpdate'");
+  });
+
   it('migrates before the roles on install and upgrade, without a post-install readiness deadlock (#389)', () => {
     expect(helmMigrateJob).toMatch(/helm\.sh\/hook:\s*pre-install,pre-upgrade/);
     expect(helmMigrateJob).not.toMatch(/helm\.sh\/hook:.*post-install/);

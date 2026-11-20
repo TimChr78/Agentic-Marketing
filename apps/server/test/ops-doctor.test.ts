@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runScoped } from '../../../packages/db/test/run';
@@ -160,6 +161,25 @@ describe('am doctor offline checks', () => {
     expect(unknown.find((item) => item.id === 'env-file.unknown')?.message).toContain('OLD_KEY');
     expect(unknown.find((item) => item.id === 'env-file.unknown')?.message).not.toContain('COMPOSE_FILE');
     expect(unknown.find((item) => item.id === 'env-file.unknown')?.message).not.toContain('DOCKER_HOST');
+  });
+
+  it('knows the first-party keys that are documented only as comments (#1058)', async () => {
+    const example = await readFile(new URL('../../../.env.example', import.meta.url), 'utf8');
+    const checks = envFileChecks(
+      [
+        'AM_VERSION=0.14.24',
+        'BETTER_AUTH_TRUSTED_ORIGINS=https://app.example.com',
+        'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://otel.example.com/v1/traces',
+        'OTEL_EXPORTER_OTLP_HEADERS=authorization=Bearer%20collector',
+        'OTEL_EXPORTER_OTLP_TRACES_HEADERS=authorization=Bearer%20traces',
+        '',
+      ].join('\n'),
+      example,
+    );
+    const unknown = checks.find((item) => item.id === 'env-file.unknown');
+    expect(unknown?.status).toBe('ok');
+    expect(unknown?.message).not.toContain('OTEL_EXPORTER');
+    expect(unknown?.message).not.toContain('BETTER_AUTH_TRUSTED_ORIGINS');
   });
 
   it('reports only variables added after the version the file comes from', () => {

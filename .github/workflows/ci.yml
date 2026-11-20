@@ -519,6 +519,16 @@ jobs:
             exit 1
           fi
           grep -q 'config.PORT is 3001' rendered-config-port.txt
+      # Only Recreate or RollingUpdate may render: a typo must not roll mixed writer versions (#1066).
+      - name: Refuse an unknown upgradeStrategy (#1066)
+        run: |
+          if helm template am deploy/helm/agentic-marketing --set secrets.existingSecret=am \
+              --set upgradeStrategy=Rolling > rendered-strategy.txt 2>&1; then
+            cat rendered-strategy.txt
+            echo "::error::the chart rendered with upgradeStrategy Rolling; only Recreate or RollingUpdate are allowed"
+            exit 1
+          fi
+          grep -q 'upgradeStrategy must be Recreate or RollingUpdate' rendered-strategy.txt
       - run: |
           helm template am deploy/helm/agentic-marketing --set secrets.existingSecret=am \
             --set ingress.enabled=true --set config.TRUSTED_PROXY_CIDRS=10.244.0.0/16 \
