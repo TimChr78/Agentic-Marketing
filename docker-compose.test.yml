@@ -120,7 +120,7 @@ services:
 
   # Optional: `scripts/test-services.sh up mail` (SMTP 21025, UI http://localhost:28025).
   mailpit:
-    image: axllent/mailpit:v1.27.8@sha256:6abc8e633df15eaf785cfcf38bae48e66f64beecdc03121e249d0f9ec15f0707
+    image: axllent/mailpit:v1.34.0@sha256:23a2ef85bc50853ab3093645d1d64679afd8887e89da5e48a88940c172591a4e
     labels: ["am-test=1"]
     profiles: ["mail"]
     ports:
