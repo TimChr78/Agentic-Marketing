@@ -1,6 +1,9 @@
 import { Agent, createServer, request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { getRequestListener } from '@hono/node-server';
+import { Hono } from 'hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createRequestAborts, requestAbortOf, withRequestAborts } from '../src/http/request-aborts';
 import { drainHttpServer, runShutdownSteps, type ShutdownLog, type ShutdownStep } from '../src/shutdown';
 
 // #1059: the http shutdown step stops accepting connections and waits, bounded, for the requests
@@ -28,9 +31,9 @@ const deferred = () => {
 };
 
 /** One real HTTP request; resolves with the body, or rejects if the connection is dropped. */
-function get(port: number, agent?: Agent): Promise<string> {
+function get(port: number, agent?: Agent, path = '/'): Promise<string> {
   return new Promise((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, path: '/', agent }, (res) => {
+    const req = request({ host: '127.0.0.1', port, path, agent }, (res) => {
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (c: string) => (body += c));
@@ -117,5 +120,87 @@ describe('HTTP shutdown drain (#1059)', () => {
 
     expect(force).toHaveBeenCalled();
     expect(server.listening).toBe(false);
+  });
+});
+
+describe('HTTP shutdown aborts what it force-closes (#1098)', () => {
+  it('aborts a turn that outlives the bound, and its cleanup finishes before the pools close', async () => {
+    const aborts = createRequestAborts();
+    const started = deferred();
+    let aborted = false;
+    let cleanupDone = false;
+    // A copilot-like route: the handler returns a stream whose producer keeps working after it
+    // returned, so only the request's own signal can stop it when the drain gives up.
+    const app = new Hono();
+    app.use('*', withRequestAborts(aborts));
+    app.get('/turn', (c) => {
+      // The handler returns before its stream ends, so it takes its own hold.
+      const request = requestAbortOf(c)?.retain();
+      const body = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          started.resolve();
+          try {
+            await new Promise<void>((resolve) => {
+              const signal = request?.signal;
+              if (!signal || signal.aborted) return resolve();
+              signal.addEventListener('abort', () => resolve(), { once: true });
+            });
+            aborted = request?.signal.aborted ?? false;
+            // The turn's finally store: it must run before the shutdown closes the pools.
+            cleanupDone = true;
+          } finally {
+            request?.release();
+          }
+          controller.close();
+        },
+      });
+      return new Response(body, { headers: { 'content-type': 'text/plain' } });
+    });
+    server = createServer(getRequestListener(app.fetch));
+    const port = await listen(server);
+    const pending = get(port, undefined, '/turn');
+    pending.catch(() => undefined);
+    await started.promise;
+
+    let cleanupBeforePoolClose = false;
+    const steps: ShutdownStep[] = [
+      { name: 'http', close: () => drainHttpServer(server as Server, 50, { aborts, settleMs: 5_000 }) },
+      {
+        name: 'database',
+        close: () => {
+          cleanupBeforePoolClose = aborted && cleanupDone;
+        },
+      },
+    ];
+    await runShutdownSteps(steps, log);
+
+    expect(aborted).toBe(true);
+    expect(cleanupDone).toBe(true);
+    expect(cleanupBeforePoolClose).toBe(true);
+    expect(server.listening).toBe(false);
+  });
+
+  it('aborts every registered request and settles once they release', async () => {
+    const aborts = createRequestAborts();
+    const request = aborts.begin();
+    const retained = request.retain();
+    // The middleware's own hold ends when the handler returns; the turn keeps the request alive.
+    request.release();
+    expect(aborts.count()).toBe(1);
+
+    aborts.abortAll();
+    expect(request.signal.aborted).toBe(true);
+    expect(retained.signal.aborted).toBe(true);
+    let settled: boolean | undefined;
+    const settling = aborts.settle(60_000).then((value) => (settled = value));
+    await Promise.resolve();
+    expect(settled).toBeUndefined();
+
+    retained.release();
+    await settling;
+    expect(settled).toBe(true);
+    expect(aborts.count()).toBe(0);
+    // A request that already ended never holds a drain.
+    await expect(aborts.settle(60_000)).resolves.toBe(true);
   });
 });
