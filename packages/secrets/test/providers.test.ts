@@ -102,6 +102,17 @@ describe('OpenBao Transit', () => {
     expect(await kp.unwrap(wrapped, kp.id)).toHaveLength(32);
     validToken = 'root-token';
   });
+
+  it('retries the token file after a transient read failure (#1134)', async () => {
+    const file = join(await mkdtemp(join(tmpdir(), 'bao-retry-')), 'token');
+    const kp = openbaoKeyProvider({ addr: base, key: 'am', tokenFile: file });
+    // The sidecar has not written the projected token yet: the read rejects. A cached rejected
+    // promise would poison every later call, so the next one must read the file again.
+    await expect(kp.wrap(newDataKey())).rejects.toThrow();
+    await writeFile(file, 'root-token');
+    const wrapped = await kp.wrap(newDataKey());
+    expect(wrapped.toString('utf8')).toMatch(/^vault:v1:/);
+  });
 });
 
 describe('AWS KMS', () => {

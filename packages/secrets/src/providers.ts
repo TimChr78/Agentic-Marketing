@@ -47,9 +47,22 @@ export function openbaoKeyProvider(o: {
   base.pathname = `${base.pathname.replace(/\/$/, '')}/v1/${mount}`;
   let token: Promise<string> | undefined;
   const readToken = () => (o.token ? Promise.resolve(o.token) : readFile(o.tokenFile ?? '', 'utf8').then((t) => t.trim()));
+  /**
+   * The cached token, cleared when the read rejects. A transient `ENOENT`/`EACCES` while a sidecar
+   * refreshes the projected file must not pin every later call to the rejected promise (#1134).
+   */
+  function tokenValue(): Promise<string> {
+    if (!token) {
+      const pending = readToken();
+      token = pending;
+      pending.catch(() => {
+        if (token === pending) token = undefined;
+      });
+    }
+    return token;
+  }
   async function post<T>(path: string, body: unknown, retried = false): Promise<T> {
-    token ??= readToken();
-    const headers: Record<string, string> = { ...auth, 'content-type': 'application/json', 'x-vault-token': await token };
+    const headers: Record<string, string> = { ...auth, 'content-type': 'application/json', 'x-vault-token': await tokenValue() };
     if (o.namespace) headers['x-vault-namespace'] = o.namespace;
     const url = new URL(base);
     url.pathname = `${base.pathname}/${path}/${encodeURIComponent(o.key)}`;
