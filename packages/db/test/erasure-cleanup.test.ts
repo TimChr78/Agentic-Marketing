@@ -296,6 +296,67 @@ describe.skipIf(!hasTestDatabase())('durable erasure cleanup (#978 part 2b)', ()
     expect(JSON.stringify(left.rows)).not.toContain('anon-a');
   });
 
+  // #1136: a segment_change batch carries the person at properties.profile_id, not at profileId.
+  it('waits for a pending segment_change row of the erased person', async () => {
+    await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1', [d.workspace]);
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state)
+       VALUES
+         ($1, 'obx_seg_pending', 'segment_change',
+          '{"events":[{"type":"track","name":"Segment Entered","properties":{"segment_id":"seg_x","profile_id":"prf_erased_a"}}]}',
+          'seg-pending', 'pending'),
+         ($1, 'obx_seg_other', 'segment_change',
+          '{"events":[{"type":"track","name":"Segment Entered","properties":{"profile_id":"prf_other"}}]}',
+          'seg-other', 'pending')`,
+      [d.workspace],
+    );
+    await expect(erasureOutboxOutstanding(d.db, d.workspace, ['prf_erased_a'])).resolves.toBe(1);
+  });
+
+  it('keeps failed and delivered segment_change rows for unrelated people', async () => {
+    await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1', [d.workspace]);
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, delivered_at)
+       VALUES
+         ($1, 'obx_seg_failed_other', 'segment_change',
+          '{"events":[{"type":"track","name":"Segment Entered","properties":{"profile_id":"prf_other"}}]}',
+          'seg-failed-other', 'failed', NULL),
+         ($1, 'obx_seg_delivered_other', 'segment_change',
+          '{"events":[{"type":"track","name":"Segment Exited","properties":{"profile_id":"prf_other"}}]}',
+          'seg-delivered-other', 'delivered', now())`,
+      [d.workspace],
+    );
+    await expect(dropErasedProfileOutbox(d.db, d.workspace, ['prf_erased_a'])).resolves.toBe(0);
+    const left = await d.db.admin.query<{ operation_key: string }>(
+      `SELECT operation_key FROM outbox WHERE workspace_id = $1 ORDER BY operation_key`,
+      [d.workspace],
+    );
+    expect(left.rows.map((r) => r.operation_key)).toEqual(['seg-delivered-other', 'seg-failed-other']);
+  });
+
+  it('removes only the erased person’s events from a mixed segment_change batch', async () => {
+    await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1', [d.workspace]);
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state)
+       VALUES
+         ($1, 'obx_seg_erased', 'segment_change',
+          '{"events":[{"type":"track","name":"Segment Exited","properties":{"profile_id":"prf_erased_a"}}]}',
+          'seg-erased', 'failed'),
+         ($1, 'obx_seg_mixed', 'segment_change',
+          '{"events":[{"type":"track","name":"Segment Exited","properties":{"profile_id":"prf_erased_a"}},
+                       {"type":"track","name":"Segment Exited","properties":{"profile_id":"prf_other"}}]}',
+          'seg-mixed', 'failed')`,
+      [d.workspace],
+    );
+    await expect(dropErasedProfileOutbox(d.db, d.workspace, ['prf_erased_a'])).resolves.toBe(1);
+    const left = await d.db.admin.query<{ operation_key: string; payload: { events: { properties: { profile_id: string } }[] } }>(
+      `SELECT operation_key, payload FROM outbox WHERE workspace_id = $1 ORDER BY operation_key`,
+      [d.workspace],
+    );
+    expect(left.rows.map((r) => r.operation_key)).toEqual(['seg-mixed']);
+    expect(left.rows[0]?.payload.events.map((e) => e.properties.profile_id)).toEqual(['prf_other']);
+  });
+
   it('backs off on a bounded schedule', () => {
     expect(erasureCleanupRetrySeconds(1)).toBe(5);
     expect(erasureCleanupRetrySeconds(2)).toBe(10);

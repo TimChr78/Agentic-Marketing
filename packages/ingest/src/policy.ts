@@ -225,9 +225,13 @@ export function processEvent(
   if (!isConsentChange) redactReservedProperties(properties, nonPersonal);
 
   const context: Record<string, unknown> = { ...(e.context ?? {}) };
-  const traitSource = e.type === 'identify' ? e.traits : (context.traits as Record<string, unknown> | undefined);
+  // Identify and group carry their traits at the top level. A group is a company, not the person
+  // (#1141): its traits still follow the plan, but personal data is dropped rather than sealed on
+  // the individual, because there is no encrypted per-group store to keep it in.
+  const traitSource = e.type === 'identify' || e.type === 'group' ? e.traits : (context.traits as Record<string, unknown> | undefined);
   delete context.traits;
-  const { plain, pii } = e.type === 'group' ? { plain: e.traits ?? {}, pii: {} } : splitTraits(plan, traitSource);
+  const split = splitTraits(plan, traitSource);
+  const pii = e.type === 'group' ? {} : split.pii;
   const ip = (context.ip as string | undefined) ?? opts.ip;
   if (ip) context.ip = truncateIp(ip);
   else delete context.ip;
@@ -244,7 +248,7 @@ export function processEvent(
     timestamp: correctedTimestamp(e, receivedAt).toISOString(),
     receivedAt: receivedAt.toISOString(),
     properties,
-    traits: plain,
+    traits: split.plain,
     piiTraits: pii,
     context,
     consent: consent ?? {},

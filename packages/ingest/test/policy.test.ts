@@ -164,6 +164,54 @@ describe('personal data', () => {
   });
 });
 
+// #1141: a group is a company, not a person. Its traits still go through the plan (reserved
+// personal keys, declared PII and unknown-trait drops), but personal data is dropped rather than
+// sealed on the individual, because there is no encrypted store for a group.
+describe('group traits', () => {
+  it('drops reserved personal keys instead of storing them', () => {
+    const out = run({
+      type: 'group',
+      groupId: 'grp_1',
+      userId: 'u1',
+      traits: { email: 'ada@example.com', phone: '+4512345678', name: 'Ada Lovelace', industry: 'Software' },
+      context: yes,
+    });
+    if (out.kind !== 'accepted') throw new Error(out.kind);
+    expect(out.event.traits).toEqual({ industry: 'Software' });
+    expect(out.event.piiTraits).toEqual({});
+    expect(out.event.groupId).toBe('grp_1');
+  });
+
+  it('applies the tracking plan’s PII and unknown-trait rules to group traits', () => {
+    const p: WorkspacePolicy = {
+      ...defaultPolicy,
+      plan: artifactTypes.tracking_plan.content.parse({
+        unknownEvents: 'warn',
+        unknownTraits: 'drop',
+        events: [],
+        traits: [
+          { name: 'loyaltyTier', pii: 'none' },
+          { name: 'healthNotes', pii: 'sensitive' },
+        ],
+      }),
+    };
+    const out = run(
+      {
+        type: 'group',
+        groupId: 'grp_1',
+        userId: 'u1',
+        traits: { loyaltyTier: 'gold', healthNotes: 'private', industry: 'Software' },
+        context: yes,
+      },
+      browser,
+      p,
+    );
+    if (out.kind !== 'accepted') throw new Error(out.kind);
+    expect(out.event.traits).toEqual({ loyaltyTier: 'gold' });
+    expect(out.event.piiTraits).toEqual({});
+  });
+});
+
 describe('tracking plan', () => {
   const p: WorkspacePolicy = { ...defaultPolicy, plan };
   it('warns on unknown events, blocks unknown properties, and warns about declared wrong types', () => {

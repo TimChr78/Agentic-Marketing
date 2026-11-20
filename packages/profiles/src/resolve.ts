@@ -39,8 +39,24 @@ async function identsOf(e: BusEvent, crypto: PersonCrypto): Promise<Ident[]> {
   return out;
 }
 
+// Group traits belong to the company, not the person (#1141): they neither become profile data
+// nor make the fast path write a profile row.
 const hasProfileData = (e: BusEvent) =>
-  Object.keys(e.traits).length > 0 || Object.keys(e.piiTraits).length > 0 || e.name === CONSENT_EVENT || e.type === 'alias';
+  (e.type !== 'group' && Object.keys(e.traits).length > 0) ||
+  Object.keys(e.piiTraits).length > 0 ||
+  e.name === CONSENT_EVENT ||
+  e.type === 'alias';
+
+/** One entry per (type, value): an alias can repeat an identifier `identsOf` already produced (#1142). */
+function dedupeIdents(ids: Ident[]): Ident[] {
+  const seen = new Set<string>();
+  return ids.filter((i) => {
+    const key = JSON.stringify([i.type, i.value]);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 /** Events the platform publishes about existing people (packages/segments uses the same id). */
 const SYSTEM_SOURCE = 'system';
@@ -96,8 +112,11 @@ async function applyEventsLocked(tx: Tx, workspaceId: string, events: BusEvent[]
   let tombstoned = 0;
   let purposes: Purposes | undefined;
   for (const e of events) {
-    const ids = await identsOf(e, crypto);
+    let ids = await identsOf(e, crypto);
     if (e.type === 'alias' && e.previousId) ids.push(...(await previousIdents(tx, workspaceId, e.previousId)));
+    // An alias naming itself puts the same identifier in `ids` twice; resolving it twice crashed
+    // the whole batch on the identifier primary key (#1142).
+    ids = dedupeIdents(ids);
     if (!ids.length) continue;
 
     // Fast path, most events: known identifiers of one profile, nothing to change but last seen.
@@ -251,15 +270,19 @@ async function resolve(tx: Tx, workspaceId: string, ids: Ident[], crypto: Person
       logger.warn({ workspaceId, profileId: target, type: i.type }, 'identity conflict: profile already has another value; not attached');
       continue;
     }
-    await tx.insert(schema.identifiers).values({
-      workspaceId,
-      type: i.type,
-      value: i.value,
-      profileId: target,
-      valueEnc: i.plain ? await crypto.seal(target, i.plain) : null,
-      firstSeen: new Date(e.timestamp),
-      lastSeen: new Date(e.timestamp),
-    });
+    await tx
+      .insert(schema.identifiers)
+      .values({
+        workspaceId,
+        type: i.type,
+        value: i.value,
+        profileId: target,
+        valueEnc: i.plain ? await crypto.seal(target, i.plain) : null,
+        firstSeen: new Date(e.timestamp),
+        lastSeen: new Date(e.timestamp),
+      })
+      // Attaching is idempotent: a redelivered event must not fail the batch on its own row.
+      .onConflictDoNothing();
     owned.push({ type: i.type, value: i.value, profileId: target });
   }
   return target;
@@ -354,7 +377,8 @@ async function updateProfile(tx: Tx, workspaceId: string, profileId: string, e: 
     .where(and(eq(schema.profiles.workspaceId, workspaceId), eq(schema.profiles.id, profileId)));
   const seen = new Date(e.timestamp);
   const changes: Partial<typeof schema.profiles.$inferInsert> = {};
-  if (Object.keys(e.traits).length) changes.traits = { ...p.traits, ...e.traits };
+  // Group traits describe a company (#1141); merging them would overwrite the person's own traits.
+  if (e.type !== 'group' && Object.keys(e.traits).length) changes.traits = { ...p.traits, ...e.traits };
   const pii = Object.fromEntries(Object.entries(e.piiTraits).filter(([k]) => k !== 'email' && k !== 'phone'));
   // E-mail and phone are kept (sealed) on the identifiers; other personal traits in the profile.
   if (Object.keys(pii).length) {

@@ -378,14 +378,22 @@ export async function failErasureCleanup(
   return rows[0] ? (rows[0].state === 'failed' ? 'failed' : 'pending') : 'stale';
 }
 
+/**
+ * The profile an outbox event is about. Message and DOI payloads carry `profileId`; a
+ * `segment_change` batch puts it in `properties.profile_id` (#1136). A missing profile id is NULL:
+ * callers treat that as "someone else", never as the erased person, so it can neither satisfy the
+ * barrier nor cause a whole batch to be dropped.
+ */
+const OUTBOX_PROFILE = (value: string) => `coalesce(${value}->>'profileId', ${value}->'properties'->>'profile_id')`;
+
 /** The SQL predicate that finds an outbox row naming one of the erased profiles. */
 const NAMES_ERASED_PROFILE = `(
-  o.payload->>'profileId' = ANY($2::text[])
+  ${OUTBOX_PROFILE('o.payload')} = ANY($2::text[])
   OR EXISTS (
     SELECT 1 FROM jsonb_array_elements(
       CASE WHEN jsonb_typeof(o.payload->'events') = 'array' THEN o.payload->'events' ELSE '[]'::jsonb END
     ) AS e(event)
-    WHERE event->>'profileId' = ANY($2::text[])
+    WHERE ${OUTBOX_PROFILE('e.event')} = ANY($2::text[])
   )
 )`;
 
@@ -431,13 +439,14 @@ export async function dropErasedProfileOutbox(db: Db, workspaceId: string, profi
      WHERE o.workspace_id = $1
        AND o.state IN ('failed', 'delivered')
        AND (
-         (coalesce(jsonb_typeof(o.payload->'events'), 'none') <> 'array' AND o.payload->>'profileId' = ANY($2::text[]))
+         (coalesce(jsonb_typeof(o.payload->'events'), 'none') <> 'array'
+          AND ${OUTBOX_PROFILE('o.payload')} = ANY($2::text[]))
          OR (
            jsonb_typeof(o.payload->'events') = 'array'
            AND jsonb_array_length(o.payload->'events') > 0
            AND NOT EXISTS (
              SELECT 1 FROM jsonb_array_elements(o.payload->'events') AS e(event)
-             WHERE NOT (e.event->>'profileId' = ANY($2::text[]))
+             WHERE (${OUTBOX_PROFILE('e.event')} = ANY($2::text[])) IS DISTINCT FROM TRUE
            )
          )
        )`,
@@ -450,7 +459,7 @@ export async function dropErasedProfileOutbox(db: Db, workspaceId: string, profi
      SET payload = jsonb_set(o.payload, '{events}', (
            SELECT coalesce(jsonb_agg(e.event), '[]'::jsonb)
            FROM jsonb_array_elements(o.payload->'events') AS e(event)
-           WHERE NOT (e.event->>'profileId' = ANY($2::text[]))
+           WHERE (${OUTBOX_PROFILE('e.event')} = ANY($2::text[])) IS DISTINCT FROM TRUE
          )),
          updated_at = now()
      WHERE o.workspace_id = $1
@@ -458,11 +467,11 @@ export async function dropErasedProfileOutbox(db: Db, workspaceId: string, profi
        AND jsonb_typeof(o.payload->'events') = 'array'
        AND EXISTS (
          SELECT 1 FROM jsonb_array_elements(o.payload->'events') AS e(event)
-         WHERE e.event->>'profileId' = ANY($2::text[])
+         WHERE ${OUTBOX_PROFILE('e.event')} = ANY($2::text[])
        )
        AND EXISTS (
          SELECT 1 FROM jsonb_array_elements(o.payload->'events') AS e(event)
-         WHERE NOT (e.event->>'profileId' = ANY($2::text[]))
+         WHERE (${OUTBOX_PROFILE('e.event')} = ANY($2::text[])) IS DISTINCT FROM TRUE
        )`,
     [workspaceId, profileIds],
   );
