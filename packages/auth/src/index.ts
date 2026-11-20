@@ -143,6 +143,11 @@ export function authOptions(config: AuthConfig) {
       // Hash reset tokens at rest (#191). Other verification values stay plain, as Better Auth
       // expects to find them by their own identifier.
       storeIdentifier: { default: 'plain', overrides: { [RESET_PREFIX]: 'hashed' } },
+      // Reset links are read back and deleted straight from the `verification` table (#191), so
+      // verification values must stay in the database even if secondary storage is added later.
+      // Stating it also gives Better Auth's DPoP replay context the `storeInDatabase` it types
+      // `verification` as (`DpopReplayAuthContext` in 1.7.25), which `requireMcpAuth` now takes.
+      storeInDatabase: true,
     },
     advanced: {
       ipAddress: { ipAddressHeaders: config.clientIpHeaders ?? [config.clientIpHeader ?? 'x-forwarded-for'] },
