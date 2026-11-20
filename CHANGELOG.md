@@ -2,6 +2,22 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.17.3] - 2026-11-20
+
+- 0.17.2 was tagged and its image was pushed (`ghcr.io/timchr78/agentic-marketing:0.17.2`, and `:0.17` and `:latest` pointed at it for a while), but its GitHub release (the Helm chart, the Compose bundle and `SHA256SUMS`) was never created: GitHub refused the release with `HTTP 403` because `main` had moved past the tagged commit while the release ran. 0.17.3 is the first complete release with everything listed under 0.17.2 below, plus the ClickHouse update. Coming from 0.17.1, read the 0.17.2 notes as well: they hold four migrations and the breaking changes.
+
+### Changed
+
+- ClickHouse is updated to 26.8.41.14, the latest build of the 26.8 LTS line, in `docker-compose.yml` and the test stack. CI now tests on exactly the pinned image instead of the floating `26.8` tag. Dependabot now proposes Compose image updates weekly, staying on the 26.8 line; the move to the next LTS is planned in #1113.
+
+### Upgrading from 0.17.2
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** none beyond 0.17.2's. 0.17.2 was never fully published, so an install on 0.17.1 upgrades straight to 0.17.3 and gets migrations `0114`–`0117` and every change listed under 0.17.2; an install that pulled the 0.17.2 image upgrades with no further step. ClickHouse moves from 26.8.36.3 to 26.8.41.14, a patch build of the same LTS line, and upgrades in place.
+- **Manual steps:** the 0.17.2 manual step applies when coming from 0.17.1 with Helm.
+- **Upgrade:** download `agentic-marketing-compose-0.17.3.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.17.3 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.17.3` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.17.3). Run `docker compose exec app am doctor`.
+
 ## [0.17.2] - 2026-11-20
 
 ### Changed
