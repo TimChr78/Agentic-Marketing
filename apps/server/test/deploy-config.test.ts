@@ -145,7 +145,7 @@ describe('compose production defaults', () => {
 
   it('health-checks NATS on its monitoring endpoint and Valkey through the CLI', () => {
     const nats = service(compose, 'nats');
-    expect(nats).toContain('image: nats:2.15.0-alpine');
+    expect(nats).toContain('image: nats:2.15.3-alpine@sha256:');
     expect(nats).toContain('"-m", "8222"');
     expect(nats).toMatch(/healthz\?js-enabled-only=true/);
     expect(nats).toMatch(/interval: 5s[\s\S]*retries: 20/);
@@ -591,24 +591,37 @@ describe('image pinning (#870)', () => {
     }
   });
 
-  it('tests in CI on exactly the ClickHouse image Compose ships', () => {
-    // CI used the floating 26.8 tag while Compose pinned one build by digest, so CI could test a
-    // different ClickHouse patch than the one released. Every ClickHouse reference names one image.
-    const clickhouse = (text: string) => images(text).filter((ref) => ref.startsWith('clickhouse/clickhouse-server:'));
-    const shipped = clickhouse(compose);
-    expect(shipped).toHaveLength(1);
-    expect(shipped[0]).toMatch(/^clickhouse\/clickhouse-server:26\.8\.\d+\.\d+@sha256:[0-9a-f]{64}$/);
-    for (const [file, text] of [
-      ['docker-compose.test.yml', composeTest],
-      ['.github/workflows/ci.yml', ci],
-    ] as const) {
-      const refs = clickhouse(text);
-      expect(refs.length, `${file} names no ClickHouse image`).toBeGreaterThan(0);
-      for (const ref of refs) expect(ref, `${file} tests a different ClickHouse than docker-compose.yml ships`).toBe(shipped[0]);
-    }
-    // The preflight pulls the images the test stack needs, listed one per line.
+  it('tests in CI on exactly the service images Compose ships', () => {
+    // CI once used floating tags (clickhouse 26.8, valkey 8.1.9, nats 2.15.0) while Compose pinned
+    // other builds by digest, so CI could test something other than what is released, and a
+    // Dependabot bump of docker-compose.yml left CI on the old image. Every reference to a service
+    // image, as a CI service or a `docker run`, names the one pinned image (#1114, #1124).
+    const refsOf = (text: string, repo: string) =>
+      [...text.matchAll(new RegExp(`(?<![\\w/.-])${repo.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}:\\d[^\\s'"]*`, 'g'))].map(
+        (match) => match[0],
+      );
     const preflight = readFileSync(join(root, 'scripts/preflight.sh'), 'utf8');
-    expect(preflight).toContain(`\n  ${shipped[0]}\n`);
+    for (const [repo, source, sourceName] of [
+      ['clickhouse/clickhouse-server', compose, 'docker-compose.yml'],
+      ['valkey/valkey', compose, 'docker-compose.yml'],
+      ['nats', compose, 'docker-compose.yml'],
+      ['openbao/openbao', composeTest, 'docker-compose.test.yml'],
+    ] as const) {
+      const shipped = [...new Set(refsOf(source, repo))];
+      expect(shipped, `${sourceName} pins one ${repo} image`).toHaveLength(1);
+      expect(shipped[0], `${repo} is not pinned by digest`).toMatch(/@sha256:[0-9a-f]{64}$/);
+      for (const [file, text] of [
+        ['docker-compose.test.yml', composeTest],
+        ['.github/workflows/ci.yml', ci],
+      ] as const) {
+        const refs = refsOf(text, repo);
+        expect(refs.length, `${file} names no ${repo} image`).toBeGreaterThan(0);
+        for (const ref of refs) expect(ref, `${file} tests a different ${repo} than ${sourceName} ships`).toBe(shipped[0]);
+      }
+      // The preflight pulls the images the test stack needs, listed one per line.
+      expect(preflight, `scripts/preflight.sh does not pull ${shipped[0]}`).toContain(`\n  ${shipped[0]}\n`);
+    }
+    expect(refsOf(compose, 'clickhouse/clickhouse-server')[0]).toMatch(/^clickhouse\/clickhouse-server:26\.8\.\d+\.\d+@/);
   });
 
   it('keeps the released image tag readable beside its version variable', () => {

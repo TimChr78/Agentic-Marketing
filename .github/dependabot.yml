@@ -34,6 +34,10 @@ updates:
     # The spikes are throwaway benchmarks, not part of CI or the image.
     exclude-paths:
       - spikes/**
+    ignore:
+      # 13 changes the APIs the journey builder uses; the migration is its own PR (#1125).
+      - dependency-name: '@xyflow/react'
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule:
