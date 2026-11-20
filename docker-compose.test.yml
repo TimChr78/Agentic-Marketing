@@ -101,7 +101,7 @@ services:
     mem_limit: 1g
 
   openbao:
-    image: openbao/openbao:2.6.4@sha256:cf2340fc9a22cb9358ca0defd1f39b65673836bd23fe2bb8984a07e11fe13ef4
+    image: openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
     labels: ["am-test=1"]
     # Dev mode: in-memory, root token `root`, exactly what packages/secrets and phase10-ops expect.
     command: ["server", "-dev", "-dev-root-token-id=root", "-dev-listen-address=0.0.0.0:8200"]
