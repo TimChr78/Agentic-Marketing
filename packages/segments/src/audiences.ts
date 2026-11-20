@@ -427,7 +427,12 @@ export const removeAudienceMembers = defineCommand({
   input: ListSelector,
   output: z.object({
     removed: z.number().int(),
-    notMembers: z.number().int().describe('People resolved but not on the list'),
+    notMembers: z
+      .number()
+      .int()
+      .describe(
+        'Matched people who did not remove a row: already absent, or folded into another matched person by a merge during the call. `removed + notMembers` counts distinct resolved people, which can be fewer than the matched selectors',
+      ),
     unmatched: z.array(z.object({ value: z.string(), reason: z.enum(['not_found', 'ambiguous', 'invalid']) })),
   }),
   permission: 'profiles:write',
@@ -464,7 +469,11 @@ export const removeAudienceMembers = defineCommand({
       const events = await listChangeEvents(ctx.tx, ws, published, [], exited, cause);
       await enqueueSegmentChanges(ctx.tx, ws, events, cause);
     }
-    return { removed: removed.length, notMembers: people.length - removed.length, unmatched };
+    // Count every resolved person once. `removed` is the rows this call deleted, and `notMembers`
+    // is the rest of the matched people, so the two always add up to the number of selectors that
+    // resolved. Counting the survivors instead under-reported `notMembers` when a merge that landed
+    // mid-call folded two resolved ids into one person (#1111).
+    return { removed: removed.length, notMembers: resolved.length - removed.length, unmatched };
   },
 });
 
@@ -518,7 +527,12 @@ export const importAudienceCsv = defineCommand({
     rows: z.number().int(),
     matched: z.number().int().describe('Rows whose identifier resolved to a person'),
     added: z.number().int().describe('People newly on the list'),
-    existing: z.number().int().describe('People already on the list'),
+    existing: z
+      .number()
+      .int()
+      .describe(
+        'Matched people who did not add a new row: already on the list, or folded into another matched person by a merge during the call. `added + existing` counts distinct resolved people, which can be fewer than the matched rows',
+      ),
     unmatched: z.array(z.object({ row: z.number().int(), reason: z.enum(['not_found', 'ambiguous', 'invalid']) })),
     stamp: z
       .string()
@@ -558,7 +572,7 @@ export const importAudienceCsv = defineCommand({
       const people = await resolvedPeople(ctx.tx, ws, resolved);
       const existing = await existingMembers(ctx.tx, seg.id, people);
       const fresh = people.filter((p) => !existing.has(p));
-      return { importId: null, rows: data.length, matched, added: fresh.length, existing: people.length - fresh.length, unmatched };
+      return { importId: null, rows: data.length, matched, added: fresh.length, existing: resolved.length - fresh.length, unmatched };
     }
 
     const people = await lockedSurvivors(ctx.tx, ws, resolved);
@@ -618,7 +632,10 @@ export const importAudienceCsv = defineCommand({
       rows: data.length,
       matched,
       added: added.length,
-      existing: people.length - added.length,
+      // Count the matched selectors, not the survivors: a merge that landed mid-call can fold two
+      // resolved ids into one person, and `added + existing` must still cover every one of them
+      // (#1111).
+      existing: resolved.length - added.length,
       unmatched,
       stamp,
     };
