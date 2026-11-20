@@ -40,7 +40,7 @@ const apiB = () => t.api(owner, wsB);
  * only once the dispatcher published it; a background dispatcher round may already hold the rows.
  */
 const publishEvents = async (ws: string) => {
-  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events }, { batch: 500 });
+  await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 500 });
   await eventually(
     async () =>
       Number(

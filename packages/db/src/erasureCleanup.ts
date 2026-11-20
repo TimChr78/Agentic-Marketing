@@ -1,3 +1,4 @@
+import { sleep } from '@agentic-marketing/core';
 import { and, eq } from 'drizzle-orm';
 import type { Db, Tx } from './pool';
 import * as schema from './schema';
@@ -592,6 +593,43 @@ export async function enqueueUnpublishedErasures(db: Db): Promise<number> {
          AND erasure_cleanup_jobs.state IN ('complete', 'failed')`,
   );
   return rowCount ?? 0;
+}
+
+/**
+ * How often the scheduler re-opens erasures whose publication job failed or finished unpublished.
+ * The pass is one indexed statement, so it is cheap enough to run while the cleanup queue drains.
+ */
+export const ERASURE_PUBLICATION_BACKLOG_INTERVAL_MS = 5 * 60 * 1000;
+
+export interface ErasurePublicationBacklogOptions {
+  tickMs?: number;
+  log?: (message: string) => void;
+  onError?: (err: unknown) => void;
+}
+
+/**
+ * The scheduler's periodic publication backlog pass (#1062). A cleanup job that burned its retry
+ * budget lands `failed`, and the claim query only takes `pending_external`/`running`; without this
+ * pass nothing re-opens it after the scheduler started. Re-enqueueing is idempotent, leaves a
+ * running claim alone and never re-runs a published job. The abortable sleep stops the loop on
+ * shutdown instead of waiting out a whole tick.
+ */
+export async function runErasurePublicationBacklog(
+  deps: { db: Db },
+  signal: AbortSignal,
+  opts: ErasurePublicationBacklogOptions = {},
+): Promise<void> {
+  const tickMs = opts.tickMs ?? ERASURE_PUBLICATION_BACKLOG_INTERVAL_MS;
+  while (!signal.aborted) {
+    try {
+      const count = await enqueueUnpublishedErasures(deps.db);
+      if (count) opts.log?.(`re-enqueued ${count} erasure(s) without a published exclusion`);
+    } catch (err) {
+      opts.onError?.(err);
+    }
+    if (signal.aborted) return;
+    await sleep(tickMs, signal);
+  }
 }
 
 /**

@@ -490,5 +490,8 @@ describe('scope changes and erasure', () => {
     await api().call('profiles.erase', { profileId: control!.profileId, reason: 'test erasure' });
     expect((await assignmentsOf(campaignId)).some((a) => a.profile_id === control!.profileId)).toBe(false);
     expect(await assignmentCount(campaignId)).toBe(CAMPAIGN_PEOPLE - 1);
+    // The report, not only the table: the erased person no longer enters an arm (#1048).
+    const result = await api().call('campaigns.holdoutResult', { campaignId });
+    expect(result.control.entered! + result.treatment.entered!).toBe(CAMPAIGN_PEOPLE - 1);
   });
 });

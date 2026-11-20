@@ -102,10 +102,10 @@ async function eventPredicate(c: Extract<SegmentCondition, { event: string }>, c
 }
 
 /**
- * A message condition (#441): counts the message events the send recorded, joined to profiles the
- * same way an event condition is, and resolves merges so a person keeps what was recorded under an
- * alias before the merge. `message_events` keys its primary index on the workspace, so the read is
- * the workspace's own parts; the aggregation happens in ClickHouse and is streamed into a
+ * A message condition (#441): counts the distinct messages the send recorded, joined to profiles
+ * the same way an event condition is, and resolves merges so a person keeps what was recorded under
+ * an alias before the merge. `message_events` keys its primary index on the workspace, so the read
+ * is the workspace's own parts; the aggregation happens in ClickHouse and is streamed into a
  * temporary table, so only one row per person is ever held.
  */
 async function messagePredicate(c: Extract<SegmentCondition, { message: string }>, ctx: SqlContext): Promise<SQL> {

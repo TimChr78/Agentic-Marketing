@@ -6,6 +6,7 @@ import { consentStateOf, currentConsent, profileForMessage, purposeAllowed } fro
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
+import type { DeliveryAttempt } from '../attempt';
 import type { Decision, EmailServices } from '../gateway';
 import { idempotencyKeyReused, legacySameSend, lockSendKey, topicSuppression } from '../gateway';
 import { decisionEvent, defer, enqueueMessageEvents, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
@@ -160,7 +161,13 @@ async function segmentsThisMonth(tx: Tx, providerId: string) {
   return n;
 }
 
-export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: KeyProvider; events: EventStore; email: EmailServices }) {
+export async function deliverSms(
+  db: Db,
+  ws: string,
+  id: string,
+  deps: { kp: KeyProvider; events: EventStore; email: EmailServices },
+  attempt: DeliveryAttempt = { providerCalled: false },
+) {
   const prepared = await db.withWorkspace(ws, async (tx) => {
     const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
     const finish = async (status: 'suppressed' | 'failed', reason: string) => {
@@ -224,24 +231,12 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
 
   if (prepared.kind === 'done') return;
   const { m, provider, transport, out, stream } = prepared;
+  attempt.providerCalled = true;
+  // Only the provider call's own failure may retry; a failure while recording an accepted send
+  // propagates to the round's recovery (`unknown_outcome`), never back to `queued` (#1094 review).
+  let sent: Awaited<ReturnType<typeof transport.send>>;
   try {
-    const sent = await transport.send(out);
-    // The outcome and its event commit in one transaction (#1008).
-    await db.withWorkspace(ws, async (tx) => {
-      await tx
-        .update(schema.messages)
-        .set({
-          status: 'sent',
-          reason: null,
-          providerId: provider.id,
-          providerMessageId: sent.providerMessageId,
-          segments: sent.segments ?? prepared.segments,
-          sentAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(schema.messages.id, id));
-      await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
-    });
+    sent = await transport.send(out);
   } catch (e) {
     const reason = `provider_error: ${failureText((e as Error).message)}`;
     const retry = m.attempts < MAX_ATTEMPTS;
@@ -254,5 +249,22 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
         .where(eq(schema.messages.id, id));
       await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
     });
+    return;
   }
+  // The outcome and its event commit in one transaction (#1008).
+  await db.withWorkspace(ws, async (tx) => {
+    await tx
+      .update(schema.messages)
+      .set({
+        status: 'sent',
+        reason: null,
+        providerId: provider.id,
+        providerMessageId: sent.providerMessageId,
+        segments: sent.segments ?? prepared.segments,
+        sentAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.messages.id, id));
+    await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
+  });
 }

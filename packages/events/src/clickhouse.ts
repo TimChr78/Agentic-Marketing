@@ -555,8 +555,9 @@ function messageCountConditions(q: MessageEventCountQuery): { conditions: string
 /**
  * The SQL a message-event count runs (#441): `message_events FINAL` over the workspace's own parts
  * (the primary key starts with `workspace_id`), aggregated in ClickHouse so only one row per person
- * crosses the wire. Exported so the plan guard in the tests follows the real query rather than a
- * copy.
+ * crosses the wire. The count is distinct `message_id`s, not events: a mailbox that prefetches an
+ * open pixel twice, or a person who clicks one link twice, engaged with one message (#1072).
+ * Exported so the plan guard in the tests follows the real query rather than a copy.
  *
  * `scopedKeys` switches to the id-scoped shape (#1037 part 2): the caller has already collected
  * the subject keys of the rows this scope names, so the ledger set is bounded to them instead of
@@ -583,13 +584,13 @@ export function messageEventCountQuery(
             ))`
       : `(SELECT m.* FROM message_events AS m FINAL WHERE ${where})`;
     return {
-      query: `SELECT m.profile_id, count() AS c FROM ${source} AS m GROUP BY m.profile_id`,
+      query: `SELECT m.profile_id, uniqExact(m.message_id) AS c FROM ${source} AS m GROUP BY m.profile_id`,
       query_params: params,
       format: 'JSONEachRow' as const,
     };
   }
   return {
-    query: `SELECT m.profile_id, count() AS c FROM ${personReadSource('message_events', protectedRead)} AS m FINAL
+    query: `SELECT m.profile_id, uniqExact(m.message_id) AS c FROM ${personReadSource('message_events', protectedRead)} AS m FINAL
             WHERE ${where}
             GROUP BY m.profile_id`,
     query_params: params,
