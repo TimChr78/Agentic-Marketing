@@ -2,6 +2,128 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.17.2] - 2026-11-20
+
+### Changed
+
+- The database now records the writer protocol version, and a server refuses to start when it
+  implements an older protocol than the database expects, naming `UPGRADING.md`. The Helm chart uses
+  the `Recreate` strategy for `api`, `ingest`, `worker` and `scheduler` by default, so a plain
+  upgrade no longer runs an old and a new writer side by side inside one Deployment; a routine
+  `helm upgrade` therefore briefly takes the api, ingest and worker pods down while their old pods
+  stop. Operators who drain every writer externally can set `upgradeStrategy: RollingUpdate`. A
+  protocol-changing upgrade still needs the full scale-to-zero drain in `UPGRADING.md`, because the
+  four Deployments roll independently.
+- The documentation now states the spend contract exactly: the spend action class gates the direct
+  paid commands (`prompts.test`, `ai.classify`, `ai.score`), while AI steps inside a journey spend
+  the provider's monthly token budget when participants reach them and need no spend mandate.
+  `journeys.enroll`, `journeys.enrollSegment` and `artifacts.requestPublish` say so in their tool
+  descriptions.
+- `journeys.holdoutResult` reads a journey's goals and unsubscribes one page of winners at a time,
+  scoped to that page's merge family, instead of loading every outcome id for the journey first.
+  Memory and the ClickHouse read are now bounded by the page. A page that cannot be resolved says
+  why in the note and matches on the stored profile id: either its merge family is larger than the
+  supported profile bound, or a family is corruptly deep.
+
+### Fixed
+
+- Journey triggers, waits and goals ignore an event whose delivery is more than 7 days old, so an
+  event the event stream replays after its processed-event marker was pruned can no longer enrol the
+  same person again or satisfy a later wait. A refused event is acknowledged and counted in
+  `am_journey_events_too_old_total`; imports that carry a historical timestamp still enrol, because
+  the bound uses the server's receive time.
+- An outbox row keeps the time it was queued, so a `message_event` that is delivered late, or
+  requeued with `am outbox`, is judged by its original age instead of looking fresh. The trade-off is
+  explicit: a backlog older than 7 days loses the journey triggers in it for good, requeueing does
+  not revive them, and `am doctor` names the affected rows; re-enrol segment journeys with
+  `journeys.enrollSegment`.
+- `analytics.campaignSummary` now counts a person who merged mid-campaign once in the e-mail
+  headline as well as in the recipients total and the member rows, so a recipient reached under a
+  pre-merge and a surviving profile no longer makes the e-mail total exceed the people reached.
+- `analytics.query` names a currency in `meta.currency` only when every revenue row has a visible
+  amount and all rows share one known currency (not `UNKNOWN`), as the campaign summary already
+  did. A client keying suppression detection on `meta.currency === null` no longer misses a
+  withheld revenue figure, and a dimensioned all-EUR result still names EUR.
+- A staged send's canary check now judges the messages the send actually selected, even when the
+  segment still lists a profile that merged away. A bounce, complaint or unsubscribe from such a
+  canary message counts towards the breach thresholds, so a bad canary no longer releases the rest
+  of the audience.
+- `am doctor --env-file` no longer reports `BETTER_AUTH_TRUSTED_ORIGINS`,
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` and
+  `OTEL_EXPORTER_OTLP_TRACES_HEADERS` as unknown or obsolete. They are documented as commented keys
+  in `.env.example`, so the pre-upgrade check stops telling operators to remove working OTLP
+  credentials, and knows which release introduced each key.
+- Public unsubscribe, preference-centre, topic-link, SMS and provider-webhook requests now wait for
+  the workspace identity lock for a bounded time (2 seconds for each workspace lock, so a provider webhook naming several workspaces can wait for each) and answer a retryable `503`
+  with a `Retry-After` when another writer holds it. A long import or merge for one workspace can no
+  longer pin public requests and pool connections indefinitely. `am_identity_lock_timeouts_total`
+  reports how many requests were shed, next to the existing wait histogram.
+- An agent's guardrail check now refuses (and asks a person) when the queue holds a message-event
+  row for its sends that this server cannot parse, instead of silently ignoring evidence that could
+  contain a bounce or complaint.
+- The scheduler removes expired live AI budget holds that no `ai_calls` row links to, after their
+  own deadline plus a grace window. A crash during a decision, copilot, hosted or independent-check
+  call no longer leaves dead rows in `ai_token_reservations` for ever. A hold that still guards
+  billed usage is never deleted: linked holds stay with the crash-recovery path, and an expired hold
+  no longer counts against the monthly budget.
+- Old unsubscribe and preference links, topic choices, webhook consent checks, erasure requests and
+  audience syncs now follow a person's merges as far as the rest of the platform does (256 hops,
+  cycle-safe) instead of stopping after 20. A person merged more than 20 times deep keeps their
+  preference page, their topic choice lands on the survivor, their erasure request finds them,
+  their queued webhook is not suppressed as if consent were refused, and their ad audience row is
+  repaired onto the survivor.
+- A message the delivery worker left in `sending` is now marked `failed`/`unknown_outcome` with
+  the same decision event the per-message recovery writes, in the same transaction, so reports and
+  guardrails see it whichever writer recorded it.
+- A send that finishes after the stale sweep already recorded `unknown_outcome` no longer
+  overwrites that row with `sent` or returns it to `queued` (a possible duplicate send). The
+  sweep's outcome stands and the drop is logged; the same guard applies to the SMS and push paths.
+- On shutdown, the http drain now aborts the requests it force-closes. A copilot turn stops
+  before its next model step (a provider call already sent finishes under its own deadline) and
+  stores the turn and settles its AI reservation before the pools close; if that write cannot
+  finish, it is skipped with a log line instead of failing against a closed pool.
+- A subject test's status now reports the variant counts its winner decision used, so the recorded
+  reason (a tie, or fewer than 20 sends in a variant) and the counts beside it always describe the
+  same sample, even after the winner's rest sends.
+- List membership rows that a merge left on a merged-away profile before the 0.17.1 fix are repaired
+  once on upgrade: they move to the surviving person, the earliest addition and its source are
+  kept, and a duplicate when the survivor was already on the list collapses. Until now such rows
+  were invisible to every read, and removing the person from the list could not delete them.
+- Refreshing a segment whose saved definition no longer parses, and editing a legacy list from the
+  audience commands, now answer a clear "this definition is from an older release, re-save it"
+  error instead of "has no published version" or an internal server error.
+- A queued `segment_change` payload is now validated in full before it is published, like a queued
+  message event: a corrupt row is failed permanently and stays visible for inspection instead of
+  reaching subscribers as a half-formed event.
+- Adding people to a static audience now reports `added` and `existing` counts that add up to the
+  number of people the selectors matched, even when a merge lands during the call and folds two
+  matched ids into one person.
+- A segment refresh and the incremental membership update that runs as people's events arrive no
+  longer deadlock on the same segment. Every writer of one segment's membership rows now takes a
+  short database lock for that segment, so a refresh, a list edit, an import, a snapshot refresh and
+  a live event batch finish one after the other instead of each holding a row the other is waiting
+  for. The e2e seed also retries the retryable "another change locked the same artifacts" answer
+  instead of failing on it.
+- `journeys.splitResult` reads a journey's goals and unsubscribes one page of split participants
+  at a time. Each page resolves its own merge family and drops it again, so memory and the
+  ClickHouse read are bounded by the page, not the journey's whole history. A page that cannot be
+  resolved says why in the note and matches on the stored profile id: either its merge family is
+  larger than the supported profile bound, or a family is corruptly deep.
+- A split unsubscribe stored under a merged-away id now counts for the person it became, as it
+  does in the holdout report, and the k=5 floor counts people rather than ids, so one person with
+  two merged ids is one person and an arm of five entries can still be hidden.
+- The release script that closes a release's remaining issues no longer stops with `spawnSync gh ENOBUFS` when a release merged many pull requests: it reads `gh` and `git` output with a 256 MiB limit instead of Node's 1 MiB default.
+
+### Upgrading from 0.17.1
+
+- **Migrations:** `packages/db/migrations/0114_writer_protocol.sql`, `packages/db/migrations/0115_ai_calls_reservation_index.sql`, `packages/db/migrations/0116_broadcast_test_decision_variants.sql`, `packages/db/migrations/0117_stranded_segment_memberships.sql`.
+- **Configuration:** no new variables. `.env.example` now lists `BETTER_AUTH_TRUSTED_ORIGINS`, `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_TRACES_HEADERS` (read since 0.14.22 and 0.14.24), so `am doctor --env-file` no longer calls them unknown. The Helm chart has a new `upgradeStrategy` value (default `Recreate`).
+- **Breaking changes:** The Helm chart now recreates the api, ingest, worker and scheduler Deployments on upgrade, so a `helm upgrade` briefly takes those pods down; set `upgradeStrategy: RollingUpdate` only if you drain writers yourself. Public unsubscribe, preference-centre, topic-link, SMS and provider-webhook requests answer `503` with `Retry-After` when the workspace identity lock is busy for more than 2 seconds, and providers retry them. The journey hook ignores events received more than 7 days ago, so a backlog older than that drops its journey triggers (re-enrol segment journeys with `journeys.enrollSegment`). `analytics.query`'s `meta.currency` names a currency only when every revenue row is visible and all share one known currency. After a subject test is decided, `broadcasts.status` reports the variant counts the decision used. `journeys.splitResult` counts a person once across merged ids, for both its outcomes and its privacy floor.
+- **Manual steps:** none for Compose. Migration 0115 builds an index without a transaction and 0117 repairs list rows left on merged-away profiles; both run on start. Before a Helm upgrade from 0.17.1, if `am doctor` shows outbox rows older than 7 days, deliver or clear them first: the new journey bound ignores their triggers after the upgrade.
+- **Upgrade:** download `agentic-marketing-compose-0.17.2.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.17.2 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.17.2` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.17.2). Run `docker compose exec app am doctor`.
+
+<!-- issues: 1027, 1049, 1050, 1053, 1058, 1066, 1074, 1079, 1080, 1081, 1093, 1096, 1098, 1099, 1102, 1104, 1105 -->
+
 ## [0.17.1] - 2026-11-20
 
 ### Changed
