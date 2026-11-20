@@ -135,7 +135,7 @@ services:
 
   # Optional: `scripts/test-services.sh up obs` (Grafana 23000, OTLP 24317/24318).
   otel-lgtm:
-    image: grafana/otel-lgtm:0.11.1@sha256:2bc63304ef2d51e879c6101637eab186cb644fa4367240db16bcd81b893e8632
+    image: grafana/otel-lgtm:0.41.0@sha256:2e3290657f2f2a256c7a9175f097424a3ac5b54840741ace433e108e109348b6
     labels: ["am-test=1"]
     profiles: ["obs"]
     ports:
