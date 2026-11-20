@@ -21,7 +21,7 @@ npm install -g --ignore-scripts "pnpm@$(node -p 'require("./package.json").packa
 pnpm install
 ```
 
-The server needs PostgreSQL 16, ClickHouse, NATS with JetStream and Valkey. [Run
+The server needs PostgreSQL 18 (16 is still supported), ClickHouse, NATS with JetStream and Valkey. [Run
 locally](docs/development.md#run-locally) covers `.env`, the services, `pnpm dev` and the admin UI;
 [the admin UI section](docs/development.md#the-admin-ui) covers the seeded server for UI work.
 

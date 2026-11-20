@@ -147,10 +147,12 @@ describe('am smoke', () => {
     const signup = report.checks.find((c) => c.id === 'public.signup');
     expect(signup?.status).toBe('pass');
     expect(signup?.detail).toContain('left in place');
-    expect(signup?.detail).toContain('RETENTION_UNCONFIRMED_DAYS');
     expect(signup?.detail).toContain('profiles.erase');
     expect(signup?.detail).toContain('people-only');
-    expect(signup?.detail).toContain('30 days');
+    // Retention keeps unconfirmed signups while destructive pruning is paused (#978 part 2), so
+    // the message must not promise that it removes this one (#1056).
+    expect(signup?.detail).toContain('erase it as a person in the admin UI');
+    expect(signup?.detail).not.toMatch(/retention[^;]*removes/i);
     // The profile really exists, so the cleanup message is about real data, not a lookup bug.
     expect((await t.api(owner).call('profiles.find', { type: 'email', value: address })).profileId).toMatch(/^prf_/);
   });
@@ -175,6 +177,7 @@ describe('am smoke', () => {
     // The usage names the scopes --cleanup needs and why a token can never erase.
     expect(res.err).toContain('profiles:read');
     expect(res.err).toContain('people-only');
-    expect(res.err).toContain('RETENTION_UNCONFIRMED_DAYS');
+    expect(res.err).toContain('erase it as a person');
+    expect(res.err).not.toMatch(/goes with retention/);
   });
 });

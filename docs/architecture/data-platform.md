@@ -46,6 +46,20 @@ profile_merges(workspace_id, from_id, into_id, reason, at)
 - Lookups use `value_hash` (HMAC with a workspace secret) so plaintext emails are not needed for matching; `value_enc` holds the encrypted value when it must be displayed/sent.
 - **Probabilistic resolution later:** the identity module exposes a `MatchStrategy` interface; a future probabilistic strategy proposes merges with a confidence score that can require human/agent approval.
 
+### Workspace lock protocol (0.15.0)
+
+Every write that must not interleave with an identity merge serialises on one lock per workspace, so a writer never decides the canonical profile from a stale view. The normative text is the header of [`packages/profiles/src/identity.ts`](../../packages/profiles/src/identity.ts); this section says what a contributor adding a writer has to know.
+
+- **Who takes it:** identity resolution (every SDK, form, import and webhook batch, including the fast-path `touch`), every consent writer, merges and erasures. A new writer of consent, identity or erasure state must take it too (`withIdentityLock`, or `withIdentityLocks` for several workspaces in sorted order), before its row writes, in the same transaction.
+- **It is a transaction-scoped advisory lock** on `identity:<workspace id>`. Wait and hold times are exported as histograms on `/metrics`.
+- **No network I/O while it is held.** Prepare keys before the transaction (`prepareKeys`) and use the memory-only key provider inside it. No ClickHouse, provider or HTTP call runs under the lock.
+- **Order below it:** the lock first, then profile rows in ascending id order (`lockProfileRows`), then journey participant rows. The journey sweep, which cannot take the lock because a wait-until condition may reach ClickHouse, locks a participant's profile with `SKIP LOCKED` before it claims the participant row, so it never waits on a row a batch holds (#1011).
+- **Sends never take it.** Nothing that takes the identity lock also takes a broadcast run row or a send key (`lockSendKey`), so the two orders cannot cross.
+- **The second family is agent policy.** An agent's write takes `agent-policy`, then approval request rows (`lockApproval`), then artifact rows in id order (`lockArtifacts`), then the mandate validator's `am.agent-mandate` lock. It is documented at [`apps/server/src/agents/holds.ts`](../../apps/server/src/agents/holds.ts) and [`packages/artifacts/src/mandates.ts`](../../packages/artifacts/src/mandates.ts). A person's mandate publish and the mandate repair skip `agent-policy` and start at the artifact rows.
+- **Upgrades:** old and new writers must never run at the same time when the protocol changes. That is why 0.15.0 and 0.17.0 are drained upgrades ([UPGRADING.md](../../UPGRADING.md)).
+
+The protocol tests (`packages/profiles/test/lock-protocol.test.ts` and the `v015*` server tests) pin the behaviour. A writer that breaks the order shows up as a deadlock (`40P01`) or a latency incident, so check new writers against this list in review.
+
 ## 4. Profiles & attribute schema
 
 - Traits are stored in `jsonb` but **governed by an attribute schema** per workspace: type, PII class (`none`, `personal`, `sensitive`), allowed purposes, retention, and whether agents/LLMs may see it.

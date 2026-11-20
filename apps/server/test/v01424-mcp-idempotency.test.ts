@@ -42,6 +42,18 @@ describe('MCP write tools take an idempotency key (#906)', () => {
     expect(propertiesOf(list.inputSchema).idempotencyKey).toBeUndefined();
   });
 
+  it('names every 409 reason a client can get, on MCP and in OpenAPI (#1082)', async () => {
+    const create = (await mcp.listTools()).tools.find((x) => x.name === 'artifacts.create')!;
+    const mcpText = String((propertiesOf(create.inputSchema).idempotencyKey as { description?: string }).description);
+    expect(mcpText).toContain('idempotency_key_reversed');
+    const doc = (await (await fetch(`${t.base}/openapi.json`)).json()) as {
+      paths: Record<string, { post: { parameters?: { name: string; description?: string }[] } }>;
+    };
+    const header = doc.paths['/v1/artifacts.create']!.post.parameters!.find((p) => p.name === 'idempotency-key')!;
+    for (const reason of ['idempotency_key_reused', 'idempotency_in_progress', 'idempotency_key_reversed'])
+      expect(header.description).toContain(reason);
+  });
+
   it('runs the handler once for two calls with the same key', async () => {
     const args = { ...note('MCP idempotent note'), idempotencyKey: 'mcp-note-1' };
     const first = await mcp.callTool({ name: 'artifacts.create', arguments: args });
