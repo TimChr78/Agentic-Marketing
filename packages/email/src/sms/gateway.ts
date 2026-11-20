@@ -6,6 +6,7 @@ import { consentStateOf, currentConsent, profileForMessage, purposeAllowed } fro
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, gte, inArray, sql } from 'drizzle-orm';
+import type { DeliveryAttempt } from '../attempt';
 import type { Decision, EmailServices } from '../gateway';
 import { idempotencyKeyReused, legacySameSend, lockSendKey, topicSuppression } from '../gateway';
 import { decisionEvent, defer, enqueueMessageEvents, MAX_ATTEMPTS, retryDelaySeconds } from '../outbox';
@@ -160,7 +161,13 @@ async function segmentsThisMonth(tx: Tx, providerId: string) {
   return n;
 }
 
-export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: KeyProvider; events: EventStore; email: EmailServices }) {
+export async function deliverSms(
+  db: Db,
+  ws: string,
+  id: string,
+  deps: { kp: KeyProvider; events: EventStore; email: EmailServices },
+  attempt: DeliveryAttempt = { providerCalled: false },
+) {
   const prepared = await db.withWorkspace(ws, async (tx) => {
     const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
     const finish = async (status: 'suppressed' | 'failed', reason: string) => {
@@ -224,6 +231,7 @@ export async function deliverSms(db: Db, ws: string, id: string, deps: { kp: Key
 
   if (prepared.kind === 'done') return;
   const { m, provider, transport, out, stream } = prepared;
+  attempt.providerCalled = true;
   try {
     const sent = await transport.send(out);
     // The outcome and its event commit in one transaction (#1008).
