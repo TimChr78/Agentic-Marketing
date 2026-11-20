@@ -1,6 +1,6 @@
 import {
   type AudienceSync,
-  canonicalProfileId,
+  canonicalProfileIds,
   DEFAULT_PURPOSES,
   publishedSingleton,
   publishValidators,
@@ -1028,6 +1028,12 @@ export async function processMergeRepair(
       WHERE m.workspace_id = ${ws} AND m.sync_id = ${syncId} AND m.platform = ${platform}
         AND m.destination_key = ${destinationKey} AND p.merged_into IS NOT NULL
       ORDER BY m.profile_id LIMIT ${limit}`);
+    // Resolve every row's merged-away id in one walk, not one query per row (#1096 review).
+    const survivors = await canonicalProfileIds(
+      tx,
+      ws,
+      rows.map((row) => row.merged_into),
+    );
     const out: MemberWritePlan[] = [];
     for (const row of rows) {
       const [mergedIntent] = await tx
@@ -1042,7 +1048,7 @@ export async function processMergeRepair(
             eq(schema.audienceWriteIntents.profileId, row.profile_id),
           ),
         );
-      const survivor = await canonicalProfileId(tx, ws, row.merged_into);
+      const survivor = survivors.get(row.merged_into) ?? null;
       if (!survivor) {
         const plan = planMemberWrite({
           profileId: row.profile_id,

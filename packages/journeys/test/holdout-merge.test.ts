@@ -92,13 +92,14 @@ async function assign(journeyId: string, profileId: string, arm: 'control' | 'tr
   );
 }
 
-const result = (journeyId: string, range: { from?: string; to?: string } = {}) =>
+const result = (journeyId: string, range: { from?: string; to?: string } = {}, limits: { pageProfileLimit?: number } = {}) =>
   d.db.withWorkspace(ws, (tx) =>
     computeJourneyHoldout(
       {
         tx,
         events,
         workspaceId: ws,
+        ...limits,
       },
       journeyId,
       range,
@@ -196,5 +197,56 @@ describe.skipIf(!hasTestDatabase())('journeys.holdoutResult resolves merge famil
     expect(report.control.entered).toBe(6);
     expect(report.control.converted).toBe(6);
     expect(report.treatment.converted).toBe(6);
+  }, 120_000);
+
+  it('matches stored profile ids only when a page is over its profile bound (#1096)', async () => {
+    outcomes.converted = [];
+    outcomes.unsubscribed = [];
+    const journeyId = await publishJourney();
+    const control = newId('prf');
+    const otherControl = Array.from({ length: 4 }, () => newId('prf'));
+    const treatment = Array.from({ length: 5 }, () => newId('prf'));
+    // Four aliases merged into one control person: five profiles for that winner.
+    const aliases = Array.from({ length: 4 }, () => newId('prf'));
+    await seedPeople([control, ...otherControl]);
+    await seedPeople(aliases, new Map(aliases.map((id) => [id, control])));
+    await seedPeople(treatment);
+    await assign(journeyId, control, 'control', EARLY);
+    for (const id of otherControl) await assign(journeyId, id, 'control', EARLY);
+    for (const id of treatment) await assign(journeyId, id, 'treatment', EARLY);
+    // One outcome on the person, one on an alias that only the family map could resolve.
+    outcomes.converted = [control, aliases[0]!];
+
+    const report = await result(journeyId, {}, { pageProfileLimit: 3 });
+
+    // The alias outcome cannot be attributed without the map, so only the stored id counts.
+    expect(report.suppressed).toBe(false);
+    expect(report.control.converted).toBe(1);
+    expect(report.note).toContain('more than 3 merge-family profiles to resolve');
+    expect(report.note).not.toContain('merges deep');
+  }, 120_000);
+
+  it('names a corruptly deep merge family instead of a profile count (#1096)', async () => {
+    outcomes.converted = [];
+    outcomes.unsubscribed = [];
+    const journeyId = await publishJourney();
+    // One family 257 merges deep: the component walk stops at MERGE_MAX_HOPS (256).
+    const family = Array.from({ length: 258 }, () => newId('prf'));
+    await seedPeople(family, new Map(family.slice(0, -1).map((id, i) => [id, family[i + 1]!])));
+    const control = family[family.length - 1]!;
+    const otherControl = Array.from({ length: 4 }, () => newId('prf'));
+    const treatment = Array.from({ length: 5 }, () => newId('prf'));
+    await seedPeople([...otherControl, ...treatment]);
+    await assign(journeyId, control, 'control', EARLY);
+    for (const id of otherControl) await assign(journeyId, id, 'control', EARLY);
+    for (const id of treatment) await assign(journeyId, id, 'treatment', EARLY);
+    outcomes.converted = [control, family[0]!];
+
+    const report = await result(journeyId);
+
+    expect(report.suppressed).toBe(false);
+    expect(report.control.converted).toBe(1);
+    expect(report.note).toContain('256 or more merges deep');
+    expect(report.note).not.toContain('more than');
   }, 120_000);
 });
