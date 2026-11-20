@@ -1,6 +1,7 @@
 import type { MandateView, PolicyOutcome, Principal } from '@agentic-marketing/commands';
 import { newId, redactedText, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
+import type { EgressPolicy } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { generateText } from 'ai';
 import { z } from 'zod';
@@ -37,6 +38,8 @@ export interface IndependentCheckInput {
 export interface IndependentCheckDeps {
   db: Db;
   kp: KeyProvider;
+  /** The server's egress policy: the provider URL is guarded like a webhook's (#1131). */
+  egress?: EgressPolicy;
 }
 
 export interface IndependentCheckVerdict {
@@ -170,7 +173,7 @@ export async function independentCheck(
   input: IndependentCheckInput,
   deps: IndependentCheckDeps,
 ): Promise<IndependentCheckVerdict> {
-  const model = await modelFor(tx, deps.kp, 'journeys', 'fast');
+  const model = await modelFor(tx, deps.kp, 'journeys', 'fast', deps.egress);
   const prompt = checkPrompt(input);
   const id = newId('aic');
   const estimate = estimateTokens({ system: SYSTEM, prompt }, MAX_OUTPUT_TOKENS);

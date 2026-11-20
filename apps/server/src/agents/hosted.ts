@@ -19,6 +19,7 @@ import { HOSTED_CLAIM_STALE_MINUTES, nextHostedRunAt } from '@agentic-marketing/
 import { agentPrincipal, type Executor, type Principal } from '@agentic-marketing/commands';
 import { AppError, newId, sleep } from '@agentic-marketing/core';
 import { type Db, type Role, schema, type Tx } from '@agentic-marketing/db';
+import type { EgressPolicy } from '@agentic-marketing/integrations';
 import { logger } from '@agentic-marketing/telemetry';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
@@ -48,6 +49,8 @@ const SYSTEM = `You are a hosted agent of an agent-first marketing platform. The
 export interface HostedAgentDeps extends NotifyDeps {
   db: Db;
   executor: Executor;
+  /** The server's egress policy: a run's provider URL is guarded like a webhook's (#1131). */
+  egress?: EgressPolicy;
 }
 
 export interface HostedAgentsSummary {
@@ -219,9 +222,9 @@ const fieldLine = (text: string, label: string) => (text.trim() ? `${label}: ${t
       .from(schema.aiProviders)
       .where(and(eq(schema.aiProviders.id, loaded.hosted.modelProviderId), eq(schema.aiProviders.enabled, true)));
     if (!row) throw new Error('The AI provider chosen for this hosted agent is not enabled.');
-    return languageModel(tx, row, deps.kp, 'default');
+    return languageModel(tx, row, deps.kp, 'default', deps.egress);
   }
-  return modelFor(tx, deps.kp, 'copilot');
+  return modelFor(tx, deps.kp, 'copilot', 'default', deps.egress);
 }
 
 const toolName = (name: string) => name.replaceAll('.', '__');

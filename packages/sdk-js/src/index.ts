@@ -290,9 +290,22 @@ export function createAnalytics(opts: AnalyticsOptions) {
     /** Record the visitor's choice (from your consent banner or CMP). Merges with earlier choices. */
     setConsent(choice: Consent) {
       const before = JSON.stringify(consent);
+      const hadAdMeasurement = consent?.[AD_PURPOSE] === true;
       consent = { ...(consent ?? {}), ...choice };
       store.set(KEYS.consent, JSON.stringify(consent));
       persistIds();
+      // Ad click ids are ad-measurement data: a withdrawal removes the in-memory copy and strips
+      // them from events already queued, before the flush below sends the queue (#1135). Captured
+      // ids stay in memory while the visitor has not allowed the purpose yet; only a withdrawal
+      // from a grant discards them.
+      if (hadAdMeasurement && consent?.[AD_PURPOSE] !== true) {
+        clickIds = {};
+        for (const e of outbox) {
+          if (!e.context || !('clickIds' in e.context)) continue;
+          const { clickIds: _withdrawn, ...context } = e.context;
+          e.context = context;
+        }
+      }
       // A withdrawal discards what was collected under the old grant; only consent updates survive.
       if (!allowed()) {
         for (let i = outbox.length - 1; i >= 0; i--) if (outbox[i].event !== CONSENT_EVENT) outbox.splice(i, 1);
@@ -326,7 +339,9 @@ export function createAnalytics(opts: AnalyticsOptions) {
         headers: { 'content-type': 'application/json', authorization: auth },
         body: JSON.stringify({
           anonymousId,
-          ...(userId ? { userId } : {}),
+          // The decision API uses userId as the sticky variant key. A person is only identified
+          // with the personalization purpose; analytics consent alone does not send it (#1135).
+          ...(userId && consent?.web_personalization === true ? { userId } : {}),
           placements,
           page: page ? { url: page.url, path: page.path, referrer: page.referrer } : undefined,
           ...(preview ? { preview } : {}),

@@ -3,6 +3,7 @@ import { request as httpRequest } from 'node:http';
 import { connect as http2Connect } from 'node:http2';
 import { request as httpsRequest } from 'node:https';
 import { BlockList, isIP, type LookupFunction } from 'node:net';
+import { Readable } from 'node:stream';
 import { CancelledError } from '@agentic-marketing/core';
 
 // Outbound HTTP for webhooks and connector actions, guarded against SSRF
@@ -337,6 +338,88 @@ export function egressFetch(policy: EgressPolicy): typeof fetch {
       policy,
     );
     return new Response(res.status === 204 || res.status === 304 ? null : res.body, { status: res.status, headers: res.headers });
+  }) as typeof fetch;
+}
+
+/**
+ * A fetch for provider APIs that stream their answer (LLM chat completions, server-sent events):
+ * the same checks as `egressFetch` — scheme, no private target unless allowed, DNS pinning and no
+ * redirects — but the body is handed on as a stream instead of being buffered, because the copilot
+ * and journey steps read it as it arrives (#1131).
+ *
+ * `inactivityTimeoutMs` bounds a provider that stops sending; an answer may arrive over minutes.
+ * A redirect is refused rather than followed, so a redirector cannot point at an internal service.
+ */
+export function egressFetchStream(policy: EgressPolicy, opts: { inactivityTimeoutMs?: number } = {}): typeof fetch {
+  const inactivityTimeoutMs = opts.inactivityTimeoutMs ?? 60_000;
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const req = input instanceof Request ? input : null;
+    const url = req ? req.url : String(input);
+    const problem = checkUrl(url, policy);
+    if (problem) throw new EgressError(problem);
+    const u = new URL(url);
+    const method = init?.method ?? req?.method ?? 'GET';
+    const signal = init?.signal ?? req?.signal ?? undefined;
+    const headers: Record<string, string> = {};
+    for (const [k, v] of new Headers(req ? req.headers : init?.headers)) headers[k] = v;
+    const raw = init?.body;
+    let body: Buffer | undefined;
+    if (raw !== undefined && raw !== null) {
+      if (typeof raw === 'string') body = Buffer.from(raw);
+      else if (raw instanceof Uint8Array) body = Buffer.from(raw);
+      else if (raw instanceof ArrayBuffer) body = Buffer.from(raw);
+      else if (raw instanceof URLSearchParams) body = Buffer.from(raw.toString());
+      else throw new EgressError('unsupported request body');
+    } else if (req && method !== 'GET' && method !== 'HEAD') body = Buffer.from(await req.arrayBuffer());
+
+    return await new Promise<Response>((resolve, reject) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        reject(err);
+      };
+      const onAbort = () => {
+        request.destroy();
+        fail(new EgressError('the request was cancelled'));
+      };
+      const request = (u.protocol === 'https:' ? httpsRequest : httpRequest)(
+        u,
+        { method, headers, lookup: lookupFor(u, policy) },
+        (res) => {
+          const status = res.statusCode ?? 0;
+          if (status >= 300 && status < 400) {
+            res.resume();
+            request.destroy();
+            fail(new EgressError('redirects are not followed'));
+            return;
+          }
+          const out = new Headers();
+          for (const [k, v] of Object.entries(res.headers)) if (v !== undefined) out.set(k, Array.isArray(v) ? v.join(', ') : String(v));
+          settled = true;
+          if (timer) clearTimeout(timer);
+          // The request stays alive while the body streams; an abort after the headers destroys it.
+          res.once('close', () => signal?.removeEventListener('abort', onAbort));
+          const stream = Readable.toWeb(res) as unknown as ReadableStream<Uint8Array>;
+          resolve(new Response(status === 204 || status === 304 ? null : stream, { status, headers: out }));
+        },
+      );
+      if (signal?.aborted) {
+        request.destroy();
+        fail(new EgressError('the request was cancelled'));
+        return;
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+      // A socket that stops carrying data (not a slow stream: chunks reset it) fails the request.
+      request.setTimeout(inactivityTimeoutMs, () => request.destroy(new EgressError(`no data for ${inactivityTimeoutMs} ms`)));
+      request.on('error', (err) => fail(err));
+      request.on('close', () => signal?.removeEventListener('abort', onAbort));
+      if (body !== undefined) request.write(body);
+      request.end();
+    });
   }) as typeof fetch;
 }
 

@@ -166,10 +166,16 @@ describe('ai.score', () => {
     }
   });
 
-  it('refuses a decision endpoint on a private name before any request reaches it (#354)', async () => {
+  it('refuses a decision endpoint on a private name before any request reaches it (#354, #1131)', async () => {
     const api = t.api(owner);
     const before = sys.requests.length;
-    await api.call('aiProviders.update', { id: providerId, baseUrl: sys.url.replace('127.0.0.1', 'localhost') + '/v1' });
+    const privateUrl = sys.url.replace('127.0.0.1', 'localhost') + '/v1';
+    // Setting it is refused already, for every provider kind (#1131).
+    const refused = await rejects(api.call('aiProviders.update', { id: providerId, baseUrl: privateUrl }));
+    expect(refused.code).toBe('invalid_input');
+    expect(refused.message).toContain('localhost is an internal address');
+    // Even a row written around the command is refused before the request leaves (#354).
+    await t.srv.db.admin.query('UPDATE ai_providers SET base_url = $1 WHERE id = $2', [privateUrl, providerId]);
     try {
       const err = await rejects(api.call('ai.score', { questions: [NOUL], state: { plan: 'pro' } }));
       expect(err.code).toBe('conflict');

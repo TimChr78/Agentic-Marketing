@@ -42,13 +42,43 @@ interface Snapshot {
   at: string;
 }
 
+/**
+ * The most entries one isolate keeps. /v1/decide takes an unauthenticated write key and hashes it
+ * into a cache key, so distinct keys are attacker-controlled and the cache needs a hard ceiling
+ * (#1133).
+ */
+export const MAX_CACHE_ENTRIES = 500;
+
 const cache = new Map<string, { at: number; value: Promise<unknown> }>();
+
+/** Test-only view of the isolate cache: its size, and whether one key is held. */
+export const cacheSize = () => cache.size;
+export const cacheHas = (key: string) => cache.has(key);
+
+/** Keep the cache under the ceiling: drop expired entries first, then the oldest inserted. */
+function remember(key: string, value: Promise<unknown>, ttl: number) {
+  cache.set(key, { at: Date.now(), value });
+  if (cache.size <= MAX_CACHE_ENTRIES) return;
+  const now = Date.now();
+  for (const [k, e] of cache) if (now - e.at >= ttl) cache.delete(k);
+  while (cache.size > MAX_CACHE_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
 function cached<T>(env: Env, key: string): Promise<T | null> {
   const ttl = Number(env.AM_CACHE_SECONDS ?? 10) * 1000;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < ttl) return hit.value as Promise<T | null>;
-  const value = env.AM_KV.get(key, 'json');
-  cache.set(key, { at: Date.now(), value });
+  const value = env.AM_KV.get(key, 'json').then((v) => {
+    // An unknown write key resolves to null and would otherwise stay forever: the catch below
+    // never fires for it. Drop the entry, but only if a newer lookup has not replaced it.
+    if (v == null && cache.get(key)?.value === value) cache.delete(key);
+    return v;
+  });
+  remember(key, value, ttl);
   value.catch(() => cache.delete(key));
   return value as Promise<T | null>;
 }

@@ -290,7 +290,7 @@ export const testPrompt = defineCommand({
     if (!p) throw new AppError('not_found', `Prompt ${a.id} has no version ${input.version}.`);
     if (!p.def.tests.length) throw new AppError('invalid_input', 'This prompt has no test cases yet. Add some to its `tests`.');
     try {
-      await modelFor(ctx.tx, ctx.services.keyProvider, 'journeys', p.def.model);
+      await modelFor(ctx.tx, ctx.services.keyProvider, 'journeys', p.def.model, ctx.services.egress);
     } catch (err) {
       if (err instanceof AiUnavailable) throw new AppError('conflict', `Cannot run the tests: ${err.message}.`);
       throw err;

@@ -20,30 +20,139 @@ export interface Decision {
 export const antiFlickerSnippet = (ms = 500) =>
   `<style>.am-loading [data-am-placement]{visibility:hidden}</style><script>document.documentElement.classList.add('am-loading');setTimeout(function(){document.documentElement.classList.remove('am-loading')},${ms})</script>`;
 
-const DROP = new Set(['SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'LINK', 'META', 'BASE', 'FORM', 'NOSCRIPT', 'TEMPLATE']);
-const URL_ATTRS = new Set(['href', 'src', 'action', 'formaction', 'xlink:href', 'srcset']);
+// An allowlist, not a denylist (#1132): a denylist always misses the next construct — SVG SMIL
+// <set>, <style>, a second srcset candidate — so only markup that is known to be inert is kept.
+// No svg, math, style, script, frame, form or template element, and no event handler attribute.
+const ALLOWED_TAGS = new Set([
+  'A',
+  'ABBR',
+  'B',
+  'BLOCKQUOTE',
+  'BR',
+  'CAPTION',
+  'CITE',
+  'CODE',
+  'COL',
+  'COLGROUP',
+  'DD',
+  'DEL',
+  'DIV',
+  'DL',
+  'DT',
+  'EM',
+  'FIGCAPTION',
+  'FIGURE',
+  'H1',
+  'H2',
+  'H3',
+  'H4',
+  'H5',
+  'H6',
+  'HR',
+  'I',
+  'IMG',
+  'INS',
+  'KBD',
+  'LI',
+  'MARK',
+  'OL',
+  'P',
+  'PRE',
+  'Q',
+  'S',
+  'SAMP',
+  'SMALL',
+  'SPAN',
+  'STRONG',
+  'SUB',
+  'SUP',
+  'TABLE',
+  'TBODY',
+  'TD',
+  'TFOOT',
+  'TH',
+  'THEAD',
+  'TIME',
+  'TR',
+  'U',
+  'UL',
+]);
+const GLOBAL_ATTRS = new Set(['class', 'id', 'title', 'role', 'dir', 'lang', 'hidden', 'style']);
+const TAG_ATTRS: Record<string, readonly string[]> = {
+  a: ['href', 'rel', 'target', 'type'],
+  img: ['src', 'srcset', 'alt', 'width', 'height', 'loading', 'decoding'],
+  ol: ['start', 'reversed', 'type'],
+  li: ['value'],
+  td: ['colspan', 'rowspan', 'headers', 'scope', 'abbr'],
+  th: ['colspan', 'rowspan', 'headers', 'scope', 'abbr'],
+  col: ['span', 'width'],
+  colgroup: ['span', 'width'],
+  time: ['datetime'],
+};
 
-/** Removes scripts, frames, forms, event handlers and script URLs from HTML. Needs a DOM. */
+const URL_ATTRS = new Set(['href', 'src']);
+const SAFE_DATA = /^data:image\/(?:png|gif|jpe?g|webp);/;
+const EXTERNAL_URL = /url\(\s*(?!['"]?\s*#)/i;
+
+/** Browsers ignore whitespace and control characters inside a scheme ("java\tscript:"). */
+const normalizeUrl = (value: string) =>
+  [...value]
+    .filter((ch) => ch.charCodeAt(0) > 0x20)
+    .join('')
+    .toLowerCase();
+
+/** http(s), a relative URL, or a raster data: image; nothing that can run as script. */
+function safeUrl(value: string): boolean {
+  const v = normalizeUrl(value);
+  const scheme = /^([a-z][a-z0-9+.-]*):/.exec(v)?.[1];
+  if (!scheme) return true;
+  if (scheme === 'http' || scheme === 'https') return true;
+  return scheme === 'data' && SAFE_DATA.test(v);
+}
+
+/** Every candidate is a URL of its own: a later candidate must not smuggle a script scheme past the first. */
+function safeSrcset(value: string): boolean {
+  return value.split(',').every((candidate) => {
+    const url = candidate.trim().split(/\s+/)[0];
+    return !!url && safeUrl(url);
+  });
+}
+
+/** Inline CSS may style the element but not fetch anything, import a sheet or hide a value from this check. */
+function unsafeStyle(css: string): boolean {
+  return (
+    /@/.test(css) ||
+    /\\/.test(css) ||
+    /expression\s*\(/i.test(css) ||
+    /javascript:/i.test(css) ||
+    /-moz-binding/i.test(css) ||
+    EXTERNAL_URL.test(css)
+  );
+}
+
+const allowedAttribute = (tag: string, name: string) =>
+  name.startsWith('aria-') || GLOBAL_ATTRS.has(name) || (TAG_ATTRS[tag]?.includes(name) ?? false);
+
+/** Removes everything outside a small allowlist of inert HTML tags and attributes. Needs a DOM. */
 export function sanitize(html: string, doc: Document = document): DocumentFragment {
   const tpl = doc.createElement('template');
   tpl.innerHTML = html;
   const walk = (node: Element | DocumentFragment) => {
     for (const el of Array.from(node.children)) {
-      if (DROP.has(el.tagName.toUpperCase())) {
+      if (!ALLOWED_TAGS.has(el.tagName.toUpperCase())) {
         el.remove();
         continue;
       }
+      const tag = el.tagName.toLowerCase();
       for (const a of Array.from(el.attributes)) {
         const name = a.name.toLowerCase();
-        // Browsers ignore whitespace and control characters inside a scheme ("java\tscript:").
-        const value = [...a.value]
-          .filter((ch) => ch.charCodeAt(0) > 0x20)
-          .join('')
-          .toLowerCase();
-        const handler = name.startsWith('on');
-        const badStyle = name === 'style' && /expression|url\(\s*['"]?javascript:/i.test(a.value);
-        const badUrl = URL_ATTRS.has(name) && /^(javascript|vbscript|data):(?!image\/(png|gif|jpe?g|webp);)/.test(value);
-        if (handler || badStyle || badUrl) el.removeAttribute(a.name);
+        if (
+          !allowedAttribute(tag, name) ||
+          (name === 'style' && unsafeStyle(a.value)) ||
+          (name === 'srcset' && !safeSrcset(a.value)) ||
+          (URL_ATTRS.has(name) && !safeUrl(a.value))
+        )
+          el.removeAttribute(a.name);
       }
       walk(el);
     }
