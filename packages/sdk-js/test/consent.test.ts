@@ -150,6 +150,52 @@ describe('consent gates on what leaves the browser (#1135)', () => {
         .at(-1).context,
     ).not.toHaveProperty('clickIds');
   });
+
+  it('strips click ids from a batch that fails after a withdrawal made while it was in flight', async () => {
+    const bodies: any[] = [];
+    let release!: () => void;
+    let calls = 0;
+    const data = new Map<string, string>();
+    const a = createAnalytics({
+      writeKey: 'pk_test',
+      host: 'https://am.example.com',
+      storage: {
+        getItem: (k: string) => data.get(k) ?? null,
+        setItem: (k: string, v: string) => void data.set(k, v),
+        removeItem: (k: string) => void data.delete(k),
+      },
+      page: () => ({ path: '/', url: 'https://martechsignal.com/', title: 'Home', referrer: '' }),
+      landing: () => ({ search: '?gclid=Cj0KCQabc', cookies: '' }),
+      flushInterval: 10_000,
+      fetch: (async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(String(init.body)));
+        // The first batch that carries the page view fails, but only after the withdrawal.
+        if (++calls === 2) {
+          await new Promise<void>((r) => {
+            release = r;
+          });
+          throw new Error('offline');
+        }
+        return new Response('{}');
+      }) as typeof globalThis.fetch,
+    });
+    a.setConsent({ analytics: true, ad_measurement: true });
+    await a.flush();
+    a.track('Page View');
+    const inFlight = a.flush();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bodies.at(-1).batch.find((e: any) => e.event === 'Page View').context.clickIds).toEqual({ gclid: 'Cj0KCQabc' });
+    a.setConsent({ ad_measurement: false });
+    release();
+    await inFlight;
+    await a.flush();
+    const retried = bodies
+      .slice(2)
+      .flatMap((b) => b.batch)
+      .filter((e: any) => e.event === 'Page View');
+    expect(retried.length).toBeGreaterThan(0);
+    for (const e of retried) expect(e.context).not.toHaveProperty('clickIds');
+  });
 });
 
 describe('consent banner', () => {

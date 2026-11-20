@@ -226,6 +226,15 @@ export function createAnalytics(opts: AnalyticsOptions) {
     return sending;
   }
 
+  /** Removes ad click ids (ad-measurement data) from events that have not been delivered. */
+  function stripClickIds(events: typeof outbox) {
+    for (const e of events) {
+      if (!e.context || !('clickIds' in e.context)) continue;
+      const { clickIds: _withdrawn, ...rest } = e.context;
+      e.context = rest;
+    }
+  }
+
   async function send(): Promise<void> {
     clearTimeout(timer);
     timer = undefined;
@@ -246,8 +255,11 @@ export function createAnalytics(opts: AnalyticsOptions) {
       if (res.status >= 500 || res.status === 429) throw new Error(`collector answered ${res.status}`);
       backoff = 0;
     } catch {
-      // A withdrawal during the request wins over the failed batch.
-      outbox.unshift(...batch.filter(maySend).slice(0, Math.max(0, MAX_QUEUE - outbox.length)));
+      // A withdrawal during the request wins over the failed batch: analytics drops the events,
+      // ad_measurement drops their click ids before the retry (#1135).
+      const retry = batch.filter(maySend);
+      if (consent?.[AD_PURPOSE] !== true) stripClickIds(retry);
+      outbox.unshift(...retry.slice(0, Math.max(0, MAX_QUEUE - outbox.length)));
       backoff = Math.min(60_000, backoff ? backoff * 2 : 1000);
     }
     if (outbox.length) schedule();
@@ -300,11 +312,7 @@ export function createAnalytics(opts: AnalyticsOptions) {
       // from a grant discards them.
       if (hadAdMeasurement && consent?.[AD_PURPOSE] !== true) {
         clickIds = {};
-        for (const e of outbox) {
-          if (!e.context || !('clickIds' in e.context)) continue;
-          const { clickIds: _withdrawn, ...context } = e.context;
-          e.context = context;
-        }
+        stripClickIds(outbox);
       }
       // A withdrawal discards what was collected under the old grant; only consent updates survive.
       if (!allowed()) {
