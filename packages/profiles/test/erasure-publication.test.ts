@@ -1,6 +1,12 @@
 import { createHash } from 'node:crypto';
 import { newUuid } from '@agentic-marketing/core';
-import { enqueueUnpublishedErasures, erasureLedgerChecker, readErasureLog, replayErasures } from '@agentic-marketing/db';
+import {
+  enqueueUnpublishedErasures,
+  erasureLedgerChecker,
+  readErasureLog,
+  replayErasures,
+  runErasurePublicationBacklog,
+} from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore, migrateClickHouse, resetClickHouse } from '@agentic-marketing/events';
 import { localKeyProvider } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -411,6 +417,50 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
       { erasure_id: 'era_backlog_pending', state: 'pending_external', claim_token: null },
       { erasure_id: 'era_backlog_running', state: 'running', claim_token: 'claim-live' },
     ]);
+  }, 60_000);
+
+  it('re-opens a failed publication job on a later pass and stops on abort (#1062)', async () => {
+    const workspace = newUuid();
+    const erasureId = 'era_backlog_failed';
+    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Failed backlog', 'none')", [workspace]);
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, '{}', 'user_test', 'failed publication', '{}')`,
+      [workspace, erasureId],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'profile', $2, 'dk_exclusion_test', $3, 'full')`,
+      [workspace, hash('failed-publication'), erasureId],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, last_error, clickhouse_done, hotstate_done)
+       VALUES ($1, $2, '{}', 'failed', 36, 'ClickHouse unavailable', true, true)`,
+      [workspace, erasureId],
+    );
+    const controller = new AbortController();
+    const running = runErasurePublicationBacklog({ db: d.db }, controller.signal, { tickMs: 5 });
+    const deadline = Date.now() + 10_000;
+    let state = 'failed';
+    while (Date.now() < deadline) {
+      const { rows } = await d.db.admin.query<{ state: string }>(
+        'SELECT state FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
+        [workspace, erasureId],
+      );
+      state = rows[0]?.state ?? 'missing';
+      if (state === 'pending_external') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    controller.abort();
+    await running;
+    expect(state).toBe('pending_external');
+    const { rows } = await d.db.admin.query<{ state: string; published_at: Date | null; clickhouse_done: boolean; attempts: number }>(
+      'SELECT state, published_at, clickhouse_done, attempts FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
+      [workspace, erasureId],
+    );
+    // Re-opened for a fresh publication: the earlier sweep checkpoints and publication do not count.
+    expect(rows[0]).toMatchObject({ state: 'pending_external', published_at: null, clickhouse_done: false, attempts: 36 });
   }, 60_000);
 
   it('keeps a restored workspace on the protected path with ledger rows but no generation row', async () => {

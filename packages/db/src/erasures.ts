@@ -375,6 +375,9 @@ async function eraseFamily(client: pg.Client, workspaceId: string, profileIds: s
   // a restored snapshot brings them back with the person (#1011 review).
   await client.query('DELETE FROM journey_processed_events WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM segment_memberships WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
+  // Holdout arms are person-keyed rows a report still reads. Their foreign key cascades with the
+  // profile; naming the table keeps this replay's list complete (#1048).
+  await client.query('DELETE FROM holdout_assignments WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM consent_records WHERE workspace_id = $1 AND profile_id = ANY($2)', params);
   await client.query('DELETE FROM profile_merges WHERE workspace_id = $1 AND (from_id = ANY($2) OR into_id = ANY($2))', params);
   const deleted = await client.query('DELETE FROM profiles WHERE workspace_id = $1 AND id = ANY($2)', params);
