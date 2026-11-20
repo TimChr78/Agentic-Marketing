@@ -76,6 +76,9 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     expect(check?.message).toContain('1 erasure cleanup job(s) failed after their retries');
     expect(check?.message).toContain('1 waiting');
     expect(check?.hint).toContain('ClickHouse');
+    // 0.17 semantics: an unpublished exclusion means reads still return the person (#1062).
+    expect(check?.hint).toContain('reads still return the person');
+    expect(check?.hint).toContain('periodic publication pass');
 
     await d.db.admin.query("UPDATE erasure_cleanup_jobs SET state = 'complete' WHERE workspace_id = $1", [d.workspace]);
     expect((await erasureCheck())?.status).toBe('ok');

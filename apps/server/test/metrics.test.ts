@@ -92,6 +92,7 @@ describe('metrics exposition', () => {
       'am_broadcast_runs_due',
       'am_warehouse_exports_due',
       'am_deliveries_dead_24h',
+      'am_erasures_unpublished',
       'am_agent_decisions_last_hour',
       'am_dependency_up',
     ])

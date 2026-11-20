@@ -3,7 +3,7 @@ import { isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { classifyCommands } from './classify';
+import { classifyCommands, classifyInputForLog } from './classify';
 import { copilotCommands } from './copilot';
 import { listTestRuns, testPrompt, testRunResults } from './prompts';
 import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider } from './providers';
@@ -79,7 +79,9 @@ export const listAiCalls = defineCommand({
         journeyId: r.journeyId,
         node: r.node,
         profileId: r.profileId,
-        input: r.input,
+        // A pending classify call still holds the raw text the worker needs, and the read path
+        // must never return it (#1057); the worker replaces the stored copy when it settles.
+        input: r.kind === 'classify' ? classifyInputForLog(r.input) : r.input,
         output: r.output,
         rationale: r.rationale,
         error: r.error,

@@ -1059,7 +1059,7 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
           id: 'queue.erasureCleanup',
           status: 'warn',
           message: `${erasureFailed} erasure cleanup job(s) failed after their retries; ${erasureWaiting}`,
-          hint: 'An erasure’s SQL rows are already gone; its ClickHouse events and hot state may remain. Check ClickHouse and Valkey, then restart the scheduler role: a failed job is not retried automatically.',
+          hint: 'The erasure’s SQL rows are gone, but its exclusion never published, so reads still return the person’s ClickHouse rows and queued events. Check ClickHouse and the scheduler role: it re-opens a failed job on its periodic publication pass, so check that role’s logs; Valkey hot state may also remain.',
         }
       : erasurePending === 0
         ? { id: 'queue.erasureCleanup', status: 'ok', message: 'no erasure cleanup is waiting' }

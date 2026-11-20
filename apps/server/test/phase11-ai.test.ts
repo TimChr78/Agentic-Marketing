@@ -11,6 +11,7 @@ let t: Awaited<ReturnType<typeof startTestServer>>;
 let llm: Awaited<ReturnType<typeof fakeLlm>>;
 let owner: User;
 let key = '';
+let ws = '';
 
 function answer(r: FakeRequest) {
   if (r.system.includes('Choose exactly one label')) {
@@ -40,7 +41,7 @@ beforeAll(async () => {
   llm = await fakeLlm(answer);
   t = await startTestServer('test_p11_ai', testPort(3293));
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
-  await t.workspaceWith([[owner, 'owner']], 'none');
+  ws = await t.workspaceWith([[owner, 'owner']], 'none');
   const api = t.api(owner);
   key = (await api.call('sources.create', { name: 'Backend', kind: 'server' })).key;
   await api.call('aiProviders.create', {
@@ -111,6 +112,45 @@ describe('ai.classify', () => {
     const after = await api.call('ai.reviews', { status: 'reviewed', promptId: prompt });
     expect(after.reviews[0]).toMatchObject({ callId, verdict: 'good', note: 'Right call' });
     expect(after.quality).toEqual([{ promptId: prompt, pending: 0, good: 1, bad: 0, goodRate: 1 }]);
+  });
+
+  it('keeps only the redacted text on the call log while the model still sees the raw text (#1057)', async () => {
+    const api = t.api(owner);
+    const prompt = await publish('prompt', 'Redacted reply', {
+      kind: 'classify',
+      instructions: 'What does this customer reply want?',
+      options: [
+        { key: 'complaint', description: 'Something went wrong' },
+        { key: 'question', description: 'Asks for information' },
+      ],
+      review: { sampleRate: 1 },
+    });
+    const text = 'Ada from the refund team wrote back: ada.redaction@example.com, please call +45 40 50 60 70.';
+    const { callId } = await api.call('ai.classify', { artifactId: prompt, text });
+
+    // The read path never returns the raw text, even while the call is still pending.
+    const logged = await api.call('ai.calls', { kind: 'classify', promptId: prompt, limit: 10 });
+    const call = logged.calls.find((row) => row.id === callId)!;
+    expect(JSON.stringify(call.input)).not.toContain('ada.redaction@example.com');
+    expect(String(call.input.text)).toContain('[email]');
+
+    const done = await eventually(
+      () => api.call('ai.classification', { callId }),
+      (r) => r.status !== 'pending' && r.status !== 'running',
+    );
+    expect(done.status).toBe('done');
+    // The provider saw the raw text, as #352 allows: only the kept copy is scrubbed.
+    expect(llm.requests.some((r) => r.user.includes('ada.redaction@example.com'))).toBe(true);
+    // The stored row was replaced with the redacted copy when the call settled.
+    const stored = await t.srv.db.admin.query<{ text: string }>(
+      `SELECT input->>'text' AS text FROM ai_calls WHERE workspace_id = $1 AND id = $2`,
+      [ws, callId],
+    );
+    expect(stored.rows[0]!.text).not.toContain('ada.redaction@example.com');
+    expect(stored.rows[0]!.text).toContain('[email]');
+    // So is what human review shows for the sampled answer.
+    const reviews = await api.call('ai.reviews', { promptId: prompt });
+    expect(JSON.stringify(reviews.reviews[0]!.input)).not.toContain('ada.redaction@example.com');
   });
 
   it('refuses people who did not allow AI processing, and prompts of another kind', async () => {
