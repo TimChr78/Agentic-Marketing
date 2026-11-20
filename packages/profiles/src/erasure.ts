@@ -106,10 +106,8 @@ export async function removeProfiles(
   await tx.delete(schema.journeyProcessedEvents).where(inArray(schema.journeyProcessedEvents.profileId, family));
   // Out of every segment's materialised membership; static list rows cascade with the profile below.
   await tx.delete(schema.segmentMemberships).where(inArray(schema.segmentMemberships.profileId, family));
-  // Out of every holdout arm as well. The foreign key cascades, but the deletion is explicit so the
-  // stage and the restore replay name every person-keyed table that a report reads (#1048). The
-  // table is append-only for the app role, so a narrow owner-rights function removes the rows.
-  await tx.execute(sql`SELECT erase_holdout_assignments(${sql.param(family)}::text[])`);
+  // Holdout arms (`holdout_assignments`) go with the profile rows below: their foreign key to
+  // profiles cascades, and the table is append-only for the app role (#1048).
   const suppress = opts.suppress ? identifiers.filter((i) => i.type === 'email' || i.type === 'phone') : [];
   if (suppress.length)
     await tx
