@@ -32,6 +32,7 @@ import {
   isSingleton,
   publishValidators,
   referencesOf,
+  segmentContentProblems,
 } from './types';
 
 // Generic, versioned artifacts with a configurable approval pipeline (journeys-and-editors.md §5).
@@ -137,6 +138,10 @@ export async function validateContent(type: ArtifactType, content: unknown, mode
     );
   }
   const problems = (await contentValidators.get(type)?.(parsed.data)) ?? [];
+  // A message window longer than the stored history is refused when it is saved, not when the
+  // ClickHouse TTL has already clamped it (#1076). Definitions saved before this check stay
+  // readable: the schema's own 10-year cap is what a read sees.
+  if (type === 'segment') problems.push(...segmentContentProblems(parsed.data as { condition?: unknown }));
   if (problems.length) throw new AppError('invalid_input', `The content is not a valid ${type}: ${problems.join('; ')}`, { problems });
   return parsed.data as Record<string, unknown>;
 }
@@ -231,6 +236,7 @@ async function checkPublishable(ctx: CommandContext, type: string, content: unkn
       type,
       workspaceId: ctx.principal.workspaceId,
     })) ?? [];
+  if (type === 'segment') problems.push(...segmentContentProblems(content as { condition?: unknown }));
   if (problems.length) throw new AppError('invalid_input', `This ${type} cannot be published yet: ${problems.join('; ')}`, { problems });
 }
 

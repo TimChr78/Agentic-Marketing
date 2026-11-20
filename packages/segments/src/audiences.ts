@@ -4,7 +4,7 @@ import { type CommandContext, defineCommand } from '@agentic-marketing/commands'
 import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { BusEvent } from '@agentic-marketing/events';
-import { personCrypto } from '@agentic-marketing/profiles';
+import { personCrypto, withIdentityLock } from '@agentic-marketing/profiles';
 import { and, desc, eq, inArray, lt, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { parseCsv } from './csv';
@@ -80,6 +80,18 @@ async function canonicalOf(tx: Tx, workspaceId: string, ids: string[]): Promise<
   }
   for (const input of frontier.keys()) result.set(input, null);
   return result;
+}
+
+/**
+ * Today's people for ids resolved a moment earlier. The caller resolves identifiers before it
+ * takes the identity lock (that step can unwrap a key with the provider); a merge may commit in
+ * between, so the locked write must follow each id to its survivor rather than insert it as it was
+ * (#1068). The lock, not a last-moment `merged_into` read, is what closes the window: a merge that
+ * starts after this call waits for the write to commit.
+ */
+async function survivingPeople(tx: Tx, workspaceId: string, ids: string[]): Promise<string[]> {
+  const canonical = await canonicalOf(tx, workspaceId, ids);
+  return [...new Set([...canonical.values()].filter((id): id is string => !!id))];
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -241,14 +253,6 @@ async function recordRun(tx: Tx, workspaceId: string, seg: PublishedSegment, ent
   return written?.stamp ?? null;
 }
 
-/** Publishes list change events before the command commits; stable ids make a retried batch harmless. */
-async function publishChanges(ctx: CommandContext, seg: PublishedSegment, entered: string[], exited: string[], cause: string) {
-  if (!entered.length && !exited.length) return [] as BusEvent[];
-  const events = await listChangeEvents(ctx.tx, ctx.principal.workspaceId, seg, entered, exited, cause);
-  await publishInSlices(ctx.services.bus, events);
-  return events;
-}
-
 function asPublished(seg: ListSegment, definition = seg.definition): PublishedSegment {
   return { id: seg.id, name: seg.name, version: seg.version, definition };
 }
@@ -280,40 +284,50 @@ export const addAudienceMembers = defineCommand({
     if (!resolved.length) return { added: 0, existing: 0, unmatched };
 
     const at = new Date();
-    const added: string[] = [];
-    for (let i = 0; i < resolved.length; i += MAX_BATCH) {
-      const rows = await ctx.tx
-        .insert(schema.segmentListMembers)
-        .values(
-          resolved.slice(i, i + MAX_BATCH).map((profileId) => ({
-            workspaceId: ws,
-            segmentId: seg.id,
-            profileId,
-            addedAt: at,
-            addedBy: ctx.principal.userId,
-            source: input.source,
-          })),
-        )
-        .onConflictDoNothing()
-        .returning({ profileId: schema.segmentListMembers.profileId });
-      added.push(...rows.map((r) => r.profileId));
-    }
+    const { added, people, events } = await withIdentityLock(ctx.tx, ws, async () => {
+      const today = await survivingPeople(ctx.tx, ws, resolved);
+      if (!today.length) return { added: [] as string[], people: today, events: [] as BusEvent[] };
+      const added: string[] = [];
+      for (let i = 0; i < today.length; i += MAX_BATCH) {
+        const rows = await ctx.tx
+          .insert(schema.segmentListMembers)
+          .values(
+            today.slice(i, i + MAX_BATCH).map((profileId) => ({
+              workspaceId: ws,
+              segmentId: seg.id,
+              profileId,
+              addedAt: at,
+              addedBy: ctx.principal.userId,
+              source: input.source,
+            })),
+          )
+          .onConflictDoNothing()
+          .returning({ profileId: schema.segmentListMembers.profileId });
+        added.push(...rows.map((r) => r.profileId));
+      }
 
-    // Mirror into segment_memberships; only people new to the membership are entered.
-    const entered: string[] = [];
-    for (let i = 0; i < added.length; i += MAX_BATCH) {
-      const rows = await ctx.tx
-        .insert(schema.segmentMemberships)
-        .values(added.slice(i, i + MAX_BATCH).map((profileId) => ({ workspaceId: ws, segmentId: seg.id, profileId })))
-        .onConflictDoNothing()
-        .returning({ profileId: schema.segmentMemberships.profileId });
-      entered.push(...rows.map((r) => r.profileId));
-    }
+      // Mirror into segment_memberships; only people new to the membership are entered.
+      const entered: string[] = [];
+      for (let i = 0; i < added.length; i += MAX_BATCH) {
+        const rows = await ctx.tx
+          .insert(schema.segmentMemberships)
+          .values(added.slice(i, i + MAX_BATCH).map((profileId) => ({ workspaceId: ws, segmentId: seg.id, profileId })))
+          .onConflictDoNothing()
+          .returning({ profileId: schema.segmentMemberships.profileId });
+        entered.push(...rows.map((r) => r.profileId));
+      }
 
-    const published = asPublished(seg);
-    await recordRun(ctx.tx, ws, published, entered.length, 0);
-    if (entered.length) await publishChanges(ctx, published, entered, [], `list:${newId('chg')}`);
-    return { added: added.length, existing: resolved.length - added.length, unmatched };
+      const published = asPublished(seg);
+      await recordRun(ctx.tx, ws, published, entered.length, 0);
+      const events = entered.length
+        ? await listChangeEvents(ctx.tx, ws, published, entered, [], `list:${newId('chg')}`)
+        : ([] as BusEvent[]);
+      return { added, people: today, events };
+    });
+    // Outside the protected block: the bus is network I/O, and the lock exists only around the
+    // reads and writes that must not interleave with a merge.
+    if (events.length) await publishInSlices(ctx.services.bus, events);
+    return { added: added.length, existing: people.length - added.length, unmatched };
   },
 });
 
@@ -339,21 +353,27 @@ export const removeAudienceMembers = defineCommand({
     const { resolved, unmatched } = await resolveSelectors(ctx, input);
     if (!resolved.length) return { removed: 0, notMembers: 0, unmatched };
 
-    const removedRows = await ctx.tx
-      .delete(schema.segmentListMembers)
-      .where(and(eq(schema.segmentListMembers.segmentId, seg.id), inArray(schema.segmentListMembers.profileId, resolved)))
-      .returning({ profileId: schema.segmentListMembers.profileId });
-    const removed = removedRows.map((r) => r.profileId);
-    const exitedRows = await ctx.tx
-      .delete(schema.segmentMemberships)
-      .where(and(eq(schema.segmentMemberships.segmentId, seg.id), inArray(schema.segmentMemberships.profileId, resolved)))
-      .returning({ profileId: schema.segmentMemberships.profileId });
-    const exited = exitedRows.map((r) => r.profileId);
+    const { removed, people, events } = await withIdentityLock(ctx.tx, ws, async () => {
+      const today = await survivingPeople(ctx.tx, ws, resolved);
+      if (!today.length) return { removed: [] as string[], people: today, events: [] as BusEvent[] };
+      const removedRows = await ctx.tx
+        .delete(schema.segmentListMembers)
+        .where(and(eq(schema.segmentListMembers.segmentId, seg.id), inArray(schema.segmentListMembers.profileId, today)))
+        .returning({ profileId: schema.segmentListMembers.profileId });
+      const removed = removedRows.map((r) => r.profileId);
+      const exitedRows = await ctx.tx
+        .delete(schema.segmentMemberships)
+        .where(and(eq(schema.segmentMemberships.segmentId, seg.id), inArray(schema.segmentMemberships.profileId, today)))
+        .returning({ profileId: schema.segmentMemberships.profileId });
+      const exited = exitedRows.map((r) => r.profileId);
 
-    const published = asPublished(seg);
-    await recordRun(ctx.tx, ws, published, 0, exited.length);
-    if (exited.length) await publishChanges(ctx, published, [], exited, `list:${newId('chg')}`);
-    return { removed: removed.length, notMembers: resolved.length - removed.length, unmatched };
+      const published = asPublished(seg);
+      await recordRun(ctx.tx, ws, published, 0, exited.length);
+      const events = exited.length ? await listChangeEvents(ctx.tx, ws, published, [], exited, `list:${newId('chg')}`) : ([] as BusEvent[]);
+      return { removed, people: today, events };
+    });
+    if (events.length) await publishInSlices(ctx.services.bus, events);
+    return { removed: removed.length, notMembers: people.length - removed.length, unmatched };
   },
 });
 
@@ -439,65 +459,89 @@ export const importAudienceCsv = defineCommand({
     const { results } = await resolveMany(ctx, input.idType, values);
     const unmatched = results.flatMap((r, i) => ('reason' in r ? [{ row: i + 2, reason: r.reason }] : []));
     const matched = results.length - unmatched.length;
-    const people = [...new Set(results.filter((r): r is { profileId: string } => 'profileId' in r).map((r) => r.profileId))];
-
-    const existingRows = people.length
-      ? await ctx.tx
-          .select({ profileId: schema.segmentListMembers.profileId })
-          .from(schema.segmentListMembers)
-          .where(and(eq(schema.segmentListMembers.segmentId, seg.id), inArray(schema.segmentListMembers.profileId, people)))
-      : [];
-    const existing = new Set(existingRows.map((r) => r.profileId));
-    const fresh = people.filter((p) => !existing.has(p));
-
-    if (input.dryRun) {
-      return { importId: null, rows: data.length, matched, added: fresh.length, existing: people.length - fresh.length, unmatched };
-    }
+    const resolved = [...new Set(results.filter((r): r is { profileId: string } => 'profileId' in r).map((r) => r.profileId))];
 
     const at = new Date();
-    const added: string[] = [];
-    for (let i = 0; i < fresh.length; i += MAX_BATCH) {
-      const rows = await ctx.tx
-        .insert(schema.segmentListMembers)
-        .values(
-          fresh.slice(i, i + MAX_BATCH).map((profileId) => ({
-            workspaceId: ws,
-            segmentId: seg.id,
-            profileId,
-            addedAt: at,
-            addedBy: ctx.principal.userId,
-            source: 'csv' as const,
-          })),
-        )
-        .onConflictDoNothing()
-        .returning({ profileId: schema.segmentListMembers.profileId });
-      added.push(...rows.map((r) => r.profileId));
+    const outcome = await withIdentityLock(ctx.tx, ws, async () => {
+      const people = await survivingPeople(ctx.tx, ws, resolved);
+      const existingRows = people.length
+        ? await ctx.tx
+            .select({ profileId: schema.segmentListMembers.profileId })
+            .from(schema.segmentListMembers)
+            .where(and(eq(schema.segmentListMembers.segmentId, seg.id), inArray(schema.segmentListMembers.profileId, people)))
+        : [];
+      const existing = new Set(existingRows.map((r) => r.profileId));
+      const fresh = people.filter((p) => !existing.has(p));
+      if (input.dryRun) return { people, fresh, added: [] as string[], events: [] as BusEvent[], stamp: null as string | null };
+
+      const added: string[] = [];
+      for (let i = 0; i < fresh.length; i += MAX_BATCH) {
+        const rows = await ctx.tx
+          .insert(schema.segmentListMembers)
+          .values(
+            fresh.slice(i, i + MAX_BATCH).map((profileId) => ({
+              workspaceId: ws,
+              segmentId: seg.id,
+              profileId,
+              addedAt: at,
+              addedBy: ctx.principal.userId,
+              source: 'csv' as const,
+            })),
+          )
+          .onConflictDoNothing()
+          .returning({ profileId: schema.segmentListMembers.profileId });
+        added.push(...rows.map((r) => r.profileId));
+      }
+
+      const entered: string[] = [];
+      for (let i = 0; i < added.length; i += MAX_BATCH) {
+        const rows = await ctx.tx
+          .insert(schema.segmentMemberships)
+          .values(added.slice(i, i + MAX_BATCH).map((profileId) => ({ workspaceId: ws, segmentId: seg.id, profileId })))
+          .onConflictDoNothing()
+          .returning({ profileId: schema.segmentMemberships.profileId });
+        entered.push(...rows.map((r) => r.profileId));
+      }
+
+      const published = asPublished(seg);
+      const stamp = await recordRun(ctx.tx, ws, published, entered.length, 0);
+      const events = entered.length
+        ? await listChangeEvents(ctx.tx, ws, published, entered, [], `import:${newId('chg')}`)
+        : ([] as BusEvent[]);
+      return { people, fresh, added, events, stamp };
+    });
+
+    if (input.dryRun) {
+      return {
+        importId: null,
+        rows: data.length,
+        matched,
+        added: outcome.fresh.length,
+        existing: outcome.people.length - outcome.fresh.length,
+        unmatched,
+      };
     }
 
-    const entered: string[] = [];
-    for (let i = 0; i < added.length; i += MAX_BATCH) {
-      const rows = await ctx.tx
-        .insert(schema.segmentMemberships)
-        .values(added.slice(i, i + MAX_BATCH).map((profileId) => ({ workspaceId: ws, segmentId: seg.id, profileId })))
-        .onConflictDoNothing()
-        .returning({ profileId: schema.segmentMemberships.profileId });
-      entered.push(...rows.map((r) => r.profileId));
-    }
-
-    const published = asPublished(seg);
-    const stamp = await recordRun(ctx.tx, ws, published, entered.length, 0);
-    if (entered.length) await publishChanges(ctx, published, entered, [], `import:${newId('chg')}`);
+    if (outcome.events.length) await publishInSlices(ctx.services.bus, outcome.events);
     const importId = await recordImport(ctx.tx, ws, seg.id, {
       source: 'csv',
       rows: data.length,
       matched,
-      added: added.length,
+      added: outcome.added.length,
       unmatched,
       fileName: input.fileName ?? null,
       fileSha256: createHash('sha256').update(input.csv).digest('hex'),
       actor: ctx.principal.userId,
     });
-    return { importId, rows: data.length, matched, added: added.length, existing: people.length - added.length, unmatched, stamp };
+    return {
+      importId,
+      rows: data.length,
+      matched,
+      added: outcome.added.length,
+      existing: outcome.people.length - outcome.added.length,
+      unmatched,
+      stamp: outcome.stamp,
+    };
   },
 });
 
@@ -567,13 +611,18 @@ async function memberIds(tx: Tx, workspaceId: string, segmentId: string): Promis
   return rows.map((r) => r.profileId);
 }
 
-/** Makes the snapshot's stored list exactly `target`, mirroring memberships and reporting the diff. */
+/**
+ * Makes the snapshot's stored list exactly `target`, mirroring memberships and reporting the diff.
+ * The caller runs it under the workspace identity lock: `target` was read a moment earlier, and a
+ * merge in between must not strand the inserted rows on a folded-away id (#1068). The change events
+ * are returned, not published, so the bus write happens outside that block.
+ */
 async function replaceList(
   ctx: CommandContext,
   seg: PublishedSegment,
   target: string[],
   source: 'snapshot',
-): Promise<{ added: number; removed: number; entered: number; exited: number; members: number }> {
+): Promise<{ added: number; removed: number; entered: number; exited: number; members: number; events: BusEvent[] }> {
   const ws = ctx.principal.workspaceId;
   const want = new Set(target);
   const currentRows = await ctx.tx
@@ -625,8 +674,11 @@ async function replaceList(
   }
 
   await recordRun(ctx.tx, ws, seg, entered.length, exited.length);
-  await publishChanges(ctx, seg, entered, exited, `snapshot:${newId('chg')}`);
-  return { added: add.length, removed: remove.length, entered: entered.length, exited: exited.length, members: want.size };
+  const events =
+    entered.length || exited.length
+      ? await listChangeEvents(ctx.tx, ws, seg, entered, exited, `snapshot:${newId('chg')}`)
+      : ([] as BusEvent[]);
+  return { added: add.length, removed: remove.length, entered: entered.length, exited: exited.length, members: want.size, events };
 }
 
 export const snapshotAudience = defineCommand({
@@ -672,8 +724,11 @@ export const snapshotAudience = defineCommand({
       version: created.version,
       definition: artifactTypes.segment.content.parse(content),
     };
-    const members = await memberIds(ctx.tx, ws, input.sourceSegmentId);
-    const result = await replaceList(ctx, seg, members, 'snapshot');
+    const { result, members } = await withIdentityLock(ctx.tx, ws, async () => {
+      const members = await memberIds(ctx.tx, ws, input.sourceSegmentId);
+      return { members, result: await replaceList(ctx, seg, members, 'snapshot') };
+    });
+    if (result.events.length) await publishInSlices(ctx.services.bus, result.events);
     await recordImport(ctx.tx, ws, seg.id, {
       source: 'snapshot',
       rows: members.length,
@@ -715,8 +770,11 @@ export const refreshSnapshotAudience = defineCommand({
       .from(schema.artifacts)
       .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, sourceId)));
     if (!source?.publishedVersion) throw new AppError('conflict', `The snapshot's source ${sourceId} is not published.`);
-    const members = await memberIds(ctx.tx, ws, sourceId);
-    const result = await replaceList(ctx, asPublished(seg), members, 'snapshot');
+    const { result, members } = await withIdentityLock(ctx.tx, ws, async () => {
+      const members = await memberIds(ctx.tx, ws, sourceId);
+      return { members, result: await replaceList(ctx, asPublished(seg), members, 'snapshot') };
+    });
+    if (result.events.length) await publishInSlices(ctx.services.bus, result.events);
     const importId = await recordImport(ctx.tx, ws, seg.id, {
       source: 'snapshot',
       rows: members.length,

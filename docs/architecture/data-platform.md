@@ -106,8 +106,19 @@ what happened to a message it sent, read from ClickHouse `message_events` (#441)
 ```
 
 - `message` is `delivered`, `opened`, `clicked`, `bounced`, `complained` or `unsubscribed`.
-- `within` is an ISO 8601 window, `count` the number of such messages (default at least once; `{"lte": 0}`
-  is "never"), `channel` narrows to `email`, `sms` or `push`, and `purpose` to a published purpose key.
+- `within` is an ISO 8601 window (at most 10 years), `count` the number of such messages (default at
+  least once; `{"lte": 0}` is "never"), `channel` narrows to `email`, `sms` or `push`, and `purpose`
+  to a published purpose key.
+- **Distinct messages, not events:** `count` counts the messages that met the condition, not the
+  engagement rows. Two pixel fetches for one issue (a mailbox that pre-fetches images) or two clicks
+  on one link are one message. That is why `{"gte": 2}` means "opened two issues", not "opened twice".
+- **How long the log is kept:** `message_events` has a ClickHouse TTL of 25 months
+  (`0002_message_events.sql`). A message leaf without `within` reads the whole history that is kept,
+  which the builder and this document name as "the last 25 months (how long message history is
+  kept)". A new window longer than 25 months is refused when a segment is saved, because the TTL
+  would silently clamp it; a window saved before that check keeps working. Lifetime "ever opened"
+  rules therefore have a 25-month horizon: do not build a segment whose membership must never decay
+  on a message condition without a window.
 - `broadcast` or `journey` (not both) counts only the messages that send produced.
 - `not`, `all` and `any` compose it like any other leaf, and a merge is followed: messages recorded
   under a profile that was later merged in count for the person it became.
@@ -122,7 +133,9 @@ what happened to a message it sent, read from ClickHouse `message_events` (#441)
   its message leaves are evaluated then too; `refreshPeople` (a consent write or a preference-centre
   link) likewise re-evaluates every rule for the affected people, message leaves included. Otherwise
   membership moves on the next recompute — the scheduler's regular pass or `segments.refresh` — and
-  a journey's wait-until checks one person at once.
+  a journey's wait-until checks one person at once. The builder's estimate is a live count from
+  `segments.preview`, so it can differ from the stored membership (what a send uses) until the next
+  refresh; the builder and the estimate panel say so.
 
 Two evaluation modes from the same definition:
 

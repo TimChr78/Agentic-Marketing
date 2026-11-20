@@ -664,10 +664,57 @@ const audienceSync = z
 
 // Segment DSL (data-platform.md §6): a JSON condition tree that agents read and write and the
 // UI edits. The same definition is evaluated in batch and per person as events arrive.
+const SECONDS_PER_UNIT: Record<string, number> = { W: 604_800, D: 86_400, H: 3_600, M: 60 };
+
+/**
+ * The seconds an ISO 8601 duration names, by one linear scan. Segment evaluation uses the same
+ * parse, so the window a definition is saved with is exactly the window that is counted.
+ */
+export function durationSeconds(iso: string): number {
+  const text = iso.replace(/^P/, '').replace('T', '');
+  let total = 0;
+  let i = 0;
+  while (i < text.length) {
+    if (text[i]! < '0' || text[i]! > '9') {
+      i += 1;
+      continue;
+    }
+    let end = i;
+    while (end < text.length && text[end]! >= '0' && text[end]! <= '9') end++;
+    const unit = text[end];
+    // The old regex matched only a digit run immediately followed by a unit; leave an
+    // un-suffixed run alone and continue after it, exactly as that scan did.
+    if (unit && SECONDS_PER_UNIT[unit] !== undefined) {
+      total += Number(text.slice(i, end)) * SECONDS_PER_UNIT[unit]!;
+      i = end + 1;
+    } else {
+      i = end;
+    }
+  }
+  return total;
+}
+
+/**
+ * The longest look-back a condition may name. ClickHouse binds the window as a `UInt32` second
+ * count (`toIntervalSecond`), so a larger value failed at bind time on every evaluation of the
+ * segment, forever. Ten years stays far inside that type and is longer than any reasonable
+ * segment window.
+ */
+export const MAX_DURATION_SECONDS = 10 * 365 * 86_400;
+
 const Duration = z
   .string()
   .regex(/^P(\d+W|\d+D|T\d+H|T\d+M|\d+DT\d+H)$/, 'ISO 8601 duration such as P7D, P2W, PT6H or PT30M')
+  .refine((iso) => durationSeconds(iso) <= MAX_DURATION_SECONDS, 'A look-back window can be at most 10 years.')
   .describe('Look-back window, e.g. "P7D"');
+
+/**
+ * How long `message_events` is kept: its ClickHouse TTL is 25 calendar months (`0002_message_events.sql`).
+ * A no-window message condition therefore counts all the history that is kept, which is what the
+ * builder sentence and the schema description say. About 760 days: the longest windows are refused
+ * at save so a rule cannot ask for history the store no longer has.
+ */
+export const MESSAGE_HISTORY_SECONDS = 760 * 86_400;
 const PropKey = z.string().regex(/^[A-Za-z0-9_]{1,64}$/, 'Letters, digits and _');
 const Scalar = z.union([z.string().max(500), z.number(), z.boolean()]);
 /**
@@ -731,8 +778,10 @@ export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
         count: z
           .object({ gte: z.number().int().min(0).optional(), lte: z.number().int().min(0).optional() })
           .optional()
-          .describe('How many such messages; default at least once'),
-        within: Duration.optional(),
+          .describe('How many distinct messages; default at least once'),
+        within: Duration.describe(
+          'Look-back window, e.g. "P7D", at most 25 months. Without one, the rule reads the 25 months of message history that is kept',
+        ).optional(),
         channel: z.enum(['email', 'sms', 'push']).optional().describe('Only messages on this channel'),
         purpose: z
           .string()
@@ -793,6 +842,30 @@ export const segmentCondition: z.ZodType<SegmentCondition> = z.lazy(() =>
       .strict(),
   ]),
 );
+/**
+ * Why a segment may not be saved as it is, beyond what the schema alone can say (#1076). A message
+ * leaf without `within` is allowed and reads all the history that is kept; a *new* window longer
+ * than that history is refused, because the ClickHouse TTL would silently clamp it and a lifetime
+ * rule would lose members to retention. Existing definitions are not re-read through this check.
+ */
+export function segmentContentProblems(content: { condition?: unknown }): string[] {
+  const problems: string[] = [];
+  const walk = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    const c = node as Record<string, unknown>;
+    if (Array.isArray(c.all)) for (const child of c.all) walk(child);
+    if (Array.isArray(c.any)) for (const child of c.any) walk(child);
+    if (c.not) walk(c.not);
+    if (typeof c.message === 'string' && typeof c.within === 'string' && durationSeconds(c.within) > MESSAGE_HISTORY_SECONDS) {
+      problems.push(
+        `A message condition’s within "${c.within}" is longer than the 25 months of message history that is kept (about 760 days), so the oldest part of the window would be silently missing. Use a shorter window, or leave within out to count all the history that is kept.`,
+      );
+    }
+  };
+  walk(content.condition);
+  return problems;
+}
+
 export const segmentMode = z
   .enum(['dynamic', 'static', 'snapshot'])
   .default('dynamic')

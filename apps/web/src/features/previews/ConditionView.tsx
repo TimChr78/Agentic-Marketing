@@ -116,7 +116,11 @@ export function ConditionView({ condition, depth = 0 }: { condition: unknown; de
         )}
         {count?.gte !== undefined && count.gte !== 1 && <> at least {count.gte} times</>}
         {count?.lte !== undefined && <> at most {count.lte} times</>}
-        {typeof c.within === 'string' && <> in the last {durationText(c.within)}</>}
+        {typeof c.within === 'string' ? (
+          <> in the last {durationText(c.within)}</>
+        ) : (
+          <> in the last 25 months (how long message history is kept)</>
+        )}
         {typeof c.broadcast === 'string' && (
           <>
             {' '}
