@@ -397,6 +397,17 @@ describe('Helm rollout, migration and replica reporting', () => {
     expect(kubeDoc).toContain('kubectl rollout restart');
   });
 
+  it('recreates every writer role so old and new writers never overlap (#1066)', () => {
+    // The 0.15.0 lock protocol forbids two writers of different versions at once. One unconditional
+    // Recreate line covers every role in the range; api, ingest, worker and scheduler all write.
+    expect(helmDeployments.match(/strategy: \{ type: Recreate \}/g)).toHaveLength(1);
+    const strategy = helmDeployments.indexOf('strategy: { type: Recreate }');
+    expect(strategy).toBeGreaterThan(0);
+    expect(helmDeployments.slice(0, strategy)).not.toContain('if eq $role "scheduler"');
+    expect(helmDeployments.slice(0, strategy)).toContain('range $role, $r := .Values.roles');
+    expect(helmValues).toMatch(/Recreate/);
+  });
+
   it('migrates before the roles on install and upgrade, without a post-install readiness deadlock (#389)', () => {
     expect(helmMigrateJob).toMatch(/helm\.sh\/hook:\s*pre-install,pre-upgrade/);
     expect(helmMigrateJob).not.toMatch(/helm\.sh\/hook:.*post-install/);

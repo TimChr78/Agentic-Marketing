@@ -141,6 +141,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0111_erasure_key_ledger.sql': '0.17.0',
   '0112_erasure_publication.sql': '0.17.0',
   '0113_erasure_completion.sql': '0.17.0',
+  '0114_writer_protocol.sql': '0.17.2',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

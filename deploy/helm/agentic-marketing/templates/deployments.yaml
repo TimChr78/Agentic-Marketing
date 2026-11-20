@@ -12,9 +12,11 @@ spec:
   {{- if not (and $r.autoscaling $r.autoscaling.enabled) }}
   replicas: {{ $r.replicas }}
   {{- end }}
-  {{- if eq $role "scheduler" }}
-  strategy: { type: Recreate }   # never two schedulers at once
-  {{- end }}
+  # Never roll two writer versions at once (#1066): the 0.15.0 lock protocol and the 0.17.0
+  # erasure contract need the old pods gone before the new ones start. Recreate covers api, ingest,
+  # worker and scheduler; a protocol-changing upgrade still starts with a full scale-to-zero drain
+  # (UPGRADING.md), because the four Deployments roll independently.
+  strategy: { type: Recreate }
   selector:
     matchLabels: {{- include "am.selector" (dict "root" $ "role" $role) | nindent 6 }}
   template:
