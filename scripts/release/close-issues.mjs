@@ -37,8 +37,15 @@ export function parseIssuesComment(section) {
   ].sort((a, b) => a - b);
 }
 
+/**
+ * Output limit for the `gh` and `git` reads. Node's default (1 MiB) was too small for the merged
+ * pull requests of a 0.17.1-sized release: `spawnSync gh ENOBUFS` stopped the script after the
+ * release had already published.
+ */
+export const OUTPUT_LIMIT = 256 * 1024 * 1024;
+
 function gh(args) {
-  return execFileSync('gh', args, { encoding: 'utf8' }).trim();
+  return execFileSync('gh', args, { encoding: 'utf8', maxBuffer: OUTPUT_LIMIT }).trim();
 }
 
 function repository() {
@@ -72,7 +79,7 @@ export function prLimitWarning(count) {
 }
 
 /** The release tags in the local repository. */
-export function localTags(run = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' })) {
+export function localTags(run = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: OUTPUT_LIMIT })) {
   return run(['tag', '--list', 'v*'])
     .split('\n')
     .map((tag) => tag.trim())
@@ -124,7 +131,10 @@ export function issuesForRelease({ prs, changelog, version }) {
 }
 
 /** The CHANGELOG.md at the release tag, not the checkout, so a later edit cannot change the result. */
-export function readChangelogAtTag(version, run = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' })) {
+export function readChangelogAtTag(
+  version,
+  run = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', maxBuffer: OUTPUT_LIMIT }),
+) {
   return run(['show', `v${version}:CHANGELOG.md`]);
 }
 
@@ -176,7 +186,7 @@ export function commitsInRange(root, previous, version) {
   // before it is read rather than silently narrowed (#772).
   assertCompleteHistory(root);
   const range = previous ? `${previous}..v${version}` : `v${version}`;
-  return execFileSync('git', ['rev-list', range], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
+  return execFileSync('git', ['rev-list', range], { cwd: root, encoding: 'utf8', maxBuffer: OUTPUT_LIMIT }).split('\n').filter(Boolean);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
