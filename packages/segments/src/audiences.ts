@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { artifactTypes, createArtifact, type SegmentDefinition } from '@agentic-marketing/artifacts';
+import { artifactTypes, canonicalProfileIds, createArtifact, type SegmentDefinition } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -58,28 +58,13 @@ function requireList(seg: ListSegment): void {
     );
 }
 
-/** Follows merges so a list always holds the surviving profile. */
-async function canonicalOf(tx: Tx, workspaceId: string, ids: string[]): Promise<Map<string, string | null>> {
-  const result = new Map<string, string | null>();
-  let frontier = new Map([...new Set(ids)].map((id) => [id, id] as const));
-  for (let round = 0; round < 20 && frontier.size; round++) {
-    const current = [...new Set(frontier.values())];
-    const rows = await tx
-      .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
-      .from(schema.profiles)
-      .where(and(eq(schema.profiles.workspaceId, workspaceId), inArray(schema.profiles.id, current)));
-    const byId = new Map(rows.map((r) => [r.id, r]));
-    const next = new Map<string, string>();
-    for (const [input, id] of frontier) {
-      const p = byId.get(id);
-      if (!p) result.set(input, null);
-      else if (p.mergedInto) next.set(input, p.mergedInto);
-      else result.set(input, id);
-    }
-    frontier = next;
-  }
-  for (const input of frontier.keys()) result.set(input, null);
-  return result;
+/**
+ * Follows merges so a list always holds the surviving profile. The shared merge walk (#1093)
+ * resolves 256 hops and cycles; the old 20-hop frontier treated a selector 21+ merges deep as not
+ * found, so it could not be added to a static list. Exported so the merge-depth test can call it.
+ */
+export async function canonicalOf(tx: Tx, workspaceId: string, ids: string[]): Promise<Map<string, string | null>> {
+  return canonicalProfileIds(tx, workspaceId, ids);
 }
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

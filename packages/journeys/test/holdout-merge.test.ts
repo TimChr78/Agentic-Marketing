@@ -2,24 +2,33 @@ import { newId } from '@agentic-marketing/core';
 import type { EventStore } from '@agentic-marketing/events';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
-import { computeJourneyHoldout, holdoutHashVersion } from '../src/holdout';
+import { computeJourneyHoldout, holdoutHashVersion, setJourneyHoldoutPageSizeForTests } from '../src/holdout';
 
 // #1070: journeys.holdoutResult must resolve a person's merge family the same way the campaign
 // report does (#985). Counting assignment rows counts one person twice when a later entry copied
 // an arm onto the survivor, and matching raw outcome ids misses a conversion stored under the id
 // the person was merged away from.
+//
+// #1096: outcomes are read one winners page at a time, scoped to that page's merge family, so the
+// report never loads every outcome id for the journey at once.
 
 let d: Awaited<ReturnType<typeof createDisposableDb>>;
 let ws: string;
 
 const outcomes = { converted: [] as string[], unsubscribed: [] as string[] };
+/** The profileIds each event-store call was scoped to, so a test can prove the read is per page. */
+const outcomeScopes: (string[] | undefined)[] = [];
 const events = {
-  async journeyHoldoutOutcomes() {
+  async journeyHoldoutOutcomes(_workspaceId: string, q: { profileIds?: string[] }) {
+    outcomeScopes.push(q.profileIds);
+    const scoped = (ids: string[]) => (q.profileIds ? ids.filter((id) => q.profileIds!.includes(id)) : ids);
+    const converted = scoped(outcomes.converted);
+    const unsubscribed = scoped(outcomes.unsubscribed);
     return {
-      converted: outcomes.converted,
-      unsubscribed: outcomes.unsubscribed,
-      convertedAt: outcomes.converted.map((profileId) => ({ profileId, participantId: null, at: Date.now() })),
-      unsubscribedAt: outcomes.unsubscribed.map((profileId) => ({ profileId, at: Date.now() })),
+      converted,
+      unsubscribed,
+      convertedAt: converted.map((profileId) => ({ profileId, participantId: null, at: Date.now() })),
+      unsubscribedAt: unsubscribed.map((profileId) => ({ profileId, at: Date.now() })),
     };
   },
 } as unknown as EventStore;
@@ -155,5 +164,37 @@ describe.skipIf(!hasTestDatabase())('journeys.holdoutResult resolves merge famil
     expect(report.control.entered).toBe(5);
     expect(report.control.converted).toBe(1);
     expect(report.treatment.converted).toBe(0);
+  }, 120_000);
+
+  it('reads outcomes one winners page at a time, scoped to that page (#1096)', async () => {
+    outcomes.converted = [];
+    outcomes.unsubscribed = [];
+    const journeyId = await publishJourney();
+    const ids = Array.from({ length: 12 }, () => newId('prf'));
+    await seedPeople(ids);
+    for (const id of ids.slice(0, 6)) await assign(journeyId, id, 'control', EARLY);
+    for (const id of ids.slice(6)) await assign(journeyId, id, 'treatment', EARLY);
+    // Every person converts, so both pages have an outcome to count.
+    outcomes.converted = [...ids];
+    outcomeScopes.length = 0;
+
+    let report: Awaited<ReturnType<typeof result>>;
+    setJourneyHoldoutPageSizeForTests(5);
+    try {
+      report = await result(journeyId);
+    } finally {
+      setJourneyHoldoutPageSizeForTests(null);
+    }
+
+    // 12 winners in pages of 5 give three reads (5, 5, 2); each carries only that page's family.
+    expect(outcomeScopes).toHaveLength(3);
+    for (const scope of outcomeScopes) {
+      expect(scope).toBeDefined();
+      expect(scope!.length).toBeLessThanOrEqual(5);
+    }
+    // The per-page reads still add up to the whole report.
+    expect(report.control.entered).toBe(6);
+    expect(report.control.converted).toBe(6);
+    expect(report.treatment.converted).toBe(6);
   }, 120_000);
 });

@@ -1013,7 +1013,7 @@ export const requestPublish = defineCommand({
   name: 'artifacts.requestPublish',
   title: 'Submit for review (or publish)',
   description:
-    "Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get.",
+    "Submits the latest draft for review under the workspace approval policy; publishes directly only when the policy allows it (policy `none`, or `agent_changes` for a person's own edits). A person then approves or rejects it in the admin UI. Check the result with approvals.list or artifacts.get. Publishing a journey is a journey.live action; its AI steps spend the provider's monthly token budget when participants reach them and need no spend mandate.",
   input: z.object({ artifactId: ArtifactId, note: z.string().min(1).max(1000).describe('What changed and why, for the reviewer') }),
   output: z.object({
     status: z

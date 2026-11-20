@@ -1,4 +1,4 @@
-import { DEFAULT_PURPOSES, mergeComponentCtes, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
+import { DEFAULT_PURPOSES, mergeRepresentative, publishedSingleton, type TrackingPlan } from '@agentic-marketing/artifacts';
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { erasureCleanupJob, erasureLedgerCoverage, erasurePurgeProgress, type IdentifierType, schema } from '@agentic-marketing/db';
@@ -40,28 +40,14 @@ const cursorTimestamp = (field: string) =>
     .refine(isProfileCursorTimestamp, `${field} must be an ISO 8601 timestamp with a time zone and valid date fields.`)
     .describe(`ISO 8601 with a time zone, e.g. 2026-10-30T07:00:00Z; pass nextCursor.${field} unchanged for the next page`);
 
-/**
- * The end of a profile's merge chain, through the shared merge component (#985, #1071): 256 hops
- * and cycle-safe, so a person merged deeper than the old 20-hop walk still resolves to their
- * survivor. A corrupted cycle resolves to its lowest id; a chain past the bound resolves to the
- * seed itself. Both are still marked as merged by the caller's lookup, which treats them as
- * unresolvable rather than sending to an alias.
- */
-async function mergeRepresentative(tx: CommandContext['tx'], workspaceId: string, profileId: string): Promise<string | null> {
-  const { rows } = await tx.execute<{ id: string }>(sql`
-    WITH RECURSIVE ${mergeComponentCtes(workspaceId, { seeds: sql`SELECT ${profileId}::text AS id` })}
-    SELECT representative AS id FROM merge_representative WHERE origin = ${profileId}::text`);
-  return rows[0]?.id ?? null;
-}
-
 async function canonical(ctx: CommandContext, profileId: string) {
+  // The shared merge walk (#985, #1071) resolves 256 hops and cycles; a representative that is
+  // still merged is a corrupted cycle or a chain past the bound, and is not a person.
   const id = await mergeRepresentative(ctx.tx, ctx.principal.workspaceId, profileId);
-  const [p] = id
-    ? await ctx.tx
-        .select()
-        .from(schema.profiles)
-        .where(and(eq(schema.profiles.workspaceId, ctx.principal.workspaceId), eq(schema.profiles.id, id)))
-    : [];
+  const [p] = await ctx.tx
+    .select()
+    .from(schema.profiles)
+    .where(and(eq(schema.profiles.workspaceId, ctx.principal.workspaceId), eq(schema.profiles.id, id)));
   if (!p) throw new AppError('not_found', `No profile ${profileId}. Find people with profiles.find or profiles.list.`);
   if (p.mergedInto) throw new Error('merge chain too long');
   return p;
@@ -1044,7 +1030,6 @@ export const profileCommands = [
  */
 export async function canonicalProfile(tx: CommandContext['tx'], workspaceId: string, profileId: string): Promise<{ id: string } | null> {
   const id = await mergeRepresentative(tx, workspaceId, profileId);
-  if (!id) return null;
   const [p] = await tx
     .select({ id: schema.profiles.id, mergedInto: schema.profiles.mergedInto })
     .from(schema.profiles)
@@ -1065,7 +1050,6 @@ export async function profileForMessage(
   kp: CommandContext['services']['keyProvider'],
 ) {
   const id = await mergeRepresentative(tx, workspaceId, profileId);
-  if (!id) return null;
   const [p] = await tx
     .select()
     .from(schema.profiles)

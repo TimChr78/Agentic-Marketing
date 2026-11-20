@@ -81,6 +81,29 @@ describe('documented commands', () => {
   });
 });
 
+describe('agent spend contract', () => {
+  // #1081: the spend class gates the direct paid commands only. Journey AI steps are capped by the
+  // provider's monthly token budget, not by a mandate, and the docs must say so where the classes
+  // are described; the generated tool catalog carries the same sentence from the command
+  // descriptions, so a later edit cannot quietly drop half of it.
+  const sentence =
+    "The spend class gates the direct commands that call or queue the provider (`prompts.test`, `ai.classify`, `ai.score`); AI steps inside a journey spend the provider's `monthlyTokenBudget` when a participant reaches them and need no spend mandate.";
+
+  it('documents the spend-class boundary for journey AI steps', async () => {
+    const autonomy = await read(join(root, 'docs/architecture/agentic-autonomy.md'));
+    expect(autonomy).toContain(sentence);
+  });
+
+  it('carries the journey part into the enrol and publish descriptions', async () => {
+    const tools = await read(join(root, '.claude/skills/agentic-marketing-mcp/references/tools.md'));
+    for (const tool of ['journeys.enroll', 'journeys.enrollSegment', 'artifacts.requestPublish']) {
+      const row = tools.split('\n').find((line) => line.startsWith(`| \`${tool}\` |`));
+      expect(row, `${tool} is missing from the generated catalog`).toBeDefined();
+      expect(row).toContain('need no spend mandate');
+    }
+  });
+});
+
 describe('pilot documentation', () => {
   it('describes automatic retention instead of manual cleanup', async () => {
     const [skill, pilot] = await Promise.all([read(paths.skill), read(paths.pilot)]);
