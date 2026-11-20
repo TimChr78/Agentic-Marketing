@@ -17,7 +17,9 @@ function answer(r: FakeRequest) {
   if (r.system.includes('Choose exactly one label')) {
     const text = r.user.match(/<text>\n([\s\S]*)\n<\/text>/)?.[1] ?? '';
     const label = /broken|refund|angry/i.test(text) ? 'complaint' : /\?/.test(text) ? 'question' : 'praise';
-    return { text: JSON.stringify({ label, rationale: `Reads as ${label}.` }) };
+    // A model may quote what it classified in its rationale; this one does when the text has an address.
+    const rationale = text.includes('@') ? `Reads as ${label}: "${text}"` : `Reads as ${label}.`;
+    return { text: JSON.stringify({ label, rationale }) };
   }
   if (r.system.includes('Write text for each content slot'))
     return { text: JSON.stringify({ slots: { intro: `Made for ${r.user.includes('Tent fans') ? 'tent fans' : 'you'}.` } }) };
@@ -142,12 +144,15 @@ describe('ai.classify', () => {
     // The provider saw the raw text, as #352 allows: only the kept copy is scrubbed.
     expect(llm.requests.some((r) => r.user.includes('ada.redaction@example.com'))).toBe(true);
     // The stored row was replaced with the redacted copy when the call settled.
-    const stored = await t.srv.db.admin.query<{ text: string }>(
-      `SELECT input->>'text' AS text FROM ai_calls WHERE workspace_id = $1 AND id = $2`,
+    const stored = await t.srv.db.admin.query<{ text: string; rationale: string }>(
+      `SELECT input->>'text' AS text, rationale FROM ai_calls WHERE workspace_id = $1 AND id = $2`,
       [ws, callId],
     );
     expect(stored.rows[0]!.text).not.toContain('ada.redaction@example.com');
     expect(stored.rows[0]!.text).toContain('[email]');
+    // A rationale that quotes the text is kept scrubbed the same way (#1095 review).
+    expect(stored.rows[0]!.rationale).toContain('[email]');
+    expect(stored.rows[0]!.rationale).not.toContain('ada.redaction@example.com');
     // So is what human review shows for the sampled answer.
     const reviews = await api.call('ai.reviews', { promptId: prompt });
     expect(JSON.stringify(reviews.reviews[0]!.input)).not.toContain('ada.redaction@example.com');

@@ -73,12 +73,25 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     );
     const check = await erasureCheck();
     expect(check).toMatchObject({ status: 'warn' });
-    expect(check?.message).toContain('1 erasure cleanup job(s) failed after their retries');
+    expect(check?.message).toContain('1 erasure cleanup job(s) failed after their retries (1 before their exclusion published, 0 after)');
     expect(check?.message).toContain('1 waiting');
     expect(check?.hint).toContain('ClickHouse');
     // 0.17 semantics: an unpublished exclusion means reads still return the person (#1062).
     expect(check?.hint).toContain('reads still return the person');
     expect(check?.hint).toContain('periodic publication pass');
+    expect(check?.hint).not.toContain('not re-opened automatically');
+
+    // A job that failed after it published is excluded from reads but is never re-opened: the
+    // hint must not promise a self-heal for it (#1095 review).
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, attempts, created_at, last_error, published_at)
+       VALUES ($1, 'era_ops_failed_published', '{prf_ops_failed_published}', 'failed', 36, now() - interval '2 hours', 'Valkey unavailable', now())`,
+      [d.workspace],
+    );
+    const both = await erasureCheck();
+    expect(both?.message).toContain('2 erasure cleanup job(s) failed after their retries (1 before their exclusion published, 1 after)');
+    expect(both?.hint).toContain('already excluded from reads');
+    expect(both?.hint).toContain('not re-opened automatically');
 
     await d.db.admin.query("UPDATE erasure_cleanup_jobs SET state = 'complete' WHERE workspace_id = $1", [d.workspace]);
     expect((await erasureCheck())?.status).toBe('ok');

@@ -863,6 +863,7 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
         erasure_cleanup_pending: string;
         erasure_cleanup_oldest_seconds: string;
         erasure_cleanup_failed: string;
+        erasure_cleanup_failed_unpublished: string;
         erasure_unpublished: string;
         erasure_unavailable: string;
         erasure_purge_backlog: string;
@@ -903,6 +904,8 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
            (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM erasure_cleanup_jobs
               WHERE state IN ('pending_external', 'running')) AS erasure_cleanup_oldest_seconds,
            (SELECT count(*) FROM erasure_cleanup_jobs WHERE state = 'failed') AS erasure_cleanup_failed,
+           (SELECT count(*) FROM erasure_cleanup_jobs
+              WHERE state = 'failed' AND published_at IS NULL) AS erasure_cleanup_failed_unpublished,
            (SELECT count(*) FROM erasures e
               WHERE EXISTS (SELECT 1 FROM erasure_keys k
                              WHERE k.workspace_id = e.workspace_id
@@ -1052,14 +1055,27 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
   const erasurePending = Number(row.erasure_cleanup_pending);
   const erasureOldest = Number(row.erasure_cleanup_oldest_seconds);
   const erasureFailed = Number(row.erasure_cleanup_failed);
+  // A job can fail before its exclusion published (the periodic pass re-opens it) or after (its
+  // reads are already excluded, and nothing re-opens it: a published job never runs again).
+  const erasureFailedUnpublished = Number(row.erasure_cleanup_failed_unpublished);
+  const erasureFailedPublished = erasureFailed - erasureFailedUnpublished;
   const erasureWaiting = erasurePending ? `${erasurePending} waiting, the oldest ${duration(erasureOldest)}` : 'none waiting';
   checks.push(
     erasureFailed > 0
       ? {
           id: 'queue.erasureCleanup',
           status: 'warn',
-          message: `${erasureFailed} erasure cleanup job(s) failed after their retries; ${erasureWaiting}`,
-          hint: 'The erasure’s SQL rows are gone, but its exclusion never published, so reads still return the person’s ClickHouse rows and queued events. Check ClickHouse and the scheduler role: it re-opens a failed job on its periodic publication pass, so check that role’s logs; Valkey hot state may also remain.',
+          message: `${erasureFailed} erasure cleanup job(s) failed after their retries (${erasureFailedUnpublished} before their exclusion published, ${erasureFailedPublished} after); ${erasureWaiting}`,
+          hint: [
+            erasureFailedUnpublished > 0
+              ? 'A job that failed before its exclusion published means reads still return the person in ClickHouse and in queued events; the scheduler re-opens it on its periodic publication pass, so check ClickHouse and that role’s logs.'
+              : '',
+            erasureFailedPublished > 0
+              ? 'A job that failed after publishing is already excluded from reads, but its purge and Valkey hot-state cleanup stopped and it is not re-opened automatically: fix Valkey or ClickHouse, then restart the scheduler role.'
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
         }
       : erasurePending === 0
         ? { id: 'queue.erasureCleanup', status: 'ok', message: 'no erasure cleanup is waiting' }

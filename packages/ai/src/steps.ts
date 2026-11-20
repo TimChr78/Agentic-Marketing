@@ -685,7 +685,8 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
         model: ready.model.modelId,
         input: storedInput,
         output: { label: r.label, ...(trait ? { trait } : {}) },
-        rationale: r.rationale,
+        // The model may quote the text it classified; keep the same scrubbed copy as the input.
+        rationale: typeof r.rationale === 'string' ? (redact(r.rationale) as string) : r.rationale,
         ...r.usage,
         usageEstimated: false,
         latencyMs: Date.now() - started,
