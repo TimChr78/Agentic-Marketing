@@ -8,6 +8,7 @@ import { releaseNotesErrors, topReleaseVersion } from '../../../scripts/release/
 import {
   commitsInRange,
   issuesForRelease,
+  OUTPUT_LIMIT,
   parseCloses,
   parseIssuesComment,
   previousTagFrom,
@@ -402,6 +403,17 @@ describe('previousTagFrom (#521 re-check)', () => {
   });
   it('refuses when the release tag is not present locally', () => {
     expect(() => previousTagFrom(tags, '0.13.0')).toThrow(/not in the local repository/);
+  });
+});
+
+describe('close-issues output limit (v0.17.1 release)', () => {
+  it('reads gh and git output with a raised buffer, so a large release does not stop with ENOBUFS', () => {
+    expect(OUTPUT_LIMIT).toBeGreaterThanOrEqual(64 * 1024 * 1024);
+    const source = readFileSync(fileURLToPath(new URL('../../../scripts/release/close-issues.mjs', import.meta.url)), 'utf8');
+    // Every read that returns output carries the limit; only the fetch, whose output is discarded, does not.
+    const reads = [...source.matchAll(/execFileSync\((?:'gh'|'git'), [^)]*encoding: 'utf8'[^)]*\)/g)].map((m) => m[0]);
+    expect(reads.length).toBeGreaterThanOrEqual(4);
+    for (const read of reads) expect(read).toContain('maxBuffer: OUTPUT_LIMIT');
   });
 });
 
