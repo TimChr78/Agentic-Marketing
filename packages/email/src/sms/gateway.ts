@@ -243,17 +243,24 @@ export async function deliverSms(
     const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(stream, m.attempts) * 1000) : null;
     logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'SMS send failed');
     await db.withWorkspace(ws, async (tx) => {
-      await tx
+      const settled = await tx
         .update(schema.messages)
         .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
-        .where(eq(schema.messages.id, id));
+        .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+        .returning({ id: schema.messages.id });
+      if (!settled.length) {
+        // The stale sweep settled this attempt as unknown_outcome while the provider was slow. A
+        // retry could duplicate a send that may have happened, so the sweep's row stands.
+        logger.warn({ messageId: id, provider: provider.adapter }, 'SMS failure arrived after the stale sweep settled the row');
+        return;
+      }
       await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
     });
     return;
   }
   // The outcome and its event commit in one transaction (#1008).
   await db.withWorkspace(ws, async (tx) => {
-    await tx
+    const settled = await tx
       .update(schema.messages)
       .set({
         status: 'sent',
@@ -264,7 +271,17 @@ export async function deliverSms(
         sentAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(schema.messages.id, id));
+      .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+      .returning({ id: schema.messages.id });
+    if (!settled.length) {
+      // The provider accepted the message after the sweep recorded unknown_outcome; keep that for
+      // a person to check instead of showing a phantom `sent` beside it (#1098 review).
+      logger.warn(
+        { messageId: id, provider: provider.adapter, providerMessageId: sent.providerMessageId },
+        'SMS send finished after the stale sweep settled the row; the sweep outcome stays',
+      );
+      return;
+    }
     await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
   });
 }

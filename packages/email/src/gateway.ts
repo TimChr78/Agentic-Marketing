@@ -313,8 +313,20 @@ export async function deliverRound(
     // and its decision event commit together (#1098), so reports and guardrails see the same
     // outcome whichever writer recorded it.
     await db.withWorkspace(ws, async (tx) => {
+      // Only the fields its decision event records: the sweep never reads a body or address.
       const stale = await tx
-        .select()
+        .select({
+          workspaceId: schema.messages.workspaceId,
+          id: schema.messages.id,
+          attempts: schema.messages.attempts,
+          profileId: schema.messages.profileId,
+          channel: schema.messages.channel,
+          purpose: schema.messages.purpose,
+          templateId: schema.messages.templateId,
+          templateVersion: schema.messages.templateVersion,
+          journeyId: schema.messages.journeyId,
+          variant: schema.messages.variant,
+        })
         .from(schema.messages)
         .where(and(eq(schema.messages.status, 'sending'), lt(schema.messages.updatedAt, new Date(Date.now() - STALE_SENDING_MS))))
         .for('update', { skipLocked: true });
@@ -560,10 +572,17 @@ async function deliverOne(
       const nextAttemptAt = retry ? new Date(Date.now() + retryDelaySeconds(out.stream, m.attempts) * 1000) : null;
       logger.warn({ messageId: id, provider: provider.adapter, retry, err: (e as Error).message }, 'e-mail send failed');
       await db.withWorkspace(ws, async (tx) => {
-        await tx
+        const settled = await tx
           .update(schema.messages)
           .set({ status: retry ? 'queued' : 'failed', reason, providerId: provider.id, nextAttemptAt, updatedAt: new Date() })
-          .where(eq(schema.messages.id, id));
+          .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+          .returning({ id: schema.messages.id });
+        if (!settled.length) {
+          // The stale sweep settled this attempt as unknown_outcome while the provider was slow.
+          // A retry could duplicate a send we cannot prove was not made, so the sweep's row stands.
+          logger.warn({ messageId: id, provider: provider.adapter }, 'e-mail failure arrived after the stale sweep settled the row');
+          return;
+        }
         await enqueueMessageEvents(tx, ws, [decisionEvent(m, retry ? 'queued' : 'failed', reason, provider.adapter)]);
       });
       return;
@@ -573,10 +592,21 @@ async function deliverOne(
     // layer after this commit finds the event, published or still queued. The event store is not
     // written here at all, so a lagging or unavailable one cannot make a send invisible.
     await db.withWorkspace(ws, async (tx) => {
-      await tx
+      const settled = await tx
         .update(schema.messages)
         .set({ status: 'sent', reason: null, providerId: provider.id, providerMessageId, sentAt: new Date(), updatedAt: new Date() })
-        .where(eq(schema.messages.id, id));
+        .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+        .returning({ id: schema.messages.id });
+      if (!settled.length) {
+        // The provider accepted the message, but the sweep already recorded the attempt as
+        // unknown_outcome. Keep that for a person to check rather than show a phantom `sent`
+        // beside the sweep's `failed` (#1098 review).
+        logger.warn(
+          { messageId: id, provider: provider.adapter, providerMessageId },
+          'e-mail send finished after the stale sweep settled the row; the sweep outcome stays',
+        );
+        return;
+      }
       await enqueueMessageEvents(tx, ws, [decisionEvent(m, 'sent', '', provider.adapter)]);
     });
     if (known?.length) {

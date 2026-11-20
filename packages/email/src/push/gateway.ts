@@ -314,7 +314,7 @@ export async function deliverPush(
             delivered.map((d) => d.device),
           ),
         );
-    await tx
+    const settled = await tx
       .update(schema.messages)
       .set({
         status,
@@ -326,7 +326,14 @@ export async function deliverPush(
         data,
         updatedAt: new Date(),
       })
-      .where(eq(schema.messages.id, id));
+      .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+      .returning({ id: schema.messages.id });
+    if (!settled.length) {
+      // The stale sweep settled this attempt as unknown_outcome while the send was slow. Keep
+      // that for a person to check; a second, contradictory decision would hide it (#1098 review).
+      logger.warn({ messageId: id }, 'push send finished after the stale sweep settled the row; the sweep outcome stays');
+      return;
+    }
     // The outcome and its event commit together (#1008).
     await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason ?? '', delivered[0]?.adapter ?? '')]);
   });
