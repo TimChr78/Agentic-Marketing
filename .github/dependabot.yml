@@ -38,6 +38,10 @@ updates:
       # 13 changes the APIs the journey builder uses; the migration is its own PR (#1125).
       - dependency-name: '@xyflow/react'
         update-types: [version-update:semver-major]
+      # better-auth pins better-call exactly (1.7.25 → 1.4.5) and its plugins peer on ~1.4.x, so a
+      # better-call major arrives only with the Better Auth release that adopts it (#1126).
+      - dependency-name: 'better-call'
+        update-types: [version-update:semver-major]
   - package-ecosystem: github-actions
     directory: /
     schedule:
