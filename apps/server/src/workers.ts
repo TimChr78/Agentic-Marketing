@@ -1,5 +1,5 @@
 import { clickIdHook, conversionHook, runAudienceSyncs, runSpendImport } from '@agentic-marketing/ads';
-import { runAiWorker } from '@agentic-marketing/ai';
+import { runAiWorker, runExpiredHoldSweep } from '@agentic-marketing/ai';
 import { runAlertEvaluator } from '@agentic-marketing/alerts';
 import { runActiveMandateRepair, runArchivedApprovalSweep } from '@agentic-marketing/artifacts';
 import { consentHook, runBroadcasts, runOutboxDispatcher, runRetention } from '@agentic-marketing/audience';
@@ -93,6 +93,8 @@ export function startScheduler(
     enrollmentTickMs?: number;
     rolloutTickMs?: number;
     idempotencyCleanupTickMs?: number;
+    /** How often the scheduler removes expired live AI budget holds (#1080). */
+    expiredHoldSweepTickMs?: number;
     /** How long the erasure cleanup waits before its final ClickHouse re-sweep. */
     erasureFinalSweepMs?: number;
     /** False keeps the erasure cleanup loop out of the way; a test drives its rounds itself. */
@@ -166,6 +168,18 @@ export function startScheduler(
         tickMs: opts.idempotencyCleanupTickMs,
         log: (message) => logger.info(message),
         onError: (err) => logger.error({ err }, 'idempotency key cleanup failed'),
+      }),
+    ),
+    // Expired live budget holds (#1080): a decision, copilot, hosted or independent-check call
+    // killed between reserve and settle leaves a row that no longer counts but is never removed.
+    // Only unlinked holds past their own deadline and a grace window go; a linked hold waits for
+    // settleStaleReservation.
+    loop(
+      'expired-ai-holds',
+      runExpiredHoldSweep({ db: srv.db }, signal, {
+        tickMs: opts.expiredHoldSweepTickMs,
+        log: (message) => logger.info(message),
+        onError: (err) => logger.error({ err }, 'expired AI budget hold sweep failed'),
       }),
     ),
     // One pass at start: the single-active-mandate repair (#911) keeps the mandate the runtime

@@ -1,5 +1,5 @@
 import { defineCommand } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
+import { AppError, newId, sleep } from '@agentic-marketing/core';
 import { type AiUse, type Db, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
@@ -115,6 +115,86 @@ const cleanupExpiredEstimates = (tx: Tx, providerId: string) =>
     sql`DELETE FROM ai_token_reservations
         WHERE provider_id = ${providerId} AND estimated_tokens IS NOT NULL AND expires_at < now()`,
   );
+
+/** How long a live hold is kept after its own deadline, so a call that started just before it may still settle. */
+export const EXPIRED_HOLD_GRACE_MS = 60 * 60_000;
+/** How many expired live holds one sweep removes at most; the next tick continues. */
+export const EXPIRED_HOLD_SWEEP_BATCH = 1_000;
+/** How often the scheduler sweeps expired live holds. */
+export const EXPIRED_HOLD_SWEEP_INTERVAL_MS = 60 * 60_000;
+
+interface HoldSweepQuery {
+  query(sql: string, values?: unknown[]): Promise<{ rowCount: number | null }>;
+}
+
+/**
+ * Delete live holds (`estimated_tokens IS NULL`) that expired more than `graceMs` ago and that no
+ * `ai_calls` row still links to. A hold with a linked call belongs to `settleStaleReservation`,
+ * which records the estimate before clearing it; deleting that row would lose usage the provider
+ * may already have billed. An expired hold no longer counts against the monthly budget, so this
+ * frees no live allowance: it only removes dead rows the decision, copilot, hosted and
+ * independent-check flows leave when a process dies between reserve and settle (#1080).
+ *
+ * The deadline is the hold's own `expires_at`: the five-minute TTL for an ordinary call, or the
+ * billing-month deadline `billingReservationTtlMs` sets before a metered call. `now()` is the
+ * database clock, the same one that wrote the deadline.
+ */
+export async function sweepExpiredTokenReservations(
+  admin: HoldSweepQuery,
+  opts: { graceMs?: number; batchSize?: number } = {},
+): Promise<number> {
+  const graceSeconds = Math.max(0, Math.floor((opts.graceMs ?? EXPIRED_HOLD_GRACE_MS) / 1_000));
+  const { rowCount } = await admin.query(
+    `DELETE FROM ai_token_reservations
+      WHERE ctid = ANY (ARRAY(
+        SELECT r.ctid FROM ai_token_reservations r
+         WHERE r.estimated_tokens IS NULL
+           AND r.expires_at < now() - make_interval(secs => $1)
+           AND NOT EXISTS (SELECT 1 FROM ai_calls c WHERE c.reservation_id = r.id)
+         ORDER BY r.expires_at
+         LIMIT $2
+         FOR UPDATE SKIP LOCKED
+      ))`,
+    [graceSeconds, opts.batchSize ?? EXPIRED_HOLD_SWEEP_BATCH],
+  );
+  return rowCount ?? 0;
+}
+
+export interface ExpiredHoldSweepOptions {
+  graceMs?: number;
+  batchSize?: number;
+  tickMs?: number;
+  /** Batches per tick before the sleep; the next tick continues from the remaining rows. */
+  maxBatches?: number;
+  log?: (message: string) => void;
+  onError?: (err: unknown) => void;
+}
+
+/** The scheduler job: one pass at start, then every `tickMs`; the sleep ends early on abort. */
+export async function runExpiredHoldSweep(
+  deps: { db: { admin: HoldSweepQuery } },
+  signal: AbortSignal,
+  opts: ExpiredHoldSweepOptions = {},
+): Promise<void> {
+  const tickMs = opts.tickMs ?? EXPIRED_HOLD_SWEEP_INTERVAL_MS;
+  const batchSize = opts.batchSize ?? EXPIRED_HOLD_SWEEP_BATCH;
+  const maxBatches = opts.maxBatches ?? 10;
+  while (!signal.aborted) {
+    let deleted = 0;
+    try {
+      for (let batch = 0; batch < maxBatches && !signal.aborted; batch++) {
+        const removed = await sweepExpiredTokenReservations(deps.db.admin, { graceMs: opts.graceMs, batchSize });
+        deleted += removed;
+        if (removed < batchSize) break;
+      }
+      if (deleted) opts.log?.(`expired budget holds: ${deleted} dead live hold(s) removed`);
+    } catch (err) {
+      opts.onError?.(err);
+    }
+    if (signal.aborted) return;
+    await sleep(tickMs, signal);
+  }
+}
 
 /** The provider a reservation belongs to; its id is immutable, so reading it before the lock is safe. */
 async function reservationProvider(tx: Tx, id: string): Promise<string | null> {
