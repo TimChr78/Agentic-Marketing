@@ -317,8 +317,8 @@ export type SettleOutcome = 'settled' | 'fallback' | 'held';
 /** The first instant of the next UTC month: a usage write that failed keeps its hold through the month. */
 export const nextMonthStart = (now = new Date()) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
 
-/** Reserve durably before I/O, including the following month for calls crossing UTC month-end.
- * Successful settlement deletes the hold immediately. A crash/outage keeps conservative budget
+/** Reserve durably before I/O. Every metered call's hold lasts until the start of the month after
+ * next, so a call that crosses a UTC month-end is still covered. Successful settlement deletes the hold immediately. A crash/outage keeps conservative budget
  * coverage until this deadline instead of freeing billed usage after five minutes. */
 export const billingReservationTtlMs = (now = new Date()) => nextMonthStart(nextMonthStart(now)).getTime() - now.getTime();
 

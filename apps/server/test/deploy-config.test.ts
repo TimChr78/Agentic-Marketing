@@ -408,9 +408,12 @@ describe('Helm rollout, migration and replica reporting', () => {
     expect(helmValues).toMatch(/^upgradeStrategy: Recreate$/m);
     expect(helmValues).toMatch(/RollingUpdate/);
 
-    const render = (value: string) => helmDeployments.replace('{{ $.Values.upgradeStrategy }}', value);
-    expect(render('Recreate')).toContain('strategy: { type: Recreate }');
-    expect(render('RollingUpdate')).toContain('strategy: { type: RollingUpdate }');
+    // Any other value must fail the render, not roll mixed writer versions (#1101 review). The
+    // helm binary is only in CI, which renders a bad value and expects this message.
+    expect(helmDeployments).toMatch(/if not \(has \$\.Values\.upgradeStrategy \(list "Recreate" "RollingUpdate"\)\)/);
+    expect(helmDeployments).toContain('fail "upgradeStrategy must be Recreate or RollingUpdate"');
+    expect(ci).toContain('--set upgradeStrategy=Rolling');
+    expect(ci).toContain("grep -q 'upgradeStrategy must be Recreate or RollingUpdate'");
   });
 
   it('migrates before the roles on install and upgrade, without a post-install readiness deadlock (#389)', () => {
