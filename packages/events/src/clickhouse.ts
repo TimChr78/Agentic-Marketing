@@ -131,7 +131,7 @@ export interface EventStore {
     workspaceId: string,
     q: { experienceId: string; version: number; goal?: string; since?: Date },
   ): Promise<{ variants: { variant: string; exposed: number; converted: number }[]; unversioned: number }>;
-  insertMessageEvents(events: MessageEvent[]): Promise<void>;
+  insertMessageEvents(events: MessageEvent[], opts?: MessageEventPublishOptions): Promise<void>;
   insertJourneyEvents(events: JourneyEvent[]): Promise<void>;
   /**
    * Publishes erasure exclusions into `erased_subjects` (#1037 part 1). Idempotent: the table
@@ -329,6 +329,16 @@ export interface MessageEvent {
   variant?: string;
   reason: string;
   url: string;
+}
+
+/**
+ * How a message-event batch is published as customer events. The outbox passes the time the batch
+ * was queued, so a row delivered (or requeued) days later still produces carrier events with the
+ * age of their original delivery (#1027) instead of looking like a fresh one.
+ */
+export interface MessageEventPublishOptions {
+  /** When the message events reached the platform; defaults to now. */
+  receivedAt?: Date;
 }
 
 /** Which message events to count, and how to narrow them (a segment's message condition, #441). */

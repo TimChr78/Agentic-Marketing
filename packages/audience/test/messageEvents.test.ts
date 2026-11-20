@@ -270,4 +270,37 @@ describe('e-mail message events as customer events', () => {
     await expect(wrapped.insertMessageEvents([messageEvent()])).resolves.toBeUndefined();
     expect(inserted).toHaveLength(1);
   });
+
+  it('publishes with the receive time the outbox stored, so a late delivery keeps its age (#1027)', async () => {
+    const { store } = recordingStore();
+    const { bus, published } = recordingBus();
+    const wrapped = withEmailProfileEvents(store, {
+      db: fakeDb(() => [{ profile_id: 'prf_1', type: 'user_id', value: 'usr_1' }]),
+      bus,
+    });
+
+    // A click at 07:59, queued at 08:00, delivered days later: the carrier event keeps both the
+    // time it happened and the time its delivery arrived. Age is measured from the latter.
+    await wrapped.insertMessageEvents([messageEvent({ at: '2026-09-01T07:59:00.000Z' })], {
+      receivedAt: new Date('2026-09-01T08:00:00.000Z'),
+    });
+
+    expect(published[0]?.timestamp).toBe('2026-09-01T07:59:00.000Z');
+    expect(published[0]?.receivedAt).toBe('2026-09-01T08:00:00.000Z');
+  });
+
+  it('publishes a direct write as received now when no queued time is given', async () => {
+    const { store } = recordingStore();
+    const { bus, published } = recordingBus();
+    const wrapped = withEmailProfileEvents(store, {
+      db: fakeDb(() => [{ profile_id: 'prf_1', type: 'user_id', value: 'usr_1' }]),
+      bus,
+    });
+
+    const before = Date.now();
+    await wrapped.insertMessageEvents([messageEvent()]);
+    const received = Date.parse(published[0]?.receivedAt ?? '');
+    expect(received).toBeGreaterThanOrEqual(before);
+    expect(received).toBeLessThanOrEqual(Date.now());
+  });
 });

@@ -249,18 +249,27 @@ export async function wakeWaiters(
  * package beside the marker retention, because it has to stay strictly inside it.
  */
 const MAX_EVENT_AGE_MS = JOURNEY_EVENT_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+/**
+ * How far ahead of the local clock a receive time may be before it is treated as a clock problem
+ * (#1027). No ingest path stamps a future time, but replicas' clocks differ by seconds; anything
+ * beyond this cannot be trusted to describe the delivery.
+ */
+const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 /**
  * Whether an event is young enough to apply (#1027). The age is measured from `receivedAt`, the
  * server's own receive time: it is written at ingest and every redelivery carries it unchanged. The
  * event's `timestamp` is the sender's and may be deliberately historical (an import of an old
  * signup, a backfill), so it says when something happened, not when the delivery arrived, and
- * cannot prove a redelivery is fresh. A receive time that cannot be read proves nothing at all and
- * is treated as too old.
+ * cannot prove a redelivery is fresh. A receive time that cannot be read proves nothing at all, and
+ * one more than a few minutes in the future is a clock problem rather than a fresh delivery; both
+ * are treated as too old.
  */
 export function withinDeliveryAge(receivedAt: string, now: number): boolean {
   const received = Date.parse(receivedAt);
-  return Number.isFinite(received) && now - received <= MAX_EVENT_AGE_MS;
+  if (!Number.isFinite(received)) return false;
+  const age = now - received;
+  return age <= MAX_EVENT_AGE_MS && age >= -MAX_FUTURE_SKEW_MS;
 }
 
 /**

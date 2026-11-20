@@ -145,6 +145,15 @@ describe('the delivery-age bound stays inside the marker retention (#1027)', () 
     // A receive time that cannot be read proves nothing about the delivery's age.
     expect(withinDeliveryAge('not a date', now)).toBe(false);
   });
+
+  it('refuses a receive time far in the future as a clock problem, not a fresh delivery', () => {
+    const now = Date.UTC(2026, 10, 20, 12);
+    // A few seconds of replica clock skew between the ingest node and here is normal.
+    expect(withinDeliveryAge(new Date(now + 30_000).toISOString(), now)).toBe(true);
+    expect(withinDeliveryAge(new Date(now + 4 * 60_000).toISOString(), now)).toBe(true);
+    // No ingest path stamps minutes ahead of the server clock.
+    expect(withinDeliveryAge(new Date(now + 10 * 60_000).toISOString(), now)).toBe(false);
+  });
 });
 
 describe.skipIf(!hasTestDatabase())('an event past the bound is ignored (#1027)', () => {

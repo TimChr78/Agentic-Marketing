@@ -4,7 +4,14 @@ import { readdir } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
-import { appRoleReach, createDb, type Db, ERASURE_PURGE_INTERVAL_SECONDS, normalizeHost } from '@agentic-marketing/db';
+import {
+  appRoleReach,
+  createDb,
+  type Db,
+  ERASURE_PURGE_INTERVAL_SECONDS,
+  JOURNEY_EVENT_MAX_AGE_DAYS,
+  normalizeHost,
+} from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
 import { endpointFailure, endpointOrigin, splitUrlCredentials } from '@agentic-marketing/telemetry';
@@ -860,6 +867,7 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
         outbox_pending: string;
         outbox_oldest_seconds: string;
         outbox_failed: string;
+        outbox_stale_journey: string;
         erasure_cleanup_pending: string;
         erasure_cleanup_oldest_seconds: string;
         erasure_cleanup_failed: string;
@@ -899,6 +907,12 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
            (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM outbox
               WHERE state IN ('pending', 'delivering')) AS outbox_oldest_seconds,
            (SELECT count(*) FROM outbox WHERE state = 'failed') AS outbox_failed,
+           -- The journey hook refuses an event received more than JOURNEY_EVENT_MAX_AGE_DAYS ago,
+           -- and these kinds publish the bus events a journey trigger sees (#1027).
+           (SELECT count(*) FROM outbox
+              WHERE state IN ('pending', 'failed')
+                AND kind IN ('message_event', 'segment_change')
+                AND created_at < now() - make_interval(days => ${JOURNEY_EVENT_MAX_AGE_DAYS})) AS outbox_stale_journey,
            (SELECT count(*) FROM erasure_cleanup_jobs
               WHERE state IN ('pending_external', 'running')) AS erasure_cleanup_pending,
            (SELECT COALESCE(max(EXTRACT(EPOCH FROM now() - created_at)), 0) FROM erasure_cleanup_jobs
@@ -1029,12 +1043,18 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
   const outboxOldest = Number(row.outbox_oldest_seconds);
   const outboxFailed = Number(row.outbox_failed);
   const outboxWaiting = outboxPending ? `${outboxPending} waiting, the oldest ${duration(outboxOldest)}` : 'none waiting';
+  // A message event or segment change older than the journey delivery-age bound publishes carrier
+  // events the journey hook now refuses, however often the row is requeued (#1027).
+  const staleJourney = Number(row.outbox_stale_journey);
+  const staleJourneyNote = staleJourney
+    ? ` ${staleJourney} row(s) are older than the ${JOURNEY_EVENT_MAX_AGE_DAYS}-day journey delivery bound: journey triggers in them will be ignored; re-enrol segment journeys with \`journeys.enrollSegment\`.`
+    : '';
   checks.push(
     outboxFailed > 0
       ? {
           id: 'queue.outbox',
           status: 'warn',
-          message: `${outboxFailed} outbox row(s) failed after their retries; ${outboxWaiting}`,
+          message: `${outboxFailed} outbox row(s) failed after their retries; ${outboxWaiting}${staleJourneyNote}`,
           hint: 'Message events, double opt-in confirmations and audience segment changes are queued here. Check ClickHouse, NATS and the scheduler role, then requeue with `am outbox` (or `am outbox --kind <kind>`, e.g. message_event or segment_change).',
         }
       : outboxPending === 0
@@ -1043,13 +1063,13 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
           ? {
               id: 'queue.outbox',
               status: 'warn',
-              message: `${outboxPending} outbox row(s) waiting; the oldest has waited ${duration(outboxOldest)}`,
+              message: `${outboxPending} outbox row(s) waiting; the oldest has waited ${duration(outboxOldest)}${staleJourneyNote}`,
               hint: 'The scheduler role publishes the outbox (message events, double opt-in confirmations): check that ROLE includes scheduler and that its logs show the dispatcher running.',
             }
           : {
               id: 'queue.outbox',
               status: 'ok',
-              message: `${outboxPending} outbox row(s) publishing; the oldest has waited ${duration(outboxOldest)}`,
+              message: `${outboxPending} outbox row(s) publishing; the oldest has waited ${duration(outboxOldest)}${staleJourneyNote}`,
             },
   );
   const erasurePending = Number(row.erasure_cleanup_pending);

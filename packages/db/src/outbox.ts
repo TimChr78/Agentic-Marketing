@@ -44,6 +44,12 @@ export interface OutboxClaim {
   attempts: number;
   /** Fences completion: only the claim holding the row's current token may ack or fail it. */
   claimToken: string;
+  /**
+   * When the action was queued. A payload that has no better record of when its work arrived can
+   * use this as the original time (#1027): a row enqueued before that record existed still must
+   * not look freshly received when it is finally delivered.
+   */
+  createdAt: Date;
 }
 
 /**
@@ -112,6 +118,7 @@ export async function claimOutboxBatch(db: Db, opts: { limit?: number; leaseMs?:
     operation_key: string;
     attempts: number;
     claim_token: string;
+    created_at: Date;
   }>(
     `WITH ready AS (
        SELECT workspace_id, id FROM outbox
@@ -131,7 +138,7 @@ export async function claimOutboxBatch(db: Db, opts: { limit?: number; leaseMs?:
          updated_at = now()
      FROM ready
      WHERE o.workspace_id = ready.workspace_id AND o.id = ready.id
-     RETURNING o.workspace_id, o.id, o.kind, o.payload, o.operation_key, o.attempts, o.claim_token`,
+     RETURNING o.workspace_id, o.id, o.kind, o.payload, o.operation_key, o.attempts, o.claim_token, o.created_at`,
     [limit, leaseMs / 1000],
   );
   return rows.map((r) => ({
@@ -142,6 +149,7 @@ export async function claimOutboxBatch(db: Db, opts: { limit?: number; leaseMs?:
     operationKey: r.operation_key,
     attempts: r.attempts,
     claimToken: r.claim_token,
+    createdAt: new Date(r.created_at),
   }));
 }
 
