@@ -57,6 +57,70 @@ async function createSegment(name: string, content: Record<string, unknown>) {
   return a.artifactId;
 }
 
+/** Two unmerged profiles a later identify with both ids folds into one, plus that identify. */
+async function twoProfilesForOnePerson(prefix: string) {
+  await send([{ type: 'identify', anonymousId: `${prefix}-anon` }]);
+  await send([{ type: 'identify', userId: `${prefix}-user` }]);
+  const anon = (
+    await eventually(
+      () => api().call('profiles.find', { type: 'anonymous_id', value: `${prefix}-anon` }),
+      (r) => !!r.profileId,
+    )
+  ).profileId!;
+  const user = (
+    await eventually(
+      () => api().call('profiles.find', { type: 'user_id', value: `${prefix}-user` }),
+      (r) => !!r.profileId,
+    )
+  ).profileId!;
+  const { rows } = await t.srv.db.admin.query<{ id: string }>(
+    'SELECT id FROM profiles WHERE workspace_id = $1 AND id = ANY($2::text[]) ORDER BY created_at, id',
+    [ws, [anon, user]],
+  );
+  return {
+    loser: rows.at(-1)!.id,
+    survivor: rows[0]!.id,
+    merge: () => send([{ type: 'identify', userId: `${prefix}-user`, anonymousId: `${prefix}-anon` }]),
+  };
+}
+
+/**
+ * Runs a command, commits a merge through #1097/#1110's `beforeRowLocks` seam while its profile
+ * rows are still unlocked, and answers the command's result. The merge must be visible before the
+ * release, so the command's locked re-read folds the two ids into one person.
+ */
+async function resultAfterMergeDuringCall<T>(loser: string, merge: () => Promise<unknown>, call: () => Promise<T>): Promise<T> {
+  let reached!: () => void;
+  let release!: () => void;
+  const atGate = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  audienceTestHooks.beforeRowLocks = async () => {
+    reached();
+    await gate;
+  };
+  try {
+    const pending = call();
+    await atGate;
+    const merging = merge();
+    await eventually(
+      () => t.srv.db.admin.query<{ merged_into: string | null }>('SELECT merged_into FROM profiles WHERE id = $1', [loser]),
+      (r) => !!r.rows[0]?.merged_into,
+      20_000,
+    );
+    release();
+    const result = await pending;
+    await merging;
+    return result;
+  } finally {
+    delete audienceTestHooks.beforeRowLocks;
+    release();
+  }
+}
+
 describe('static and snapshot audiences', () => {
   const ids: Record<string, string> = {};
   let list = '';
@@ -287,6 +351,37 @@ describe('static and snapshot audiences', () => {
       delete audienceTestHooks.beforeRowLocks;
       release();
     }
+  }, 120_000);
+
+  it('counts a merge that folds two resolved ids during an import, so added and existing add up (#1111)', async () => {
+    const { loser, survivor, merge } = await twoProfilesForOnePerson('v028-import-count');
+    const list = await createSegment('Import counted list', { mode: 'static' });
+    const csv = ['profile_id', loser, survivor].join('\n');
+
+    const result = await resultAfterMergeDuringCall(loser, merge, () =>
+      api().call('audiences.import', { segmentId: list, csv, column: 'profile_id', idType: 'profile_id' }),
+    );
+
+    // Both rows matched, one person was inserted, and the second resolved id folded into the same
+    // person. Before the fix `existing` counted survivors only and reported 0.
+    expect(result).toMatchObject({ rows: 2, matched: 2, added: 1, existing: 1, unmatched: [] });
+    expect((await api().call('segments.members', { artifactId: list })).total).toBe(1);
+  }, 120_000);
+
+  it('counts a merge that folds two resolved ids during a remove, so removed and notMembers add up (#1111)', async () => {
+    const { loser, survivor, merge } = await twoProfilesForOnePerson('v028-remove-count');
+    const list = await createSegment('Remove counted list', { mode: 'static' });
+    await api().call('audiences.add', { segmentId: list, profileIds: [survivor] });
+
+    const result = await resultAfterMergeDuringCall(loser, merge, () =>
+      api().call('audiences.remove', { segmentId: list, profileIds: [loser, survivor] }),
+    );
+
+    // The survivor was on the list; the second resolved id folded into it, so the two selectors
+    // resolved to one removed person and the rest is a non-member. Before the fix `notMembers`
+    // counted survivors only and reported 0.
+    expect(result).toMatchObject({ removed: 1, notMembers: 1, unmatched: [] });
+    expect((await api().call('segments.members', { artifactId: list })).total).toBe(0);
   }, 120_000);
 
   it('reports no reference stamp to a caller that cannot read the segment (#771 review)', async () => {
