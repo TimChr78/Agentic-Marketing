@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
 import { DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
-import { createClient } from '@agentic-marketing/client';
+import { ApiError, createClient } from '@agentic-marketing/client';
 import type { BusEvent, JourneyEvent, MessageEvent } from '@agentic-marketing/events';
 import type { Commands } from '../../src/registry';
 import { eventually, type startTestServer } from '../harness';
@@ -37,6 +37,17 @@ const mjml = (title: string, body: string) => `<mjml>
     </mj-section>
   </mj-body>
 </mjml>`;
+
+/** A 409 the caller may retry: the work rolled back and nothing was written (#1104). */
+function isRetryableConflict(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    err.status === 409 &&
+    typeof err.details === 'object' &&
+    err.details !== null &&
+    (err.details as { retryable?: unknown }).retryable === true
+  );
+}
 
 /** A tiny PNG (solid colour) so the asset library has a real image. */
 function png(w: number, h: number, rgb: [number, number, number]) {
@@ -624,9 +635,18 @@ export async function seed(t: T, opts: { confirmedUrl?: string; now?: Date } = {
   const profileOf = new Map(imported.map((r) => [r.value, r.profile_id]));
   if (profileOf.size < people.length) throw new Error(`seeded ${profileOf.size} of ${people.length} people`);
 
-  // A refresh forces membership now rather than waiting for the next segment tick.
+  // A refresh forces membership now rather than waiting for the next segment tick. A refresh that
+  // meets another writer of the same segment answers a retryable 409 and writes nothing (#1104), so
+  // the poll tries again instead of failing the seed.
   await eventually(
-    () => owner.call('segments.refresh', { artifactId: subscribers.artifactId }),
+    async () => {
+      try {
+        return await owner.call('segments.refresh', { artifactId: subscribers.artifactId });
+      } catch (err) {
+        if (!isRetryableConflict(err)) throw err;
+        return { members: -1, entered: 0, exited: 0 };
+      }
+    },
     (r) => r.members >= 400,
     30_000,
   );

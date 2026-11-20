@@ -64,6 +64,31 @@ export interface BusEvent {
   groupId?: string;
 }
 
+/**
+ * Complete shape of one event on the bus, for a queued payload that must be validated before it is
+ * published. A payload from an older or corrupt row fails this and is failed permanently instead of
+ * reaching consumers as a half-formed event (the same contract `messageEventSchema` gives).
+ */
+export const busEventSchema = z.object({
+  workspaceId: z.string().min(1),
+  sourceId: z.string().min(1),
+  messageId: z.string().min(1),
+  type: z.enum(['track', 'page', 'screen', 'identify', 'group', 'alias']),
+  name: z.string(),
+  anonymousId: z.string(),
+  userId: z.string(),
+  profileId: z.string().optional(),
+  timestamp: z.string().min(1),
+  receivedAt: z.string().min(1),
+  properties: z.record(z.string(), z.unknown()),
+  traits: z.record(z.string(), z.unknown()),
+  piiTraits: z.record(z.string(), z.unknown()),
+  context: z.record(z.string(), z.unknown()),
+  consent: z.record(z.string(), z.boolean()),
+  previousId: z.string().optional(),
+  groupId: z.string().optional(),
+});
+
 /** Segment's consent-change event; the profile worker records it in the consent ledger. */
 export const CONSENT_EVENT = 'Segment Consent Preference Updated';
 

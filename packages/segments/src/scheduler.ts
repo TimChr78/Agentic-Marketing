@@ -47,6 +47,9 @@ export async function runSegmentScheduler(
           const runs = new Map((await tx.select().from(schema.segmentRuns)).map((r) => [r.segmentId, r]));
           const out: BusEvent[] = [];
           const touched = new Set<string>();
+          // `all` is ordered by segment id, and each refresh takes that segment's membership lock
+          // (#1104): this transaction therefore always locks them in one order, whatever the round
+          // skips.
           for (const seg of all) {
             if (seg.definition.mode !== 'dynamic') continue;
             const last = runs.get(seg.id);

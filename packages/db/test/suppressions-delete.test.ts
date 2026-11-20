@@ -95,7 +95,8 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
     // ai_token_reservations for 0097's billing columns and 0098's index, profiles for 0099's
     // merged-into index, idempotency_keys for 0103's reversal columns and 0104's retention index,
     // agent_actions for 0103's foreign key, broadcast_runs for 0107's defer counter,
-    // journey_processed_events for 0109's new table and its policy); FORCE RLS applies to it as
+    // journey_processed_events for 0109's new table and its policy, and segment_memberships and
+    // segment_list_members for 0117's one-off stranded-row repair); FORCE RLS applies to it as
     // well, which is the small-install path this guards.
     for (const table of [
       'artifacts',
@@ -117,6 +118,8 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'data_keys',
       'journey_processed_events',
       'writer_protocol',
+      'segment_memberships',
+      'segment_list_members',
     ])
       await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
     await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);

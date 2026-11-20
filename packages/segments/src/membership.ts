@@ -7,6 +7,7 @@ import type { ResolvedEvent } from '@agentic-marketing/profiles';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { type EvalContext, evaluate, relevant } from './evaluate';
+import { lockSegmentMemberships } from './locks';
 import { materialize } from './sql';
 
 // Keeping memberships current. A change of membership is also an event ("Segment Entered" /
@@ -50,7 +51,11 @@ export async function publishedSegments(tx: Tx): Promise<PublishedSegment[]> {
         eq(schema.artifactVersions.number, schema.artifacts.publishedVersion),
       ),
     )
-    .where(and(eq(schema.artifacts.type, 'segment'), isNotNull(schema.artifacts.publishedVersion), eq(schema.artifacts.archived, false)));
+    .where(and(eq(schema.artifacts.type, 'segment'), isNotNull(schema.artifacts.publishedVersion), eq(schema.artifacts.archived, false)))
+    // Ascending id: a refresh loop that takes one segment's lock at a time (the scheduler, the
+    // streaming update, the consent re-evaluation) then takes them in one order for every
+    // transaction (#1104).
+    .orderBy(schema.artifacts.id);
   const segments: PublishedSegment[] = [];
   for (const r of rows) {
     try {
@@ -152,6 +157,11 @@ export async function publishInSlices(bus: EventBus, events: BusEvent[], size = 
 }
 
 async function applyDiff(tx: Tx, workspaceId: string, segId: string, members: Set<string>, scope?: string[]) {
+  // One writer of this segment at a time: the streaming update, a full refresh and the list
+  // commands insert and delete the same people's rows, and without this their unique-index waits
+  // can cross into a deadlock (#1104). The evaluation above this call read the people, not their
+  // membership rows, so it does not need the lock.
+  await lockSegmentMemberships(tx, [segId]);
   const current = new Set(
     (
       await tx
@@ -198,6 +208,14 @@ export async function refreshSegment(tx: Tx, workspaceId: string, seg: Published
   // The diff lands in a temporary table first, so the id lookup below is planned with real row counts.
   const changed = `seg_changed_${members.table.slice('seg_members_'.length)}`;
   await tx.execute(sql.raw(`CREATE TEMP TABLE ${changed} (profile_id text PRIMARY KEY, entered boolean NOT NULL) ON COMMIT DROP`));
+  // The materialisation above read profiles; the locks that keep a merge from stranding a row are
+  // the profile row locks the list commands take, and this refresh takes none. What it does take is
+  // the membership lock: one writer of this segment's rows at a time, so a refresh and an
+  // incremental update cannot wait on each other's uncommitted rows (#1104). It is taken after the
+  // (possibly long) evaluation and held only for the two diff statements below. A streaming update
+  // that commits inside that window is overwritten by this run and picked up again by the next
+  // one; without the lock the two could deadlock instead, and one caller lost its work.
+  await lockSegmentMemberships(tx, [seg.id]);
   await tx.execute(sql`
     WITH ins AS (
       INSERT INTO segment_memberships (workspace_id, segment_id, profile_id)
@@ -289,6 +307,8 @@ export async function streamUpdate(tx: Tx, workspaceId: string, resolved: Resolv
   if (!useful.length) return [];
   const segments = await publishedSegments(tx);
   const out: BusEvent[] = [];
+  // `publishedSegments` is ordered by id and `applyDiff` takes each segment's membership lock as
+  // it goes, so a transaction that moves several segments locks them in one order (#1104).
   for (const seg of segments) {
     if (seg.definition.mode !== 'dynamic' || !seg.definition.condition) continue;
     const touched = useful.filter((r) => relevant(seg.definition.condition!, r.event));
@@ -332,6 +352,8 @@ export async function refreshPeople(tx: Tx, workspaceId: string, profileIds: str
   if (!scope.length) return [];
   const segments = await publishedSegments(tx);
   const out: BusEvent[] = [];
+  // Ordered by id, so the per-segment membership locks taken by `applyDiff` are always taken in
+  // the same order, even though the savepoints below can skip a segment (#1104).
   for (const seg of segments) {
     if (seg.definition.mode !== 'dynamic' || !seg.definition.condition) continue;
     // This runs inside the unsubscribe request's transaction. One segment that cannot be

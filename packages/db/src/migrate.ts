@@ -143,6 +143,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0113_erasure_completion.sql': '0.17.0',
   '0114_writer_protocol.sql': '0.17.2',
   '0115_ai_calls_reservation_index.sql': '0.17.2',
+  '0117_stranded_segment_memberships.sql': '0.17.2',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

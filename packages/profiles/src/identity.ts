@@ -27,6 +27,12 @@ import { sql } from 'drizzle-orm';
  * waits on a row a batch holds. A transaction that waits for a participant row only after it holds
  * its profile rows cannot form the cycle in #1011 (batch: profile → participant; sweep: profile,
  * never waiting, → participant).
+ *
+ * Segment membership writers add one more level below the profile rows: a transaction-scoped lock
+ * per segment (`segment:<segment id>`, `lockSegmentMemberships` in packages/segments) before they
+ * write that segment's membership rows. Nothing takes it and then waits for this lock, so the two
+ * orders cannot cross; the full order and the reason are in docs/architecture/data-platform.md
+ * ("Workspace lock protocol", #1104).
  */
 
 /** Latency buckets in seconds, shared by the wait and hold histograms. */
