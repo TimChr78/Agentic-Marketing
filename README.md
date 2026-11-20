@@ -179,7 +179,7 @@ Wave 1 (Phases −1 to 5) is complete: foundations, data platform, e-mail, segme
 
 [Wave 5](docs/architecture/roadmap-wave-5.md), polish: a more intuitive, more visual and more polished product, with no new scope (Phases 23–28; Phase 23, baselines and the design v2 foundations, built in 0.9.0; Phase 24, navigation, Home and the Broadcasts pages, in 0.10.0).
 
-Since 0.10.0 the releases have hardened what exists rather than adding phases: audit waves (0.11–0.14), the consent, identity and erasure lock protocol (0.15.0), PostgreSQL 18 for new installs (0.16.0) and the erasure completion contract with protected reads (0.17.0). What is released, what comes next and the open follow-ups are in [docs/status/current.md](docs/status/current.md), which is updated with every release.
+Since 0.10.0 the releases have hardened what exists rather than adding phases: product polish (0.11–0.14.0), audit waves (0.14.2–0.14.28), the consent, identity and erasure lock protocol (0.15.0), PostgreSQL 18 for new installs (0.16.0) and the erasure completion contract with protected reads (0.17.0). What is released, what comes next and the open follow-ups are in [docs/status/current.md](docs/status/current.md), which is updated with every release.
 
 ## Development
 
