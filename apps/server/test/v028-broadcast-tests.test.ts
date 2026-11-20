@@ -56,6 +56,18 @@ const messagesOf = async (artifactId: string) =>
     )
   ).rows;
 
+/**
+ * The sample the subject test's decision counts: variant messages that were not suppressed or
+ * failed. A consent withdrawal or address refusal is not a send, and the decision excludes it, so
+ * the test's expected sample must too. Shared fixture members are re-granted before a test ends so
+ * one test's withdrawal cannot land in a later sample.
+ */
+const decisionSample = (rows: Awaited<ReturnType<typeof messagesOf>>) =>
+  rows.filter((m) => m.variant !== null && m.status !== 'suppressed' && m.status !== 'failed');
+
+/** The variant send total in a status response. */
+const variantSends = (s: Awaited<ReturnType<typeof status>>) => s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0;
+
 const click = (message: { id: string; profile_id: string }, broadcastId: string, n: number) => ({
   workspaceId: ws,
   messageId: message.id,
@@ -253,7 +265,7 @@ describe('subject A/B test', () => {
     expect(deciding.test).not.toBeNull();
     expect(deciding.test?.decideAt).not.toBeNull();
 
-    sampleMessages = (await messagesOf(winnerId)).filter((m) => m.variant !== null);
+    sampleMessages = decisionSample(await messagesOf(winnerId));
     const members = await t.srv.db.admin.query<{ profile_id: string }>(
       'SELECT profile_id FROM segment_memberships WHERE workspace_id = $1 AND segment_id = $2',
       [ws, segment],
@@ -272,11 +284,14 @@ describe('subject A/B test', () => {
     for (const message of sampleMessages) expect(message.variant).toBe(expected.get(message.profile_id));
     expect(sampleMessages.some((m) => m.variant === 'A')).toBe(true);
     expect(sampleMessages.some((m) => m.variant === 'B')).toBe(true);
-    await eventually(
+    const countSettled = await eventually(
       () => status(winnerId),
-      (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sampleMessages.length,
+      (s) => variantSends(s) === sampleMessages.length,
       20_000,
     );
+    // `eventually` returns the last value on timeout, so assert the converged condition here: a
+    // later divergence fails at the wait rather than in a distant assertion.
+    expect(variantSends(countSettled), 'the status sample should count every decision send').toBe(sampleMessages.length);
 
     // One non-sample reader withdraws before the rest goes out; the gateway must refuse them.
     const sampleIds = new Set(sampleMessages.map((m) => m.profile_id));
@@ -336,6 +351,9 @@ describe('subject A/B test', () => {
     expect(bMails.length).toBe(b.length + (expectedWinner === 'B' ? restSent : 0));
     expect(aMails.length).toBe(a.length + (expectedWinner === 'A' ? restSent : 0));
     expect(mailTo(withdrawnEmail)).toHaveLength(0);
+    // The segment is shared by the rest of the file: restore the reader so this withdrawal cannot
+    // land in a later test's sample and be suppressed by the delivery worker there.
+    await api().call('consent.record', { profileId: outside!.profile_id, purpose: 'marketing_email', status: 'granted' });
 
     // messages.stats can narrow to a variant.
     await dispatchOutboxOnce({ db: t.srv.db, kp: t.srv.keyProvider, events: t.srv.events, bus: t.srv.bus }, { batch: 500 });
@@ -357,12 +375,13 @@ describe('subject A/B test', () => {
       (s) => s.test?.state === 'deciding' && s.test.variants.reduce((n, v) => n + v.sent, 0) >= 1,
       20_000,
     );
-    const sample = (await messagesOf(id)).filter((m) => m.variant !== null);
-    await eventually(
+    const sample = decisionSample(await messagesOf(id));
+    const countSettled = await eventually(
       () => status(id),
-      (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sample.length,
+      (s) => variantSends(s) === sample.length,
       20_000,
     );
+    expect(variantSends(countSettled), 'the status sample should count every decision send').toBe(sample.length);
     const a = sample.filter((m) => m.variant === 'A');
     const b = sample.filter((m) => m.variant === 'B');
     const expected = Math.min(a.length, b.length) >= 20 ? 'B' : 'A';
@@ -434,12 +453,13 @@ describe('subject A/B test', () => {
       (s) => s.test?.state === 'deciding' && s.test.variants.reduce((n, v) => n + v.sent, 0) >= 1,
       20_000,
     );
-    const sample = (await messagesOf(id)).filter((m) => m.variant);
-    await eventually(
+    const sample = decisionSample(await messagesOf(id));
+    const countSettled = await eventually(
       () => status(id),
-      (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sample.length,
+      (s) => variantSends(s) === sample.length,
       20_000,
     );
+    expect(variantSends(countSettled), 'the status sample should count every decision send').toBe(sample.length);
     const a = sample.filter((m) => m.variant === 'A').slice(0, 5);
     const b = sample.filter((m) => m.variant === 'B').slice(0, 5);
     await t.srv.events.insertMessageEvents([...a.map((m, i) => click(m, id, i)), ...b.map((m, i) => click(m, id, 100 + i))]);
@@ -452,8 +472,11 @@ describe('subject A/B test', () => {
       20_000,
     );
     expect(done.test?.winner).toBe('A');
+    // The report is the decision's own snapshot, so the reason and the counts beside it describe
+    // the same sample: the winner's rest sends carry its variant but are not part of the test.
+    expect(done.test?.variants.reduce((n, v) => n + v.sent, 0)).toBe(sample.length);
     // The split is random: a variant can end up under the 20-send minimum, which also picks A,
-    // with its own reason. Assert the reason that matches the actual split.
+    // with its own reason. Assert the reason that matches the split the decision recorded.
     const fewest = Math.min(...(done.test?.variants.map((v) => v.sent) ?? [0]));
     expect(done.test?.reason).toContain(fewest >= 20 ? 'tie' : 'fewer than 20 sends');
   }, 60_000);
@@ -469,13 +492,14 @@ describe('subject A/B test', () => {
       (s) => s.test?.state === 'deciding' && s.test.variants.reduce((n, v) => n + v.sent, 0) >= 1,
       45_000,
     );
-    const sample = (await messagesOf(id)).filter((m) => m.variant);
+    const sample = decisionSample(await messagesOf(id));
     expect(sample.length).toBeLessThan(40);
-    await eventually(
+    const countSettled = await eventually(
       () => status(id),
-      (s) => (s.test?.variants.reduce((n, v) => n + v.sent, 0) ?? 0) === sample.length,
+      (s) => variantSends(s) === sample.length,
       45_000,
     );
+    expect(variantSends(countSettled), 'the status sample should count every decision send').toBe(sample.length);
     const b = sample.filter((m) => m.variant === 'B');
     await t.srv.events.insertMessageEvents(b.map((m, i) => click(m, id, i)));
     await flushOutbox(id);

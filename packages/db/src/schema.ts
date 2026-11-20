@@ -1436,6 +1436,15 @@ export const broadcastTests = pgTable(
     decideAt: ts('decide_at'),
     winner: text('winner'),
     reason: text('reason'),
+    /**
+     * The variant counts the winner decision used, fixed when it was made. `broadcasts.status`
+     * reports these after the decision, so the recorded reason and the counts beside it cannot
+     * disagree once the winner's rest sends start (they carry the winner variant too).
+     */
+    decidedVariants:
+      jsonb('decided_variants').$type<
+        { variant: string; subject: string; sent: number; delivered: number; opened: number; clicked: number }[]
+      >(),
     decidedAt: ts('decided_at'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
