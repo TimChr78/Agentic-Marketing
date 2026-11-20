@@ -909,8 +909,15 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
            (SELECT count(*) FROM outbox WHERE state = 'failed') AS outbox_failed,
            -- The journey hook refuses an event received more than JOURNEY_EVENT_MAX_AGE_DAYS ago,
            -- and these kinds publish the bus events a journey trigger sees (#1027).
+           -- Two arms whose predicates match the partial indexes (outbox_ready for pending and
+           -- delivering, outbox_failed_subject for failed): one combined state list matched neither
+           -- and scanned the whole table, about 2 s on 8M delivered rows (#1107 review).
            (SELECT count(*) FROM outbox
-              WHERE state IN ('pending', 'failed')
+              WHERE state IN ('pending', 'delivering')
+                AND kind IN ('message_event', 'segment_change')
+                AND created_at < now() - make_interval(days => ${JOURNEY_EVENT_MAX_AGE_DAYS}))
+           + (SELECT count(*) FROM outbox
+              WHERE state = 'failed'
                 AND kind IN ('message_event', 'segment_change')
                 AND created_at < now() - make_interval(days => ${JOURNEY_EVENT_MAX_AGE_DAYS})) AS outbox_stale_journey,
            (SELECT count(*) FROM erasure_cleanup_jobs
