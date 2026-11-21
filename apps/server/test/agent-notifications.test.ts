@@ -50,6 +50,17 @@ async function primeCursor(ws: string) {
   await t.srv.db.admin.query('INSERT INTO agent_notification_cursor (workspace_id, last_action_id) VALUES ($1, 0)', [ws]);
 }
 
+/**
+ * A cursor whose last digest went out a day before `now`, so the next sweep is due and the digest
+ * window starts at a time the test controls (#1184).
+ */
+async function primeDigestDue(ws: string, now: Date) {
+  await t.srv.db.admin.query('UPDATE agent_notification_cursor SET last_digest_at = $2 WHERE workspace_id = $1', [
+    ws,
+    new Date(now.getTime() - DAY),
+  ]);
+}
+
 /** A fresh workspace with one agent, its sponsor and (optionally) an escalation target. */
 async function setup(
   opts: {
@@ -226,7 +237,8 @@ describe('agent notifications (#226)', () => {
 
   it('the daily digest goes out once a day per sponsor', async () => {
     const s = await setup({ level: 3 });
-    const t0 = new Date();
+    // A fixed clock at midday keeps this test away from UTC midnight (#1184).
+    const t0 = new Date('2026-03-10T12:00:00.000Z');
     for (const title of ['Autonomous one', 'Autonomous two']) {
       const published = await publishNote(s, title);
       expect(published.body.status).toBe('published');
@@ -348,7 +360,8 @@ describe('agent notifications (#226)', () => {
     const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
     const outsiderDigests = () => outbox.filter((m) => m.to === outsider.email && m.subject.startsWith('Daily agent digest'));
 
-    const t0 = new Date();
+    const t0 = new Date('2026-03-10T12:00:00.000Z');
+    await primeDigestDue(s.ws, t0);
     expect((await run(t0)).digests).toBe(1);
     expect(ownerDigests()).toHaveLength(1);
     expect(outsiderDigests()).toHaveLength(0);
@@ -430,7 +443,8 @@ describe('agent notifications (#226)', () => {
     const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
     const outsiderDigests = () => outbox.filter((m) => m.to === outsider.email && m.subject.startsWith('Daily agent digest'));
 
-    const t0 = new Date();
+    const t0 = new Date('2026-03-10T12:00:00.000Z');
+    await primeDigestDue(s.ws, t0);
     const first = await run(t0);
     expect(first.digests).toBe(1); // only the owner's digest went out
     expect(ownerDigests()).toHaveLength(1);
@@ -455,5 +469,61 @@ describe('agent notifications (#226)', () => {
     expect((await run(new Date(t0.getTime() + 10 * 60_000))).digests).toBe(0);
     expect(ownerDigests()).toHaveLength(1);
     expect(outsiderDigests()).toHaveLength(1);
+  }, 40_000);
+
+  it('a digest retried after UTC midnight sends only to the sponsor whose mail failed (#1184)', async () => {
+    // A partial failure keeps the digest window open. The retry belongs to the same window even
+    // when it runs on the next UTC day, so it must not re-send the digest to the sponsor who got it.
+    const s = await setup({ level: 3 });
+    const second = await addAgent(s, { name: 'Midnight digest agent', level: 3 });
+    // The second agent's sponsor is not a member yet: the send fails while the first sponsor's works.
+    const outsider = await t.signUp(`outsider-digest-midnight-${Date.now()}@example.com`);
+    await t.srv.db.admin.query('UPDATE agents SET sponsor_user_id = $2 WHERE workspace_id = $1 AND id = $3', [
+      s.ws,
+      outsider.id,
+      second.agentId,
+    ]);
+    expect((await publishNote(s, 'Digest before midnight')).body.status).toBe('published');
+    expect((await publishNoteWith(second.token, 'Digest for the outsider')).body.status).toBe('published');
+
+    const lateNight = new Date('2026-03-10T23:58:00.000Z');
+    const afterMidnight = new Date('2026-03-11T00:03:00.000Z');
+    await primeDigestDue(s.ws, lateNight);
+
+    const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
+    const outsiderDigests = () => outbox.filter((m) => m.to === outsider.email && m.subject.startsWith('Daily agent digest'));
+
+    const first = await run(lateNight);
+    expect(first.digests).toBe(1); // only the owner's digest went out
+    expect(ownerDigests()).toHaveLength(1);
+    expect(outsiderDigests()).toHaveLength(0);
+
+    // 00:03 UTC: the retry of the same window reaches only the sponsor whose mail failed.
+    await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)', [
+      s.ws,
+      outsider.id,
+      'viewer',
+    ]);
+    const retry = await run(afterMidnight);
+    expect(retry.digests).toBe(1);
+    expect(ownerDigests()).toHaveLength(1);
+    expect(outsiderDigests()).toHaveLength(1);
+    expect(outsiderDigests()[0].text).toContain('Digest for the outsider');
+    const rows = await emailRows(s.ws, 'agent-digest:');
+    expect(rows.filter((r) => r.status === 'sent')).toHaveLength(2);
+
+    // The window completed with the retry, so the next day's digest still goes out normally.
+    expect((await publishNote(s, 'Next day activity')).body.status).toBe('published');
+    const nextDay = new Date(lateNight.getTime() + DAY + 5 * 60_000);
+    const { rows: latest } = await t.srv.db.admin.query<{ id: number }>(
+      'SELECT max(id) AS id FROM agent_actions WHERE workspace_id = $1 AND agent_id = $2',
+      [s.ws, s.agentId],
+    );
+    await t.srv.db.admin.query('UPDATE agent_actions SET at = $2 WHERE workspace_id = $1 AND id = $3', [s.ws, nextDay, latest[0].id]);
+    const next = await run(new Date(nextDay.getTime() + 60_000));
+    expect(next.digests).toBeGreaterThanOrEqual(1);
+    expect(ownerDigests()).toHaveLength(2);
+    expect(outsiderDigests()).toHaveLength(2);
+    expect(await emailRows(s.ws, 'agent-digest:')).toHaveLength(4);
   }, 40_000);
 });
