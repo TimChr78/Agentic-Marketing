@@ -45,7 +45,7 @@ const SCAN_LIMIT_FACTOR = 10;
  * workspace backlog in one round). A scan that reached the end of the due set, or filled its batch,
  * clears its entry and starts from the oldest again.
  */
-const scanCursors = new Map<string, { dueAt: string; id: string }>();
+const scanCursors = new Map<string, { dueAt: Date; id: string }>();
 
 /** The compiled graph of a journey version (versions are immutable, so it is cached forever). */
 async function graphOf(tx: Tx, journeyId: string, version: number): Promise<Graph> {
@@ -727,20 +727,14 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
       // not spend the batch, and due time — not the profile id — decides who moves first (#1011
       // review).
       const claimable: string[] = [];
-      const claimed = new Set<string>();
       const scanLimit = Math.max(1, batch * SCAN_LIMIT_FACTOR);
       let after = scanCursors.get(ws);
       let scanned = 0;
       let reachedEnd = false;
       while (claimable.length < batch && scanned < scanLimit) {
         const want = Math.min(batch - claimable.length, scanLimit - scanned);
-        // The cursor is read as text at full microsecond precision (#1151): a `timestamptz` becomes
-        // a JS Date with milliseconds only, so `(due_at, id) > (truncated, id)` re-reads every row
-        // of the page's last millisecond (and with ≥ a page sharing it, starves the rest).
-        const page = await tx.execute<{ id: string; profile_id: string; due_cursor: string }>(sql`
-          SELECT id, profile_id,
-            to_char(due_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS due_cursor
-          FROM journey_participants
+        const page = await tx.execute<{ id: string; profile_id: string; due_at: Date }>(sql`
+          SELECT id, profile_id, due_at FROM journey_participants
           WHERE status IN ('ready', 'waiting') AND due_at <= ${now()}
             ${after ? sql`AND (due_at, id) > (${after.dueAt}::timestamptz, ${after.id}::bigint)` : sql``}
           ORDER BY due_at, id LIMIT ${want}`);
@@ -749,7 +743,7 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           break;
         }
         const last = page.rows[page.rows.length - 1]!;
-        after = { dueAt: last.due_cursor, id: last.id };
+        after = { dueAt: last.due_at, id: last.id };
         scanned += page.rows.length;
         const canonical = await canonicalPeople(
           tx,
@@ -762,12 +756,8 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
         // of claiming a participant row whose survivor this transaction does not hold.
         const locked = new Set(await lockProfileRows(tx, ws, roots, { skipLocked: true }));
         for (const row of page.rows) {
-          if (claimed.has(row.id)) continue;
           const root = canonical.get(row.profile_id) ?? row.profile_id;
-          if (locked.has(root)) {
-            claimed.add(row.id);
-            claimable.push(row.id);
-          }
+          if (locked.has(root)) claimable.push(row.id);
         }
         if (page.rows.length < want) {
           reachedEnd = true;

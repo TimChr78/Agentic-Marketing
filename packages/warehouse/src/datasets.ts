@@ -90,43 +90,24 @@ export const DATASETS: Record<WarehouseDataset, DatasetSpec> = {
 };
 
 const PAGE = 5000;
-/** The selected microsecond cursor; stripped from every row before it is yielded. */
-const CURSOR_TS = 'cursor_ts';
-
-interface PageOptions {
-  keyCols: string[];
-  /**
-   * When the first key column is a timestamp, read it as text at full microsecond precision
-   * (#1138). node-postgres turns `timestamptz` into a JS Date, which keeps milliseconds only, so a
-   * cursor built from it re-reads every row of the page's last millisecond (and loops forever when
-   * a whole page shares that millisecond).
-   */
-  timeKey?: string;
-  /** Page size; tests inject a small one to exercise a page boundary. */
-  page?: number;
-}
 
 /** Postgres rows of a workspace, page by page in key order (keyset pagination). */
-async function* pgPages(db: Db, ws: string, from: string, columns: SQL, where: SQL, opts: PageOptions): AsyncGenerator<Row[]> {
-  const { keyCols, timeKey, page = PAGE } = opts;
+async function* pgPages(db: Db, ws: string, select: SQL, where: SQL, keyCols: string[]): AsyncGenerator<Row[]> {
   let after: unknown[] | null = null;
   const keys = sql.raw(keyCols.join(', '));
-  const projection = timeKey
-    ? sql`SELECT ${columns}, to_char(${sql.raw(timeKey)} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS ${sql.raw(
-        CURSOR_TS,
-      )} FROM ${sql.raw(from)}`
-    : sql`SELECT ${columns} FROM ${sql.raw(from)}`;
-  const cursorValue = (value: unknown, index: number): SQL => (timeKey && index === 0 ? sql`${value}::timestamptz` : sql`${value}`);
   for (;;) {
-    const query: SQL = after
-      ? sql`${projection} WHERE ${where} AND (${keys}) > (${sql.join(after.map(cursorValue), sql`, `)}) ORDER BY ${keys} LIMIT ${page}`
-      : sql`${projection} WHERE ${where} ORDER BY ${keys} LIMIT ${page}`;
-    const rows = await db.withWorkspace(ws, async (tx) => (await tx.execute<Row>(query)).rows);
+    const page: SQL = after
+      ? sql`${select} WHERE ${where} AND (${keys}) > (${sql.join(
+          after.map((v) => sql`${v}`),
+          sql`, `,
+        )}) ORDER BY ${keys} LIMIT ${PAGE}`
+      : sql`${select} WHERE ${where} ORDER BY ${keys} LIMIT ${PAGE}`;
+    const rows = await db.withWorkspace(ws, async (tx) => (await tx.execute<Row>(page)).rows);
     if (!rows.length) return;
-    yield timeKey ? rows.map(({ [CURSOR_TS]: _cursor, ...row }) => row) : rows;
-    if (rows.length < page) return;
-    const last = rows[rows.length - 1]!;
-    after = keyCols.map((c, i) => (timeKey && i === 0 ? last[CURSOR_TS] : (last[c] ?? last.profile_id)));
+    yield rows;
+    if (rows.length < PAGE) return;
+    const last = rows[rows.length - 1];
+    after = keyCols.map((c) => last[c] ?? last.profile_id);
   }
 }
 
@@ -175,17 +156,15 @@ export function readDataset(
   dataset: WarehouseDataset,
   since: string,
   until: string,
-  opts: { page?: number } = {},
 ): AsyncGenerator<Row[]> {
   switch (dataset) {
     case 'profiles':
       return pgPages(
         deps.db,
         ws,
-        'profiles',
-        sql`id, id AS profile_id, merged_into, traits, first_seen, last_seen, updated_at`,
+        sql`SELECT id, id AS profile_id, merged_into, traits, first_seen, last_seen, updated_at FROM profiles`,
         sql`updated_at > ${since} AND updated_at <= ${until}`,
-        { keyCols: ['updated_at', 'id'], timeKey: 'updated_at', page: opts.page },
+        ['updated_at', 'id'],
       );
     case 'identifiers': {
       const w = sql.raw(DATASETS.identifiers.window!);
@@ -193,10 +172,9 @@ export function readDataset(
         pgPages(
           deps.db,
           ws,
-          'identifiers',
-          sql`type, value, profile_id, first_seen, warehouse_changed_at`,
+          sql`SELECT type, value, profile_id, first_seen, warehouse_changed_at FROM identifiers`,
           sql`type IN ('user_id', 'anonymous_id') AND ${w} > ${since} AND ${w} <= ${until}`,
-          { keyCols: [DATASETS.identifiers.window!, 'type', 'value'], timeKey: DATASETS.identifiers.window!, page: opts.page },
+          [DATASETS.identifiers.window!, 'type', 'value'],
         ),
         ({ warehouse_changed_at: _changed, ...row }) => row,
       );
@@ -207,23 +185,18 @@ export function readDataset(
         pgPages(
           deps.db,
           ws,
-          'consent_state',
-          sql`profile_id, purpose, channel, status, basis, updated_at, warehouse_changed_at`,
+          sql`SELECT profile_id, purpose, channel, status, basis, updated_at, warehouse_changed_at FROM consent_state`,
           sql`${w} > ${since} AND ${w} <= ${until}`,
-          {
-            keyCols: [DATASETS.consent.window!, 'profile_id', 'purpose', 'channel'],
-            timeKey: DATASETS.consent.window!,
-            page: opts.page,
-          },
+          [DATASETS.consent.window!, 'profile_id', 'purpose', 'channel'],
         ),
         ({ warehouse_changed_at: _changed, ...row }) => row,
       );
     }
     case 'segment_memberships':
-      return pgPages(deps.db, ws, 'segment_memberships', sql`segment_id, profile_id, since`, sql`true`, {
-        keyCols: ['segment_id', 'profile_id'],
-        page: opts.page,
-      });
+      return pgPages(deps.db, ws, sql`SELECT segment_id, profile_id, since FROM segment_memberships`, sql`true`, [
+        'segment_id',
+        'profile_id',
+      ]);
     case 'events':
       return mapRows(
         protectedChBatches(
