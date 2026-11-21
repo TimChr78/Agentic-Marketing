@@ -1,6 +1,7 @@
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId, sleep } from '@agentic-marketing/core';
 import { type AiUse, type Db, schema, type Tx } from '@agentic-marketing/db';
+import { checkUrl, type EgressPolicy, egressFetchStream } from '@agentic-marketing/integrations';
 import { type KeyProvider, openJson, sealJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { createAnthropic } from '@ai-sdk/anthropic';
@@ -521,17 +522,38 @@ export class AiUnavailable extends Error {
   }
 }
 
-export async function languageModel(tx: Tx, row: ProviderRow, kp: KeyProvider, tier: 'default' | 'fast'): Promise<ReadyModel> {
+/**
+ * The provider's URL under the server's egress policy (#1131): a workspace admin sets it, so it
+ * gets the same guard as a webhook or connector URL. `EGRESS_ALLOWED_HOSTS` keeps a local Ollama
+ * or a homelab gateway working.
+ */
+function assertBaseUrlAllowed(baseUrl: string, egress: EgressPolicy | undefined) {
+  const problem = checkUrl(baseUrl, egress ?? { allowedHosts: [] });
+  if (problem) throw new AppError('invalid_input', `The provider URL is not allowed: ${problem}.`);
+}
+
+export async function languageModel(
+  tx: Tx,
+  row: ProviderRow,
+  kp: KeyProvider,
+  tier: 'default' | 'fast',
+  egress?: EgressPolicy,
+): Promise<ReadyModel> {
   if (!row.secrets || !row.secretsKeyId) throw new AiUnavailable('no_key');
   const { apiKey } = await openJson<{ apiKey: string }>(tx, row.workspaceId, kp, row.secrets, row.secretsKeyId);
   const modelId = (tier === 'fast' && row.models.fast) || row.models.default;
+  // Every request goes through the guard again, after DNS resolution and without redirects, but
+  // the body stays a stream: the copilot reads its answer as it arrives. Without an explicit
+  // policy private networks are refused (the server always passes its config).
+  const fetch = egressFetchStream(egress ?? { allowedHosts: [] });
   const model =
     row.kind === 'anthropic-compatible'
-      ? createAnthropic({ baseURL: row.baseUrl, apiKey })(modelId)
+      ? createAnthropic({ baseURL: row.baseUrl, apiKey, fetch })(modelId)
       : createOpenAICompatible({
           name: 'byok',
           baseURL: row.baseUrl,
           apiKey,
+          fetch,
           supportsStructuredOutputs: row.structuredOutputs,
           includeUsage: true,
         })(modelId);
@@ -539,12 +561,18 @@ export async function languageModel(tx: Tx, row: ProviderRow, kp: KeyProvider, t
 }
 
 /** The model for a use, after checking that the provider is enabled and within its budget. */
-export async function modelFor(tx: Tx, kp: KeyProvider, use: AiUse, tier: 'default' | 'fast' = 'default'): Promise<ReadyModel> {
+export async function modelFor(
+  tx: Tx,
+  kp: KeyProvider,
+  use: AiUse,
+  tier: 'default' | 'fast' = 'default',
+  egress?: EgressPolicy,
+): Promise<ReadyModel> {
   const rows = await tx.select().from(schema.aiProviders).where(eq(schema.aiProviders.enabled, true));
   const row = rows.find((r) => r.useFor.includes(use));
   if (!row) throw new AiUnavailable('no_provider');
   if (row.monthlyTokenBudget !== null && (await usedThisMonth(tx, row.id)) >= row.monthlyTokenBudget) throw new AiUnavailable('budget');
-  return languageModel(tx, row, kp, tier);
+  return languageModel(tx, row, kp, tier, egress);
 }
 
 export const listAiProviders = defineCommand({
@@ -598,6 +626,7 @@ export const createAiProvider = defineCommand({
   humansOnly: true,
   sensitive: ['apiKey'],
   handler: async ({ apiKey, ...input }, ctx) => {
+    assertBaseUrlAllowed(input.baseUrl, ctx.services.egress);
     const id = newId('aip');
     await claimUses(ctx.tx, id, input.useFor);
     const [row] = await ctx.tx
@@ -643,6 +672,7 @@ export const updateAiProvider = defineCommand({
   handler: async ({ id, apiKey, ...rest }, ctx) => {
     const [cur] = await ctx.tx.select().from(schema.aiProviders).where(eq(schema.aiProviders.id, id));
     if (!cur) throw new AppError('not_found', `No AI provider ${id}. List them with aiProviders.list.`);
+    if (rest.baseUrl) assertBaseUrlAllowed(rest.baseUrl, ctx.services.egress);
     if (rest.useFor) await claimUses(ctx.tx, id, rest.useFor);
     const [row] = await ctx.tx
       .update(schema.aiProviders)

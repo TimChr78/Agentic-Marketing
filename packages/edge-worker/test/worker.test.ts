@@ -1,6 +1,6 @@
 import { writeKeyHash } from '@agentic-marketing/personalize/core';
 import { describe, expect, it } from 'vitest';
-import worker, { type Env } from '../src/worker';
+import worker, { cacheHas, cacheSize, type Env, MAX_CACHE_ENTRIES } from '../src/worker';
 
 // The edge worker answers /v1/decide from what the scheduler wrote to KV, with the same rules as
 // the server: write keys and origins, consent before people data, sticky variants, previews.
@@ -90,6 +90,45 @@ describe('edge worker', () => {
       decisions: { experienceId: string }[];
     };
     expect(open.decisions).toMatchObject([{ experienceId: 'exp_fans' }]);
+  });
+
+  it('does not keep an entry for a write key that resolved to null (#1133)', async () => {
+    const e: Env = { ...env(), AM_CACHE_SECONDS: '60' };
+    const unknown = `wk_unknown_${Math.random().toString(16).slice(2)}`;
+    expect((await decide({ writeKey: unknown }, undefined, e)).status).toBe(401);
+    expect(cacheHas(`am:key:${writeKeyHash(unknown)}`)).toBe(false);
+  });
+
+  it('bounds the isolate cache and evicts, so random keys cannot grow it without limit (#1133)', async () => {
+    const source = { workspaceId: ws, kind: 'server', requiredPurpose: null, enabled: true, allowedOrigins: ['*'] };
+    const bundle = { purposes: [], experiences: [] };
+    const kv = {
+      get: async (key: string) => (key.startsWith('am:key:') ? source : key.startsWith('am:exp:') ? bundle : null),
+    };
+    const e: Env = { AM_KV: kv, AM_CACHE_SECONDS: '60' };
+    for (let i = 0; i < MAX_CACHE_ENTRIES * 2 + 25; i++)
+      expect((await decide({ writeKey: `wk_${i}`, placements: ['hero'] }, undefined, e)).status).toBe(200);
+    expect(cacheSize()).toBeLessThanOrEqual(MAX_CACHE_ENTRIES);
+    // An evicted key is simply read from KV again; eviction never fails a request.
+    expect((await decide({ writeKey: 'wk_0', placements: ['hero'] }, undefined, e)).status).toBe(200);
+  });
+
+  it('serves a cached write key without a second KV read within its TTL (#1133)', async () => {
+    const base = env();
+    let reads = 0;
+    const counted: Env = {
+      AM_KV: {
+        get: (key, type) => {
+          reads++;
+          return base.AM_KV.get(key, type);
+        },
+      },
+      AM_CACHE_SECONDS: '60',
+    };
+    await decide({ writeKey: 'wk_site' }, undefined, counted);
+    const afterFirst = reads;
+    await decide({ writeKey: 'wk_site' }, undefined, counted);
+    expect(reads).toBe(afterFirst);
   });
 
   it('refuses unknown keys, other origins and bad input, and answers preflight', async () => {

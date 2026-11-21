@@ -331,6 +331,7 @@ export function startScheduler(
           db: srv.db,
           executor: srv.executor,
           kp: srv.keyProvider,
+          egress: srv.egress,
           email: srv.email,
           directory: srv.directory,
           publicUrl: srv.publicUrl,

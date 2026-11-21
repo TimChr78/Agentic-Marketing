@@ -4,14 +4,17 @@ import { captureClickIds, createAnalytics, createConsentBanner } from '../src';
 
 function harness(landing = { search: '', cookies: '' }) {
   const sent: any[] = [];
+  const calls: { url: string; body: any }[] = [];
   const data = new Map<string, string>();
   const storage = {
     getItem: (k: string) => data.get(k) ?? null,
     setItem: (k: string, v: string) => void data.set(k, v),
     removeItem: (k: string) => void data.delete(k),
   };
-  const fetch = (async (_url: string, init: RequestInit) => {
-    sent.push(JSON.parse(String(init.body)));
+  const fetch = (async (url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    calls.push({ url: String(url), body });
+    sent.push(body);
     return new Response('{}');
   }) as typeof globalThis.fetch;
   const page = () => ({ path: '/', url: 'https://martechsignal.com/', title: 'Home', referrer: '' });
@@ -25,7 +28,12 @@ function harness(landing = { search: '', cookies: '' }) {
       landing: () => landing,
       flushInterval: 10_000,
     });
-  return { data, make, events: () => sent.flatMap((b) => b.batch) };
+  return {
+    data,
+    make,
+    events: () => sent.flatMap((b) => b.batch ?? []),
+    decideBodies: () => calls.filter((c) => c.url.endsWith('/v1/decide')).map((c) => c.body),
+  };
 }
 
 describe('ad click ids', () => {
@@ -90,6 +98,103 @@ describe('ad click ids', () => {
 
     a.setConsent({ ad_measurement: false });
     expect(h.data.has('am.clk')).toBe(false);
+  });
+});
+
+describe('consent gates on what leaves the browser (#1135)', () => {
+  it('sends userId to /v1/decide only with web_personalization consent', async () => {
+    const h = harness();
+    const a = h.make();
+    a.identify('user-1');
+    await a.decide(['hero']);
+    expect(h.decideBodies().at(-1)).not.toHaveProperty('userId');
+
+    // Personalisation is its own purpose: analytics consent does not identify the visitor.
+    a.setConsent({ analytics: true });
+    await a.decide(['hero']);
+    expect(h.decideBodies().at(-1)).not.toHaveProperty('userId');
+
+    a.setConsent({ web_personalization: true });
+    await a.decide(['hero']);
+    expect(h.decideBodies().at(-1).userId).toBe('user-1');
+
+    a.setConsent({ web_personalization: false });
+    await a.decide(['hero']);
+    expect(h.decideBodies().at(-1)).not.toHaveProperty('userId');
+  });
+
+  it('clears queued click ids when ad_measurement is withdrawn, before the flush', async () => {
+    const h = harness({ search: '?gclid=Cj0KCQabc', cookies: '' });
+    const a = h.make();
+    a.setConsent({ analytics: true, ad_measurement: true });
+    await a.flush();
+    expect(JSON.parse(h.data.get('am.clk')!)).toEqual({ gclid: 'Cj0KCQabc' });
+
+    // Queued under the grant, not yet sent: the withdrawal must strip its context before flush.
+    a.track('Page View');
+    a.setConsent({ ad_measurement: false });
+    await a.flush();
+    const queued = h.events().find((e) => e.event === 'Page View');
+    expect(queued).toBeDefined();
+    expect(queued.context).not.toHaveProperty('clickIds');
+    expect(h.data.has('am.clk')).toBe(false);
+
+    // The in-memory copy is gone too: re-granting does not resurrect it on the next event.
+    a.setConsent({ ad_measurement: true });
+    a.track('Page View');
+    await a.flush();
+    expect(
+      h
+        .events()
+        .filter((e) => e.event === 'Page View')
+        .at(-1).context,
+    ).not.toHaveProperty('clickIds');
+  });
+
+  it('strips click ids from a batch that fails after a withdrawal made while it was in flight', async () => {
+    const bodies: any[] = [];
+    let release!: () => void;
+    let calls = 0;
+    const data = new Map<string, string>();
+    const a = createAnalytics({
+      writeKey: 'pk_test',
+      host: 'https://am.example.com',
+      storage: {
+        getItem: (k: string) => data.get(k) ?? null,
+        setItem: (k: string, v: string) => void data.set(k, v),
+        removeItem: (k: string) => void data.delete(k),
+      },
+      page: () => ({ path: '/', url: 'https://martechsignal.com/', title: 'Home', referrer: '' }),
+      landing: () => ({ search: '?gclid=Cj0KCQabc', cookies: '' }),
+      flushInterval: 10_000,
+      fetch: (async (_url: string, init: RequestInit) => {
+        bodies.push(JSON.parse(String(init.body)));
+        // The first batch that carries the page view fails, but only after the withdrawal.
+        if (++calls === 2) {
+          await new Promise<void>((r) => {
+            release = r;
+          });
+          throw new Error('offline');
+        }
+        return new Response('{}');
+      }) as typeof globalThis.fetch,
+    });
+    a.setConsent({ analytics: true, ad_measurement: true });
+    await a.flush();
+    a.track('Page View');
+    const inFlight = a.flush();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(bodies.at(-1).batch.find((e: any) => e.event === 'Page View').context.clickIds).toEqual({ gclid: 'Cj0KCQabc' });
+    a.setConsent({ ad_measurement: false });
+    release();
+    await inFlight;
+    await a.flush();
+    const retried = bodies
+      .slice(2)
+      .flatMap((b) => b.batch)
+      .filter((e: any) => e.event === 'Page View');
+    expect(retried.length).toBeGreaterThan(0);
+    for (const e of retried) expect(e.context).not.toHaveProperty('clickIds');
   });
 });
 

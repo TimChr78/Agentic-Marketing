@@ -220,7 +220,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
           ...input,
           subject: await checkSubjectOf(tx, input.principal.workspaceId, input.command, input.input),
         },
-        { db, kp: keyProvider },
+        { db, kp: keyProvider, egress: config.egress },
       ),
   };
   const executor = createExecutor(db, services, {
@@ -626,7 +626,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       (c) => mcp(c.req.raw),
     );
   }
-  if (config.roles.has('api')) app.route('/', copilotApi({ auth, db, executor, kp: keyProvider, origin, aborts: requestAborts }));
+  if (config.roles.has('api'))
+    app.route('/', copilotApi({ auth, db, executor, kp: keyProvider, origin, egress: config.egress, aborts: requestAborts }));
   if (config.roles.has('api')) app.route('/', scimApi({ auth, db, executor, publicUrl: config.publicUrl }));
   app.route('/', restApi({ auth, db, executor, assetMaxBytes: config.assetMaxBytes, origin }));
 

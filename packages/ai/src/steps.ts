@@ -96,7 +96,7 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
   const consent = await aiAllowed(tx, c.workspaceId, c.profileId ?? '');
   if (!consent.ok) return { ...base, fallback: consent.reason };
   try {
-    const model = await modelFor(tx, deps.kp, 'journeys', p.def.model);
+    const model = await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress);
     if (p.def.kind === 'generate' && p.def.cache) {
       const { key, names } = await segmentKey(tx, c.profileId ?? '', p.def.cache.segments);
       const [hit] = await tx
@@ -572,7 +572,7 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
     const test = p?.def.tests[index];
     if (!p || !test) return null;
     try {
-      return { def: p.def, test, model: await modelFor(tx, deps.kp, 'journeys', p.def.model) };
+      return { def: p.def, test, model: await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress) };
     } catch (err) {
       if (err instanceof AiUnavailable) return { error: `${err.reason}: ${err.message}` };
       throw err;
@@ -629,7 +629,7 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
       if (!consent.ok) return { error: consent.reason ?? 'no_lawful_basis' };
     }
     try {
-      return { def: p.def, model: await modelFor(tx, deps.kp, 'journeys', p.def.model) };
+      return { def: p.def, model: await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress) };
     } catch (err) {
       if (err instanceof AiUnavailable) return { error: `${err.reason}: ${err.message}` };
       throw err;

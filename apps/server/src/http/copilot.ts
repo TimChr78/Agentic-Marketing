@@ -18,6 +18,7 @@ import { agentPrincipal, type Executor, type Permission, ROLE_PERMISSIONS } from
 import { AppError, newId, redactCredentials, sha256 } from '@agentic-marketing/core';
 import { type Db, type Role, schema, type Tx } from '@agentic-marketing/db';
 import { bodyLimit } from '@agentic-marketing/ingest';
+import type { EgressPolicy } from '@agentic-marketing/integrations';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { Client } from '@modelcontextprotocol/client';
@@ -239,6 +240,8 @@ export function copilotApi(deps: {
   executor: Executor;
   kp: KeyProvider;
   origin: BrowserRequestPolicy;
+  /** The server's egress policy: the provider URL is guarded like a webhook's (#1131). */
+  egress?: EgressPolicy;
   /** The shutdown's request registry; a turn keeps its request registered until its own cleanup. */
   aborts?: RequestAborts;
 }) {
@@ -293,7 +296,7 @@ export function copilotApi(deps: {
     const copilotAgent = acting ? acting.agent : await deps.db.withWorkspace(ws, (tx) => builtinCopilotAgent(tx, ws, user));
     const role = acting ? acting.sponsorRole : user.role;
     const model = await deps.db
-      .withWorkspace(ws, (tx) => modelFor(tx, deps.kp, 'copilot'))
+      .withWorkspace(ws, (tx) => modelFor(tx, deps.kp, 'copilot', 'default', deps.egress))
       .catch((err) => {
         if (err instanceof AiUnavailable)
           throw new AppError('conflict', `The copilot cannot answer: ${err.message}. An admin can set one up under AI providers.`);
