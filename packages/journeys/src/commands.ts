@@ -1,5 +1,6 @@
 import {
   artifactTypes,
+  canonicalProfileIds,
   DEFAULT_PURPOSES,
   type JourneyDefinition,
   publishedSingleton,
@@ -11,7 +12,14 @@ import { AppError, isoDateTime, newId, newUuid, personalDataInText, safeErrorTex
 import { schema, type Tx } from '@agentic-marketing/db';
 import { checkPushRecipient, checkRecipient, checkSmsRecipient, sendIdempotencyKey } from '@agentic-marketing/email';
 import type { JourneyEvent } from '@agentic-marketing/events';
-import { consentStateOf, currentConsent, erasedProfileIdsInTx, purposeAllowed } from '@agentic-marketing/profiles';
+import {
+  consentStateOf,
+  currentConsent,
+  erasedProfileIdsInTx,
+  lockProfileRows,
+  purposeAllowed,
+  withIdentityLock,
+} from '@agentic-marketing/profiles';
 import { contextFor, durationSeconds, evaluate, publishedSegments } from '@agentic-marketing/segments';
 import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -312,89 +320,105 @@ export const enrollProfiles = defineCommand({
   },
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
-    const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
-    if (!a?.publishedVersion) throw new AppError('not_found', `Journey ${input.artifactId} has no published version.`);
-    const { def } = await loadDefinition(ctx.tx, a.id, a.publishedVersion);
+    const ws = ctx.principal.workspaceId;
+    const [a] = await ctx.tx
+      .select()
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, input.artifactId)));
+    if (a?.type !== 'journey' || !a.publishedVersion)
+      throw new AppError('not_found', `Journey ${input.artifactId} has no published version.`);
+    if (a.archived) throw new AppError('invalid_input', `Journey ${input.artifactId} is archived.`);
+    const version = a.publishedVersion;
+    const { def } = await loadDefinition(ctx.tx, a.id, version);
     const g = compile(def);
-    let entered = 0;
-    const holdout: JourneyEvent[] = [];
-    for (const profileId of input.profileIds) {
-      if (g.trigger.reentry !== 'always') {
-        const [prior] = await ctx.tx
-          .select({ id: schema.journeyParticipants.id })
-          .from(schema.journeyParticipants)
-          .where(
-            and(
-              eq(schema.journeyParticipants.journeyId, a.id),
-              eq(schema.journeyParticipants.profileId, profileId),
-              g.trigger.reentry === 'after_exit' ? inArray(schema.journeyParticipants.status, ['ready', 'waiting']) : undefined,
-            ),
-          )
-          .limit(1);
-        if (prior) continue;
+    // Merged-away ids are aliases: resolve them to today's survivor under the identity lock, so a
+    // merge cannot commit between resolution and the participant/holdout writes. Re-entry, the
+    // holdout arm and the participant row then all name the same person (#1149).
+    return withIdentityLock(ctx.tx, ws, async () => {
+      const canonical = await canonicalProfileIds(ctx.tx, ws, input.profileIds);
+      const targets: string[] = [];
+      const seen = new Set<string>();
+      for (const id of input.profileIds) {
+        const person = canonical.get(id);
+        if (person && !seen.has(person)) {
+          seen.add(person);
+          targets.push(person);
+        }
       }
-      const [p] = await ctx.tx.select({ id: schema.profiles.id }).from(schema.profiles).where(eq(schema.profiles.id, profileId));
-      if (!p) continue;
-      const campaign = await campaignWithControlForMember(ctx.tx, a.id);
-      const assigned = campaign
-        ? await assignHoldout(
-            ctx.tx,
-            ctx.principal.workspaceId,
-            { type: 'campaign', id: campaign.id },
-            campaign.content.controlGroup,
+      // Profile rows in ascending id order, the documented order below the identity lock.
+      await lockProfileRows(ctx.tx, ws, targets);
+      let entered = 0;
+      const holdout: JourneyEvent[] = [];
+      for (const profileId of targets) {
+        if (g.trigger.reentry !== 'always') {
+          const [prior] = await ctx.tx
+            .select({ id: schema.journeyParticipants.id })
+            .from(schema.journeyParticipants)
+            .where(
+              and(
+                eq(schema.journeyParticipants.journeyId, a.id),
+                eq(schema.journeyParticipants.profileId, profileId),
+                g.trigger.reentry === 'after_exit' ? inArray(schema.journeyParticipants.status, ['ready', 'waiting']) : undefined,
+              ),
+            )
+            .limit(1);
+          if (prior) continue;
+        }
+        const campaign = await campaignWithControlForMember(ctx.tx, a.id);
+        const assigned = campaign
+          ? await assignHoldout(ctx.tx, ws, { type: 'campaign', id: campaign.id }, campaign.content.controlGroup, profileId)
+          : await assignHoldout(ctx.tx, ws, { type: 'journey', id: a.id }, g.controlGroup, profileId);
+        const [participant] = await ctx.tx
+          .insert(schema.journeyParticipants)
+          .values({
+            workspaceId: ws,
+            journeyId: a.id,
+            version,
             profileId,
-          )
-        : await assignHoldout(ctx.tx, ctx.principal.workspaceId, { type: 'journey', id: a.id }, g.controlGroup, profileId);
-      const [participant] = await ctx.tx
-        .insert(schema.journeyParticipants)
-        .values({
-          workspaceId: ctx.principal.workspaceId,
-          journeyId: a.id,
-          version: a.publishedVersion,
-          profileId,
-          entryKey: `manual:${newUuid()}`,
-          node: g.start,
-          status: 'ready',
-          dueAt: new Date(),
-          context: {
-            event: { name: 'manual', properties: { reason: input.reason ?? '' } },
-            ...(assigned
-              ? {
-                  holdout: {
-                    ...assigned.assignment,
-                    scope: campaign ? 'campaign' : 'journey',
-                    ...(campaign ? { campaignId: campaign.id } : {}),
-                  },
-                }
-              : {}),
-          },
-        })
-        .returning({ id: schema.journeyParticipants.id });
-      entered++;
-      if (assigned?.created && participant)
-        holdout.push({
-          workspaceId: ctx.principal.workspaceId,
-          journeyId: campaign?.id ?? a.id,
-          version: campaign?.version ?? a.publishedVersion,
-          participantId: participant.id,
-          profileId,
-          node: g.start,
-          type: 'holdout_assigned',
-          seq: 0,
-          at: new Date().toISOString(),
-          detail: holdoutDetail(assigned.assignment, campaign?.id),
-        });
-    }
-    if (holdout.length) {
-      const erased = await erasedProfileIdsInTx(
-        ctx.tx,
-        ctx.principal.workspaceId,
-        holdout.map((event) => event.profileId),
-      );
-      const kept = holdout.filter((event) => !event.profileId || !erased.has(event.profileId));
-      if (kept.length) ctx.afterCommit?.(() => ctx.services.events.insertJourneyEvents(kept).catch(() => {}));
-    }
-    return { entered, skipped: input.profileIds.length - entered };
+            entryKey: `manual:${newUuid()}`,
+            node: g.start,
+            status: 'ready',
+            dueAt: new Date(),
+            context: {
+              event: { name: 'manual', properties: { reason: input.reason ?? '' } },
+              ...(assigned
+                ? {
+                    holdout: {
+                      ...assigned.assignment,
+                      scope: campaign ? 'campaign' : 'journey',
+                      ...(campaign ? { campaignId: campaign.id } : {}),
+                    },
+                  }
+                : {}),
+            },
+          })
+          .returning({ id: schema.journeyParticipants.id });
+        entered++;
+        if (assigned?.created && participant)
+          holdout.push({
+            workspaceId: ws,
+            journeyId: campaign?.id ?? a.id,
+            version: campaign?.version ?? version,
+            participantId: participant.id,
+            profileId,
+            node: g.start,
+            type: 'holdout_assigned',
+            seq: 0,
+            at: new Date().toISOString(),
+            detail: holdoutDetail(assigned.assignment, campaign?.id),
+          });
+      }
+      if (holdout.length) {
+        const erased = await erasedProfileIdsInTx(
+          ctx.tx,
+          ws,
+          holdout.map((event) => event.profileId),
+        );
+        const kept = holdout.filter((event) => !event.profileId || !erased.has(event.profileId));
+        if (kept.length) ctx.afterCommit?.(() => ctx.services.events.insertJourneyEvents(kept).catch(() => {}));
+      }
+      return { entered, skipped: input.profileIds.length - entered };
+    });
   },
 });
 
@@ -446,9 +470,13 @@ export const enrollSegment = defineCommand({
     const segments = await publishedSegments(ctx.tx);
     const segment = segments.find((s) => s.id === input.segmentId);
     if (!segment) throw new AppError('not_found', `Segment ${input.segmentId} has no published version.`);
-    const [journey] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
+    const [journey] = await ctx.tx
+      .select()
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, input.artifactId)));
     if (journey?.type !== 'journey' || !journey.publishedVersion)
       throw new AppError('not_found', `Journey ${input.artifactId} has no published version.`);
+    if (journey.archived) throw new AppError('invalid_input', `Journey ${input.artifactId} is archived.`);
 
     // The caller this job's key is bound to (#926): a person is their user id, an agent its record.
     const caller = callerIdentity(ctx.principal);
@@ -953,44 +981,92 @@ export const migrateJourney = defineCommand({
   permission: 'artifacts:publish',
   effect: 'publish',
   actionClass: 'journey.live',
-  impact: async (input) => ({
-    people: 0,
-    summary: `move participants to the published version of ${input.artifactId}`,
-    touches: { artifacts: [{ id: input.artifactId, type: 'journey' }] },
-  }),
+  impact: async (input, ctx) => {
+    const ws = ctx.principal.workspaceId;
+    const [a] = await ctx.tx
+      .select({ published: schema.artifacts.publishedVersion })
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, input.artifactId)));
+    // Only people still on an older version move; a dry run and a live run touch the same people.
+    let people = 0;
+    if (a?.published) {
+      const [{ n }] = await ctx.tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(schema.journeyParticipants)
+        .where(
+          and(
+            eq(schema.journeyParticipants.workspaceId, ws),
+            eq(schema.journeyParticipants.journeyId, input.artifactId),
+            inArray(schema.journeyParticipants.status, ['ready', 'waiting']),
+            sql`${schema.journeyParticipants.version} <> ${a.published}`,
+          ),
+        );
+      people = n;
+    }
+    const touches = await journeyTouches(ctx.tx, input.artifactId);
+    return {
+      people,
+      summary: `move participants to the published version of ${input.artifactId}`,
+      touches: {
+        ...(touches ?? {}),
+        artifacts: [{ id: input.artifactId, type: 'journey' }, ...(touches?.artifacts ?? [])],
+      },
+    };
+  },
   target: (i) => i.artifactId,
   handler: async (input, ctx) => {
-    const [a] = await ctx.tx.select().from(schema.artifacts).where(eq(schema.artifacts.id, input.artifactId));
+    const ws = ctx.principal.workspaceId;
+    const [a] = await ctx.tx
+      .select()
+      .from(schema.artifacts)
+      .where(and(eq(schema.artifacts.workspaceId, ws), eq(schema.artifacts.id, input.artifactId)));
     if (a?.type !== 'journey' || !a.publishedVersion)
       throw new AppError('not_found', `Journey ${input.artifactId} has no published version.`);
-    const target = compile((await loadDefinition(ctx.tx, a.id, a.publishedVersion)).def);
+    const toVersion = a.publishedVersion;
+    const target = compile((await loadDefinition(ctx.tx, a.id, toVersion)).def);
     for (const [from, to] of Object.entries(input.mapping))
-      if (!target.nodes.has(to))
-        throw new AppError('invalid_input', `mapping ${from} → ${to}: version ${a.publishedVersion} has no node "${to}".`);
-    const active = await ctx.tx
-      .select()
+      if (!target.nodes.has(to)) throw new AppError('invalid_input', `mapping ${from} → ${to}: version ${toVersion} has no node "${to}".`);
+    // One row per (version, node): every participant in a group takes the same decision, so the
+    // migration is one batched UPDATE per group instead of loading every context row and rewriting
+    // each participant on its own (#1150).
+    const groups = await ctx.tx
+      .select({
+        version: schema.journeyParticipants.version,
+        node: schema.journeyParticipants.node,
+        n: sql<number>`count(*)::int`,
+      })
       .from(schema.journeyParticipants)
       .where(
         and(
+          eq(schema.journeyParticipants.workspaceId, ws),
           eq(schema.journeyParticipants.journeyId, a.id),
           inArray(schema.journeyParticipants.status, ['ready', 'waiting']),
-          sql`${schema.journeyParticipants.version} <> ${a.publishedVersion}`,
+          sql`${schema.journeyParticipants.version} <> ${toVersion}`,
         ),
-      );
+      )
+      .groupBy(schema.journeyParticipants.version, schema.journeyParticipants.node);
     const olds = new Map<number, ReturnType<typeof compile>>();
-    const out = { toVersion: a.publishedVersion, moved: 0, restarted: 0, stayed: 0, exited: 0 };
+    const out = { toVersion, moved: 0, restarted: 0, stayed: 0, exited: 0 };
     const byNode = new Map<string, { fromVersion: number; from: string; to: string | null; count: number }>();
-    for (const p of active) {
-      if (!olds.has(p.version)) olds.set(p.version, compile((await loadDefinition(ctx.tx, a.id, p.version)).def));
-      const oldNode = olds.get(p.version)!.nodes.get(p.node);
-      const to = input.mapping[p.node] ?? (target.nodes.has(p.node) ? p.node : null);
-      const key = `${p.version}:${p.node}`;
-      const b = byNode.get(key) ?? { fromVersion: p.version, from: p.node, to, count: 0 };
-      b.count++;
+    const groupWhere = (version: number, node: string) =>
+      and(
+        eq(schema.journeyParticipants.workspaceId, ws),
+        eq(schema.journeyParticipants.journeyId, a.id),
+        eq(schema.journeyParticipants.version, version),
+        eq(schema.journeyParticipants.node, node),
+        inArray(schema.journeyParticipants.status, ['ready', 'waiting']),
+      );
+    for (const group of groups) {
+      if (!olds.has(group.version)) olds.set(group.version, compile((await loadDefinition(ctx.tx, a.id, group.version)).def));
+      const oldNode = olds.get(group.version)!.nodes.get(group.node);
+      const to = input.mapping[group.node] ?? (target.nodes.has(group.node) ? group.node : null);
+      const key = `${group.version}:${group.node}`;
+      const b = byNode.get(key) ?? { fromVersion: group.version, from: group.node, to, count: 0 };
+      b.count += group.n;
       byNode.set(key, b);
       if (!to) {
         if (input.unmatched === 'exit') {
-          out.exited++;
+          out.exited += group.n;
           if (!input.dryRun)
             await ctx.tx
               .update(schema.journeyParticipants)
@@ -999,25 +1075,35 @@ export const migrateJourney = defineCommand({
                 dueAt: null,
                 waitingEvent: null,
                 waitingUntil: null,
-                error: `left in a migration to v${a.publishedVersion}`,
+                error: `left in a migration to v${toVersion}`,
                 updatedAt: new Date(),
               })
-              .where(eq(schema.journeyParticipants.id, p.id));
-        } else out.stayed++;
+              .where(groupWhere(group.version, group.node));
+        } else out.stayed += group.n;
         continue;
       }
-      // Same kind at the same place: the wait (due time, awaited event) carries over as it is.
-      const same = to === p.node && oldNode?.kind === target.nodes.get(to)?.kind;
-      if (same) out.moved++;
+      // Same id and kind at the same place keeps the participant's place and its wait. For a
+      // waitEvent/goal node the wait is for its event, so a changed event is not the same wait:
+      // the participant stays and now waits for the new event instead of the removed one (#1150).
+      const sameKind = to === group.node && oldNode?.kind === target.nodes.get(to)?.kind;
+      const oldEvent = oldNode && (oldNode.kind === 'waitEvent' || oldNode.kind === 'goal') ? oldNode.event : null;
+      const newNode = target.nodes.get(to);
+      const newEvent = newNode && (newNode.kind === 'waitEvent' || newNode.kind === 'goal') ? newNode.event : null;
+      const sameWait = oldEvent === newEvent;
+      if (sameKind) out.moved++;
       else out.restarted++;
       if (!input.dryRun)
         await ctx.tx
           .update(schema.journeyParticipants)
           .set(
-            same
-              ? { version: a.publishedVersion, updatedAt: new Date() }
+            sameKind
+              ? {
+                  version: toVersion,
+                  updatedAt: new Date(),
+                  ...(sameWait ? {} : { waitingEvent: newEvent }),
+                }
               : {
-                  version: a.publishedVersion,
+                  version: toVersion,
                   node: to,
                   status: 'ready',
                   dueAt: new Date(),
@@ -1027,7 +1113,7 @@ export const migrateJourney = defineCommand({
                   updatedAt: new Date(),
                 },
           )
-          .where(eq(schema.journeyParticipants.id, p.id));
+          .where(groupWhere(group.version, group.node));
     }
     return { ...out, moved: out.moved + out.restarted, byNode: [...byNode.values()] };
   },

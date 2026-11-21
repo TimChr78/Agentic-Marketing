@@ -6,8 +6,10 @@ import { EMAIL_EVENTS, withEmailProfileEvents, withResolvedEventProfiles } from 
 // The e-mail message log becomes customer events in code, so the mapping and the identifier
 // lookups can be unit-tested with a recording store, bus and database handle.
 
-const emptyTx = (): Tx =>
+const emptyTx = (profileIds: string[] = []): Tx =>
   ({
+    // canonicalProfileIds seeds the merge walk with the batch's ids; the fake maps each to itself.
+    execute: async () => ({ rows: profileIds.map((id) => ({ origin: id, id, merged_into: null })) }),
     select: () => ({
       from: () => ({
         innerJoin: () => ({ where: async () => [] }),
@@ -16,11 +18,18 @@ const emptyTx = (): Tx =>
   }) as unknown as Tx;
 
 function fakeDb(identifierRows: (params: unknown[]) => unknown[] = () => []): Db {
+  const known = () => [
+    ...new Set(
+      identifierRows([])
+        .map((r) => (r as { profile_id?: string }).profile_id)
+        .filter((id): id is string => !!id),
+    ),
+  ];
   return {
     admin: {
       query: async (_sql: string, params: unknown[]) => ({ rows: identifierRows(params) }),
     },
-    withWorkspace: async (_ws: string, cb: (tx: Tx) => Promise<unknown>) => cb(emptyTx()),
+    withWorkspace: async (_ws: string, cb: (tx: Tx) => Promise<unknown>) => cb(emptyTx(known())),
   } as unknown as Db;
 }
 
@@ -302,5 +311,35 @@ describe('e-mail message events as customer events', () => {
     const received = Date.parse(published[0]?.receivedAt ?? '');
     expect(received).toBeGreaterThanOrEqual(before);
     expect(received).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('resolves a merged-away profile id to the survivor before reading identifiers (#1145)', async () => {
+    const alias = 'prf_alias';
+    const survivor = 'prf_survivor';
+    const lookupParams: unknown[][] = [];
+    const tx = {
+      // The shared merge walk returns the survivor for the seeded alias.
+      execute: async () => ({ rows: [{ origin: alias, id: survivor, merged_into: null }] }),
+      select: () => ({ from: () => ({ innerJoin: () => ({ where: async () => [] }) }) }),
+    } as unknown as Tx;
+    const db = {
+      admin: {
+        query: async (text: string, params: unknown[]) => {
+          if (text.includes('FROM identifiers')) lookupParams.push(params);
+          return {
+            rows: text.includes('FROM identifiers') ? [{ profile_id: survivor, type: 'user_id', value: 'usr_survivor' }] : [],
+          };
+        },
+      },
+      withWorkspace: async (_ws: string, cb: (tx: Tx) => Promise<unknown>) => cb(tx),
+    } as unknown as Db;
+    const { store } = recordingStore();
+    const { bus, published } = recordingBus();
+
+    await withEmailProfileEvents(store, { db, bus }).insertMessageEvents([messageEvent({ profileId: alias })]);
+
+    expect(lookupParams).toEqual([['ws_01', [survivor]]]);
+    expect(published).toHaveLength(1);
+    expect(published[0]).toMatchObject({ name: 'Email Link Clicked', userId: 'usr_survivor' });
   });
 });

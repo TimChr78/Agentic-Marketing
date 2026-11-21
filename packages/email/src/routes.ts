@@ -211,8 +211,15 @@ export function emailRoutes(deps: EmailRouteDeps) {
             } as Msg);
           // A one-click unsubscribe is a synchronous write: the link POST is the person's action.
           const at = new Date();
-          await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, at);
-          const event = messageEvent(msg, { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() }, '');
+          const profileId = await withdraw(tx, msg, 'unsubscribe', { messageId: link.m, via: 'unsubscribe link' }, at);
+          // Erased or missing: there is no person to record against, so write no outbox row for a
+          // stale id either (#1152).
+          if (!profileId) return null;
+          const event = messageEvent(
+            { ...msg, profileId },
+            { eventId: 'unsubscribe-link', type: 'unsubscribed', at: at.toISOString() },
+            '',
+          );
           // The unsubscribe event is published after commit by the outbox dispatcher (#978 part 2).
           await enqueueMessageEvents(tx, link.w, [event]);
           return event;
@@ -220,7 +227,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
         { waitMs: lockWaitMs },
       ),
     );
-    if (recorded.profileId) await consentChanged(link.w, [recorded.profileId], `unsubscribe:${link.m}`);
+    if (recorded?.profileId) await consentChanged(link.w, [recorded.profileId], `unsubscribe:${link.m}`);
     return link;
   };
 

@@ -1410,7 +1410,12 @@ async function cleanupOnlyDestination(
   return writePlans(db, ws, syncId, platform, ref, plans, deps, { stopOnError: false });
 }
 
-async function countsFor(
+/**
+ * The counts a sync reports: current members, intents still pending, and the unresolved cleanup
+ * (orphaned members plus every pending intent). Exported so a test can pin the arithmetic without
+ * a platform.
+ */
+export async function countsFor(
   db: Db,
   ws: string,
   syncId: string,
@@ -1423,14 +1428,14 @@ async function countsFor(
              count(*) FILTER (WHERE NOT destination_known OR orphaned_at IS NOT NULL)::int AS orphaned
       FROM audience_members
       WHERE workspace_id = ${ws} AND sync_id = ${syncId} AND platform = ${platform}`);
-    const { rows: intentRows } = await tx.execute<{ orphaned: number; pending: number }>(sql`
-      SELECT count(*) FILTER (WHERE orphaned_at IS NOT NULL)::int AS orphaned,
-             count(*)::int AS pending
+    const { rows: intentRows } = await tx.execute<{ pending: number }>(sql`
+      SELECT count(*)::int AS pending
       FROM audience_write_intents
       WHERE workspace_id = ${ws} AND sync_id = ${syncId} AND platform = ${platform}`);
-    const orphaned = (rows[0]?.orphaned ?? 0) + (intentRows[0]?.orphaned ?? 0);
+    // `pending` already counts every intent row, including the orphaned ones, so only the member
+    // orphans are added to it. Adding the orphaned intents as well counted them twice (#1155).
     const pending = intentRows[0]?.pending ?? 0;
-    return { members: rows[0]?.members ?? 0, unresolved: orphaned + pending, pending };
+    return { members: rows[0]?.members ?? 0, unresolved: (rows[0]?.orphaned ?? 0) + pending, pending };
   });
 }
 

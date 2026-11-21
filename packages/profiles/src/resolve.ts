@@ -343,6 +343,12 @@ async function merge(tx: Tx, workspaceId: string, from: string, into: string, cr
   // Static/snapshot list membership follows and is deduplicated (#396); dynamic memberships are
   // derived from the rule and are left for the next refresh to recompute from the merged traits.
   await tx.execute(sql`SELECT merge_segment_memberships(${from}, ${into})`);
+  // Scores follow the person (#1144): readers (segments, journeys, profiles.scores) only look at
+  // the canonical id, so leaving them on the merged-away row lost them from segments and journeys
+  // and let ai.calibration count an orphan prediction with no identifiers left to match. The
+  // function keeps the newer score per key, and migration 0119 reuses it to repair the scores that
+  // merges before it left behind.
+  await tx.execute(sql`SELECT merge_profile_scores(${from}, ${into})`);
 
   const srcPii = (await crypto.open<Record<string, unknown>>(from, src.pii)) ?? {};
   const dstPii = (await crypto.open<Record<string, unknown>>(into, dst.pii)) ?? {};
