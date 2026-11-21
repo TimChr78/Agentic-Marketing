@@ -210,8 +210,26 @@ export interface RunSubjectKeyBackfillOptions extends Omit<SubjectKeyBackfillOpt
   /** Calls per turn before yielding, so a large install does not hold the event loop. */
   callsPerTurn?: number;
   pauseMs?: number;
+  /** The first transient-error backoff; it doubles each failure up to `maxBackoffMs`. */
+  maxBackoffMs?: number;
   log?: (message: string) => void;
   onError?: (err: unknown) => void;
+}
+
+/**
+ * Whether an error means the schema this pass needs is absent (SKIP_MIGRATIONS): a ClickHouse
+ * `UNKNOWN_TABLE` / `UNKNOWN_IDENTIFIER`, or a missing PostgreSQL relation or column. Only these
+ * are permanent for the process; anything else (a timeout, a restart, a transient pool error) is
+ * retried (#1140).
+ */
+export function isSchemaMissingError(err: unknown): boolean {
+  const e = err as { code?: unknown; type?: unknown; message?: unknown } | null | undefined;
+  // PostgreSQL: undefined_table (42P01) and undefined_column (42703).
+  if (e?.code === '42P01' || e?.code === '42703') return true;
+  // The ClickHouse client tags the server's exception type.
+  if (e?.type === 'UNKNOWN_TABLE' || e?.type === 'UNKNOWN_IDENTIFIER') return true;
+  const message = typeof e?.message === 'string' ? e.message : '';
+  return /\bUNKNOWN_(?:TABLE|IDENTIFIER)\b/.test(message);
 }
 
 /**
@@ -222,6 +240,10 @@ export interface RunSubjectKeyBackfillOptions extends Omit<SubjectKeyBackfillOpt
  * A pass is done only when the uncovered count is zero; the job then revalidates at a low frequency
  * instead of ever treating the backfill as permanently finished. The exclusion key never leaves
  * the app.
+ *
+ * A missing schema stops the pass permanently (the next process start retries once migrations have
+ * run); a transient error is logged and retried with exponential backoff, so one ClickHouse timeout
+ * does not disable the backfill for the scheduler's lifetime and strand erasure cleanups (#1140).
  */
 export async function runSubjectKeyBackfill(
   deps: { events: Pick<EventStore, 'backfillSubjectKeys'>; workspaces: () => Promise<string[]> },
@@ -231,6 +253,8 @@ export async function runSubjectKeyBackfill(
   const callsPerTurn = opts.callsPerTurn ?? 4;
   const pauseMs = opts.pauseMs ?? 1_000;
   const revalidateMs = opts.revalidateMs ?? 60 * 60 * 1_000;
+  const maxBackoffMs = opts.maxBackoffMs ?? 60_000;
+  let backoffMs = pauseMs;
   for (;;) {
     if (signal.aborted) return;
     let result: SubjectKeyBackfillResult | undefined;
@@ -244,10 +268,19 @@ export async function runSubjectKeyBackfill(
         if (result.done || !result.tables.some((table) => table.advanced)) break;
         if (signal.aborted) return;
       }
+      backoffMs = pauseMs;
     } catch (err) {
-      // A missing column or table (SKIP_MIGRATIONS) stops this pass; the next start retries.
       opts.onError?.(err);
-      return;
+      // A missing table or column (SKIP_MIGRATIONS) stays permanent: retrying cannot add it.
+      if (isSchemaMissingError(err)) return;
+      if (signal.aborted) return;
+      try {
+        await sleep(backoffMs, signal);
+      } catch {
+        return;
+      }
+      backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
+      continue;
     }
     if (result?.done)
       opts.log?.(`subject-key backfill pass complete (${result.tables.length} table/workspace pair(s)); revalidating later`);

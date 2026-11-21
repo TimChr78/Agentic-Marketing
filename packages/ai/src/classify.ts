@@ -187,7 +187,7 @@ export const submitReview = defineCommand({
   name: 'ai.review',
   title: 'Review an AI answer',
   description:
-    'Record whether a sampled AI answer was good or bad, with a note on what was wrong. People only: reviews are the human check on the model.',
+    'Record whether a sampled AI answer was good or bad, with a note on what was wrong. People only: reviews are the human check on the model, and this needs the artifacts:approve or artifacts:write permission.',
   input: z.object({ callId: CallId, verdict: z.enum(['good', 'bad']), note: z.string().max(2000).optional() }),
   output: z.object({ callId: z.string(), verdict: z.enum(['good', 'bad']) }),
   permission: 'artifacts:read',

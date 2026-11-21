@@ -209,9 +209,9 @@ export const scimDeleteUser = defineCommand({
     ).rows[0]?.role;
     if (role === 'owner') throw new AppError('forbidden', 'Owners are managed by people, not by SCIM.');
     await ctx.tx.execute(sql`DELETE FROM workspace_members WHERE workspace_id = ${ws} AND user_id = ${input.userId}`);
-    await ctx.tx.execute(sql`DELETE FROM scim_users WHERE user_id = ${input.userId}`);
+    await ctx.tx.execute(sql`DELETE FROM scim_users WHERE workspace_id = ${ws} AND user_id = ${input.userId}`);
     await ctx.tx.execute(
-      sql`UPDATE scim_groups SET members = array_remove(members, ${input.userId}), updated_at = now() WHERE ${input.userId} = ANY(members)`,
+      sql`UPDATE scim_groups SET members = array_remove(members, ${input.userId}), updated_at = now() WHERE workspace_id = ${ws} AND ${input.userId} = ANY(members)`,
     );
     return { deleted: true };
   },

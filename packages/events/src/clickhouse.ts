@@ -1024,7 +1024,10 @@ export function clickHouseStore(opts: {
           const queryParams = { ws: workspaceId, keys: unique, table: spec.table, batch: batchSize };
           for (let batch = 0; batch < maxBatches; batch++) {
             const rs = await query(workspaceId, {
-              query: `SELECT count() AS n FROM ${spec.table} AS t FINAL ${join} WHERE ${match}`,
+              // Scope the match to this workspace explicitly: with row policies off, the same
+              // identity or subject key in another workspace must not inflate the count or consume
+              // the batch limit (#1146).
+              query: `SELECT count() AS n FROM ${spec.table} AS t FINAL ${join} WHERE t.workspace_id = {ws:UUID} AND ${match}`,
               query_params: queryParams,
               format: 'JSONEachRow',
             });
@@ -1042,7 +1045,7 @@ export function clickHouseStore(opts: {
                        WHERE workspace_id = {ws:UUID}
                          AND (${deleteIdentity}) IN (
                            SELECT ${identity} FROM ${spec.table} AS t FINAL ${join}
-                            WHERE ${match} LIMIT {batch:UInt32}
+                            WHERE t.workspace_id = {ws:UUID} AND ${match} LIMIT {batch:UInt32}
                          )`,
               query_params: queryParams,
               clickhouse_settings: { mutations_sync: '2' },

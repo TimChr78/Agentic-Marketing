@@ -7,10 +7,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import type { AdapterDeps } from '../src/adapters';
 import { outbox } from '../src/adapters';
-import { deliverRound, recoverUnhandledDelivery } from '../src/gateway';
+import { deliverOne, deliverRound, recoverUnhandledDelivery } from '../src/gateway';
 import { linkSigner } from '../src/links';
 import { MAX_ATTEMPTS } from '../src/outbox';
 import { sealSecrets, webhookTokenHash } from '../src/providers';
+import { deliverPush } from '../src/push/gateway';
+import { deliverSms } from '../src/sms/gateway';
 
 // #1054: one message whose handling throws an unexpected error must not abandon the messages
 // claimed after it. A failure before any provider call goes back to `queued` with backoff and is
@@ -338,4 +340,76 @@ describe.skipIf(!hasTestDatabase())('a send that finished after the stale sweep 
     // A `queued` event would have scheduled a retry of a send that may already have happened.
     expect((await decisionEvents(id)).map((event) => event.type)).toEqual(['failed']);
   }, 120_000);
+});
+
+describe.skipIf(!hasTestDatabase())('a message the stale sweep took before delivery (#1148)', () => {
+  it('is not sent and keeps the sweep’s outcome when the worker reaches it later', async () => {
+    const first = await queuedMessage(await person('pre-first'), '2026-01-07T00:00:00Z');
+    const second = await queuedMessage(await person('pre-second'), '2026-01-07T00:00:01Z');
+    await d.db.admin.query(`DELETE FROM messages WHERE workspace_id = $1 AND status = 'queued' AND id NOT IN ($2, $3)`, [
+      d.workspace,
+      first,
+      second,
+    ]);
+    await slowProvider();
+
+    let calls = 0;
+    let releaseSend!: () => void;
+    const held = new Promise<void>((resolve) => (releaseSend = resolve));
+    let reachedProvider!: () => void;
+    const sending = new Promise<void>((resolve) => (reachedProvider = resolve));
+    const fetchImpl = (async () => {
+      calls++;
+      reachedProvider();
+      await held;
+      return new Response(JSON.stringify({ MessageID: 'pm-first' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+
+    const round = deliverRound(d.db, { kp, events: {} as EventStore, email: { ...email(), adapterDeps: { fetch: fetchImpl } } });
+    await sending;
+    // Both rows were claimed; the first is still on the wire. Make the second look stuck and let
+    // another round's sweep settle it before the first round reaches it.
+    await d.db.admin.query(`UPDATE messages SET updated_at = now() - interval '11 minutes' WHERE workspace_id = $1 AND id = $2`, [
+      d.workspace,
+      second,
+    ]);
+    await deliverRound(d.db, { kp, events: {} as EventStore, email: email() });
+
+    releaseSend();
+    await round;
+
+    // The provider was called for the first message only: the swept second one is skipped.
+    expect(calls).toBe(1);
+    expect((await message(first)).status).toBe('sent');
+    const swept = await message(second);
+    expect(swept).toMatchObject({ status: 'failed', next_attempt_at: null });
+    expect(swept.reason).toMatch(/^unknown_outcome: /);
+    // No phantom `suppressed`/`queued`/`sent` beside the sweep's `failed`.
+    expect((await decisionEvents(second)).map((event) => event.type)).toEqual(['failed']);
+  }, 120_000);
+
+  it('does not revert a swept SMS message to queued or suppressed', async () => {
+    const id = await queuedMessage(await person('pre-swept-sms'), '2026-01-08T00:00:00Z');
+    const reason = 'unknown_outcome: the worker stopped while sending; check the provider before resending';
+    await d.db.admin.query(`UPDATE messages SET status = 'failed', reason = $3, attempts = 1 WHERE workspace_id = $1 AND id = $2`, [
+      d.workspace,
+      id,
+      reason,
+    ]);
+    await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1', [d.workspace]);
+
+    await deliverSms(d.db, d.workspace, id, { kp, events: {} as EventStore, email: email() }, { providerCalled: false });
+
+    expect(await message(id)).toMatchObject({ status: 'failed', reason });
+    // The sweep's single decision stands; the late worker adds nothing.
+    expect(await decisionEvents(id)).toEqual([]);
+  });
+
+  it('returns quietly instead of throwing when the row was deleted', async () => {
+    const missing = newId('msg');
+    const deps = { kp, events: {} as EventStore, email: email() };
+    await expect(deliverSms(d.db, d.workspace, missing, deps)).resolves.toBeUndefined();
+    await expect(deliverPush(d.db, d.workspace, missing, deps)).resolves.toBeUndefined();
+    await expect(deliverOne(d.db, d.workspace, missing, deps, new Map(), { providerCalled: false })).resolves.toBeUndefined();
+  });
 });

@@ -30,6 +30,8 @@ interface Deps {
   db: Db;
   kp: KeyProvider;
   email: EmailServices;
+  /** Called after consent changed outside the event stream (a STOP or a complaint), e.g. to update segments. */
+  consentChanged?: (workspaceId: string, profileIds: string[], cause: string) => Promise<void>;
   /** How long a public callback waits for the identity lock before a retryable 503 (#1074). */
   identityLockWaitMs?: number;
   identityLockRetryAfterSeconds?: string;
@@ -131,6 +133,13 @@ export function smsRoutes(deps: Deps) {
     if (!t?.w || !t.sms) return null;
     return { ws: t.w, id: t.sms };
   };
+  // Best effort: the opt-out is recorded either way, and the segment scheduler catches up.
+  const consentChanged = async (ws: string, people: string[], cause: string) => {
+    if (!deps.consentChanged || !people.length) return;
+    await deps
+      .consentChanged(ws, people, cause)
+      .catch((err) => logger.warn({ err, workspace: ws }, 'segment update after an SMS opt-out failed'));
+  };
 
   app.post(
     '/hooks/sms/:token/:kind{status|inbound}',
@@ -176,8 +185,9 @@ export function smsRoutes(deps: Deps) {
           if (!inbound) return { status: 400 as const };
           const match = classifySmsReply(inbound.body);
           let reply: string | null = null;
+          let profileIds: string[] = [];
           if (match?.intent === 'stop' || match?.intent === 'start') {
-            await applySmsOptOut(tx, {
+            const applied = await applySmsOptOut(tx, {
               workspaceId: target.ws,
               providerId: provider.id,
               keyword: match.keyword,
@@ -187,8 +197,11 @@ export function smsRoutes(deps: Deps) {
               prepared: prepared!,
               lockWaitMs,
             });
+            // A START only lifts a suppression; it does not change consent, so only a STOP refreshes
+            // the segments (#1154).
+            if (match.intent === 'stop') profileIds = applied.profileIds;
           } else if (match?.intent === 'help') reply = billingOf(provider).helpText;
-          return { status: 200 as const, reply: transport.reply(reply) };
+          return { status: 200 as const, reply: transport.reply(reply), profileIds };
         });
       // The matching key is unwrapped before the write transaction, and the whole prepare-and-write
       // pair is retried when a key changed in between: the STOP/START block holds the identity lock
@@ -213,8 +226,15 @@ export function smsRoutes(deps: Deps) {
       if ('events' in result) {
         // After the transaction committed: a rolled-back escalation leaves no log behind.
         for (const escalation of result.escalations ?? []) logSuppressionEscalation(escalation);
+        // An inbound complaint or unsubscribe changes consent, so the segment read-through must be
+        // refreshed after commit, exactly like the e-mail webhook (#1154).
+        for (const e of result.events ?? [])
+          if ((e.type === 'unsubscribed' || e.type === 'complained') && e.profileId)
+            await consentChanged(target.ws, [e.profileId], `unsubscribe:${e.messageId}`);
         return c.json({ ok: true });
       }
+      // A STOP withdrew consent for every profile that shares the number (#1154).
+      await consentChanged(target.ws, result.profileIds, `sms-stop:${target.id}`);
       return c.body(result.reply!.body, 200, { 'content-type': result.reply!.contentType });
     },
   );

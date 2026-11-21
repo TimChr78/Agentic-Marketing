@@ -430,8 +430,10 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
   } catch (err) {
     const error = failureText((err as Error).message);
     logger.warn({ err }, 'member e-mail transport could not be created');
+    // A recipient that already has a result (sent or failed) is not recorded again: an error
+    // escaping the loop after some sends must not turn a delivered notice into a bogus failure.
     for (const email of emails)
-      if (!out.some((n) => n.userId === email.userId && n.status === 'failed')) out.push({ userId: email.userId, status: 'failed', error });
+      if (!out.some((n) => n.userId === email.userId)) out.push({ userId: email.userId, status: 'failed', error });
   } finally {
     await transport?.close?.();
   }

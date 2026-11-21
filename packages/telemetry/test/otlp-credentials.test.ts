@@ -77,6 +77,12 @@ describe('the real OTLP exporter (#931 A2/A3)', () => {
     expect(sent[0]!.url).toBe('/custom');
   });
 
+  it('enables tracing when only the trace-specific endpoint is set (#1158)', async () => {
+    const sent = await exportOnce({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: `${base}/only-traces` });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.url).toBe('/only-traces');
+  });
+
   it('lets the SDK decode percent-encoded env headers', async () => {
     const sent = await exportOnce({
       OTEL_EXPORTER_OTLP_ENDPOINT: base,

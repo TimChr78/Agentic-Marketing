@@ -268,3 +268,51 @@ describe('recurring physical purge (#1037 part 3)', () => {
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL', {}, boundedWs)).toEqual([{ n: 0 }]);
   }, 60_000);
 });
+
+// #1146 part 2: with row policies off, the purge must still scope its count and delete subquery to
+// the workspace being purged. Otherwise another workspace's rows with the same identity inflate
+// `deleted` and can consume the bounded batch.
+describe('physical purge is scoped by workspace without row policies (#1146)', () => {
+  const NOPOLICY_DB = runScoped('am_test_purge_nopolicy');
+  const wsA = newUuid();
+  const wsB = newUuid();
+  let plain: EventStore;
+
+  const eventFor = (workspaceId: string, messageId: string): BusEvent => ({
+    ...event(1),
+    workspaceId,
+    messageId,
+    anonymousId: 'shared-anon',
+    userId: 'shared-user',
+    profileId: 'prf_shared',
+  });
+
+  beforeAll(async () => {
+    await resetClickHouse(CH_URL, NOPOLICY_DB);
+    await migrateClickHouse(CH_URL, NOPOLICY_DB, undefined, { rowPolicies: 'off' });
+    plain = clickHouseStore({ url: CH_URL, database: NOPOLICY_DB, subjectKeys: factory });
+    await plain.insert([eventFor(wsA, 'shared-a'), eventFor(wsB, 'shared-b')]);
+  }, 60_000);
+
+  afterAll(async () => {
+    await plain?.close();
+  });
+
+  it('deletes and counts only the purged workspace’s rows', async () => {
+    const key = hmac('profile', 'prf_shared');
+    const result = await plain.purgeErasedSubjects(wsA, [key], { batchSize: 100 });
+    expect(result).toMatchObject({ complete: true, deleted: 1 });
+
+    const countIn = async (workspaceId: string) => {
+      const rs = await plain.client.query({
+        query: 'SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}',
+        query_params: { ws: workspaceId },
+        format: 'JSONEachRow',
+      });
+      const [row] = await rs.json<{ n: number | string }>();
+      return Number(row?.n ?? 0);
+    };
+    expect(await countIn(wsA)).toBe(0);
+    expect(await countIn(wsB)).toBe(1);
+  }, 60_000);
+});

@@ -271,11 +271,14 @@ async function memberBreakdown(
         LEFT JOIN identity by_profile ON by_profile.identity_key = e.profile_id AND by_profile.kind = 'profile'
         WHERE e.workspace_id = {ws:UUID}
           AND e.name IN {goal_events:Array(String)}
+          AND e.timestamp >= {from:DateTime64(3, 'UTC')}
+          AND e.timestamp <= addDays({to:DateTime64(3, 'UTC')}, {attribution_days:Int32})
       ),
       sent AS (
         SELECT member_id,
-          -- The k group is people reached on any channel; the figures are e-mail only (#682).
-          uniqExactIf(profile_id, profile_id != '') AS reached,
+          -- The k group is people actually reached on any channel, so only sent/delivered events
+          -- count; a queued, suppressed or failed attempt is not a reached person (#1147).
+          uniqExactIf(profile_id, profile_id != '' AND event_type IN ('sent', 'delivered')) AS reached,
           uniqExactIf(profile_id, profile_id != '' AND event_type = 'sent' AND channel = 'email') AS sent,
           uniqExactIf(profile_id, profile_id != '' AND event_type = 'delivered' AND channel = 'email') AS delivered,
           uniqExactIf(profile_id, profile_id != '' AND event_type = 'clicked' AND channel = 'email') AS clicked,

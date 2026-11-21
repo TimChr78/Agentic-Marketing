@@ -103,7 +103,8 @@ function failureCode(err: unknown, depth = 0): string | undefined {
 }
 
 /**
- * Start OpenTelemetry tracing when OTEL_EXPORTER_OTLP_ENDPOINT is set; otherwise the API stays a no-op.
+ * Start OpenTelemetry tracing when OTEL_EXPORTER_OTLP_ENDPOINT or the trace-specific
+ * OTEL_EXPORTER_OTLP_TRACES_ENDPOINT is set; otherwise the API stays a no-op.
  * Works with any OTLP backend (Grafana Tempo, SigNoz, Jaeger, …).
  *
  * The SDK resolves the endpoint (generic + /v1/traces, or the trace-specific variable as-is) and its
@@ -113,9 +114,10 @@ function failureCode(err: unknown, depth = 0): string | undefined {
  */
 export function initTelemetry(serviceName: string) {
   const generic = nonEmpty(process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
-  if (!generic || sdk) return;
   const specific = nonEmpty(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
-  const effective = specific ?? generic;
+  // The trace-specific variable stands alone: an operator may set only that one (#1158).
+  if (!(specific ?? generic) || sdk) return;
+  const effective = (specific ?? generic) as string;
   if (!hasUrlCredentials(effective)) {
     // Exactly as before: the exporter reads the environment itself.
     sdk = new NodeSDK({ serviceName, traceExporter: new OTLPTraceExporter() });
@@ -146,8 +148,9 @@ function hasUrlCredentials(value: string): boolean {
 }
 
 /** The tracer exporter's own endpoint rules: trace-specific as-is, else generic + /v1/traces. */
-function tracesEndpointUrl(specific: string | undefined, generic: string): string {
+function tracesEndpointUrl(specific: string | undefined, generic: string | undefined): string {
   if (specific) return new URL(specific).toString();
+  if (!generic) throw new Error('no OTLP endpoint configured');
   return new URL(`${generic.endsWith('/') ? generic : `${generic}/`}v1/traces`).toString();
 }
 
