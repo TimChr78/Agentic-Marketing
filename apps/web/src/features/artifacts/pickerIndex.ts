@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { errText, getWorkspaceId, onWorkspaceChange } from '../../app/api';
+import { onArtifactsChanged } from '../artifactCache';
 import { type ArtifactListLoader, type ArtifactPage, type ArtifactRow, artifactListLoader, fetchAllArtifactPages } from './artifactList';
 
 // The shared picker index (#524): one bounded, complete list per artifact type per workspace, so a
@@ -235,6 +236,25 @@ export function invalidatePickerArtifact(workspaceId: string, artifactId: string
     reloadEntry(workspaceId, entryType);
   }
 }
+
+// Every create, save, publish, discard and approval decision announces itself through
+// `notifyArtifactsChanged` (approvals arrive as `invalidateArtifact`). Subscribing here, rather than
+// asking each caller to remember, is what keeps a picker fresh: a *create* names an id no cached
+// list contains yet, so `invalidatePickerArtifact` cannot find its key, while the id's prefix names
+// the type whose cached list is now incomplete (#1167). A change with no id drops every loaded
+// index of the current workspace.
+onArtifactsChanged((id) => {
+  const workspaceId = getWorkspaceId();
+  if (!workspaceId) return;
+  if (!id) {
+    for (const [key] of [...entries]) {
+      if (key.startsWith(`${workspaceId}:`)) reloadEntry(workspaceId, key.slice(workspaceId.length + 1));
+    }
+    return;
+  }
+  const type = artifactTypeOfId(id);
+  if (type) invalidatePickerIndex(workspaceId, type);
+});
 
 /** Test and workspace-switch seam: forget every index. */
 export function resetPickerIndexes() {

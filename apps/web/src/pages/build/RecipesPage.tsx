@@ -5,6 +5,7 @@ import { ButtonLink } from '../../app/links';
 import { useCrumbs } from '../../app/page';
 import { Link } from '../../app/router';
 import { useWorkspace } from '../../app/session';
+import { notifyArtifactsChanged } from '../../features/artifactCache';
 import { GallerySkeleton } from '../../features/phase28/content/GallerySkeleton';
 import { Alert, Button, Checkbox, EmptyState, Field, Input, LoadingBlock, Mono, PageHeader, Select, StatusPill, Tag } from '../../ui';
 import { pageWidth } from '../../ui/layout';
@@ -195,6 +196,9 @@ export default function RecipesPage({ embedded = false }: { embedded?: boolean }
     setEarlierInstallError(null);
     try {
       const out = await api.call('recipes.install', { recipeId, params });
+      // The drafts exist whatever happens next; a picker that loaded the type before this install
+      // must reread it, or the new drafts stay invisible (#1167).
+      for (const artifact of out.artifacts) notifyArtifactsChanged(artifact.artifactId);
       if (seq !== installSeq.current) return; // a newer install replaced this one
       if (recipeId !== selectedRef.current) return; // the person left this starter (#792)
       if (generation === paramsGeneration.current) {

@@ -1,6 +1,7 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { setWorkspaceId } from '../src/app/api';
+import { invalidateArtifact, notifyArtifactsChanged } from '../src/features/artifactCache';
 import { ArtifactSelect } from '../src/features/artifacts/ArtifactSelect';
 import type { ArtifactListLoader } from '../src/features/artifacts/artifactList';
 import {
@@ -120,6 +121,34 @@ describe('shared picker index (#524)', () => {
 
     expect(peekPickerIndex(ws1, 'segment')).toBeUndefined();
     expect(peekPickerIndex(ws1, 'email_template')).toBeDefined();
+  });
+
+  it('shows a newly created template in a picker that was already loaded (#1167)', async () => {
+    const template = (i: number) => row(i, 'email_template', 'eml');
+    h.rows = [template(1)];
+    render(<ArtifactSelect type="email_template" value={undefined} onChange={() => {}} />);
+    await waitFor(() => expect(screen.getByRole('option', { name: 'email_template 1 · not live yet' })).toBeTruthy());
+
+    const created = template(2);
+    h.rows = [template(1), created];
+    // A create reports the new id; the cached type list must be read again, or the new row stays
+    // invisible in every picker until a full reload.
+    act(() => notifyArtifactsChanged(created.id));
+
+    await waitFor(() => expect(screen.getByRole('option', { name: 'email_template 2 · not live yet' })).toBeTruthy());
+  });
+
+  it('refreshes a loaded picker when an approval publishes one of its rows (#1167)', async () => {
+    const draft = row(3, 'segment', 'seg');
+    h.rows = [draft];
+    render(<ArtifactSelect type="segment" value={undefined} onChange={() => {}} />);
+    await waitFor(() => expect(screen.getByRole('option', { name: 'segment 3 · not live yet' })).toBeTruthy());
+
+    h.rows = [{ ...draft, latestState: 'published', publishedVersion: 1 }];
+    // ApprovalDrawer calls invalidateArtifact for every member; the picker hears the same change.
+    act(() => invalidateArtifact(draft.id));
+
+    await waitFor(() => expect(screen.getByRole('option', { name: 'segment 3 · live v1' })).toBeTruthy());
   });
 
   it('does not read a row detail for any row when repeated selectors mount', async () => {
