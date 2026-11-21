@@ -58,10 +58,21 @@ export async function runErasurePurgeOnce(deps: ErasurePurgeDeps, opts: ErasureP
     if (!(await renewErasurePurgeLease(deps.db, claim, leaseMs))) continue;
     try {
       const keys = await erasureWorkspaceKeys(deps.db, claim.workspaceId);
+      // The sweep can outlast one 60 s lease: 4 batches over 3 tables with synchronous mutations
+      // can run longer. Renew and check before every batch; a false result means another replica
+      // took the claim, so stop without another delete instead of overlapping its mutations.
+      let leaseLost = false;
+      const checkpoint = async () => {
+        if (leaseLost) return false;
+        const held = await renewErasurePurgeLease(deps.db, claim, leaseMs);
+        if (!held) leaseLost = true;
+        return held;
+      };
       const sweep = keys.length
         ? await deps.events.purgeErasedSubjects(claim.workspaceId, keys, {
             ...(opts.batchSize === undefined ? {} : { batchSize: opts.batchSize }),
             ...(opts.maxBatches === undefined ? {} : { maxBatches: opts.maxBatches }),
+            checkpoint,
           })
         : { deleted: 0, complete: true, tables: [] };
       const recorded = await recordErasurePurgeSweep(deps.db, claim, {

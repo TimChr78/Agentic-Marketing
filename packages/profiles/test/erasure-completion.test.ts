@@ -220,4 +220,64 @@ describe.skipIf(!hasTestDatabase())('erasure logical completion and physical pur
     );
     expect(Number(rows.rows[0]?.purged_generation)).toBe(3);
   }, 60_000);
+
+  it('renews the purge lease between batches and stops when another replica takes over', async () => {
+    const workspace = newUuid();
+    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Purge lease', 'none')", [workspace]);
+    await d.db.admin.query('INSERT INTO erasure_generations (workspace_id, generation, visible_publications) VALUES ($1, 1, 1)', [
+      workspace,
+    ]);
+    // A full-coverage key makes the workspace eligible for the physical sweep.
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'profile', 'lease-key', 'dk_exclusion_test', 'era_lease', 'full')`,
+      [workspace],
+    );
+
+    let started!: () => void;
+    const startedPromise = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const slowBatch = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let checks = 0;
+    const events = {
+      async purgeErasedSubjects(id: string, _keys: string[], opts: { checkpoint?: () => Promise<boolean> }) {
+        if (id !== workspace) return { deleted: 0, complete: true, tables: [] };
+        // The first batch renews and mutates.
+        expect(await opts.checkpoint?.()).toBe(true);
+        checks++;
+        started();
+        // A slow batch: the 60 s lease can be reclaimed while this is still running.
+        await slowBatch;
+        // At the next batch boundary the worker must renew and see the takeover before mutating.
+        expect(await opts.checkpoint?.()).toBe(false);
+        checks++;
+        return { deleted: 0, complete: false, tables: [{ table: 'events', deleted: 0, remaining: true }] };
+      },
+    } as unknown as EventStore;
+
+    const running = runErasurePurgeOnce({ db: d.db, events }, { batch: 100 });
+    await startedPromise;
+    // Expire the lease and let a second replica claim it; its token fences the first worker.
+    await d.db.admin.query("UPDATE erasure_generations SET purge_lease_until = now() - interval '1 second' WHERE workspace_id = $1", [
+      workspace,
+    ]);
+    const second = (await claimErasurePurges(d.db, { intervalSeconds: 0, limit: 100 })).find((c) => c.workspaceId === workspace)!;
+    expect(second).toBeDefined();
+    release();
+    const result = await running;
+
+    expect(checks).toBe(2);
+    expect(result).toMatchObject({ deleted: 0, completed: 0 });
+    const row = await d.db.admin.query<{ purged_generation: string | number; purge_claim_token: string | null }>(
+      'SELECT purged_generation, purge_claim_token FROM erasure_generations WHERE workspace_id = $1',
+      [workspace],
+    );
+    // The stale worker neither advanced the obligation nor cleared the new owner's claim.
+    expect(Number(row.rows[0]?.purged_generation)).toBe(0);
+    expect(row.rows[0]?.purge_claim_token).toBe(second.claimToken);
+  }, 60_000);
 });

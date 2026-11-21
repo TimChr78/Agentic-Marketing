@@ -94,12 +94,14 @@ export interface EventStore {
    * match any retained exclusion key, per person-linked table, in bounded batches. It uses the same
    * keyed matching as the protected views (including `events.profile_id`, through its subject
    * hash), never the raw identifiers and never the ledger or selector rows themselves. `complete`
-   * is false when the batch bound was reached with matching rows left.
+   * is false when the batch bound was reached with matching rows left, or when `checkpoint` reports
+   * that the caller's claim was lost. `checkpoint` runs between batches and tables, before each
+   * mutation; returning false stops the sweep without another delete.
    */
   purgeErasedSubjects(
     workspaceId: string,
     keys: readonly string[],
-    opts?: { batchSize?: number; maxBatches?: number },
+    opts?: { batchSize?: number; maxBatches?: number; checkpoint?: () => Promise<boolean> },
   ): Promise<{ deleted: number; complete: boolean; tables: { table: string; deleted: number; remaining: boolean }[] }>;
   /** Matching events per identifier (segments): name, property equality, time window, optional id scope. */
   countEvents(
@@ -1008,10 +1010,15 @@ export function clickHouseStore(opts: {
     async purgeErasedSubjects(workspaceId, keys, opts = {}) {
       const batchSize = Math.max(1, Math.trunc(opts.batchSize ?? 10_000));
       const maxBatches = Math.max(1, Math.trunc(opts.maxBatches ?? 4));
+      // A caller that owns a claim renews and checks it between batches. Returning false stops the
+      // sweep before the next mutation, so a replica whose lease was taken over cannot overlap the
+      // new owner's deletes.
+      const keepClaim = opts.checkpoint ?? (async () => true);
       const unique = [...new Set(keys.filter((key) => key.length > 0))];
       const tables: { table: string; deleted: number; remaining: boolean }[] = [];
       let deleted = 0;
       let complete = true;
+      let stopped = false;
       for (const spec of SUBJECT_KEY_BACKFILL_TABLES) {
         let tableDeleted = 0;
         let remaining = false;
@@ -1022,24 +1029,33 @@ export function clickHouseStore(opts: {
           const join = purgeSideJoin(spec);
           const match = purgeMatch();
           const queryParams = { ws: workspaceId, keys: unique, table: spec.table, batch: batchSize };
-          for (let batch = 0; batch < maxBatches; batch++) {
+          // Scope the match to this workspace explicitly: with row policies off, the same identity
+          // or subject key in another workspace must not inflate the count or consume the batch
+          // limit (#1146).
+          const countBase = async () => {
             const rs = await query(workspaceId, {
-              // Scope the match to this workspace explicitly: with row policies off, the same
-              // identity or subject key in another workspace must not inflate the count or consume
-              // the batch limit (#1146).
               query: `SELECT count() AS n FROM ${spec.table} AS t FINAL ${join} WHERE t.workspace_id = {ws:UUID} AND ${match}`,
               query_params: queryParams,
               format: 'JSONEachRow',
             });
             const [row] = await rs.json<{ n: number | string }>();
-            const matching = Number(row?.n ?? 0);
+            return Number(row?.n ?? 0);
+          };
+          for (let batch = 0; batch < maxBatches; batch++) {
+            const matching = await countBase();
             if (matching === 0) {
               remaining = false;
               break;
             }
+            if (!(await keepClaim())) {
+              stopped = true;
+              remaining = true;
+              break;
+            }
             // Bounded: the subquery picks at most one batch of stable identities; the delete removes
-            // exactly those logical rows. `mutations_sync=2` makes the next count observe the result
-            // rather than a queued mutation, so progress is real, not optimistic.
+            // exactly those logical rows. `mutations_sync=2` makes the count after it observe the
+            // result rather than a queued mutation. Progress is therefore measured, not estimated
+            // from the pre-delete count: a late write during the delete keeps the table open.
             await command(workspaceId, {
               query: `DELETE FROM ${spec.table}
                        WHERE workspace_id = {ws:UUID}
@@ -1050,8 +1066,9 @@ export function clickHouseStore(opts: {
               query_params: queryParams,
               clickhouse_settings: { mutations_sync: '2' },
             });
-            tableDeleted += Math.min(matching, batchSize);
-            remaining = matching > batchSize;
+            const after = await countBase();
+            tableDeleted += Math.max(0, matching - after);
+            remaining = after > 0;
             if (!remaining) break;
           }
 
@@ -1059,11 +1076,11 @@ export function clickHouseStore(opts: {
           // it is the last raw trace of the person, so the same purge round deletes the matching
           // side entries. Only do this once the base table has no matching row left: deleting a
           // side entry while its base row still exists would make that row visible again.
-          if (!remaining) {
+          if (!remaining && !stopped) {
             const sideMatch = `arrayExists(k -> k != '' AND k IN {keys:Array(String)}, [${SUBJECT_KEY_KINDS.map(
               (kind) => SUBJECT_KEY_COLUMNS[kind],
             ).join(', ')}])`;
-            for (let batch = 0; batch < maxBatches; batch++) {
+            const countSide = async () => {
               const rs = await query(workspaceId, {
                 query: `SELECT count() AS n FROM subject_key_backfill FINAL
                          WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}`,
@@ -1071,9 +1088,17 @@ export function clickHouseStore(opts: {
                 format: 'JSONEachRow',
               });
               const [row] = await rs.json<{ n: number | string }>();
-              const matching = Number(row?.n ?? 0);
+              return Number(row?.n ?? 0);
+            };
+            for (let batch = 0; batch < maxBatches; batch++) {
+              const matching = await countSide();
               if (matching === 0) {
                 remaining = false;
+                break;
+              }
+              if (!(await keepClaim())) {
+                stopped = true;
+                remaining = true;
                 break;
               }
               await command(workspaceId, {
@@ -1087,8 +1112,9 @@ export function clickHouseStore(opts: {
                 query_params: queryParams,
                 clickhouse_settings: { mutations_sync: '2' },
               });
-              tableDeleted += Math.min(matching, batchSize);
-              remaining = matching > batchSize;
+              const after = await countSide();
+              tableDeleted += Math.max(0, matching - after);
+              remaining = after > 0;
               if (!remaining) break;
             }
           }
@@ -1096,6 +1122,7 @@ export function clickHouseStore(opts: {
         deleted += tableDeleted;
         if (remaining) complete = false;
         tables.push({ table: spec.table, deleted: tableDeleted, remaining });
+        if (stopped) break;
       }
       return { deleted, complete, tables };
     },

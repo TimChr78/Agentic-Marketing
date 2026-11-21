@@ -267,6 +267,53 @@ describe('recurring physical purge (#1037 part 3)', () => {
     expect(second).toMatchObject({ deleted: 3, complete: true });
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL', {}, boundedWs)).toEqual([{ n: 0 }]);
   }, 60_000);
+
+  it('measures progress after the delete, so a write that lands mid-batch keeps the table open', async () => {
+    const lateWs = newUuid();
+    await store.insert([event(1, { workspaceId: lateWs, profileId: 'prf_observed', anonymousId: 'observed-1' })]);
+    const key = hmac('profile', 'prf_observed');
+    let wroteLate = false;
+    const result = await store.purgeErasedSubjects(lateWs, [key], {
+      batchSize: 1,
+      maxBatches: 1,
+      checkpoint: async () => {
+        if (!wroteLate) {
+          wroteLate = true;
+          // The checkpoint runs after the pre-delete count and before the delete. A write here used
+          // to be invisible to `deleted`/`done`, which were derived from that earlier count.
+          await store.insert([event(2, { workspaceId: lateWs, profileId: 'prf_observed', anonymousId: 'observed-2' })]);
+        }
+        return true;
+      },
+    });
+    expect(result.complete).toBe(false);
+    expect(result.tables.find((table) => table.table === 'events')).toEqual({ table: 'events', deleted: 0, remaining: true });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, lateWs)).toEqual([
+      { n: 1 },
+    ]);
+  }, 60_000);
+
+  it('stops before the next batch when the caller lost its claim', async () => {
+    const claimWs = newUuid();
+    await store.insert([0, 1, 2, 3, 4].map((i) => event(i, { workspaceId: claimWs, profileId: 'prf_claim', anonymousId: `claim-${i}` })));
+    const key = hmac('profile', 'prf_claim');
+    let checks = 0;
+    const result = await store.purgeErasedSubjects(claimWs, [key], {
+      batchSize: 1,
+      maxBatches: 5,
+      checkpoint: async () => {
+        checks++;
+        // The first two batches hold the claim; another replica takes it before a third mutation.
+        return checks <= 2;
+      },
+    });
+    expect(checks).toBe(3);
+    expect(result).toMatchObject({ deleted: 2, complete: false });
+    expect(result.tables).toEqual([{ table: 'events', deleted: 2, remaining: true }]);
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, claimWs)).toEqual([
+      { n: 3 },
+    ]);
+  }, 60_000);
 });
 
 // #1146 part 2: with row policies off, the purge must still scope its count and delete subquery to

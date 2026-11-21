@@ -319,7 +319,15 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     const status = await executor.execute(erasureStatus, { erasureId: old }, userPrincipal('user_test', d.workspace, 'owner'), {
       surface: 'rest',
     });
-    expect(status).toMatchObject({ status: 'complete', attempts: 0, checkpoints: { clickhouse: true, hotState: true } });
+    // Nothing recorded which identifiers were hashed, so claiming `full` would overstate what was
+    // proven; `complete` still means the SQL rows and keys were gone when the old erasure returned.
+    expect(status).toMatchObject({
+      status: 'complete',
+      exclusion: 'unknown',
+      reason: 'legacy',
+      attempts: 0,
+      checkpoints: { clickhouse: true, hotState: true },
+    });
   });
 
   it('resumes a job another worker committed but never ran', async () => {
