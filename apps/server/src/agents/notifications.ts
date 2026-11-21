@@ -276,7 +276,7 @@ function holdOutcome(approval: PendingApproval | null): string {
 
 function digestEmail(publicUrl: string, digests: AgentDigest[]) {
   const subject = digests.length === 1 ? `Daily agent digest: “${digests[0].agent.name}”` : `Daily agent digest: ${digests.length} agents`;
-  const text: string[] = ['What your agents did in the last 24 hours.', ''];
+  const text: string[] = ['What your agents did since your last digest.', ''];
   for (const d of digests) {
     text.push(`Agent: ${d.agent.name}`);
     text.push(`Changes: ${d.counts.allow} allowed, ${d.counts.hold} held, ${d.counts.ask} sent to a person, ${d.counts.deny} refused.`);
@@ -297,7 +297,7 @@ function digestEmail(publicUrl: string, digests: AgentDigest[]) {
   text.push('You receive this daily digest as the sponsor of these agents.');
 
   const html = `<!doctype html><html><body style="font-family:system-ui,sans-serif;color:#111;line-height:1.5">
-<p>What your agents did in the last 24 hours.</p>
+<p>What your agents did since your last digest.</p>
 ${digests
   .map((d) => {
     const list = (title: string, items: string[]) =>
@@ -326,7 +326,9 @@ async function notifyDigest(
   now: Date,
 ): Promise<{ sent: number; at: Date | null }> {
   if (cursor.lastDigestAt && now.getTime() - cursor.lastDigestAt.getTime() < DAY_MS) return { sent: 0, at: null };
-  const since = new Date(now.getTime() - DIGEST_WINDOW_MS);
+  // The window starts where the last complete digest ended, so a retry hours later still covers
+  // the same actions, and a late pass leaves no gap (#1184). A first digest looks back one day.
+  const since = cursor.lastDigestAt ?? new Date(now.getTime() - DIGEST_WINDOW_MS);
   const recent = (
     await tx
       .select()
@@ -362,12 +364,32 @@ async function notifyDigest(
 
   const bySponsor = new Map<string, AgentDigest[]>();
   for (const d of digests) bySponsor.set(d.agent.sponsorUserId, [...(bySponsor.get(d.agent.sponsorUserId) ?? []), d]);
-  const day = now.toISOString().slice(0, 10);
-  const dayKey = (sponsor: string) => `agent-digest:${workspaceId}:${sponsor}:${day}`;
-  // A sponsor whose digest already went out today is skipped on a retry after another sponsor
-  // failed. Any message row for the per-day key that is not failed or suppressed is that record: a
+  // The digest is keyed by the window it covers, not by the UTC day of `now` (#1184). The window
+  // starts at the last completed digest, which a partial failure does not advance, so a retry of the
+  // same window reuses its key and skips the sponsors whose mail already went out, even when the
+  // retry crosses UTC midnight. A cursor with no digest yet (a hand-primed or pre-feature row) has
+  // no window to key on and keeps the old per-day key for that pass.
+  const windowStart = cursor.lastDigestAt;
+  const digestKey = (sponsor: string) =>
+    windowStart
+      ? `agent-digest:${workspaceId}:${sponsor}:${windowStart.toISOString()}`
+      : `agent-digest:${workspaceId}:${sponsor}:${now.toISOString().slice(0, 10)}`;
+  // Digests sent before the window key existed were keyed by the UTC day of the pass. A pass for
+  // this window can only have run from a day after the last digest up to `now`, so those two days'
+  // keys are checked as well: an upgrade in the middle of a failed pass must not mail the sponsors
+  // that already got the digest again. An older day key belongs to the previous window and is
+  // ignored, so it cannot swallow today's digest.
+  const keyedTo = new Map<string, string>();
+  for (const sponsor of bySponsor.keys()) {
+    const key = digestKey(sponsor);
+    keyedTo.set(key, sponsor);
+    if (!windowStart) continue;
+    for (const at of [new Date(windowStart.getTime() + DIGEST_WINDOW_MS), now])
+      keyedTo.set(`agent-digest:${workspaceId}:${sponsor}:${at.toISOString().slice(0, 10)}`, sponsor);
+  }
+  // A message row for a key of this window that is not failed or suppressed is that record: a
   // `delivered` or `bounced` webhook means the provider accepted it, not that it needs resending.
-  const delivered = new Set(
+  const mailed = new Set(
     (
       await tx
         .select({ idempotencyKey: schema.messages.idempotencyKey })
@@ -375,17 +397,17 @@ async function notifyDigest(
         .where(
           and(
             eq(schema.messages.workspaceId, workspaceId),
-            inArray(schema.messages.idempotencyKey, [...bySponsor.keys()].map(dayKey)),
+            inArray(schema.messages.idempotencyKey, [...keyedTo.keys()]),
             notInArray(schema.messages.status, ['failed', 'suppressed']),
           ),
         )
-    ).map((row) => row.idempotencyKey),
+    ).map((row) => keyedTo.get(row.idempotencyKey)!),
   );
   let sent = 0;
   let complete = true;
   for (const [sponsor, own] of bySponsor) {
-    const key = dayKey(sponsor);
-    if (delivered.has(key)) continue;
+    const key = digestKey(sponsor);
+    if (mailed.has(sponsor)) continue;
     const content = digestEmail(deps.publicUrl, own);
     const results = await sendMemberEmails(tx, deps, workspaceId, [
       {
