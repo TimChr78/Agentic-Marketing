@@ -211,7 +211,7 @@ export const scimDeleteUser = defineCommand({
     await ctx.tx.execute(sql`DELETE FROM workspace_members WHERE workspace_id = ${ws} AND user_id = ${input.userId}`);
     await ctx.tx.execute(sql`DELETE FROM scim_users WHERE workspace_id = ${ws} AND user_id = ${input.userId}`);
     await ctx.tx.execute(
-      sql`UPDATE scim_groups SET members = array_remove(members, ${input.userId}), updated_at = now() WHERE ${input.userId} = ANY(members)`,
+      sql`UPDATE scim_groups SET members = array_remove(members, ${input.userId}), updated_at = now() WHERE workspace_id = ${ws} AND ${input.userId} = ANY(members)`,
     );
     return { deleted: true };
   },

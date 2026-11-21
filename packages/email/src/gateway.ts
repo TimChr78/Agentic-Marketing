@@ -410,7 +410,9 @@ export async function recoverUnhandledDelivery(
   opts: { providerCalled: boolean; error: unknown },
 ): Promise<void> {
   await db.withWorkspace(ws, async (tx) => {
-    const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
+    // Locked, so a concurrent stale sweep cannot settle the row between this check and the update
+    // below; otherwise its decision event would stand beside the sweep's `failed` (#1148).
+    const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id)).for('update');
     if (!m || m.status !== 'sending') return;
     if (opts.providerCalled) {
       const reason = 'unknown_outcome: the delivery failed after the provider may have been called; check the provider before resending';
