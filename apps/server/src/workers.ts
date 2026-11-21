@@ -48,6 +48,8 @@ export function runOAuthSelectionCleanup(db: Db, signal: AbortSignal, opts: { ti
   return new Promise((resolve) => {
     let stopped = false;
     let running = false;
+    let inflight: Promise<void> | null = null;
+    let timer: ReturnType<typeof setInterval> | undefined;
     const sweep = async () => {
       if (stopped || running) return;
       running = true;
@@ -60,15 +62,24 @@ export function runOAuthSelectionCleanup(db: Db, signal: AbortSignal, opts: { ti
         running = false;
       }
     };
-    void sweep();
-    const timer = setInterval(() => void sweep(), tickMs);
+    const start = () => {
+      if (stopped || inflight) return;
+      inflight = sweep().finally(() => {
+        inflight = null;
+      });
+    };
     const stop = () => {
       if (stopped) return;
       stopped = true;
-      clearInterval(timer);
-      resolve();
+      if (timer) clearInterval(timer);
+      // Shutdown must wait for a sweep already in the pool: closing the database under it would
+      // turn a routine cleanup into a spurious shutdown error (#1160).
+      void (inflight ?? Promise.resolve()).finally(() => resolve());
     };
+    // Do not launch the first sweep on an already-aborted signal (#1160).
     if (signal.aborted) return stop();
+    timer = setInterval(start, tickMs);
+    start();
     signal.addEventListener('abort', stop, { once: true });
   });
 }

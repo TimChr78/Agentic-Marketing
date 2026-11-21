@@ -370,12 +370,27 @@ describe('SCIM account safety (#1129)', () => {
       body: JSON.stringify({ userName: `moved@${domain}`, displayName: 'Moved Person', active: true }),
     });
     expect(rewrite.status).toBe(409);
-    expect((await rewrite.json()).scimType).toBe('mutability');
+    const rewriteBody = await rewrite.json();
+    expect(rewriteBody.scimType).toBe('mutability');
+    // The 409 says nothing about the other workspace or ownership (#1182).
+    expect(rewriteBody.detail).not.toMatch(/another workspace|owns one|owner/i);
     const account = await t.srv.db.admin.query<{ email: string; name: string }>('SELECT email, name FROM "user" WHERE id = $1', [
       victim.id,
     ]);
     expect(account.rows[0]!.email).toBe(victim.email.toLowerCase());
     expect(account.rows[0]!.name).toBe(victim.email.split('@')[0]);
+
+    // A display-name change that only differs in capitalisation is not a mutation: an IdP that
+    // re-syncs the same name must not get a 409 on every run (#1182).
+    const recapitalised = await b.call(`/Users/${linkedUser.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        userName: victim.email,
+        displayName: victim.email.split('@')[0]!.toUpperCase(),
+        active: true,
+      }),
+    });
+    expect(recapitalised.status).toBe(200);
 
     // Other attributes still apply.
     const off = await b.call(`/Users/${linkedUser.id}`, {
@@ -420,6 +435,31 @@ describe('SCIM account safety (#1129)', () => {
       }),
     });
     expect((await off.json()).active).toBe(false);
+  });
+
+  it('deprovisions only the calling workspace’s scim_users row for a shared account (#1182)', async () => {
+    const a = await scimWorkspace();
+    const b = await scimWorkspace();
+    const user = await t.signUp(`scim-shared-${++unique}-${Date.now()}@example.com`);
+    for (const workspace of [a.workspace, b.workspace]) {
+      await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)', [
+        workspace,
+        user.id,
+        'viewer',
+      ]);
+      await t.srv.db.admin.query('INSERT INTO scim_users (workspace_id, user_id, external_id, active) VALUES ($1, $2, NULL, true)', [
+        workspace,
+        user.id,
+      ]);
+    }
+
+    const removed = await b.call(`/Users/${user.id}`, { method: 'DELETE' });
+    expect(removed.status).toBe(204);
+    const rows = await t.srv.db.admin.query<{ workspace_id: string }>(
+      'SELECT workspace_id FROM scim_users WHERE user_id = $1 ORDER BY workspace_id',
+      [user.id],
+    );
+    expect(rows.rows.map((row) => row.workspace_id)).toEqual([a.workspace]);
   });
 });
 

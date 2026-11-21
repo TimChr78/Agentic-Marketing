@@ -410,7 +410,7 @@ export function emailRoutes(deps: EmailRouteDeps) {
 
   app.get('/c/:token', async (c) => {
     const link = deps.email.links.verify<ClickLink>(c.req.param('token'));
-    if (!link || crossBrand(c, link.w) || !/^https?:\/\//.test(link.url)) return c.text('This link is not valid.', 404);
+    if (!link || crossBrand(c, link.w) || !/^https?:\/\//i.test(link.url)) return c.text('This link is not valid.', 404);
     try {
       const ev = await deps.db.withWorkspace(link.w, async (tx) => {
         const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, link.m));

@@ -208,11 +208,14 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
       // A shared account keeps its global e-mail and name, but the workspace side (active,
       // externalId) still applies. Compare against the stored account, not the request, so a PUT
       // that repeats the current values is not blocked.
-      if ((email !== current.email.toLowerCase() || name !== current.name) && (await sharedOutside(ws, userId))) {
+      if (
+        (email !== current.email.toLowerCase() || name.toLowerCase() !== (current.name ?? '').toLowerCase()) &&
+        (await sharedOutside(ws, userId))
+      ) {
         await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
         throw new ScimError(
           409,
-          'This account also belongs to another workspace or owns one, so SCIM here cannot change its e-mail address or name. Change only active and externalId.',
+          'This account’s e-mail address and name cannot be changed through SCIM here. Change only active and externalId.',
           'mutability',
         );
       }

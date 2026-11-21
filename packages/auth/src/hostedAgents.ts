@@ -667,7 +667,7 @@ export const addHostedMemory = defineCommand({
   name: 'agents.memory.add',
   title: 'Add a memory note',
   description:
-    'Write one working note for a hosted agent: at most 1,000 characters, no personal data (e-mail addresses and phone numbers are refused). A hosted agent may add to its own memory during a run; people may add to any hosted agent’s. The memory holds at most 50 notes and 10,000 characters per agent, so delete stale notes first.',
+    'Write one working note for a hosted agent: at most 1,000 characters, no personal data (e-mail addresses and phone numbers are refused). A hosted agent may add to its own memory during a run; a person may add to any hosted agent’s with the artifacts:write permission. The memory holds at most 50 notes and 10,000 characters per agent, so delete stale notes first.',
   input: z.object({ agentId: AGENT_ID, text: MemoryText }),
   output: MemoryNote,
   permission: 'artifacts:read',
@@ -753,7 +753,7 @@ export const deleteHostedMemory = defineCommand({
   name: 'agents.memory.delete',
   title: 'Delete a memory note',
   description:
-    'Delete one memory note. People may delete any note of a hosted agent; the agent may delete its own (to make room under the cap). The note is removed for good.',
+    'Delete one memory note. A person needs the artifacts:write permission to delete any note of a hosted agent; the agent may delete its own (to make room under the cap). The note is removed for good.',
   input: z.object({ id: z.string().regex(/^hmm_[0-9a-f]{32}$/, 'A memory note id looks like hmm_…') }),
   output: z.object({ deleted: z.literal(true) }),
   permission: 'artifacts:read',

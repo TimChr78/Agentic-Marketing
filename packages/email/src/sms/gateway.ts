@@ -169,12 +169,20 @@ export async function deliverSms(
   attempt: DeliveryAttempt = { providerCalled: false },
 ) {
   const prepared = await db.withWorkspace(ws, async (tx) => {
-    const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
+    // Lock and require `sending`: the stale sweep may have settled this row while the worker was in
+    // an earlier message, and a swept or deleted message is never sent or reverted (#1148).
+    const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id)).for('update');
+    if (!m || m.status !== 'sending') return { kind: 'done' as const };
+    await tx.update(schema.messages).set({ updatedAt: new Date() }).where(eq(schema.messages.id, id));
     const finish = async (status: 'suppressed' | 'failed', reason: string) => {
-      await tx.update(schema.messages).set({ status, reason, updatedAt: new Date() }).where(eq(schema.messages.id, id));
+      const settled = await tx
+        .update(schema.messages)
+        .set({ status, reason, updatedAt: new Date() })
+        .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+        .returning({ id: schema.messages.id });
       // The status and its event commit together (#1008): a decision sees the event either
-      // published or queued, never missing.
-      await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason)]);
+      // published or queued, never missing. A row the sweep settled keeps its outcome (#1148).
+      if (settled.length) await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason)]);
       return { kind: 'done' as const };
     };
     const tpl = m.templateId ? await publishedSmsTemplate(tx, m.templateId, m.templateVersion) : null;
@@ -191,7 +199,7 @@ export async function deliverSms(
     if (hold.ok === false) return finish('suppressed', hold.reason);
     if (hold.ok === 'later') {
       const held = await defer(tx, m, hold.until, hold.reason);
-      await enqueueMessageEvents(tx, ws, [held.event]);
+      if (held.event) await enqueueMessageEvents(tx, ws, [held.event]);
       return { kind: 'done' as const };
     }
     const marketing = isMarketing(v.basis);

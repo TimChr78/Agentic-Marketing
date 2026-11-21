@@ -139,3 +139,63 @@ describe('a failed member e-mail stores a bounded reason (#964)', () => {
     expect(results[0]?.error).not.toContain(SECRET);
   });
 });
+
+describe('a failure that escapes the member loop does not duplicate a delivered result (#1156)', () => {
+  it('adds failed only for recipients with no result yet', async () => {
+    vi.mocked(transportFor).mockResolvedValue({
+      send: async () => ({ providerMessageId: 'pm_ok' }),
+      close: async () => undefined,
+    });
+    const other = `usr_${'3'.repeat(32)}`;
+    let inserts = 0;
+    const tx = {
+      select: () => ({
+        from: (table: unknown) => ({
+          where: () => {
+            if (table === schema.workspaceMembers) return Promise.resolve([{ userId: USER }, { userId: other }]);
+            if (table === schema.emailProviders)
+              return Promise.resolve([
+                {
+                  id: 'prv_1',
+                  enabled: true,
+                  useFor: ['transactional'],
+                  fromEmail: 'alerts@example.com',
+                  fromName: 'Alerts',
+                  replyTo: null,
+                },
+              ]);
+            return Promise.resolve([]);
+          },
+        }),
+      }),
+      insert: () => ({
+        values: async () => {
+          // The second recipient's message insert dies mid-loop, after the first was sent.
+          if (++inserts === 2) throw new Error('insert failed');
+        },
+      }),
+      update: () => ({
+        set: () => ({ where: async () => undefined }),
+      }),
+    } as never;
+    const memberDeps = {
+      ...deps(),
+      directory: {
+        users: async () =>
+          new Map([
+            [USER, { email: 'member@example.com', name: 'Member' }],
+            [other, { email: 'other@example.com', name: 'Other' }],
+          ]),
+      },
+    } as never;
+
+    const results = await sendMemberEmails(tx, memberDeps, WS, [
+      { userId: USER, idempotencyKey: `alert:evt_1:firing:${USER}`, subject: 'Alert', html: '<p>Alert</p>', text: 'Alert' },
+      { userId: other, idempotencyKey: `alert:evt_1:firing:${other}`, subject: 'Alert', html: '<p>Alert</p>', text: 'Alert' },
+    ]);
+
+    expect(results.filter((r) => r.userId === USER)).toEqual([{ userId: USER, status: 'sent' }]);
+    expect(results).toHaveLength(2);
+    expect(results.find((r) => r.userId === other)).toMatchObject({ status: 'failed' });
+  });
+});

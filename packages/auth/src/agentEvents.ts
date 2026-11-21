@@ -76,7 +76,7 @@ export const subscribeAgent = defineCommand({
   name: 'agents.subscribe',
   title: 'Subscribe an agent to events',
   description:
-    'Have an agent hear about what its loop reacts to instead of polling: a hold that ran or was vetoed or now needs a person, an approval decided, a guardian episode or guardrail breach, an experiment that reached a significant verdict, an experience rollout paused by its guardrail, and an alert firing. With a webhookId the platform delivers each event to that signed webhook (retried like any delivery); without one the agent reads them with agents.events. Events carry ids and a summary, never personal data. An agent subscribes itself; a person can for any agent.',
+    'Have an agent hear about what its loop reacts to instead of polling: a hold that ran or was vetoed or now needs a person, an approval decided, a guardian episode or guardrail breach, an experiment that reached a significant verdict, an experience rollout paused by its guardrail, and an alert firing. With a webhookId the platform delivers each event to that signed webhook (retried like any delivery); without one the agent reads them with agents.events. Events carry ids and a summary, never personal data. An agent subscribes itself; a person can subscribe any agent with the artifacts:write permission.',
   input: z.object({
     agentId: AGENT_ID.optional().describe('The agent that receives the events; omit as an agent to subscribe itself'),
     eventTypes: EventTypes.describe('Event types to receive'),
@@ -116,7 +116,8 @@ export const subscribeAgent = defineCommand({
 export const unsubscribeAgent = defineCommand({
   name: 'agents.unsubscribe',
   title: 'Unsubscribe an agent from events',
-  description: 'Delete an event subscription. Events already recorded stay readable with agents.events; new ones are not delivered.',
+  description:
+    'Delete an event subscription. Events already recorded stay readable with agents.events; new ones are not delivered. An agent deletes its own subscriptions; a person needs the artifacts:write permission.',
   input: z.object({ id: SUBSCRIPTION_ID }),
   output: z.object({ deleted: z.literal(true) }),
   permission: 'artifacts:read',

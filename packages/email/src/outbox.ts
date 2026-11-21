@@ -1,7 +1,7 @@
 import { hashValue } from '@agentic-marketing/core';
 import { enqueueOutbox, schema, type Tx } from '@agentic-marketing/db';
 import type { MessageEvent } from '@agentic-marketing/events';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 // Shared by the e-mail and SMS delivery paths.
 
@@ -86,11 +86,20 @@ export function decisionEvent(m: DecisionMessage, type: MessageEvent['type'], re
   };
 }
 
-/** Puts a claimed message back until `until`; holding it back is not a failed attempt. */
+/**
+ * Puts a claimed message back until `until`; holding it back is not a failed attempt. Only a row
+ * still `sending` is deferred: the stale sweep may have settled the attempt while the worker was
+ * deciding, and that outcome must stand (#1148). `event` is null when nothing was written, so the
+ * caller enqueues no contradictory decision.
+ */
 export async function defer(tx: Tx, m: typeof schema.messages.$inferSelect, until: Date, reason: string) {
-  await tx
+  const changed = await tx
     .update(schema.messages)
     .set({ status: 'queued', reason, notBefore: until, attempts: Math.max(0, m.attempts - 1), updatedAt: new Date() })
-    .where(eq(schema.messages.id, m.id));
-  return { kind: 'done' as const, event: { ...decisionEvent(m, 'queued', reason), eventId: `decision:held:${until.toISOString()}` } };
+    .where(and(eq(schema.messages.id, m.id), eq(schema.messages.status, 'sending')))
+    .returning({ id: schema.messages.id });
+  return {
+    kind: 'done' as const,
+    event: changed.length ? { ...decisionEvent(m, 'queued', reason), eventId: `decision:held:${until.toISOString()}` } : null,
+  };
 }

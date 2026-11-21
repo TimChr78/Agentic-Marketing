@@ -432,7 +432,7 @@ export async function recoverUnhandledDelivery(
   });
 }
 
-async function deliverOne(
+export async function deliverOne(
   db: Db,
   ws: string,
   id: string,
@@ -451,12 +451,23 @@ async function deliverOne(
       };
 
   const prepared: Prepared = await db.withWorkspace(ws, async (tx) => {
-    const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id));
+    // The stale sweep may have settled this row while the worker was in an earlier message of its
+    // batch. Lock it and require it to still be `sending`: a swept, settled or deleted message is
+    // never sent and never reverted to queued or suppressed (#1148). The updated timestamp renews
+    // the sending lease before the provider call.
+    const [m] = await tx.select().from(schema.messages).where(eq(schema.messages.id, id)).for('update');
+    if (!m || m.status !== 'sending') return { kind: 'done' };
+    await tx.update(schema.messages).set({ updatedAt: new Date() }).where(eq(schema.messages.id, id));
     const finish = async (status: 'suppressed' | 'failed', reason: string): Promise<Prepared> => {
-      await tx.update(schema.messages).set({ status, reason, updatedAt: new Date() }).where(eq(schema.messages.id, id));
+      const settled = await tx
+        .update(schema.messages)
+        .set({ status, reason, updatedAt: new Date() })
+        .where(and(eq(schema.messages.id, id), eq(schema.messages.status, 'sending')))
+        .returning({ id: schema.messages.id });
       // The status and its event commit together (#1008), so a decision that sees the message also
-      // sees its event: published, or still queued for publication.
-      await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason)]);
+      // sees its event: published, or still queued for publication. A row the sweep settled in the
+      // meantime keeps its outcome and records no second decision (#1148).
+      if (settled.length) await enqueueMessageEvents(tx, ws, [decisionEvent(m, status, reason)]);
       return { kind: 'done' };
     };
     const tpl = m.templateId ? await publishedTemplateVersion(tx, m.templateId, m.templateVersion) : null;
@@ -473,7 +484,7 @@ async function deliverOne(
     if (hold.ok === 'later') {
       const held = await defer(tx, m, hold.until, hold.reason);
       // A held message is a decision too: its event is published with the status that records it.
-      await enqueueMessageEvents(tx, ws, [held.event]);
+      if (held.event) await enqueueMessageEvents(tx, ws, [held.event]);
       return { kind: 'done' };
     }
     const stream = streamOf(v.basis);
