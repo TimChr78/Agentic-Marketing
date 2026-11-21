@@ -44,6 +44,12 @@ interface MessageCondition {
 interface ConsentCondition {
   consent: string;
 }
+interface TopicCondition {
+  topic: string;
+}
+interface ScoreCondition {
+  score: { key: string; gte?: number; lte?: number };
+}
 interface SegmentRefCondition {
   segment: string;
 }
@@ -64,9 +70,11 @@ type Condition =
   | EventCondition
   | MessageCondition
   | ConsentCondition
+  | TopicCondition
+  | ScoreCondition
   | SegmentRefCondition;
 type Mode = 'all' | 'any';
-type Kind = 'trait' | 'event' | 'message' | 'consent' | 'segment' | 'not' | 'group';
+type Kind = 'trait' | 'event' | 'message' | 'consent' | 'topic' | 'score' | 'segment' | 'not' | 'group';
 /** Where the counted messages came from: any send, or one broadcast or journey. */
 type SendSource = 'any' | 'broadcast' | 'journey';
 
@@ -362,6 +370,8 @@ function RowEditor({
           <option value="event">Did event</option>
           <option value="message">Message engagement</option>
           <option value="consent">Allows purpose</option>
+          <option value="topic">Subscribed to topic</option>
+          <option value="score">Score</option>
           <option value="segment">In segment</option>
           <option value="not">Not</option>
           <option value="group" disabled={depth >= 3}>
@@ -388,6 +398,8 @@ function RowEditor({
       {kind === 'consent' && (
         <ConsentRow c={condition as ConsentCondition} onChange={onChange} index={n} readOnly={readOnly} purposes={purposes} />
       )}
+      {kind === 'topic' && <TopicRow c={condition as TopicCondition} onChange={onChange} index={n} readOnly={readOnly} />}
+      {kind === 'score' && <ScoreRow c={condition as ScoreCondition} onChange={onChange} index={n} readOnly={readOnly} />}
       {kind === 'segment' && (
         <SegmentRow c={condition as SegmentRefCondition} onChange={onChange} index={n} readOnly={readOnly} artifactId={artifactId} />
       )}
@@ -868,6 +880,83 @@ function ConsentRow({
   );
 }
 
+function TopicRow({
+  c,
+  onChange,
+  index,
+  readOnly,
+}: {
+  c: TopicCondition;
+  onChange: (c: Condition) => void;
+  index: number;
+  readOnly: boolean;
+}) {
+  return (
+    <Field label={`Topic, condition ${index}`} hideLabel hint="The topic key the person currently subscribes to, e.g. newsletter.">
+      <Input value={c.topic} readOnly={readOnly} placeholder="newsletter" onChange={(e) => onChange({ topic: e.target.value })} />
+    </Field>
+  );
+}
+
+function ScoreRow({
+  c,
+  onChange,
+  index,
+  readOnly,
+}: {
+  c: ScoreCondition;
+  onChange: (c: Condition) => void;
+  index: number;
+  readOnly: boolean;
+}) {
+  const setBound = (key: 'gte' | 'lte', raw: string) => {
+    const score = { ...c.score };
+    if (raw.trim() === '') delete score[key];
+    else {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return;
+      score[key] = Math.min(1, Math.max(0, n));
+    }
+    onChange({ score });
+  };
+  return (
+    <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_140px_140px]">
+      <Field label={`Score key, condition ${index}`} hideLabel>
+        <Input
+          value={c.score.key}
+          readOnly={readOnly}
+          placeholder="conversion_propensity"
+          onChange={(e) => onChange({ score: { ...c.score, key: e.target.value } })}
+        />
+      </Field>
+      <Field label={`Score at least, condition ${index}`} hideLabel>
+        <Input
+          type="number"
+          min={0}
+          max={1}
+          step={0.01}
+          inputMode="decimal"
+          value={c.score.gte ?? ''}
+          readOnly={readOnly}
+          onChange={(e) => setBound('gte', e.target.value)}
+        />
+      </Field>
+      <Field label={`Score at most, condition ${index}`} hideLabel>
+        <Input
+          type="number"
+          min={0}
+          max={1}
+          step={0.01}
+          inputMode="decimal"
+          value={c.score.lte ?? ''}
+          readOnly={readOnly}
+          onChange={(e) => setBound('lte', e.target.value)}
+        />
+      </Field>
+    </div>
+  );
+}
+
 function SegmentRow({
   c,
   onChange,
@@ -1222,6 +1311,8 @@ function kindOf(c: Condition): Kind {
   if ('event' in c) return 'event';
   if ('message' in c) return 'message';
   if ('consent' in c) return 'consent';
+  if ('topic' in c) return 'topic';
+  if ('score' in c) return 'score';
   if ('segment' in c) return 'segment';
   return 'trait';
 }
@@ -1234,6 +1325,10 @@ function blank(kind: Kind): Condition {
       return { message: 'opened' };
     case 'consent':
       return { consent: '' };
+    case 'topic':
+      return { topic: '' };
+    case 'score':
+      return { score: { key: '', gte: 0.5 } };
     case 'segment':
       return { segment: '' };
     case 'not':

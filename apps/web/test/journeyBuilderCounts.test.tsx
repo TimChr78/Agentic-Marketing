@@ -42,13 +42,25 @@ vi.mock('@xyflow/react', async () => {
   const React = await import('react');
   return {
     ReactFlowProvider: ({ children }: { children: React.ReactNode }) => React.createElement(React.Fragment, null, children),
-    ReactFlow: ({ nodes, nodeTypes }: { nodes: Node[]; nodeTypes: Record<string, React.ComponentType<unknown>> }) =>
+    ReactFlow: ({
+      nodes,
+      nodeTypes,
+      onNodeClick,
+    }: {
+      nodes: Node[];
+      nodeTypes: Record<string, React.ComponentType<unknown>>;
+      onNodeClick?: (_event: unknown, node: Node) => void;
+    }) =>
       React.createElement(
         'div',
         null,
         nodes.map((node) => {
           const Step = nodeTypes[node.type ?? 'step']! as React.ComponentType<{ data: unknown; selected: boolean }>;
-          return React.createElement(Step, { key: node.id, data: node.data, selected: false });
+          return React.createElement(
+            'div',
+            { key: node.id, onClick: () => onNodeClick?.({}, node) },
+            React.createElement(Step, { data: node.data, selected: false }),
+          );
         }),
       ),
     Background: () => null,
@@ -108,14 +120,14 @@ const stats = () => ({
 
 const statsCalls = () => h.calls.filter((call) => call.name === 'journeys.stats');
 
-const renderBuilder = (a: ReturnType<typeof artifact>) =>
+const renderBuilder = (a: ReturnType<typeof artifact>, opts: { readOnly?: boolean; onChange?: () => void } = {}) =>
   render(
     <ToastProvider>
       <JourneyBuilder
         artifact={a as never}
         content={(a.version as { content: JourneyContent }).content}
-        onChange={() => {}}
-        readOnly={false}
+        onChange={opts.onChange ?? (() => {})}
+        readOnly={opts.readOnly ?? false}
         errors={{}}
         warnings={[]}
       />
@@ -129,6 +141,41 @@ beforeEach(() => {
 });
 
 afterEach(cleanup);
+
+describe('builder shortcuts in read-only mode (#1170)', () => {
+  it('does not duplicate the selected step with Ctrl+D', () => {
+    const onChange = vi.fn();
+    renderBuilder(artifact(), { readOnly: true, onChange });
+    fireEvent.click(screen.getAllByText('Welcome email')[0]!);
+    fireEvent.keyDown(document.body, { key: 'd', ctrlKey: true });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('does not undo or redo a local edit', () => {
+    const onChange = vi.fn();
+    const a = artifact();
+    const content = (a.version as { content: JourneyContent }).content;
+    const builder = (readOnly: boolean) => (
+      <ToastProvider>
+        <JourneyBuilder artifact={a as never} content={content} onChange={onChange} readOnly={readOnly} errors={{}} warnings={[]} />
+      </ToastProvider>
+    );
+    const view = render(builder(false));
+    // Two local edits, then one undo, leave both an undo and a redo entry.
+    fireEvent.click(screen.getAllByText('Welcome email')[0]!);
+    fireEvent.keyDown(document.body, { key: 'd', ctrlKey: true });
+    fireEvent.click(screen.getAllByText('Welcome email')[0]!);
+    fireEvent.keyDown(document.body, { key: 'd', ctrlKey: true });
+    fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true });
+    expect(onChange).toHaveBeenCalled();
+    onChange.mockClear();
+
+    view.rerender(builder(true));
+    fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true });
+    fireEvent.keyDown(document.body, { key: 'z', ctrlKey: true, shiftKey: true });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});
 
 describe('builder count overlay provenance (#507 review)', () => {
   it('attaches counts for the published, unmodified version', async () => {

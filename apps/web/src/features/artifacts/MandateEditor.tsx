@@ -2,7 +2,7 @@ import { Plus, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api } from '../../app/api';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Checkbox, cx, Field, FieldGroup, IconButton, Input, Select, Switch, Textarea } from '../../ui';
+import { Alert, Button, Checkbox, CommaListInput, cx, Field, FieldGroup, IconButton, Input, Select, Switch, Textarea } from '../../ui';
 import { ACTION_CLASS_LABEL, AUTONOMY_LEVEL, type Autonomy, levelFor, levelLabel, MANDATE_CLASSES } from '../agents/labels';
 import type { EditorProps } from './ArtifactDetailPage';
 import { useAllArtifacts } from './artifactList';
@@ -779,20 +779,11 @@ export function MandateEditor({
             hint="The member list needs workspace admin. Enter user ids separated by commas; leave empty for none."
             error={errors['escalation.userIds']}
           >
-            <Input
-              value={userIds.join(', ')}
+            <CommaListInput
+              value={userIds}
               readOnly={readOnly}
               placeholder="usr_…, usr_…"
-              onChange={(e) =>
-                set({
-                  escalation: {
-                    userIds: e.target.value
-                      .split(',')
-                      .map((s) => s.trim())
-                      .filter(Boolean),
-                  },
-                })
-              }
+              onChange={(next) => set({ escalation: { userIds: next } })}
             />
           </Field>
         ) : (

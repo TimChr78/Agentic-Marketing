@@ -358,6 +358,19 @@ describe('BroadcastPage (#448)', () => {
     expect(await screen.findByRole('button', { name: 'Publish v2' })).toBeTruthy();
   });
 
+  it('does not offer Submit or Publish on a rejected version (#1169)', async () => {
+    h.artifact = { ...draftArtifact, version: { ...draftArtifact.version, state: 'rejected' } };
+    h.status = notRunStatus;
+    h.approvals = async () => ({ approvals: [] });
+    renderPage();
+    await screen.findByRole('heading', { level: 1, name: 'Lifecycle playbook' });
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Checking send state' })).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Submit for review' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Publish v2' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'View content' })).toBeTruthy();
+  });
+
   it('shows a retryable error above the tabs and disables submission when the pending read fails', async () => {
     h.artifact = draftArtifact;
     h.status = notRunStatus;

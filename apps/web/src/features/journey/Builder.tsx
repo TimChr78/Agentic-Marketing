@@ -408,13 +408,13 @@ function BuilderInner({ artifact, content, onChange, readOnly, warnings: serverW
       removeSelection();
     } else if (mod && e.key.toLowerCase() === 'z' && !e.shiftKey) {
       e.preventDefault();
-      undo();
+      if (!readOnly) undo();
     } else if (mod && (e.key.toLowerCase() === 'y' || (e.key.toLowerCase() === 'z' && e.shiftKey))) {
       e.preventDefault();
-      redo();
+      if (!readOnly) redo();
     } else if (mod && e.key.toLowerCase() === 'd' && selectedNode) {
       e.preventDefault();
-      commit(duplicateNode(nodes, selectedNode.id));
+      if (!readOnly) commit(duplicateNode(nodes, selectedNode.id));
     } else if ((e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) && selectedNode) {
       e.preventDefault();
       const el = wrapper.current?.querySelector(`[data-id="${selectedNode.id}"]`)?.getBoundingClientRect();
