@@ -2,6 +2,39 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.17.5] - 2026-11-21
+
+### Changed
+
+- Documentation now matches the shipped platform: the auth capabilities, action classes, ad conversion examples, restore semantics, doctor checks and metrics, MCP recipes and skills, journey node kinds and analytics measures.
+
+### Fixed
+
+- The OpenBao key provider reads its token file again after a transient failure instead of caching the error and failing every wrap and unwrap until the process restarts.
+- An `alias` event that names its own identifier no longer crashes the profile worker. The batch resolves instead of being redelivered forever, so identity resolution, segments, webhooks and journeys on that shard keep moving.
+
+### Security
+
+- SCIM provisioning can no longer take over an account. A workspace's identity provider may not change the global e-mail address or name of a person who also belongs to another workspace or owns one, and it may not replace, patch or delete that workspace's owner at all (`PUT`, `PATCH` and `DELETE` answer 403). Creating a user whose e-mail already has an account links it only when the address's domain is a verified single sign-on domain of that workspace; otherwise the request fails with a 409 `uniqueness` error, while `active` and `externalId` changes still apply.
+- Write commands no longer run on `artifacts:read` alone for people. `agents.memory.add`, `agents.memory.delete`, `agents.subscribe` and `agents.unsubscribe` need `artifacts:write`, and `ai.review` needs `artifacts:approve` or `artifacts:write`. An agent still manages its own memory and subscriptions with its read scope, and a hosted agent's trigger subscription can no longer be deleted directly with `agents.unsubscribe`; change the agent's triggers instead.
+- OpenAI- and Anthropic-compatible AI providers now go through the same egress guard as webhooks, connectors and decision providers. Adding or changing a provider refuses a loopback, metadata or internal URL, and every model request is checked again when the connection is made, with DNS pinning and no redirects. A self-hosted model on a private address keeps working when its host is listed in `EGRESS_ALLOWED_HOSTS`; streaming answers, as the copilot uses, still stream.
+- Personalization HTML is now cleaned with an allowlist of inert tags and attributes instead of a list of known-bad ones. SVG SMIL (`<set>`/`<animate>`), `<style>`, `<math>`, `<foreignObject>` and every other unlisted element are removed; every `srcset` candidate is checked on its own; and an inline `style` may not use an external `url()`, `@import` or a backslash escape. Content the previous sanitizer removed stays removed.
+- **Check your experiences before upgrading the SDK:** elements outside the allowlist are now removed together with everything inside them. Experience HTML that used `<video>`, `<audio>`, `<picture>` and `<source>` (including the fallback `<img>` inside a `<picture>`), form controls such as `<button>`, `<input>`, `<select>` and `<label>`, or custom elements no longer renders those parts, and `mailto:`/`tel:` links lose their link. Rewrite them with plain `<img>`, `<a href="https://…">` and text before you publish the new SDK.
+- The Cloudflare edge worker no longer keeps a cache entry for a write key that does not exist, and its isolate cache has a hard size limit with eviction. Unauthenticated `/v1/decide` requests with random write keys can no longer grow the worker's memory until it restarts.
+- The browser SDK sends a visitor's user id to `/v1/decide` only when the `web_personalization` purpose is allowed; analytics consent alone no longer identifies them. Withdrawing `ad_measurement` now clears the in-memory ad click ids and removes them from events already queued, before the queue is sent.
+- Erasure now waits for queued segment-membership events about the erased person before it completes, and it no longer deletes unrelated failed or delivered `segment_change` outbox batches in the workspace.
+- Personal data sent as `group` traits is no longer kept in plaintext or merged into the person's profile. Reserved personal keys and tracking-plan PII are removed from group traits, and company attributes no longer overwrite the individual's traits.
+
+### Upgrading from 0.17.4
+
+- **Migrations:** none.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** SCIM `PUT`/`PATCH`/`DELETE` on the workspace owner now answers 403, SCIM can no longer change the e-mail address or name of an account that also belongs to another workspace or owns one (409; `active` and `externalId` still apply), and creating a SCIM user whose e-mail already has an account links it only for a verified single sign-on domain of the workspace. Viewers and approvers can no longer run `agents.memory.add`/`delete`, `agents.subscribe`/`unsubscribe` or `ai.review`. An OpenAI- or Anthropic-compatible AI provider on a private, loopback or internal address is refused unless its host is in `EGRESS_ALLOWED_HOSTS`. The browser SDK drops more HTML from experiences (see Security above) and sends the user id to `/v1/decide` only with `web_personalization` consent.
+- **Manual steps:** if an AI provider points at a self-hosted model on your network (for example Ollama), add its host to `EGRESS_ALLOWED_HOSTS` before upgrading, or its copilot, hosted-agent and journey AI calls will fail. Before you publish the new browser SDK, check experience HTML for `<video>`, `<audio>`, `<picture>`, form controls, custom elements and `mailto:`/`tel:` links.
+- **Upgrade:** download `agentic-marketing-compose-0.17.5.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.17.5 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.17.5` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.17.5). Run `docker compose exec app am doctor`.
+
+<!-- issues: 1129, 1130, 1131, 1132, 1133, 1134, 1135, 1136, 1141, 1142, 1174, 1175, 1176 -->
+
 ## [0.17.4] - 2026-11-20
 
 ### Changed
