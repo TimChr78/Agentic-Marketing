@@ -362,12 +362,32 @@ async function notifyDigest(
 
   const bySponsor = new Map<string, AgentDigest[]>();
   for (const d of digests) bySponsor.set(d.agent.sponsorUserId, [...(bySponsor.get(d.agent.sponsorUserId) ?? []), d]);
-  const day = now.toISOString().slice(0, 10);
-  const dayKey = (sponsor: string) => `agent-digest:${workspaceId}:${sponsor}:${day}`;
-  // A sponsor whose digest already went out today is skipped on a retry after another sponsor
-  // failed. Any message row for the per-day key that is not failed or suppressed is that record: a
+  // The digest is keyed by the window it covers, not by the UTC day of `now` (#1184). The window
+  // starts at the last completed digest, which a partial failure does not advance, so a retry of the
+  // same window reuses its key and skips the sponsors whose mail already went out, even when the
+  // retry crosses UTC midnight. A cursor with no digest yet (a hand-primed or pre-feature row) has
+  // no window to key on and keeps the old per-day key for that pass.
+  const windowStart = cursor.lastDigestAt;
+  const digestKey = (sponsor: string) =>
+    windowStart
+      ? `agent-digest:${workspaceId}:${sponsor}:${windowStart.toISOString()}`
+      : `agent-digest:${workspaceId}:${sponsor}:${now.toISOString().slice(0, 10)}`;
+  // Digests sent before the window key existed were keyed by the UTC day of the pass. A pass for
+  // this window can only have run from a day after the last digest up to `now`, so those two days'
+  // keys are checked as well: an upgrade in the middle of a failed pass must not mail the sponsors
+  // that already got the digest again. An older day key belongs to the previous window and is
+  // ignored, so it cannot swallow today's digest.
+  const keyedTo = new Map<string, string>();
+  for (const sponsor of bySponsor.keys()) {
+    const key = digestKey(sponsor);
+    keyedTo.set(key, sponsor);
+    if (!windowStart) continue;
+    for (const at of [new Date(windowStart.getTime() + DIGEST_WINDOW_MS), now])
+      keyedTo.set(`agent-digest:${workspaceId}:${sponsor}:${at.toISOString().slice(0, 10)}`, sponsor);
+  }
+  // A message row for a key of this window that is not failed or suppressed is that record: a
   // `delivered` or `bounced` webhook means the provider accepted it, not that it needs resending.
-  const delivered = new Set(
+  const mailed = new Set(
     (
       await tx
         .select({ idempotencyKey: schema.messages.idempotencyKey })
@@ -375,17 +395,17 @@ async function notifyDigest(
         .where(
           and(
             eq(schema.messages.workspaceId, workspaceId),
-            inArray(schema.messages.idempotencyKey, [...bySponsor.keys()].map(dayKey)),
+            inArray(schema.messages.idempotencyKey, [...keyedTo.keys()]),
             notInArray(schema.messages.status, ['failed', 'suppressed']),
           ),
         )
-    ).map((row) => row.idempotencyKey),
+    ).map((row) => keyedTo.get(row.idempotencyKey)!),
   );
   let sent = 0;
   let complete = true;
   for (const [sponsor, own] of bySponsor) {
-    const key = dayKey(sponsor);
-    if (delivered.has(key)) continue;
+    const key = digestKey(sponsor);
+    if (mailed.has(sponsor)) continue;
     const content = digestEmail(deps.publicUrl, own);
     const results = await sendMemberEmails(tx, deps, workspaceId, [
       {
