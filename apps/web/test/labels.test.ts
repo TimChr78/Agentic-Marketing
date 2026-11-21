@@ -11,6 +11,7 @@ import {
   artifactTypeLabel,
   dimensionLabel,
   eventTypeLabel,
+  lawfulBasisLabel,
   measureLabel,
   measureUnit,
   metricLabel,
@@ -125,5 +126,15 @@ describe('label registry coverage (#437)', () => {
     expect(purposeLabel('marketing_email')).toBe('Marketing e-mail');
     expect(purposeLabel('marketing_email', [{ key: 'marketing_email', name: 'Weekly signal' }])).toBe('Weekly signal');
     expect(purposeLabel('custom_purpose')).toBe('Unavailable purpose');
+  });
+
+  it('names a lawful basis in words, never as the raw enum key (#1173)', () => {
+    expect(lawfulBasisLabel('consent')).toBe('Consent');
+    expect(lawfulBasisLabel('legitimate_interest')).toBe('Legitimate interest');
+    expect(lawfulBasisLabel('contract')).toBe('Contract');
+    expect(lawfulBasisLabel('legal_obligation')).toBe('Legal obligation');
+    // A basis this build does not know still reads as words, not snake_case.
+    expect(lawfulBasisLabel('public_task')).toBe('public task');
+    expect(lawfulBasisLabel(null)).toBeNull();
   });
 });

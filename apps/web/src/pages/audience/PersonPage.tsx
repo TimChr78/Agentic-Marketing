@@ -24,6 +24,7 @@ import {
   formatDateTime,
   Input,
   Meta,
+  Modal,
   Mono,
   PageHeader,
   StatusPill,
@@ -36,7 +37,6 @@ import {
   Th,
   Tr,
   timeAgo,
-  useConfirm,
   useToast,
 } from '../../ui';
 import { pageWidth } from '../../ui/layout';
@@ -102,9 +102,10 @@ export default function PersonPage({ params }: { params: Record<string, string> 
   const id = params.id ?? '';
   const { can } = useSession();
   const toast = useToast();
-  const [confirmDialog, confirm] = useConfirm();
   const [tab, setTab] = useState<Tab>('timeline');
-  const [reason, setReason] = useState('Erasure request');
+  const [erasing, setErasing] = useState(false);
+  const [typed, setTyped] = useState('');
+  const [reason, setReason] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState<'export' | 'erase' | null>(null);
   const canRead = can('profiles:read');
@@ -185,30 +186,16 @@ export default function PersonPage({ params }: { params: Record<string, string> 
     }
   };
 
+  // The erasure dialog is its own modal, not `useConfirm`: a confirm dialog snapshots its body
+  // element, so the reason field there kept its first value and `profiles.erase` read a stale
+  // closure (#1165). Here the input and the submit share this render's state.
+  const eraseTarget = identity.hidden ? p.id : identity.email;
+  const openErase = () => {
+    setTyped('');
+    setReason('');
+    setErasing(true);
+  };
   const erasePerson = async () => {
-    const typed = identity.hidden ? p.id : identity.email;
-    const ok = await confirm({
-      title: 'Erase this person?',
-      body: (
-        <>
-          <p>
-            This permanently removes <strong>{typed}</strong>, their merged profiles, identifiers, consent ledger and events. It cannot be
-            undone.
-          </p>
-          <p className="mt-2">
-            Hashes of their e-mail and phone stay on the suppression list so they are never contacted again. Their encryption key is
-            destroyed, so copies in backups become unreadable.
-          </p>
-          <Field label="Reason" hint="Kept in the erasure record." required className="mt-3">
-            <Input value={reason} maxLength={500} onChange={(e) => setReason(e.target.value)} />
-          </Field>
-        </>
-      ),
-      confirmLabel: 'Erase person',
-      destructive: true,
-      typeToConfirm: typed,
-    });
-    if (!ok) return;
     setBusy('erase');
     setActionError(null);
     try {
@@ -218,6 +205,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
       toast.success('Erased this person. Their e-mail and phone stay suppressed.');
       navigate('/audience/people', { replace: true });
     } catch (e) {
+      setErasing(false);
       setActionError(errText(e));
     } finally {
       setBusy(null);
@@ -255,7 +243,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
               </Button>
             )}
             {can('profiles:erase') && (
-              <Button variant="danger" icon={<UserX size={15} />} mutation loading={busy === 'erase'} onClick={erasePerson}>
+              <Button variant="danger" icon={<UserX size={15} />} mutation loading={busy === 'erase'} onClick={openErase}>
                 Erase person
               </Button>
             )}
@@ -484,7 +472,48 @@ export default function PersonPage({ params }: { params: Record<string, string> 
         </aside>
       </div>
 
-      {confirmDialog}
+      <Modal
+        open={erasing}
+        onClose={() => setErasing(false)}
+        role="alertdialog"
+        title="Erase this person?"
+        footer={
+          <>
+            <Button onClick={() => setErasing(false)}>Cancel</Button>
+            <Button
+              variant="danger-solid"
+              mutation
+              disabled={typed.trim() !== eraseTarget}
+              loading={busy === 'erase'}
+              onClick={() => void erasePerson()}
+            >
+              Erase person
+            </Button>
+          </>
+        }
+      >
+        <p>
+          This permanently removes <strong>{eraseTarget}</strong>, their merged profiles, identifiers, consent ledger and events. It cannot
+          be undone.
+        </p>
+        <p className="mt-2">
+          Hashes of their e-mail and phone stay on the suppression list so they are never contacted again. Their encryption key is
+          destroyed, so copies in backups become unreadable.
+        </p>
+        <Field label="Reason" hint="Kept in the erasure record." className="mt-3">
+          <Input value={reason} maxLength={500} data-autofocus onChange={(e) => setReason(e.target.value)} />
+        </Field>
+        <Field
+          label={
+            <>
+              Type <strong className="font-semibold text-fg">{eraseTarget}</strong> to confirm
+            </>
+          }
+          className="mt-3"
+        >
+          <Input value={typed} autoComplete="off" onChange={(e) => setTyped(e.target.value)} />
+        </Field>
+      </Modal>
     </div>
   );
 }

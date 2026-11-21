@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from 'react';
 import { errText, getWorkspaceId, onWorkspaceChange } from '../../app/api';
+import { onArtifactsChanged } from '../artifactCache';
 import { type ArtifactListLoader, type ArtifactPage, type ArtifactRow, artifactListLoader, fetchAllArtifactPages } from './artifactList';
 
 // The shared picker index (#524): one bounded, complete list per artifact type per workspace, so a
@@ -196,6 +197,9 @@ export function refreshPickerIndex(workspaceId: string, type: string, opts: { lo
   return readPickerIndex(workspaceId, type, opts);
 }
 
+/** Keys whose next read is already scheduled, so one mutation's several notices read once. */
+const scheduledReads = new Set<string>();
+
 function reloadEntry(workspaceId: string, type: string) {
   const key = pickerIndexKey(workspaceId, type);
   const entry = entries.get(key);
@@ -208,8 +212,19 @@ function reloadEntry(workspaceId: string, type: string) {
   entry.generation += 1;
   entry.loading = true;
   emit(entry);
-  if (entry.listeners.size > 0) void readPickerIndex(workspaceId, type).catch(() => {});
-  else entries.delete(key);
+  if (entry.listeners.size === 0) {
+    entries.delete(key);
+    return;
+  }
+  // A save both notifies and invalidates its artifact; the drop above happens for each, but the
+  // read starts once, after the current task, so the second notice does not abort the first read.
+  if (scheduledReads.has(key)) return;
+  scheduledReads.add(key);
+  queueMicrotask(() => {
+    scheduledReads.delete(key);
+    const current = entries.get(key);
+    if (current && current.listeners.size > 0 && !current.promise) void readPickerIndex(workspaceId, type).catch(() => {});
+  });
 }
 
 /** Drops the exact workspace/type key, e.g. after creating a new artifact of that type. */
@@ -236,9 +251,29 @@ export function invalidatePickerArtifact(workspaceId: string, artifactId: string
   }
 }
 
+// Every create, save, publish, discard and approval decision announces itself through
+// `notifyArtifactsChanged` (approvals arrive as `invalidateArtifact`). Subscribing here, rather than
+// asking each caller to remember, is what keeps a picker fresh: a *create* names an id no cached
+// list contains yet, so `invalidatePickerArtifact` cannot find its key, while the id's prefix names
+// the type whose cached list is now incomplete (#1167). A change with no id drops every loaded
+// index of the current workspace.
+onArtifactsChanged((id) => {
+  const workspaceId = getWorkspaceId();
+  if (!workspaceId) return;
+  if (!id) {
+    for (const [key] of [...entries]) {
+      if (key.startsWith(`${workspaceId}:`)) reloadEntry(workspaceId, key.slice(workspaceId.length + 1));
+    }
+    return;
+  }
+  const type = artifactTypeOfId(id);
+  if (type) invalidatePickerIndex(workspaceId, type);
+});
+
 /** Test and workspace-switch seam: forget every index. */
 export function resetPickerIndexes() {
   entries.clear();
+  scheduledReads.clear();
 }
 
 /** The shared picker index for one type in the current workspace. */

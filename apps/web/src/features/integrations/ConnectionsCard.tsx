@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { publicLink } from '../../lib/publicLinks';
 import {
   Alert,
   Button,
@@ -275,7 +276,7 @@ function ConnectionDrawer({
 }
 
 export function ConnectionsCard() {
-  const { can } = useWorkspace();
+  const { can, workspace } = useWorkspace();
   const admin = can('workspace:admin');
   const catalog = useApi(() => api.call('connectors.list', {}), []);
   const list = useApi(() => api.call('connections.list', {}), []);
@@ -484,7 +485,7 @@ export function ConnectionsCard() {
           onSaved={(created) => {
             setEditing(null);
             if (created) {
-              setInbound({ name: created.name, url: `${location.origin}${created.inboundPath}` });
+              setInbound({ name: created.name, url: publicLink(workspace.linksUrl, created.inboundPath) });
               toast.success(`Added “${created.name}”. Copy the inbound URL and register it at the other system.`);
             } else {
               toast.success('Connection saved.');

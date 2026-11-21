@@ -26,7 +26,8 @@ export interface SessionValue {
   can: (permission: string) => boolean;
   refresh: () => Promise<void>;
   switchWorkspace: (id: string) => Promise<void>;
-  signOut: () => Promise<void>;
+  /** True when the server confirmed the sign-out (or the session was already gone). */
+  signOut: () => Promise<boolean>;
   /** A sign-out the server did not confirm (#614): the person is still signed in. */
   signOutError: string | null;
   /** Pending approvals, for the nav badge. */
@@ -151,12 +152,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         } catch {
           // The request never reached the server: the session cookie is still valid (#614).
           setSignOutError('Sign-out did not go through. Your session is still active; try again.');
-          return;
+          return false;
         }
         // 401 means the session is already gone on the server, so the local session must go too.
         if (!response.ok && response.status !== 401) {
           setSignOutError('Sign-out did not go through. Your session is still active; try again.');
-          return;
+          return false;
         }
         setWorkspaceId(null);
         setWorkspace(null);
@@ -164,6 +165,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setThemeUser(null);
         clearRecentsMemory();
         setStatus('signed-out');
+        return true;
       },
     };
   }, [status, user, workspace, memberships, load, pending, refreshPending, signOutError]);

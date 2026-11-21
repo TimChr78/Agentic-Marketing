@@ -288,3 +288,20 @@ export const PURPOSE_LABEL: Record<string, string> = {
 export function purposeLabel(key: string, purposes?: readonly { key: string; name: string }[] | null): string {
   return purposes?.find((p) => p.key === key)?.name ?? PURPOSE_LABEL[key] ?? 'Unavailable purpose';
 }
+
+/** The GDPR lawful bases in the words people read; the server stores the keys (#1173). */
+export const LAWFUL_BASIS_LABEL: Record<string, string> = {
+  consent: 'Consent',
+  legitimate_interest: 'Legitimate interest',
+  contract: 'Contract',
+  legal_obligation: 'Legal obligation',
+};
+
+/**
+ * A lawful basis for display. Null means the purpose has none, so the caller makes no claim; a
+ * basis this build does not know still loses its underscores rather than showing a raw key.
+ */
+export function lawfulBasisLabel(basis: string | null | undefined): string | null {
+  if (!basis) return null;
+  return LAWFUL_BASIS_LABEL[basis] ?? basis.replace(/_/g, ' ');
+}

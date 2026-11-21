@@ -33,6 +33,7 @@ export function demoSessionValue(): SessionValue {
     // The demo's only exit is the normal sign-in page; no demo identity survives it.
     signOut: async () => {
       if (typeof window !== 'undefined') window.location.assign('/');
+      return true;
     },
     signOutError: null,
     pending: DEMO_PENDING_APPROVALS.length,

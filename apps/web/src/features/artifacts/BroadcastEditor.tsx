@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useWorkspace } from '../../app/session';
+import { lawfulBasisLabel } from '../../lib/labels';
 import { Alert, Button, Checkbox, DateTimeInput, Field, Input, RadioCards, Select, Textarea } from '../../ui';
 import { getWorkspaceTimeZone } from '../../ui/time';
 import { ComposerPreview } from '../broadcasts/composer/ComposerPreview';
@@ -117,7 +118,7 @@ export function BroadcastEditor({ artifact, content, onChange, readOnly, errors 
   const templatePurpose = data.templateContent?.purpose;
   const topics = topicsOf(purposes, templatePurpose);
   const purposeLabel = data.purpose
-    ? `${data.purpose.name} · ${data.purpose.basis}`
+    ? `${data.purpose.name} · ${lawfulBasisLabel(data.purpose.basis)}`
     : templatePurpose
       ? `${templatePurpose} (not configured)`
       : 'Choose a template first';

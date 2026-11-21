@@ -42,7 +42,7 @@ const h = vi.hoisted(() => ({
     },
   ],
   connectors: [
-    { id: 'http', label: 'HTTP API', description: 'Call your own API.', auth: 'oauth2', inbound: false, settings: {}, secrets: {} },
+    { id: 'http', label: 'HTTP API', description: 'Call your own API.', auth: 'oauth2', inbound: true, settings: {}, secrets: {} },
   ],
   connections: [
     {
@@ -79,6 +79,8 @@ vi.mock('../src/app/session', () => {
   const workspace = {
     id: 'ws_1',
     name: 'Northstar Journal',
+    // #1166: inbound URLs belong on the public links host, including its path prefix.
+    linksUrl: 'https://links.example.com/am/',
     you: { type: 'user', userId: 'u1', role: 'owner', permissions },
     permissionsExplained: [],
   };
@@ -118,6 +120,17 @@ vi.mock('../src/app/api', async (importOriginal) => {
         return { connectors: h.connectors };
       case 'connections.list':
         return { connections: h.connections };
+      case 'connections.create':
+        return {
+          id: 'cn_2',
+          name: 'HTTP API',
+          connector: 'http',
+          enabled: true,
+          hasSecrets: false,
+          settings: {},
+          inbound: true,
+          inboundPath: '/hooks/in/cn_2/tok',
+        };
       case 'purposes.list':
         return { source: 'published', purposes: [] };
       default:
@@ -244,6 +257,20 @@ describe('Integrations sections (#527)', () => {
     expect(within(drawer).getByLabelText(/^Name/)).toBeTruthy();
     expect(within(drawer).getByText('Settings')).toBeTruthy();
     expect(within(drawer).getByText('Credentials')).toBeTruthy();
+  });
+
+  it('shows the inbound URL on the workspace links host (#1166)', async () => {
+    renderPage();
+    await screen.findByText('n8n reporting');
+    await userEvent.click(screen.getByRole('tab', { name: 'Connections' }));
+    await screen.findByText('Shopify');
+    await userEvent.click(screen.getAllByRole('button', { name: 'Add connection' })[0]);
+    const drawer = await screen.findByRole('dialog', { name: 'Add connection' });
+    await userEvent.click(within(drawer).getByRole('button', { name: 'Add connection' }));
+
+    const modal = await screen.findByRole('dialog', { name: /Inbound URL for/ });
+    // The workspace links URL ends in a slash; the shown URL has no double slash and keeps its prefix.
+    expect(within(modal).getByText('https://links.example.com/am/hooks/in/cn_2/tok')).toBeTruthy();
   });
 
   it('opens a token deep link inside the API tokens section with one exact read', async () => {

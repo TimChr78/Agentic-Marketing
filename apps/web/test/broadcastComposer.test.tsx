@@ -466,7 +466,8 @@ describe('composer checklist evidence (#497)', () => {
     };
     const ready = consentCheck({ ...base, templatePurpose: 'marketing_email', templateTopic: 'newsletter' });
     expect(ready.status).toBe('ready');
-    expect(ready.details.join(' ')).toContain('Purpose configured · Marketing e-mail · consent');
+    // #1173: the lawful basis reads in words, never as the raw `consent` key.
+    expect(ready.details.join(' ')).toContain('Purpose configured · Marketing e-mail · Consent');
     expect(ready.details.join(' ')).toContain('confirmed opt-in');
     expect(ready.details.join(' ')).toContain('Per-person consent');
     expect(ready.details.join(' ')).not.toMatch(/Audience consented/);

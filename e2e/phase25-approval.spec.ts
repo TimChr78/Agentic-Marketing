@@ -109,7 +109,7 @@ test('the review opens with consequences, then the exact message, then the chang
   // selector must be visible as such, never as a green readiness promise.
   await expect(drawer.getByRole('heading', { name: 'Consent' })).toBeVisible();
   await expect(drawer.getByRole('heading', { name: 'Evidence' })).toBeVisible();
-  await expect(drawer).toContainText('Purpose configured · Marketing e-mail · consent');
+  await expect(drawer).toContainText('Purpose configured · Marketing e-mail · Consent');
   await expect(drawer).toContainText('Log adapter — no external delivery');
   await expect(drawer.getByText(/DKIM not checked — selectors required|No sending domain for marketing mail/).first()).toBeVisible();
   await expect(drawer).not.toContainText('Audience consented');

@@ -389,6 +389,37 @@ describe('People list (#510)', () => {
     expect(screen.queryByRole('link', { name: 'ada@example.com' })).toBeNull();
   });
 
+  it('records the erasure reason the operator typed (#1165)', async () => {
+    renderPerson();
+    await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Erase person' }));
+    const dialog = await screen.findByRole('alertdialog');
+    const reason = within(dialog).getByLabelText(/^Reason/) as HTMLInputElement;
+    // The input is live: every keystroke stays, instead of snapping back to the first value.
+    await userEvent.type(reason, 'Ticket 4711: verified by phone');
+    expect(reason.value).toBe('Ticket 4711: verified by phone');
+
+    await userEvent.type(within(dialog).getByLabelText(/to confirm/), 'ada@example.com');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Erase person' }));
+
+    await waitFor(() => expect(calls('profiles.erase')).toHaveLength(1));
+    expect(calls('profiles.erase')[0].input).toMatchObject({ profileId: canonicalId, reason: 'Ticket 4711: verified by phone' });
+  });
+
+  it('falls back to a plain erasure reason when the operator leaves it empty', async () => {
+    renderPerson();
+    await screen.findByRole('heading', { level: 1, name: 'ada@example.com' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Erase person' }));
+    const dialog = await screen.findByRole('alertdialog');
+    await userEvent.type(within(dialog).getByLabelText(/to confirm/), 'ada@example.com');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Erase person' }));
+
+    await waitFor(() => expect(calls('profiles.erase')).toHaveLength(1));
+    expect(calls('profiles.erase')[0].input).toMatchObject({ profileId: canonicalId, reason: 'Erasure request' });
+  });
+
   it('searches only on submit, by exact e-mail, and opens the match', async () => {
     const push = vi.spyOn(history, 'pushState');
     renderList();

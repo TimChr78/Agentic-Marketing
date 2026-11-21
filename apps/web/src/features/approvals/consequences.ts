@@ -1,5 +1,6 @@
 import { typeLabel } from '../../app/artifactRoutes';
 import { resolveConsentTopic } from '../../lib/consentTopic';
+import { lawfulBasisLabel } from '../../lib/labels';
 import { referencedIds } from '../artifactCache';
 
 // Consequence derivation for the approval review (#498). Pure functions only: the drawer supplies
@@ -931,7 +932,7 @@ function emailEvidence(input: ConsequenceInput, c: Record<string, unknown>, chan
         ? `${purpose.name} is not allowed on ${channel}`
         : !topicOk
           ? `Topic ${topic} is not under ${purpose.name}`
-          : `Purpose configured · ${purpose.name} · ${purpose.basis}`,
+          : `Purpose configured · ${purpose.name} · ${lawfulBasisLabel(purpose.basis)}`,
       detail:
         channelOk && topicOk
           ? `Per-person consent, topic preferences and suppression are checked at send time.${purpose.requiresDoubleOptIn ? ' This purpose requires double opt-in.' : ''}`

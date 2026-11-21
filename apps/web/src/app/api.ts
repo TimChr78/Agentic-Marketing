@@ -147,9 +147,14 @@ export function setStreamTransport(transport: StreamTransport | null): () => voi
   };
 }
 
-/** Every streaming request goes through the installed transport, like `api.call` does. */
+/**
+ * Every streaming request goes through the installed transport, like `api.call` does. Without a
+ * transport it carries the chosen workspace exactly like a typed call: the Copilot stream runs the
+ * same tools as the rest of the UI, so it must act in the workspace the person is looking at, not
+ * in the server's default (oldest) one (#1164).
+ */
 export function streamFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  return streamTransport ? streamTransport(input, init) : fetch(input, init);
+  return streamTransport ? streamTransport(input, init) : fetchWithWorkspace(input, init);
 }
 export type CommandName = Commands[number]['name'];
 export type Out<N extends CommandName> = CommandOutput<Commands, N>;
