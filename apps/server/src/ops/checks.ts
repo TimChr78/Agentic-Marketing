@@ -982,7 +982,7 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
             id: 'queue.messages',
             status: 'warn',
             message: `${pending} message(s) waiting to be sent; the oldest has waited ${duration(messagesOldest)}`,
-            hint: 'A queue that does not drain means the worker role is not running or is stuck: check ROLE=worker and `docker compose logs worker` (or the worker pods).',
+            hint: 'A queue that does not drain means the worker role is not running or is stuck: check ROLE=worker and `docker compose logs app` (or the worker pods).',
           }
         : {
             id: 'queue.messages',
@@ -1001,7 +1001,7 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
             id: 'queue.journeys',
             status: 'warn',
             message: `${journeyDue} journey step(s) due; the oldest has waited ${duration(journeyOldest)}`,
-            hint: 'Journey steps run in the worker role: check that ROLE includes worker and that `docker compose logs worker` shows the journey sweeper running.',
+            hint: 'Journey steps run in the worker role: check that ROLE includes worker and that `docker compose logs app` shows the journey sweeper running.',
           }
         : {
             id: 'queue.journeys',

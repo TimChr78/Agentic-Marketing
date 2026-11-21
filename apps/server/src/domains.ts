@@ -46,6 +46,8 @@ export interface DomainService {
   resolvePublicRequest(host: string, path: string): Promise<PublicRequest | null>;
   /** A workspace's verified primary brand origin+prefix, else the installation's PUBLIC_LINKS_URL. */
   linksUrlFor(workspaceId: string): Promise<string>;
+  /** True when Host is a verified brand host, even for a path outside its registered prefix. */
+  isBrandHost(host: string): Promise<boolean>;
   /** Persist that Host checking is on, so it cannot be switched off by removing the last domain (#463). */
   activateHostChecking(): Promise<void>;
   /**
@@ -75,6 +77,7 @@ export function createDomainService(db: Db, fallbackLinksUrl: string, publicUrl?
   return {
     reservedHosts,
     resolveWorkspaceForRequest: (host, path) => resolver.resolveWorkspaceForRequest(host, path),
+    isBrandHost: (host) => resolver.isBrandHost(host),
     async resolvePublicRequest(host, path) {
       const resolved = await resolver.resolveWorkspaceForRequest(host, path);
       if (resolved) {

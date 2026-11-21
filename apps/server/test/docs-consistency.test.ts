@@ -1,6 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 // Pure documentation checks: the pilot pages must agree on retention, on the two public-path
@@ -10,6 +10,7 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 const paths = {
   skill: join(root, '.claude/skills/agentic-marketing-implement/SKILL.md'),
   cloudflare: join(root, '.claude/skills/agentic-marketing-implement/references/cloudflare.md'),
+  proxy: join(root, '.claude/skills/agentic-marketing-implement/references/cloudflare-worker-proxy.js'),
   pilot: join(root, 'docs/pilots/martechsignal.md'),
 };
 const read = (path: string) => readFile(path, 'utf8');
@@ -171,5 +172,32 @@ describe('pilot documentation', () => {
       expect(doc).not.toMatch(/path:\s*\^\/\(f\|u\|c/);
     }
     for (const doc of [skill, pilot]) expect(doc).toMatch(/400 or 404/);
+  });
+
+  it('lets the first-party proxy reach every public path (#1162)', async () => {
+    const { AM_PUBLIC } = (await import(pathToFileURL(paths.proxy).href)) as { AM_PUBLIC: RegExp };
+    for (const path of [
+      '/f/form_id',
+      '/f/confirm/token',
+      '/u/token',
+      '/u/p/token',
+      '/u/t/token',
+      '/c/token',
+      '/n/slug/',
+      '/n/slug/feed.xml',
+      '/a/ast_00000000000000000000000000000000/logo.png',
+      '/.well-known/am-domain/token',
+      '/v1/batch',
+      '/v1/decide',
+      '/v1/consent/purposes',
+      '/v1/push/config',
+      '/v1/push/subscribe',
+      '/v1/push/unsubscribe',
+    ]) {
+      expect(AM_PUBLIC.test(path), path).toBe(true);
+    }
+    for (const path of ['/', '/mcp', '/api/auth/get-session', '/v1/workspace.get', '/v1/push/other']) {
+      expect(AM_PUBLIC.test(path), path).toBe(false);
+    }
   });
 });

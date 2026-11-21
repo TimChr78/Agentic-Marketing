@@ -142,7 +142,9 @@ ingress:
   annotations: {}
   host: marketing.example.com
   # Every verified brand domain serves subscriber-facing links. Kubernetes only routes a host that
-  # an Ingress names, so list each brand host here (the chart renders the same path split for each).
+  # an Ingress names, so list each brand host here. The chart renders the public path split for
+  # every host (admin REST and the admin UI stay on the api role); a brand host answers 404 for
+  # anything outside its public surface.
   # Add the same hosts to ingress.tls[].hosts so their certificates cover them.
   extraHosts: []
   #  - links.martechsignal.com
@@ -153,7 +155,10 @@ ingress:
 
 podDisruptionBudget:
   enabled: true
-  minAvailable: 1
+  # Only emitted for a role whose minimum replicas (autoscaling.minReplicas when enabled) exceed
+  # this value: at or below it a PDB would block every voluntary drain, so a one-replica-per-role
+  # install gets none.
+  minAvailable: 1 # a whole number of pods; a role gets a PDB only when it runs more than this
 
 serviceAccount:
   create: true

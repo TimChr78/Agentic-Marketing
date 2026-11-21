@@ -1,14 +1,22 @@
 {{- if .Values.podDisruptionBudget.enabled }}
+{{- if not (or (kindIs "float64" .Values.podDisruptionBudget.minAvailable) (kindIs "int" .Values.podDisruptionBudget.minAvailable) (kindIs "int64" .Values.podDisruptionBudget.minAvailable)) }}
+{{- fail "podDisruptionBudget.minAvailable must be a whole number of pods (a percentage cannot be compared with a role's replicas)" }}
+{{- end }}
 {{- range $role := list "api" "ingest" "worker" }}
+{{- $r := index $.Values.roles $role }}
+{{- $min := $r.replicas }}
+{{- if and $r.autoscaling $r.autoscaling.enabled }}{{ $min = $r.autoscaling.minReplicas | default $r.replicas | default 1 }}{{ end }}
+{{- if gt (int $min) (int $.Values.podDisruptionBudget.minAvailable) }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "am.fullname" $ }}-{{ $role }}
+  name: {{ include "am.fullnameFor" (dict "root" $ "suffix" $role) }}
   labels: {{- include "am.labels" $ | nindent 4 }}
 spec:
   minAvailable: {{ $.Values.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels: {{- include "am.selector" (dict "root" $ "role" $role) | nindent 6 }}
+{{- end }}
 {{- end }}
 {{- end }}

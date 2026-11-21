@@ -304,6 +304,47 @@ describe('brand host routing', () => {
     expect((await t.srv.domains.resolvePublicRequest('prefixed.example', '/am/u/x'))?.linksUrl).toBe('https://prefixed.example/am');
   });
 
+  it('serves only the public surface on a verified brand host (#1157)', async () => {
+    // Admin UI, auth, MCP, SCIM, OpenAPI and admin REST must not be reachable through a brand host.
+    for (const path of [
+      '/',
+      '/openapi.json',
+      '/mcp',
+      '/scim/v2/Users',
+      '/api/auth/get-session',
+      '/v1/workspace.get',
+      '/v1/artifacts.list',
+    ]) {
+      const res = await request(MAIN_PORT, path, { host: A });
+      expect(res.status, path).toBe(404);
+      expect(JSON.parse(res.body), path).toMatchObject({ error: 'not_found', message: 'Not found.' });
+    }
+
+    // The public API is part of the brand surface: an unknown write key is the gateway's answer,
+    // not the host check's 404.
+    const tracking = await request(MAIN_PORT, '/v1/batch', {
+      method: 'POST',
+      host: A,
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(tracking.status).toBe(401);
+    expect(JSON.parse(tracking.body)).toMatchObject({ error: 'invalid_write_key' });
+
+    // Health probes stay answerable on a brand host, as they are on a prefixed one, so an uptime
+    // monitor pointed at the brand hostname keeps working.
+    for (const probe of ['/healthz', '/readyz']) expect((await request(MAIN_PORT, probe, { host: A })).status, probe).not.toBe(404);
+
+    // The installation's own host still serves the admin API.
+    expect((await request(MAIN_PORT, '/openapi.json')).status).toBe(200);
+    const rest = await request(MAIN_PORT, '/v1/workspace.get', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(rest.status).toBe(401);
+  });
+
   it('builds each workspace’s provider webhook URL on its own host', async () => {
     expect(providerA?.webhookUrl.startsWith(`https://${A}/hooks/email/`)).toBe(true);
     const created = await t.api(ownerB, wsB).call('emailProviders.create', {

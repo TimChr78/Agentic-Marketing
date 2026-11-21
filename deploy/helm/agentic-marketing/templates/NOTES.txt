@@ -8,7 +8,7 @@ forward-only (restore a backup instead of expecting a schema rollback). `--wait`
 and then for the roles, so a first install does not serve from an unmigrated database.
 
 Create the first workspace and owner (it prompts for the password without echo):
-  kubectl exec -it deploy/{{ include "am.fullname" . }}-api -- am bootstrap \
+  kubectl exec -it deploy/{{ include "am.fullnameFor" (dict "root" . "suffix" "api") }} -- am bootstrap \
     --email you@example.com --workspace 'My site'
 
 Then open {{ .Values.config.PUBLIC_URL }} and connect MCP clients to {{ .Values.config.PUBLIC_URL }}/mcp.

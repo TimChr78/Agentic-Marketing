@@ -15,10 +15,11 @@ const read = (name: string) => readFile(join(root, name), 'utf8');
 const scriptPath = join(root, 'scripts/e2e-docker.sh');
 const containerLibPath = join(root, 'scripts/container-id.sh');
 
-const [script, docs, containerLib] = await Promise.all([
+const [script, docs, containerLib, ci] = await Promise.all([
   read('scripts/e2e-docker.sh'),
   read('docs/development.md'),
   read('scripts/container-id.sh'),
+  read('.github/workflows/ci.yml'),
 ]);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -181,6 +182,12 @@ describe('e2e-docker prerequisites and portability', () => {
   it('documents Linux as the target for the browser suite', () => {
     expect(docs).toMatch(/Linux/);
     expect(docs).toMatch(/setsid/);
+  });
+
+  it('derives the Playwright image from the pinned package version, like CI (#1163)', () => {
+    expect(script).toContain("require('@playwright/test/package.json').version");
+    expect(script).not.toMatch(/playwright:v\d+\.\d+\.\d+-noble/);
+    expect(ci).toContain("require('@playwright/test/package.json').version");
   });
 });
 

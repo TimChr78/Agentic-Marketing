@@ -2,10 +2,14 @@
 // Serves the platform's public surface under the site's own origin, at /am/*:
 //   /am/f/<form>            signup forms (POST) and /am/f/confirm/<token> (double opt-in)
 //   /am/u/<token>           unsubscribe (RFC 8058 one-click POST too)
+//   /am/u/p/<token>         preference centre, /am/u/t/<token> topic unsubscribe
 //   /am/c/<token>           e-mail click redirects
+//   /am/a/…                 public uploaded assets (logos, e-mail and page images)
 //   /am/n/…                 newsletter archive and signed web versions
+//   /am/.well-known/am-domain/<token>   brand domain verification
 //   /am/v1/batch, /am/v1/decide, /am/v1/consent/purposes   tracking, personalization and the
 //                           consent banner's texts (only if the site uses the SDK)
+//   /am/v1/push/config|subscribe|unsubscribe   web push (only if the site uses it)
 // Everything else (admin UI, REST commands, MCP, OAuth) is NOT reachable through the site.
 //
 // Settings (Pages → Settings → Variables and secrets):
@@ -14,7 +18,8 @@
 //   AM_ACCESS_SECRET Cloudflare Access service token secret     (optional, recommended)
 // Platform settings: PUBLIC_LINKS_URL=https://<site>/am and CLIENT_IP_HEADER=x-am-client-ip.
 
-const AM_PUBLIC = /^\/(f\/[A-Za-z0-9_./-]+|u\/[A-Za-z0-9_.-]+|c\/[A-Za-z0-9_.-]+|n\/[A-Za-z0-9_./-]+|v1\/(batch|b|decide|consent\/purposes))$/;
+export const AM_PUBLIC =
+  /^\/(f\/[A-Za-z0-9_./-]+|u\/(?:[pt]\/)?[A-Za-z0-9_.-]+|c\/[A-Za-z0-9_.-]+|n\/[A-Za-z0-9_./-]+|a\/[A-Za-z0-9_./-]+|\.well-known\/am-domain\/[A-Za-z0-9_.-]+|v1\/(batch|b|decide|consent\/purposes|push\/(config|subscribe|unsubscribe)))$/;
 
 export async function proxyAgenticMarketing(request, env, url) {
   const path = url.pathname.slice('/am'.length);
