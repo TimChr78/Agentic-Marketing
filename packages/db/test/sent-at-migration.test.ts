@@ -192,9 +192,10 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
       // merged-into index, idempotency_keys for 0103's reversal columns and 0104's retention index,
       // agent_actions for 0103's foreign key, broadcast_runs for 0107's defer counter,
       // journey_processed_events for 0109's new table and its policy, broadcast_tests for 0116's
-      // decision snapshot, and segment_memberships and segment_list_members for 0117's one-off
-      // stranded-row repair). It is deliberately not a superuser and has no BYPASSRLS, so FORCE RLS
-      // applies to it.
+      // decision snapshot, segment_memberships and segment_list_members for 0117's one-off
+      // stranded-row repair, and deliveries and profile_scores for 0118's and 0119's one-off
+      // repairs of conversion keys and scores stranded by earlier merges). It is deliberately not a
+      // superuser and has no BYPASSRLS, so FORCE RLS applies to it.
       for (const table of [
         'artifacts',
         'artifact_versions',
@@ -221,6 +222,7 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'writer_protocol',
         'segment_memberships',
         'segment_list_members',
+        'profile_scores',
       ])
         await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
       await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);

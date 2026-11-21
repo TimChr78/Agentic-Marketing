@@ -120,9 +120,19 @@ describe.skipIf(!hasTestDatabase())('an identity merge moves profile_scores (#11
     const alias = newId('prf');
     await seedProfile(survivor, { user: `user-${survivor}` }, new Date(Date.UTC(2026, 4, 10)));
     await seedProfile(alias, { anonymous: `anon-${alias}` }, new Date(Date.UTC(2026, 4, 11)));
-    await score(alias, 'conversion_propensity', 0.6, new Date(Date.UTC(2026, 4, 12)));
+    // Both profiles hold a score under the same key, and the alias's is the newer one: a read that
+    // follows the merge without a move would answer the survivor's stale 0.4, and calibration would
+    // count the alias row as a second prediction with no identifiers.
+    await score(survivor, 'conversion_propensity', 0.4, new Date(Date.UTC(2026, 4, 12)));
+    await score(alias, 'conversion_propensity', 0.6, new Date(Date.UTC(2026, 4, 13)));
 
     await merge(`anon-${alias}`, `user-${survivor}`);
+
+    const rows = await d.db.admin.query<{ profile_id: string; value: number }>(
+      `SELECT profile_id, value FROM profile_scores WHERE workspace_id = $1 AND key = 'conversion_propensity'`,
+      [ws],
+    );
+    expect(rows.rows).toEqual([{ profile_id: survivor, value: 0.6 }]);
 
     const scores = await d.db.withWorkspace(ws, (tx) =>
       profileScores.handler({ profileId: alias }, { tx, principal: { workspaceId: ws } } as never),
