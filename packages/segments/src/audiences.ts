@@ -43,7 +43,11 @@ type Unmatched = { value: string; reason: UnmatchedReason };
  * follow and before the profile rows are locked, so a test can commit a merge in exactly that
  * window. Production never sets it.
  */
-export const audienceTestHooks: { beforeRowLocks?: () => Promise<void> } = {};
+export const audienceTestHooks: {
+  beforeRowLocks?: () => Promise<void>;
+  /** Runs after each round locked its ids; a test reads the union it asked for. */
+  afterRowLocks?: (ids: string[]) => Promise<void>;
+} = {};
 
 /** The latest version of a segment, which is what an edit acts on. */
 async function latestSegment(tx: Tx, workspaceId: string, id: string): Promise<ListSegment> {
@@ -106,36 +110,41 @@ export async function canonicalOf(tx: Tx, workspaceId: string, ids: string[]): P
  */
 async function lockedSurvivors(tx: Tx, workspaceId: string, ids: string[]): Promise<string[]> {
   const canonical = await canonicalOf(tx, workspaceId, ids);
-  let frontier = [...new Set([...canonical.values()].filter((id): id is string => !!id))];
+  const all = new Set([...canonical.values()].filter((id): id is string => !!id));
   // The concurrency test for #1068 pauses here: the unlocked follow of a moment ago can be stale,
   // and everything after this line must re-read `merged_into` under the row lock.
   await audienceTestHooks.beforeRowLocks?.();
-  const locked = new Map<string, { id: string; mergedInto: string | null }>();
-  const survivors = new Set<string>();
-  for (let round = 0; round < 20 && frontier.length; round++) {
-    const toLock = [...new Set(frontier.filter((id) => !locked.has(id)))].sort();
-    if (toLock.length) {
-      const rows = (
-        await tx.execute<{ id: string; merged_into: string | null }>(sql`
-          SELECT id, merged_into FROM profiles
-          WHERE workspace_id = ${workspaceId} AND id = ANY(${sql.param(toLock)}::text[])
-          ORDER BY id
-          FOR SHARE`)
-      ).rows;
-      for (const r of rows) locked.set(r.id, { id: r.id, mergedInto: r.merged_into });
-    }
-    const next: string[] = [];
-    for (const id of frontier) {
-      if (!locked.has(id)) continue;
-      const row = locked.get(id)!;
-      // A merge that committed before this lock is now visible; follow it. One that starts after
-      // it is waiting on the FOR SHARE and cannot move the row until this transaction commits.
-      if (row.mergedInto) next.push(row.mergedInto);
-      else survivors.add(id);
-    }
-    frontier = [...new Set(next)].filter((id) => !locked.has(id));
+  // A savepoint before the first lock. Each round rolls back to it, which releases the previous
+  // round's `FOR SHARE` rows, and then locks the whole discovered union in one ascending query. A
+  // merge that commits during the walk can point at an id lower than one already held; the old
+  // loop kept that higher lock while waiting for the lower row, so a concurrent erase (which locks
+  // ascending) could hold the lower row and wait for the higher one — an AB-BA deadlock (#1137).
+  await tx.execute(sql.raw('SAVEPOINT audience_survivors'));
+  let locked = new Map<string, { id: string; mergedInto: string | null }>();
+  for (let round = 0; round < 20; round++) {
+    await tx.execute(sql.raw('ROLLBACK TO SAVEPOINT audience_survivors'));
+    const toLock = [...all].sort();
+    if (!toLock.length) return [];
+    const rows = (
+      await tx.execute<{ id: string; merged_into: string | null }>(sql`
+        SELECT id, merged_into FROM profiles
+        WHERE workspace_id = ${workspaceId} AND id = ANY(${sql.param(toLock)}::text[])
+        ORDER BY id
+        FOR SHARE`)
+    ).rows;
+    locked = new Map(rows.map((r) => [r.id, { id: r.id, mergedInto: r.merged_into }]));
+    await audienceTestHooks.afterRowLocks?.(toLock);
+    // Follow every merge this round revealed. If a target was not part of the locked union, the
+    // next round re-locks the full union (including it) in ascending order.
+    let widened = false;
+    for (const row of rows)
+      if (row.merged_into && !all.has(row.merged_into)) {
+        all.add(row.merged_into);
+        widened = true;
+      }
+    if (!widened) break;
   }
-  return [...survivors];
+  return [...locked.values()].filter((r) => !r.mergedInto).map((r) => r.id);
 }
 
 /**

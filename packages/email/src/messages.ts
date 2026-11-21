@@ -187,7 +187,7 @@ export const messageStats = defineCommand({
       .optional(),
     journeyId: z
       .string()
-      .regex(/^jrn_[0-9a-f]{32}$/)
+      .regex(/^(?:jrn|bct)_[0-9a-f]{32}$/)
       .optional(),
     variant: z.string().min(1).max(4).optional().describe('Only messages from this broadcast subject-test variant, e.g. "A"'),
   }),
@@ -205,31 +205,14 @@ export const messageStats = defineCommand({
   effect: 'read',
   handler: async (input, ctx) => {
     const since = new Date(Date.now() - input.days * 86_400_000);
-    // A variant lives on the message, not the event, so narrow to its message ids first.
-    const variantIds = input.variant
-      ? (
-          await ctx.tx
-            .select({ id: schema.messages.id })
-            .from(schema.messages)
-            .where(
-              and(
-                eq(schema.messages.variant, input.variant),
-                input.templateId ? eq(schema.messages.templateId, input.templateId) : undefined,
-                input.journeyId ? eq(schema.messages.journeyId, input.journeyId) : undefined,
-                gte(schema.messages.createdAt, since),
-              ),
-            )
-        ).map((r) => r.id)
-      : undefined;
-    const counts =
-      variantIds && variantIds.length === 0
-        ? {}
-        : await ctx.services.events.messageStats(ctx.principal.workspaceId, {
-            since,
-            templateId: input.templateId,
-            journeyId: input.journeyId,
-            messageIds: variantIds,
-          });
+    // `variant` lives on message_events, so ClickHouse narrows on it directly (#1153). Loading the
+    // variant's message ids first hit PostgreSQL's parameter and ClickHouse's multipart limits.
+    const counts = await ctx.services.events.messageStats(ctx.principal.workspaceId, {
+      since,
+      templateId: input.templateId,
+      journeyId: input.journeyId,
+      variant: input.variant,
+    });
     const sent = counts.sent ?? 0;
     const rate = (k: string) => (sent ? Math.round(((counts[k] ?? 0) / sent) * 10_000) / 100 : null);
     return {

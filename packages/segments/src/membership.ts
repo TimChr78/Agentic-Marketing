@@ -113,7 +113,15 @@ function changeEvent(workspaceId: string, seg: PublishedSegment, c: Changed, nam
   };
 }
 
-/** Change events for a few people (streaming), looking up their ids. */
+/** How many profile ids one identifier lookup may carry: small enough for one array parameter. */
+const IDENTIFIER_CHUNK = 5000;
+
+/**
+ * Change events for people a list edit moved, looking up their ids. Both a CSV import (50,000 rows)
+ * and a snapshot (no member cap) come through here, so the lookup is array-chunked — Drizzle's
+ * `inArray` binds one parameter per id and PostgreSQL refuses more than 65,535 — and the rows are
+ * indexed once, so building the events is O(N) instead of one linear scan per person (#1143).
+ */
 async function membershipEvents(
   tx: Tx,
   workspaceId: string,
@@ -122,17 +130,26 @@ async function membershipEvents(
   exited: string[],
   cause: (profileId: string) => string,
 ): Promise<BusEvent[]> {
-  const people = [...entered, ...exited];
+  const people = [...new Set([...entered, ...exited])];
   if (!people.length) return [];
-  const ids = await tx
-    .select({ type: schema.identifiers.type, value: schema.identifiers.value, profileId: schema.identifiers.profileId })
-    .from(schema.identifiers)
-    .where(and(inArray(schema.identifiers.profileId, people), inArray(schema.identifiers.type, ['user_id', 'anonymous_id'])));
-  const who = (profileId: string): Changed => ({
-    profileId,
-    userId: ids.find((i) => i.profileId === profileId && i.type === 'user_id')?.value ?? '',
-    anonymousId: ids.find((i) => i.profileId === profileId && i.type === 'anonymous_id')?.value ?? '',
-  });
+  const identifiers = new Map<string, { userId: string; anonymousId: string }>();
+  for (let i = 0; i < people.length; i += IDENTIFIER_CHUNK) {
+    const chunk = people.slice(i, i + IDENTIFIER_CHUNK);
+    const { rows } = await tx.execute<{ type: string; value: string; profile_id: string }>(sql`
+      SELECT type, value, profile_id FROM identifiers
+      WHERE workspace_id = ${workspaceId} AND profile_id = ANY(${sql.param(chunk)}::text[])
+        AND type IN ('user_id', 'anonymous_id')`);
+    for (const row of rows) {
+      const found = identifiers.get(row.profile_id) ?? { userId: '', anonymousId: '' };
+      if (row.type === 'user_id') found.userId = row.value;
+      else found.anonymousId = row.value;
+      identifiers.set(row.profile_id, found);
+    }
+  }
+  const who = (profileId: string): Changed => {
+    const found = identifiers.get(profileId);
+    return { profileId, userId: found?.userId ?? '', anonymousId: found?.anonymousId ?? '' };
+  };
   return [
     ...entered.map((p) => changeEvent(workspaceId, seg, who(p), ENTERED, cause(p))),
     ...exited.map((p) => changeEvent(workspaceId, seg, who(p), EXITED, cause(p))),
