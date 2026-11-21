@@ -1,7 +1,9 @@
 import { Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { ApiError, api, errText, type Out } from '../../app/api';
+import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
+import { publicLink } from '../../lib/publicLinks';
 import {
   Alert,
   Button,
@@ -168,10 +170,13 @@ function validateSms(f: SmsForm, editing: boolean): Record<string, string> {
 
 function SmsDrawer({
   provider,
+  linksUrl,
   onClose,
   onSaved,
 }: {
   provider: Sms | null;
+  /** The workspace's public links URL: the webhook URL is built on it, never on the admin origin. */
+  linksUrl: string;
   onClose: () => void;
   onSaved: (p: Sms | null, created?: { name: string; url: string }) => void;
 }) {
@@ -226,7 +231,7 @@ function SmsDrawer({
           useFor,
           billing,
         });
-        onSaved(created, { name: created.name, url: `${location.origin}${created.webhookPath}/inbound` });
+        onSaved(created, { name: created.name, url: publicLink(linksUrl, `${created.webhookPath}/inbound`) });
       }
     } catch (e) {
       if (e instanceof ApiError && e.code === 'invalid_input') {
@@ -377,6 +382,7 @@ function SmsDrawer({
 
 /** SMS providers: name, sender, uses, cost/budget and the full Twilio configuration. */
 export function useSmsChannel(): ProviderChannel {
+  const { workspace } = useWorkspace();
   const list = useApi(() => api.call('smsProviders.list', {}), []);
   const toast = useToast();
   const [confirmDialog, confirm] = useConfirm();
@@ -423,7 +429,7 @@ export function useSmsChannel(): ProviderChannel {
   };
 
   const rows: ChannelRow[] = (list.data?.providers ?? []).map((p) => {
-    const url = `${location.origin}${p.webhookPath}/inbound`;
+    const url = publicLink(workspace.linksUrl, `${p.webhookPath}/inbound`);
     return {
       id: p.id,
       name: p.name,
@@ -466,6 +472,7 @@ export function useSmsChannel(): ProviderChannel {
           <SmsDrawer
             key={editing === 'new' ? 'new' : editing.id}
             provider={editing === 'new' ? null : editing}
+            linksUrl={workspace.linksUrl}
             onClose={() => setEditing(null)}
             onSaved={(p, inbound) => {
               setEditing(null);

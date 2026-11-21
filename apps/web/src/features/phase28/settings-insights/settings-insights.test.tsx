@@ -104,6 +104,7 @@ vi.mock('../../../app/session', () => {
   const workspace = {
     id: 'ws_1',
     name: 'Northstar Journal',
+    linksUrl: 'https://links.example.com',
     timeZone: 'UTC',
     serverVersion: '0.14.0',
     seedList: [],

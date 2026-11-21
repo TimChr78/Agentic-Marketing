@@ -153,6 +153,15 @@ vi.mock('../src/app/api', async (importOriginal) => {
   };
 });
 
+// #1166: public inbound URLs are built on the workspace's links URL, not the admin page's origin.
+vi.mock('../src/app/session', () => {
+  const workspace = { id: 'ws_1', name: 'Northstar Journal', linksUrl: 'https://links.example.com/am/' };
+  return {
+    useSession: () => ({ workspace, can: () => true }),
+    useWorkspace: () => ({ workspace, can: () => true, user: { id: 'u1' } }),
+  };
+});
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -289,6 +298,14 @@ describe('Providers compact channel rows (#527)', () => {
     await waitFor(() =>
       expect(h.calls.find((c) => c.name === 'smsProviders.update')?.input).toMatchObject({ id: 'sms_1', enabled: false }),
     );
+  });
+
+  it('builds the incoming-message URL on the workspace links host (#1166)', async () => {
+    renderChannels();
+    const smsRow = await row('Twilio alerts');
+    // The workspace links URL ends in a slash; exactly one separates it from the webhook path.
+    expect(within(smsRow).getByTitle('https://links.example.com/am/hooks/sms/tok/inbound')).toBeTruthy();
+    expect(within(smsRow).getByText('https://links.example.com/am/hooks/sms/tok/inbound')).toBeTruthy();
   });
 
   it('keeps the SMS development outbox without Twilio fields', async () => {
