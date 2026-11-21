@@ -351,7 +351,7 @@ export async function deliverRound(
       );
     });
     const claimed = await db.withWorkspace(ws, async (tx) => {
-      const res = await tx.execute<{ id: string; channel: string }>(sql`
+      const res = await tx.execute<{ id: string; channel: string; created_at: string }>(sql`
         UPDATE messages SET status = 'sending', attempts = attempts + 1, updated_at = now(), next_attempt_at = NULL
         WHERE (workspace_id, id) IN (
           SELECT workspace_id, id FROM messages
@@ -360,8 +360,9 @@ export async function deliverRound(
               OR (next_attempt_at IS NULL AND updated_at <= now() - make_interval(secs => 30 * attempts * attempts)))
             AND (not_before IS NULL OR not_before <= now())
           ORDER BY created_at LIMIT ${deps.batch ?? 50} FOR UPDATE SKIP LOCKED)
-        RETURNING id, channel`);
-      return res.rows;
+        RETURNING id, channel, created_at`);
+      // RETURNING does not keep the subquery's order: deliver oldest first, as the claim chose them.
+      return res.rows.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1));
     });
     for (const { id, channel } of claimed) {
       // One message's unexpected failure must not abandon the rest of the claimed batch (#1054).
