@@ -2,6 +2,71 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.17.6] - 2026-11-21
+
+### Fixed
+
+- Adding, importing or snapshotting a static audience can no longer deadlock against a profile merge or erasure: when a merge points at an id lower than one already held, the command releases its row locks and re-locks the whole set in ascending order.
+- A duplicate `event_id` no longer wedges the PostgreSQL warehouse export: each batch is deduplicated by the dataset key before it is written, keeping the last row.
+- The subject-key backfill retries a transient ClickHouse or PostgreSQL error with backoff instead of stopping for the lifetime of the process, so erasure cleanups no longer stay blocked after a brief outage. A genuinely missing table or column still stops the pass until the next start.
+- Large CSV imports and snapshots no longer freeze the server or fail past 65,534 members: identifier lookups are chunked and indexed once, so the change events are built in linear time.
+- Predictions stored for a person now survive an identity merge: the newest score per key moves to the surviving profile, so segments, journeys, `profiles.scores` and `ai.calibration` keep reading the same person's scores. `profiles.scores` also follows a merge when called with an old profile id.
+- Scores left on a profile that a merge folded away before this release are moved to the surviving profile when the upgrade migrates the database, keeping the newer score per key, so segments, journeys, `profiles.scores` and `ai.calibration` see them again without a re-score.
+- `segments.ofProfile` and the e-mail lifecycle customer events (`Email Sent`, `Email Delivered`, `Email Link Clicked`, `Email Unsubscribed`, `Email Bounced`, `Email Complained`) now follow a profile merge, so an old profile id still reports the person's segments and no message event is dropped when a merge lands before the outbox dispatcher runs.
+- A delivery worker no longer sends a message that the stale sweep already settled as `unknown_outcome` while it waited in a batch, and no longer rewrites that outcome back to `queued` or `suppressed`. A message deleted by an erasure before delivery is skipped instead of crashing the worker.
+- `journeys.enroll` resolves merged-away profile ids to the surviving person before re-entry, holdout and participant checks, and deduplicates the result, so re-entry limits and control-group arms cannot be bypassed through an old id. Both `journeys.enroll` and `journeys.enrollSegment` now refuse an archived journey.
+- `journeys.migrate` updates a `waitEvent` or `goal` participant's awaited event when the new version changes it, instead of leaving them on the removed event; it reports the people on older versions as `impact.people` and the journey's touches, and applies one batched update per version and node rather than one per participant.
+- An unsubscribe link for a person who was erased, or whose message row is gone, no longer writes a message event or a consent-change notification for the erased profile. When the person was merged, the event and the notification use the surviving profile.
+- Large subject tests can decide their winner again: per-variant results are aggregated in ClickHouse by broadcast instead of sending every message id, and `messages.stats` filters the variant there too. It also accepts a broadcast `bct_` id as `journeyId`.
+- An inbound SMS STOP and an SMS complaint or unsubscribe callback now refresh consent-dependent segments and journey audiences straight away, as e-mail unsubscribes already did. Tracked click links whose URL uses an uppercase `HTTPS://` scheme now redirect instead of returning 404.
+- Two ad conversion rules on the same event and ad connection each queue their own delivery instead of the second being silently dropped, conversions follow a merged profile before consent is checked, and an audience sync's unresolved count no longer counts an orphaned write intent twice.
+- Ad conversions queued before this release have their delivery key rewritten at upgrade to the format that names the destination action, so a batch redelivered after the upgrade does not send a conversion twice. A conversion that was already redelivered keeps one delivery instead of a second pending copy.
+- An alert e-mail failure that interrupts a batch no longer records a second, bogus `failed` result for members whose notice was already sent.
+- Setting only `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` now enables OpenTelemetry tracing, as the OpenTelemetry specification and the deployment docs say, instead of silently staying off.
+- The Helm migration Job takes its configuration from a hook ConfigMap and its secrets from the Secret through `envFrom`, in the same order as the role Deployments, so a Secret-backed `CLICKHOUSE_URL` or `VALKEY_URL` is no longer shadowed by the chart default. It also receives `podAnnotations`, `nodeSelector`, `tolerations` and `affinity`, and every suffixed resource name stays within Kubernetes's 63-character limit.
+- The `scheduler` Deployment always uses `Recreate`, whatever `upgradeStrategy` says, so a rollout never runs two uncoordinated schedulers.
+- A `PodDisruptionBudget` is emitted only when a role's minimum replicas exceed `minAvailable`. With the documented one-replica-per-role sizing no PDB is created, so `kubectl drain` and node upgrades are no longer blocked.
+- Upgrade note: the chart removes the PDBs of roles at or below `minAvailable` replicas on `helm upgrade`, and the scheduler strategy becomes `Recreate`. Long release names that could not install before now get valid, suffixed resource names.
+- Scheduler shutdown waits for an in-flight expired OAuth-consent cleanup instead of closing the database underneath it, and an already-aborted scheduler no longer starts one.
+- The bind-mount example in `compose.override.example.yaml` mounts the PostgreSQL data directory on `postgres-check` read-only too, so the PostgreSQL 16→18 guard inspects the data that 18 will open instead of an empty named volume.
+- The example now says to widen the admin bind by setting `AM_BIND` in `.env`, rather than editing the release `docker-compose.yml`.
+- If you copied block (b) into `compose.override.yaml`, add the same read-only mount to `postgres-check` before upgrading PostgreSQL from 16 to 18.
+- The Cloudflare Pages first-party proxy reference (`cloudflare-worker-proxy.js`) now allows the preference-centre and topic-unsubscribe links (`/u/p/*`, `/u/t/*`), public uploaded assets (`/a/*`), brand domain verification (`/.well-known/am-domain/*`) and web push (`/v1/push/config`, `/v1/push/subscribe`, `/v1/push/unsubscribe`). Sites using Option B should copy the updated file.
+- `am doctor`'s queue-lag hints suggest `docker compose logs app` (Compose runs every role in the `app` service) and keep the Kubernetes worker-pod note.
+- `scripts/e2e-docker.sh` derives its Playwright image from the pinned `@playwright/test` version, as CI does, instead of a hard-coded tag.
+- The Copilot acts in the brand you are viewing: streamed chats now send the selected workspace, so they no longer run tools or save history in the oldest brand.
+- “Erase person” accepts the reason you type and records it, instead of always saving “Erasure request”.
+- SMS providers and connections show inbound webhook URLs on the workspace’s public links host, so Twilio and other services can reach them.
+- Newly created and newly approved templates, segments and other artifacts appear in pickers straight away, without a page reload.
+- A failed sign-out keeps you on the page you were using, and lawful bases and roles read as words (“Legitimate interest”, “Builder”) instead of raw keys.
+- Artifact lists and the guardian card now show a failed read with Retry instead of empty-state copy or nothing at all.
+- A rejected broadcast no longer offers Submit or Publish until it is edited into a draft.
+- Journey inputs keep a wait-until segment mode, comma-separated options and decimal profile values while typing, and read-only viewers can no longer duplicate, undo or redo.
+- Brand and experience editors offer a custom font stack, keep variant cards mounted while their id changes, keep spaces in a goal event and can clear an optional archive slug.
+- Segment conditions show and edit topic and score rows, and e-mail templates insert an SVG asset's PNG rendition.
+- A daily agent digest that only partly delivered is now retried for the same window, so a retry
+  after UTC midnight reaches only the sponsors whose mail failed instead of sending the digest to
+  the ones who already received it.
+
+### Security
+
+- The physical erasure purge now scopes its matching count and delete subquery to the workspace being purged even when ClickHouse row policies are off, so another workspace's rows can neither inflate the reported deletion count nor consume the bounded batch.
+- Campaign member rows now count only people actually sent or delivered to toward the k-anonymity floor, so a member with fewer than k real sends stays hidden even when many suppressed or failed attempts exist. Goal-event lookups are also bounded to the campaign's time window and attribution period instead of merging all history.
+- A verified brand domain serves only its public surface: signup forms, unsubscribe and preference pages, click redirects, assets, the newsletter archive, inbound webhooks, and the public `/v1` tracking, decide, push and consent paths. The admin UI, sign-in, MCP, SCIM, OpenAPI and admin REST answer 404 on a brand host instead of falling through to the admin application.
+- Path-prefixed brand domains (`/am/f/*`, `/am/hooks/in/*`, `/am/v1/*`) work on an `api` pod in a split Kubernetes deployment. Admin REST `/v1/<command>` is served by the `api` role only, and the Ingress routes only the public `/v1` paths to `ingest`.
+- Upgrade note: requests that reached the admin UI or admin REST through a brand hostname must use `PUBLIC_URL` instead. Apply the new chart so the Ingress path split changes with it.
+- SCIM deprovisioning now names the workspace explicitly, its 409 for a shared account no longer reveals that the account belongs elsewhere or owns a workspace, and a display-name change that differs only in capitalisation no longer fails every sync. The five agent memory, subscription and AI review tool descriptions now state the `artifacts:write` (or `artifacts:approve`) permission they require.
+
+### Upgrading from 0.17.5
+
+- **Migrations:** `packages/db/migrations/0118_ad_conversion_idempotency_keys.sql`, `packages/db/migrations/0119_stranded_profile_scores.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** a brand hostname (a verified brand domain) now serves only the public paths: the admin UI, sign-in, MCP, SCIM, OpenAPI and admin REST answer 404 there and must be reached through `PUBLIC_URL`; health probes still answer. In Kubernetes, admin REST `/v1/<command>` is served by the `api` role only. The Helm chart forces the scheduler to `Recreate`, emits a `PodDisruptionBudget` only for roles with more replicas than `minAvailable`, and refuses a percentage `minAvailable`. `messages.stats` with `variant` now counts by event time, like the call without it. The daily agent digest covers everything since the last complete digest rather than the last 24 hours.
+- **Manual steps:** none for Compose. On Kubernetes, apply the new chart with the release (the Ingress path split and the migration Job change with it), and point any admin, MCP or SCIM client that used a brand hostname at `PUBLIC_URL`. Migrations 0118 and 0119 rewrite existing ad-conversion delivery keys and move profile scores stranded by earlier merges; they run automatically on start.
+- **Upgrade:** download `agentic-marketing-compose-0.17.6.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.17.6 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.17.6` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.17.6). Run `docker compose exec app am doctor`.
+
+<!-- issues: 1137, 1139, 1140, 1143, 1144, 1145, 1147, 1148, 1149, 1150, 1152, 1153, 1154, 1155, 1156, 1157, 1158, 1159, 1160, 1161, 1162, 1163, 1164, 1165, 1166, 1167, 1168, 1169, 1170, 1171, 1172, 1173, 1182, 1184 -->
+
 ## [0.17.5] - 2026-11-21
 
 ### Changed
