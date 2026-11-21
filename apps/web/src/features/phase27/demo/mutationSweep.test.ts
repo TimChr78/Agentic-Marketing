@@ -64,6 +64,11 @@ const ALLOWED_CONTROLS: { file: string; control: RegExp; reason: string }[] = [
     reason: 'retries the list read',
   },
   {
+    file: 'features/artifacts/ArtifactListPage.tsx',
+    control: /<Button onClick=\{\(\) => void list\.reload\(\)\}>/,
+    reason: 'retries the list read (#1168)',
+  },
+  {
     file: 'features/tokens/TokenDrawer.tsx',
     control: /<Button variant="ghost" disabled=\{!dirty\} onClick=\{\(\) => void t\.reload\(\)\}>/,
     reason: 'reloads the token read',

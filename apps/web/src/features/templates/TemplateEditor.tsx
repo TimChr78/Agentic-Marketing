@@ -365,7 +365,8 @@ export function TemplateEditor({ artifact, content, onChange, readOnly, errors }
           title="Insert an image"
           onClose={() => setPicking(false)}
           onPick={(a) => {
-            insertImage(a.url, a.altText);
+            // Mail clients strip SVG; an SVG asset has a PNG rendition made for e-mail (#1172).
+            insertImage(a.rendition?.url ?? a.url, a.altText);
             setPicking(false);
           }}
         />

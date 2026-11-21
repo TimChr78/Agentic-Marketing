@@ -1,7 +1,8 @@
 import { CircleHelp, Copy, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
-import { Alert, Button, Field, FieldGroup, Input, Segmented, Select, Textarea } from '../../ui';
+import { Alert, Button, CommaListInput, Field, FieldGroup, Input, Segmented, Select, Textarea } from '../../ui';
 import { ArtifactSelect } from '../artifacts/ArtifactSelect';
 import { JsonEditor } from '../artifacts/JsonEditor';
 import { connectionList, trackingPlan, trackingPlanList, webhookList } from '../phase27/journey/reads';
@@ -42,6 +43,55 @@ function DurationSelect({
         ))}
       </Select>
     </Field>
+  );
+}
+
+/** Store true, false and numbers as their JSON type; anything else stays the text that was typed. */
+function coerceProfileValue(raw: string): string | number | boolean {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw.trim() !== '' && !Number.isNaN(Number(raw))) return Number(raw);
+  return raw;
+}
+
+const profileValueText = (value: unknown) => (value === null || value === undefined ? '' : String(value));
+
+/**
+ * The updateProfile value keeps the raw text while someone types, so "1." and " " are not
+ * rewritten mid-edit; it becomes a JSON value on blur (#1170).
+ */
+function ProfileValueInput({
+  value,
+  readOnly,
+  onChange,
+}: {
+  value: unknown;
+  readOnly: boolean;
+  onChange: (value: string | number | boolean) => void;
+}) {
+  const [text, setText] = useState(() => profileValueText(value));
+  const last = useRef(profileValueText(value));
+
+  useEffect(() => {
+    const next = profileValueText(value);
+    if (next !== last.current) {
+      setText(next);
+      last.current = next;
+    }
+  }, [value]);
+
+  return (
+    <Input
+      value={text}
+      readOnly={readOnly}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => {
+        const next = coerceProfileValue(text);
+        last.current = profileValueText(next);
+        setText(profileValueText(next));
+        onChange(next);
+      }}
+    />
   );
 }
 
@@ -240,7 +290,7 @@ export function Inspector({
         <FieldGroup legend="Until the person matches">
           <Segmented
             label="Wait until the person"
-            value={directSegment ? 'segment' : 'condition'}
+            value={directSegment !== undefined ? 'segment' : 'condition'}
             onChange={(v) =>
               !readOnly && setC({ condition: v === 'segment' ? { segment: directSegment ?? '' } : { trait: 'city', op: 'eq', value: '' } })
             }
@@ -249,7 +299,7 @@ export function Inspector({
               { key: 'condition', label: 'Matches a condition' },
             ]}
           />
-          {directSegment ? (
+          {directSegment !== undefined ? (
             <ArtifactSelect
               type="segment"
               value={directSegment || undefined}
@@ -353,14 +403,7 @@ export function Inspector({
             <Input value={c.trait ?? ''} readOnly={readOnly} onChange={(e) => setC({ trait: e.target.value })} />
           </Field>
           <Field label="Value" hint="Text, a number, true or false.">
-            <Input
-              value={c.value === null || c.value === undefined ? '' : String(c.value)}
-              readOnly={readOnly}
-              onChange={(e) => {
-                const v = e.target.value;
-                setC({ value: v === 'true' ? true : v === 'false' ? false : v !== '' && !Number.isNaN(Number(v)) ? Number(v) : v });
-              }}
-            />
+            <ProfileValueInput value={c.value} readOnly={readOnly} onChange={(value) => setC({ value })} />
           </Field>
         </>
       )}
@@ -379,18 +422,7 @@ export function Inspector({
           {node.kind === 'aiDecide' && (
             <>
               <Field label="Options" hint="The prompt's option keys, one per path, comma-separated.">
-                <Input
-                  value={((c.options as string[]) ?? []).join(', ')}
-                  readOnly={readOnly}
-                  onChange={(e) =>
-                    setC({
-                      options: e.target.value
-                        .split(',')
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    })
-                  }
-                />
+                <CommaListInput value={(c.options as string[]) ?? []} readOnly={readOnly} onChange={(options) => setC({ options })} />
               </Field>
               <Field label="Fallback" hint="Taken when the AI cannot decide (no consent, budget, timeout, error).">
                 <Select value={c.fallback ?? ''} disabled={readOnly} onChange={(e) => setC({ fallback: e.target.value })}>

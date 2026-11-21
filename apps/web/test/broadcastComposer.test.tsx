@@ -306,7 +306,12 @@ function Harness({
   value?: ReturnType<typeof artifactFor>;
 }) {
   const [draft, setDraft] = useState(initial);
-  return <BroadcastEditor artifact={value} content={draft} onChange={setDraft} readOnly={readOnly} errors={{}} warnings={[]} />;
+  return (
+    <>
+      <BroadcastEditor artifact={value} content={draft} onChange={setDraft} readOnly={readOnly} errors={{}} warnings={[]} />
+      <output data-testid="composer-draft">{JSON.stringify(draft)}</output>
+    </>
+  );
 }
 
 const calls = (name: string) => h.calls.filter((call) => call.name === name);
@@ -742,6 +747,13 @@ describe('composer component (#497)', () => {
     // template's exact version is read).
     await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh checks' }) as HTMLButtonElement).disabled).toBe(false));
     expect(await screen.findByText('1,842 eligible in current check')).toBeTruthy();
+  });
+
+  it('removes a cleared archive slug so the draft can be saved (#1171)', async () => {
+    render(<Harness initial={content({ archive: { publish: true, slug: 'signal-43' } })} />);
+    fireEvent.change(await screen.findByLabelText('Issue address'), { target: { value: '' } });
+    const draft = JSON.parse(screen.getByTestId('composer-draft').textContent!);
+    expect(draft.archive).toEqual({ publish: true });
   });
 
   it('never turns a failed provider read into ready and retries only that row', async () => {

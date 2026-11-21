@@ -1,5 +1,5 @@
 import { ImageIcon, X } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Button, Checkbox, Field, FieldGroup, Input, Select, Textarea } from '../../ui';
 import type { EditorProps } from '../artifacts/ArtifactDetailPage';
 import { AssetPicker } from '../assets/AssetPicker';
@@ -45,6 +45,8 @@ const COPY_LABEL: Record<keyof typeof DEFAULT_COPY, string> = {
 const prune = <T extends Record<string, unknown>>(o: T): T =>
   Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== '')) as T;
 
+const isFontPreset = (stack: string | undefined) => FONT_PRESETS.some((f) => f.value === (stack ?? DEFAULT_FONT));
+
 /**
  * Brand fields with a live preview of the hosted pages (#37, #526). Works for the workspace brand
  * and, with `override`, for a form's partial override (empty fields fall back to the workspace brand).
@@ -66,7 +68,20 @@ export function BrandFields({
   override?: boolean;
 }) {
   const [picking, setPicking] = useState(false);
+  // Choosing "Custom font stack…" is local UI state: the saved value can still be a preset (or
+  // undefined, which means the default preset) while the custom field is open (#1171).
+  const [customFont, setCustomFont] = useState(() => !isFontPreset(value.fontStack));
+  const lastFont = useRef(value.fontStack);
+  useEffect(() => {
+    if (lastFont.current === value.fontStack) return;
+    lastFont.current = value.fontStack;
+    setCustomFont(!isFontPreset(value.fontStack));
+  }, [value.fontStack]);
   const set = (p: Partial<BrandContent>) => onChange(prune({ ...value, ...p }));
+  // Empty nested archive fields must be removed, not kept as "": the server validates the slug and
+  // refuses an empty string, so clearing it must delete the key (#1171).
+  const setArchive = (patch: Partial<NonNullable<BrandContent['archive']>>) =>
+    set({ archive: prune({ ...(value.archive ?? {}), ...patch }) as BrandContent['archive'] });
   const colors = { ...DEFAULT_COLORS, ...(value.colors ?? {}) };
   const setColor = (k: ColorKey, v: string) => set({ colors: prune({ ...(value.colors ?? {}), [k]: v || undefined }) });
   const err = (k: string) => errors[`${prefix}${k}`];
@@ -218,18 +233,17 @@ export function BrandFields({
         <div className="grid gap-4 sm:grid-cols-[1fr_160px]">
           <Field label="Font" hint="System fonts load instantly and need no third party." error={err('fontStack')}>
             <Select
-              value={fontPreset ? fontPreset.value : '__custom'}
+              value={customFont || !fontPreset ? '__custom' : fontPreset.value}
               disabled={readOnly}
-              onChange={(e) =>
-                set({
-                  fontStack:
-                    e.target.value === '__custom'
-                      ? (value.fontStack ?? '')
-                      : e.target.value === DEFAULT_FONT && !override
-                        ? undefined
-                        : e.target.value,
-                })
-              }
+              onChange={(e) => {
+                const next = e.target.value;
+                if (next === '__custom') {
+                  setCustomFont(true);
+                  return;
+                }
+                setCustomFont(false);
+                set({ fontStack: next === DEFAULT_FONT && !override ? undefined : next });
+              }}
             >
               {FONT_PRESETS.map((f) => (
                 <option key={f.value} value={f.value}>
@@ -252,7 +266,7 @@ export function BrandFields({
             />
           </Field>
         </div>
-        {!fontPreset && (
+        {(customFont || !fontPreset) && (
           <Field
             label="Custom font stack"
             hint={'CSS font-family, e.g. "Inter", system-ui, sans-serif. The font must be installed on the reader’s device.'}
@@ -317,7 +331,7 @@ export function BrandFields({
             hint="Only sent broadcasts that are also marked “Publish to the archive” appear."
             checked={value.archive?.enabled ?? false}
             disabled={readOnly}
-            onChange={(e) => set({ archive: { ...(value.archive ?? {}), enabled: e.target.checked } })}
+            onChange={(e) => setArchive({ enabled: e.target.checked })}
           />
           {value.archive?.enabled && (
             <>
@@ -328,7 +342,7 @@ export function BrandFields({
                     readOnly={readOnly}
                     maxLength={120}
                     placeholder={value.siteName || 'Newsletter archive'}
-                    onChange={(e) => set({ archive: { ...(value.archive ?? {}), title: e.target.value } })}
+                    onChange={(e) => setArchive({ title: e.target.value })}
                   />
                 </Field>
                 <Field
@@ -342,7 +356,7 @@ export function BrandFields({
                     readOnly={readOnly}
                     maxLength={41}
                     placeholder="newsletter"
-                    onChange={(e) => set({ archive: { ...(value.archive ?? {}), slug: e.target.value.toLowerCase() } })}
+                    onChange={(e) => setArchive({ slug: e.target.value.toLowerCase() })}
                   />
                 </Field>
               </div>
@@ -352,7 +366,7 @@ export function BrandFields({
                   value={value.archive?.description ?? ''}
                   readOnly={readOnly}
                   maxLength={500}
-                  onChange={(e) => set({ archive: { ...(value.archive ?? {}), description: e.target.value } })}
+                  onChange={(e) => setArchive({ description: e.target.value })}
                 />
               </Field>
               <Field
@@ -365,7 +379,7 @@ export function BrandFields({
                   value={value.archive?.subscribeUrl ?? ''}
                   readOnly={readOnly}
                   placeholder="https://example.com/#signup"
-                  onChange={(e) => set({ archive: { ...(value.archive ?? {}), subscribeUrl: e.target.value } })}
+                  onChange={(e) => setArchive({ subscribeUrl: e.target.value })}
                 />
               </Field>
             </>

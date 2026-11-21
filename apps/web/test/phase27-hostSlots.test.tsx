@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type ArtifactDetailConfig, ArtifactDetailPage, type EditorProps } from '../src/features/artifacts/ArtifactDetailPage';
 import { ArtifactListPage, type ArtifactListTemplate } from '../src/features/artifacts/ArtifactListPage';
+import { resetPickerIndexes } from '../src/features/artifacts/pickerIndex';
 import { ToastProvider } from '../src/ui/toast';
 
 const h = vi.hoisted(() => ({
@@ -15,6 +16,7 @@ const h = vi.hoisted(() => ({
     publishedVersion: number | null;
     updatedAt: string;
   }[],
+  error: null as Error | null,
   detail: undefined as unknown,
 }));
 
@@ -28,7 +30,10 @@ vi.mock('../src/app/api', async (importOriginal) => {
     api: {
       call: vi.fn(async (name: string) => {
         h.calls.push(name);
-        if (name === 'artifacts.list') return { artifacts: h.rows, total: h.rows.length, nextCursor: null };
+        if (name === 'artifacts.list') {
+          if (h.error) throw h.error;
+          return { artifacts: h.rows, total: h.rows.length, nextCursor: null };
+        }
         if (name === 'approvals.list') return { approvals: [], total: 0, nextCursor: null };
         if (name === 'artifacts.get') return h.detail;
         throw new Error(`unexpected ${name}`);
@@ -59,7 +64,9 @@ function row(id: string, name: string) {
 }
 
 beforeEach(() => {
+  resetPickerIndexes();
   h.calls.length = 0;
+  h.error = null;
   h.rows = [row(tpl, 'Weekly Signal #43'), row(other, 'Confirm your subscription')];
   h.detail = {
     id: tpl,
@@ -136,6 +143,32 @@ describe('artifact list host slots (#524)', () => {
     expect(screen.getByRole('button', { name: 'Next page' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'New template' })).toBeTruthy();
     expect(screen.getByText('2 total')).toBeTruthy();
+  });
+
+  it('shows the load error and Retry, not the empty-state copy, when the v2 list fails (#1168)', async () => {
+    h.error = new Error('The list is unavailable.');
+    const template: ArtifactListTemplate = {
+      mobileRow: (a) => <li key={a.id}>{a.name}</li>,
+      filters: <select aria-label="Kind" />,
+    };
+    render(
+      <ToastProvider>
+        <ArtifactListPage
+          type="email_template"
+          title="E-mail templates"
+          description="E-mails in MJML."
+          emptyTitle="No e-mail templates yet"
+          emptyText="Create one."
+          create={{ label: 'New template', content: (name) => ({ subject: name }) }}
+          template={template}
+        />
+      </ToastProvider>,
+    );
+    expect(await screen.findByText('Couldn’t load e-mail templates')).toBeTruthy();
+    expect(screen.getByText('The list is unavailable.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
+    expect(screen.queryByText('No e-mail templates yet')).toBeNull();
+    expect(screen.queryByText('Create one.')).toBeNull();
   });
 
   it('keeps the family filters and an inline notice for a filtered-out empty list', async () => {

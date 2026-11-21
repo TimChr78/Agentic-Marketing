@@ -213,12 +213,16 @@ describe('broadcast primary action (#448)', () => {
     expect(broadcastPrimaryActionOf({ artifact: draft, canSubmit: true })).toMatchObject({ kind: 'publish' });
   });
 
-  it('rejected content can be submitted again', () => {
+  it('a rejected version cannot be submitted until it is edited into a draft (#1169)', () => {
     const rejected = artifact({
       publishedVersion: null,
       version: { ...artifact().version, state: 'rejected' },
     });
-    expect(broadcastPrimaryActionOf({ artifact: rejected, canSubmit: true })).toMatchObject({ kind: 'publish' });
+    expect(broadcastPrimaryActionOf({ artifact: rejected, canSubmit: true })).toEqual({
+      kind: 'tab',
+      tab: 'content',
+      label: 'View content',
+    });
   });
 
   it('in review links the request to the reviewer or the activity history', () => {

@@ -33,7 +33,7 @@ export function GuardianCard({ agent, onChanged }: { agent: Agent; onChanged: ()
   const [error, setError] = useState<string | null>(null);
 
   const episodes = data.data?.episodes ?? [];
-  if (!agent.guard && episodes.length === 0) return null;
+  if (!agent.guard && !data.loading && !data.error && episodes.length === 0) return null;
 
   const clear = async () => {
     setBusy(true);

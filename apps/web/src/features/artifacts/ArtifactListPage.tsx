@@ -217,8 +217,13 @@ export function ArtifactListPage<S = Record<string, never>>({
   if (template) {
     // The v2 list template (#524). Every control the default page has stays: search, publication
     // state, totals, create, loading/error/empty and the rows; the family adds its phone summaries.
-    const notice =
-      total === 0
+    const notice = list.error
+      ? {
+          title: `Couldn’t load ${title.toLowerCase()}`,
+          body: list.error,
+          action: <Button onClick={() => void list.reload()}>Retry</Button>,
+        }
+      : total === 0
         ? { title: emptyTitle, body: emptyText, action: createButton }
         : { title: 'Nothing matches', body: 'Clear the search or choose another state.' };
     const state2 = list.loading ? 'loading' : list.error ? 'error' : rows.length === 0 ? 'empty' : 'ready';

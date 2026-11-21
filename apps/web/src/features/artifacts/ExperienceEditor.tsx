@@ -317,7 +317,10 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
             const n = i + 1;
             const contentKind = variant.content?.html !== undefined ? 'html' : 'json';
             return (
-              <div key={variant.id || i} className="space-y-3 rounded-md border border-line p-3">
+              // The card keeps its identity by position while the id itself is edited; keying by
+              // the id would unmount the input on every keystroke (#1171).
+              // biome-ignore lint/suspicious/noArrayIndexKey: variant cards are positional until saved
+              <div key={i} className="space-y-3 rounded-md border border-line p-3">
                 <div className="flex items-center gap-2">
                   <span className="text-[12px] font-medium text-muted">Variant {n}</span>
                   {!readOnly && (
@@ -477,7 +480,19 @@ export function ExperienceEditor({ content, onChange, readOnly, errors, warnings
               maxLength={200}
               placeholder="Newsletter Signup"
               onChange={(e) => {
-                const event = e.target.value.trim();
+                // Keep every keystroke, including a trailing space, so a multi-word event is
+                // typeable; the trimmed value is written on blur (and therefore on save).
+                const event = e.target.value;
+                if (event) set({ goal: { ...content.goal, event } });
+                else {
+                  const next = { ...content };
+                  delete next.goal;
+                  onChange(next);
+                }
+              }}
+              onBlur={() => {
+                const event = (content.goal?.event ?? '').trim();
+                if (event === (content.goal?.event ?? '')) return;
                 if (event) set({ goal: { ...content.goal, event } });
                 else {
                   const next = { ...content };

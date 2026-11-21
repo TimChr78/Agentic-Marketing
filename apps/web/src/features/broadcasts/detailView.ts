@@ -243,7 +243,9 @@ export function broadcastPrimaryActionOf(input: PrimaryActionInput): BroadcastPr
   if (input.dirty && !input.readOnly) return { kind: 'save', label: 'Save draft' };
   if (input.statusLoading) return { kind: 'loading', label: 'Checking send state' };
   const state = input.artifact.version.state;
-  if (state === 'draft' || state === 'rejected') {
+  // Only a draft can be submitted: the server refuses to publish a rejected version until an edit
+  // has made a new draft, so offering it would deterministically fail with a conflict (#1169).
+  if (state === 'draft') {
     if (input.readOnly) return { kind: 'tab', tab: 'content', label: 'View content' };
     if (input.canSubmit)
       return {

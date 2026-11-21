@@ -114,6 +114,14 @@ export function BroadcastEditor({ artifact, content, onChange, readOnly, errors 
         Object.entries({ ...broadcast, ...patch }).filter(([, value]) => value !== undefined && value !== ''),
       ) as Broadcast,
     );
+  // Clearing an optional archive field must remove the key: the server refuses an empty slug, so
+  // keeping slug: "" would block the draft save (#1171).
+  const setArchive = (patch: Partial<NonNullable<Broadcast['archive']>>) =>
+    set({
+      archive: Object.fromEntries(
+        Object.entries({ ...(broadcast.archive ?? {}), ...patch }).filter(([, value]) => value !== undefined && value !== ''),
+      ) as Broadcast['archive'],
+    });
   const purposes = data.purposes.data?.purposes ?? [];
   const templatePurpose = data.templateContent?.purpose;
   const topics = topicsOf(purposes, templatePurpose);
@@ -515,7 +523,7 @@ export function BroadcastEditor({ artifact, content, onChange, readOnly, errors 
                 hint="Only sent issues appear. The page uses the template version that was sent, with empty personalisation."
                 checked={archiveOn}
                 disabled={readOnly}
-                onChange={(e) => set({ archive: { ...(broadcast.archive ?? {}), publish: e.target.checked } })}
+                onChange={(e) => setArchive({ publish: e.target.checked })}
               />
               {broadcast.archive?.publish && (
                 <>
@@ -529,7 +537,7 @@ export function BroadcastEditor({ artifact, content, onChange, readOnly, errors 
                       readOnly={readOnly}
                       maxLength={41}
                       placeholder="signal-43"
-                      onChange={(e) => set({ archive: { ...(broadcast.archive ?? {}), slug: e.target.value.toLowerCase() } })}
+                      onChange={(e) => setArchive({ slug: e.target.value.toLowerCase() })}
                     />
                   </Field>
                   <Field
@@ -542,7 +550,7 @@ export function BroadcastEditor({ artifact, content, onChange, readOnly, errors 
                       value={broadcast.archive.summary ?? ''}
                       readOnly={readOnly}
                       maxLength={500}
-                      onChange={(e) => set({ archive: { ...(broadcast.archive ?? {}), summary: e.target.value } })}
+                      onChange={(e) => setArchive({ summary: e.target.value })}
                     />
                   </Field>
                 </>
