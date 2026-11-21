@@ -548,27 +548,41 @@ describe('staged send', () => {
     expect((await messagesOf(id)).length).toBe(PEOPLE);
   }, 90_000);
 
-  /** A staged send whose canary stays queued behind a closed send window, so tests can set its outcome. */
+  /**
+   * A staged send whose canary stays queued behind a closed send window, so tests can set its outcome.
+   *
+   * The canary share is a hash of the person and the broadcast id, so a 5% canary of the 120 people
+   * here is empty about one broadcast in five hundred. An empty canary sends nobody first: the check
+   * then has no evidence to judge, skips it for size and releases the whole audience at once, which
+   * is a different scenario than the one these tests name. A fresh broadcast id is a fresh draw, so
+   * retry until the canary has someone in it instead of handing a test a send whose first pass never
+   * happens (#300). The rows are written with the stage in one transaction, so waiting for the stage
+   * is enough; waiting for a queued canary message would hide the empty draw behind the timeout.
+   */
   const heldCanary = async (canaryPercent: number, minCanary: number) => {
     const now = new Date();
     const clock = (minutes: number) => `${String(Math.floor(minutes / 60) % 24).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
-    const id = await broadcast({
-      template,
-      segment,
-      sendAt: now.toISOString(),
-      sendWindow: {
-        start: clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 60),
-        end: clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 180),
-        maxDelay: 'P1D',
-      },
-      stagedSend: { canaryPercent, wait: 'PT2H', minCanary },
-    });
-    await eventually(
-      () => status(id),
-      (s) => s.stage?.stage === 'canary_waiting' && s.stage.canary.queued >= 1,
-      20_000,
-    );
-    return { id, canary: await canaryMessages(id, canaryPercent) };
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const id = await broadcast({
+        template,
+        segment,
+        sendAt: now.toISOString(),
+        sendWindow: {
+          start: clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 60),
+          end: clock(now.getUTCHours() * 60 + now.getUTCMinutes() + 180),
+          maxDelay: 'P1D',
+        },
+        stagedSend: { canaryPercent, wait: 'PT2H', minCanary },
+      });
+      await eventually(
+        () => status(id),
+        (s) => s.stage?.stage === 'canary_waiting',
+        20_000,
+      );
+      const canary = await canaryMessages(id, canaryPercent);
+      if (canary.length) return { id, canary };
+    }
+    throw new Error(`no canary share after five broadcasts at ${canaryPercent}% of ${PEOPLE} people`);
   };
 
   it('stops when a canary smaller than minCanary could not deliver (#300)', async () => {
