@@ -395,6 +395,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         (c as unknown as Context<{ Variables: { publicRequest: PublicRequest } }>).set('publicRequest', resolved);
         return next();
       }
+      // Health probes answer on every host, like the prefixed branch above and the public listener.
+      if (exactProbe(path)) return next();
       if (resolved.matched) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
       return next();
     }

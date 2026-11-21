@@ -331,6 +331,10 @@ describe('brand host routing', () => {
     expect(tracking.status).toBe(401);
     expect(JSON.parse(tracking.body)).toMatchObject({ error: 'invalid_write_key' });
 
+    // Health probes stay answerable on a brand host, as they are on a prefixed one, so an uptime
+    // monitor pointed at the brand hostname keeps working.
+    for (const probe of ['/healthz', '/readyz']) expect((await request(MAIN_PORT, probe, { host: A })).status, probe).not.toBe(404);
+
     // The installation's own host still serves the admin API.
     expect((await request(MAIN_PORT, '/openapi.json')).status).toBe(200);
     const rest = await request(MAIN_PORT, '/v1/workspace.get', {

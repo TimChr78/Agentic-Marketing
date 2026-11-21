@@ -93,13 +93,15 @@ function helmSection(text: string, name: string): string {
   return end < 0 ? body : body.slice(0, end);
 }
 
-// Render tests run the real chart. CI installs helm; a local checkout may have it on PATH or at
-// the tools directory. Without it the render checks skip, while the template-reading checks above
+// Render tests run the real chart. CI installs helm; a local checkout needs it on PATH or named by
+// HELM_BIN. Without it the render checks skip, while the template-reading checks above
 // still run everywhere.
-const helm = ['helm', '/mnt/user/appdata/t3code/tools/bin/helm'].find((candidate) => {
-  const probe = spawnSync(candidate, ['version', '--short'], { encoding: 'utf8' });
-  return probe.status === 0;
-});
+const helm = [process.env.HELM_BIN, 'helm']
+  .filter((c): c is string => !!c)
+  .find((candidate) => {
+    const probe = spawnSync(candidate, ['version', '--short'], { encoding: 'utf8' });
+    return probe.status === 0;
+  });
 
 function helmTemplate(args: string[] = [], release = 'am'): string {
   const run = spawnSync(
@@ -662,6 +664,10 @@ describe('Helm disruption budgets (#1159)', () => {
     expect(autoscaled.some((name) => name.endsWith('-ingest'))).toBe(false);
     // minAvailable at or above the minimum is the same drain block.
     expect(pdbs(['--set', 'podDisruptionBudget.minAvailable=2'])).toEqual([]);
+  });
+
+  it.skipIf(!helm)('refuses a percentage minAvailable, which the replica gate cannot compare', () => {
+    expect(() => helmTemplate(['--set-string', 'podDisruptionBudget.minAvailable=50%'])).toThrow(/whole number of pods/);
   });
 });
 

@@ -1,4 +1,7 @@
 {{- if .Values.podDisruptionBudget.enabled }}
+{{- if not (or (kindIs "float64" .Values.podDisruptionBudget.minAvailable) (kindIs "int" .Values.podDisruptionBudget.minAvailable) (kindIs "int64" .Values.podDisruptionBudget.minAvailable)) }}
+{{- fail "podDisruptionBudget.minAvailable must be a whole number of pods (a percentage cannot be compared with a role's replicas)" }}
+{{- end }}
 {{- range $role := list "api" "ingest" "worker" }}
 {{- $r := index $.Values.roles $role }}
 {{- $min := $r.replicas }}

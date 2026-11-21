@@ -158,7 +158,7 @@ podDisruptionBudget:
   # Only emitted for a role whose minimum replicas (autoscaling.minReplicas when enabled) exceed
   # this value: at or below it a PDB would block every voluntary drain, so a one-replica-per-role
   # install gets none.
-  minAvailable: 1
+  minAvailable: 1 # a whole number of pods; a role gets a PDB only when it runs more than this
 
 serviceAccount:
   create: true
