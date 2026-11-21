@@ -1406,6 +1406,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       log(
         `erasures replayed: ${replayed.profiles} profile(s) removed from the restored snapshot, ` +
           `${replayed.tombstones} tombstone(s) restored` +
+          (replayed.cleanupJobs ? `, ${replayed.cleanupJobs} cleanup job(s) queued to republish the exclusions` : '') +
           (replayed.keys ? `, ${replayed.keys} erasure key(s) restored` : '') +
           (replayed.exclusionKeys ? `, ${replayed.exclusionKeys} exclusion key(s) restored` : '') +
           (replayed.generations ? `, ${replayed.generations} exclusion generation(s) replayed` : '') +

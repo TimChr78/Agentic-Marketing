@@ -170,9 +170,11 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
 3. It then restores ClickHouse, if asked, and reports how many profiles, tombstones, erasure keys,
    exclusion keys and generations were replayed. A replayed erasure is not complete again until its
    exclusion is published: the restored cleanup job starts pending, republishes the workspace's
-   `erased_subjects` rows and cleans the restored ClickHouse and hot state. The restore also resets
-   the workspace's `purged_generation` to `0`, so the scheduler's recurring physical purge sweeps
-   the restored event rows again.
+   `erased_subjects` rows and cleans the restored ClickHouse and hot state. That includes a job the
+   snapshot already carried as complete — the replay clears its publication record and sweep
+   checkpoints, so an erasure cannot stay `complete` while the restored ClickHouse has lost its
+   exclusions (#1194). The restore also resets the workspace's `purged_generation` to `0`, so the
+   scheduler's recurring physical purge sweeps the restored event rows again.
 
 A person erased after the snapshot therefore stays erased: no profile, no identifiers, no profile
 key, no consent, and the tombstones that stop late events from recreating them. Only keyed hashes

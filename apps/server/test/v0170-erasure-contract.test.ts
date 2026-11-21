@@ -122,7 +122,13 @@ async function completeErasure(erasureId: string, opts: { finalSweepMs?: number 
       coverageWaitSeconds: 0,
       maxAttempts: Number.MAX_SAFE_INTEGER,
     });
-    if (result.completed) return;
+    // A round completes whichever jobs it claimed; a restore reopens every erasure's job in the
+    // workspace, so `result.completed` alone does not say this one is done.
+    const { rows } = await t.srv.db.admin.query<{ state: string; published_at: Date | null }>(
+      'SELECT state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
+      [ws, erasureId],
+    );
+    if (rows[0]?.state === 'complete' && rows[0].published_at !== null) return;
     rounds.push(JSON.stringify(result));
     await new Promise((resolve) => setTimeout(resolve, 100));
     await makeDue(erasureId);

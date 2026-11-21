@@ -967,10 +967,14 @@ export const erasureStatus = defineCommand({
     const job = await erasureCleanupJob(ctx.tx, ctx.principal.workspaceId, erasureId);
     // A job with an unpublished ledger row is not complete under the activated contract. An erasure
     // with no job and nothing publishable (a legacy erasure, or one with only unavailable rows) is.
-    const awaitingPublication = !job && ledger.full > 0;
-    const complete = !awaitingPublication && (!job || job.state === 'complete');
+    // A job left `complete` without a publication record is not complete either (#1194): a restore
+    // clears `published_at` on a job it keeps, so this stays honest even if only the record was
+    // cleared rather than the whole state.
+    const unpublishedJob = job !== null && job.publishedAt === null;
+    const awaitingPublication = (job === null || unpublishedJob) && ledger.full > 0;
+    const complete = !awaitingPublication && (job === null || (job.state === 'complete' && !unpublishedJob));
     const status = job
-      ? job.state === 'pending_external'
+      ? job.state === 'pending_external' || (job.state === 'complete' && unpublishedJob)
         ? ('pending' as const)
         : job.state
       : awaitingPublication

@@ -6,8 +6,11 @@ import { migrate } from './migrate';
 // database before replacing it and replays it afterwards: profiles and identifiers named by an
 // erasure are deleted again, their suppression hashes are restored, the keyed tombstones go back,
 // and the durable erasure-key ledger (#1037) is re-inserted, so read-time exclusion still knows the
-// erased keys. Only pseudonymous ids and hashes are involved; no plaintext personal data is copied
-// by the replay.
+// erased keys. The restored cleanup job is reopened so those keys are published to ClickHouse's
+// `erased_subjects` again: that table is not part of the Postgres snapshot, and a job the snapshot
+// already marked complete must not leave the erasure complete over exclusions that were lost
+// (#1194). Only pseudonymous ids and hashes are involved; no plaintext personal data is copied by
+// the replay.
 
 export interface ErasureRecord {
   workspaceId: string;
@@ -118,7 +121,7 @@ export interface ReplayErasuresResult {
   profiles: number;
   /** Tombstones re-inserted (or refreshed). */
   tombstones: number;
-  /** Pending cleanup jobs recreated for the replayed erasures. */
+  /** Cleanup jobs recreated or reopened for the replayed erasures (back in the publication queue). */
   cleanupJobs: number;
   /** Erasure-key ledger rows re-inserted into the restored database. */
   keys: number;
@@ -549,11 +552,41 @@ export async function replayErasures(
             // Only this erasure's own ledger rows justify a job: another erasure's keys in the same
             // workspace must not re-open work for this one.
             if (job || entries.keys.some((key) => key.erasureId === erasure.id)) {
+              // A job the restored snapshot already carries is reopened, not left alone (#1194): the
+              // ClickHouse exclusions are not part of the Postgres snapshot, so a job that says it
+              // published may be complete next to a ClickHouse point that never saw the keys (an
+              // older `--clickhouse` file, or ClickHouse restored from an older point). Clearing the
+              // publication record and the sweep checkpoints makes the worker publish the ledger
+              // again, and `profiles.erasureStatus` reports pending until it does. Idempotent: a
+              // second replay resets the same fields, and publication replaces on its key.
               const inserted = await client.query(
                 `INSERT INTO erasure_cleanup_jobs
                    (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek)
                  VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (workspace_id, erasure_id) DO NOTHING`,
+                 ON CONFLICT (workspace_id, erasure_id) DO UPDATE
+                   SET profile_ids = EXCLUDED.profile_ids,
+                       state = 'pending_external',
+                       attempts = 0,
+                       next_attempt_at = now(),
+                       lease_until = NULL,
+                       claim_token = NULL,
+                       clickhouse_done = false,
+                       hotstate_done = false,
+                       final_sweep_at = NULL,
+                       first_sweep_done_at = NULL,
+                       published_generation = NULL,
+                       published_at = NULL,
+                       coverage_cleared_at = NULL,
+                       completion_reason = NULL,
+                       completed_at = NULL,
+                       last_error = NULL,
+                       selectors = CASE WHEN erasure_cleanup_jobs.selectors IS NOT NULL THEN erasure_cleanup_jobs.selectors
+                                        ELSE EXCLUDED.selectors END,
+                       selector_key = CASE WHEN erasure_cleanup_jobs.selectors IS NOT NULL THEN erasure_cleanup_jobs.selector_key
+                                           ELSE EXCLUDED.selector_key END,
+                       selector_kek = CASE WHEN erasure_cleanup_jobs.selectors IS NOT NULL THEN erasure_cleanup_jobs.selector_kek
+                                           ELSE EXCLUDED.selector_kek END,
+                       updated_at = now()`,
                 [workspaceId, erasure.id, erasure.profileIds, job?.selectors ?? null, job?.selectorKey ?? null, job?.selectorKek ?? null],
               );
               result.cleanupJobs += inserted.rowCount ?? 0;
