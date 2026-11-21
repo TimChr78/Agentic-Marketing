@@ -1,6 +1,6 @@
 import { mergeRepresentative } from '@agentic-marketing/artifacts';
 import { AppError, newId } from '@agentic-marketing/core';
-import { type Db, type ErasureKeyKind, enqueueErasureCleanupJob, schema, type Tx } from '@agentic-marketing/db';
+import { type Db, type ErasureKeyKind, enqueueErasureCleanupJob, lockSegmentMemberships, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, newDataKey, open, type PreparedKeys, prepareKeys, seal } from '@agentic-marketing/secrets';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { mergedFamily } from './consent';
@@ -106,7 +106,26 @@ export async function removeProfiles(
   // name them, and a marker sitting on a merged-away id comes with the family (#1011 review).
   await tx.delete(schema.journeyProcessedEvents).where(inArray(schema.journeyProcessedEvents.profileId, family));
   // Out of every segment's materialised membership; static list rows cascade with the profile below.
+  // The membership rows are written under a per-segment advisory lock (#1104), taken after the
+  // profile rows this function already holds and before the rows themselves, which is the same
+  // order every other membership writer follows. `segments.members` reports `segment_runs.members`
+  // for a dynamic segment instead of counting rows, so the stored total must lose exactly the
+  // memberships removed here or it keeps counting an erased person until the next recompute (#1197).
+  const memberships = await tx
+    .select({ segmentId: schema.segmentMemberships.segmentId, profileId: schema.segmentMemberships.profileId })
+    .from(schema.segmentMemberships)
+    .where(inArray(schema.segmentMemberships.profileId, family));
+  await lockSegmentMemberships(
+    tx,
+    memberships.map((m) => m.segmentId),
+  );
   await tx.delete(schema.segmentMemberships).where(inArray(schema.segmentMemberships.profileId, family));
+  const removedBySegment = new Map<string, number>();
+  for (const m of memberships) removedBySegment.set(m.segmentId, (removedBySegment.get(m.segmentId) ?? 0) + 1);
+  for (const [segmentId, removed] of removedBySegment)
+    await tx.execute(sql`
+      UPDATE segment_runs SET members = GREATEST(0, members - ${removed})
+      WHERE workspace_id = ${workspaceId} AND segment_id = ${segmentId}`);
   // Holdout arms (`holdout_assignments`) go with the profile rows below: their foreign key to
   // profiles cascades, and the table is append-only for the app role (#1048).
   const suppress = opts.suppress ? identifiers.filter((i) => i.type === 'email' || i.type === 'phone') : [];

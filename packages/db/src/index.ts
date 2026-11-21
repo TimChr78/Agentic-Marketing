@@ -4,6 +4,7 @@ export * from './domains';
 export * from './erasureCleanup';
 export * from './erasures';
 export * from './idempotency';
+export * from './locks';
 export * from './migrate';
 export * from './outbox';
 export * from './pool';

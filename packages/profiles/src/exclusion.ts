@@ -124,30 +124,44 @@ export async function erasureLedgerHasIdentifiers(
   kp: KeyProvider,
   identifiers: { kind: ErasureKeyKind; value: string }[],
 ): Promise<boolean> {
-  if (!identifiers.length) return false;
+  return (await erasureLedgerMatchingIdentifiers(tx, workspaceId, kp, identifiers)).length > 0;
+}
+
+/**
+ * The subset of `identifiers` whose exclusion hash is in the workspace's durable erasure ledger.
+ * Same contract as {@link erasureLedgerHasIdentifiers}, but callers that write several values at
+ * once (ingest deleting the sessions a late event recreated, #1196) get the values back instead of
+ * one boolean, and the exclusion key is unwrapped once for the whole set.
+ */
+export async function erasureLedgerMatchingIdentifiers(
+  tx: Tx,
+  workspaceId: string,
+  kp: KeyProvider,
+  identifiers: { kind: ErasureKeyKind; value: string }[],
+): Promise<{ kind: ErasureKeyKind; value: string }[]> {
+  if (!identifiers.length) return [];
   const keys = await tx
     .select()
     .from(schema.dataKeys)
     .where(and(eq(schema.dataKeys.workspaceId, workspaceId), eq(schema.dataKeys.purpose, 'exclusion')));
-  if (!keys.length) return false;
-  const hashes = new Set<string>();
+  if (!keys.length) return [];
+  const byHash = new Map<string, { kind: ErasureKeyKind; value: string }>();
   for (const row of keys) {
     const borrowed = await kp.unwrap(row.wrappedKey, row.kekId);
     // The provider may hand out a shared cached buffer; do not zero that.
     const own = Buffer.from(borrowed);
     try {
-      for (const identifier of identifiers) hashes.add(exclusionHash(own, identifier.kind, identifier.value));
+      for (const identifier of identifiers) byHash.set(exclusionHash(own, identifier.kind, identifier.value), identifier);
     } finally {
       own.fill(0);
     }
   }
-  const { rows } = await tx.execute<{ present: number }>(sql`
-    SELECT 1 AS present FROM erasure_keys
+  const { rows } = await tx.execute<{ key_value: string }>(sql`
+    SELECT DISTINCT key_value FROM erasure_keys
     WHERE workspace_id = ${workspaceId}
       AND coverage = 'full'
-      AND key_value = ANY(${sql.param([...hashes])}::text[])
-    LIMIT 1`);
-  return rows.length > 0;
+      AND key_value = ANY(${sql.param([...byHash.keys()])}::text[])`);
+  return rows.flatMap((row) => byHash.get(row.key_value) ?? []);
 }
 
 /**
