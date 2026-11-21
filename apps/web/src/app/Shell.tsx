@@ -17,6 +17,7 @@ import { lazy, type ReactNode, Suspense, useEffect, useRef, useState } from 'rea
 import { useAutonomy } from '../features/agents/AutonomyProvider';
 import { switchNotice } from '../features/agents/labels';
 import { CopilotDrawer } from '../features/copilot/CopilotDrawer';
+import { roleLabel } from '../features/settings/roles';
 import { Badge, cx, IconButton, Kbd, Menu } from '../ui';
 import { useFocusTrap } from '../ui/focus';
 import { NewMenu } from './NewMenu';
@@ -391,9 +392,6 @@ function RailNav({ groups, path, pending }: { groups: NavGroup[]; path: string; 
   );
 }
 
-const roleLabel: Record<string, string> = { owner: 'Owner', admin: 'Admin', marketer: 'Builder', approver: 'Approver', viewer: 'Viewer' };
-export const roleName = (r: string) => roleLabel[r] ?? r;
-
 /**
  * The current brand's logo, contained in a fixed square (never stretched into a bar), or its
  * initial when no logo is published or the image fails to load (#438).
@@ -430,7 +428,7 @@ export function WorkspaceSwitcher({ rail = false }: { rail?: boolean }) {
       <BrandMark logoUrl={brand?.logoUrl ?? null} name={name} className="size-7" />
       <span className="min-w-0 flex-1 text-left">
         <span className="block truncate text-[13px] font-semibold text-fg">{name}</span>{' '}
-        <span className="block truncate text-[11px] text-muted">{domain ?? roleName(workspace?.you.role ?? '')}</span>
+        <span className="block truncate text-[11px] text-muted">{domain ?? roleLabel(workspace?.you.role ?? '')}</span>
       </span>
     </>
   );
@@ -439,7 +437,7 @@ export function WorkspaceSwitcher({ rail = false }: { rail?: boolean }) {
     label: (
       <span className="block min-w-0">
         <span className="block truncate font-medium text-fg">{m.brand.siteName}</span>
-        <span className="block truncate text-[11px] text-muted">{m.brand.primaryDomain ?? roleName(m.role)}</span>
+        <span className="block truncate text-[11px] text-muted">{m.brand.primaryDomain ?? roleLabel(m.role)}</span>
       </span>
     ),
     icon: m.id === workspace?.id ? <Check /> : <span className="inline-block size-4" />,
@@ -520,7 +518,7 @@ function UserMenu() {
         <span className="block">
           <span className="block font-medium text-fg">{user?.name || 'Signed in'}</span>
           <span className="block text-[12px] text-muted">{user?.email}</span>
-          <span className="block text-[12px] text-muted">{roleName(workspace?.you.role ?? '')}</span>
+          <span className="block text-[12px] text-muted">{roleLabel(workspace?.you.role ?? '')}</span>
         </span>
       }
       items={[
@@ -540,7 +538,11 @@ function UserMenu() {
           label: 'Sign out',
           icon: <LogOut />,
           onSelect: () => {
-            void signOut().then(() => navigate('/', { replace: true }));
+            // A failed sign-out leaves the person signed in (#614); moving to `/` would throw away
+            // the page they were on for nothing (#1173).
+            void signOut().then((signedOut) => {
+              if (signedOut) navigate('/', { replace: true });
+            });
           },
         },
       ]}

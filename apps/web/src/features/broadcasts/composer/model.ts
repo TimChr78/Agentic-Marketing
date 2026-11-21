@@ -1,5 +1,6 @@
 import type { Out } from '../../../app/api';
 import { resolveConsentTopic } from '../../../lib/consentTopic';
+import { lawfulBasisLabel } from '../../../lib/labels';
 import { formatDateTime } from '../../../ui/time';
 import type { PreviewSource } from '../../previews/previewSource';
 
@@ -367,7 +368,7 @@ export function consentCheck(input: ConsentCheckInput): CheckRow {
     status: 'ready',
     statusLabel: statusLabel('ready'),
     details: [
-      `Purpose configured · ${purpose.name} · ${purpose.basis}`,
+      `Purpose configured · ${purpose.name} · ${lawfulBasisLabel(purpose.basis)}`,
       ...(purpose.requiresDoubleOptIn ? ['Consent must be a confirmed opt-in.'] : []),
       CONSENT_FOOTNOTE,
     ],

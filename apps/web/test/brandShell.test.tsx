@@ -39,7 +39,7 @@ const { session } = vi.hoisted(() => ({
     can: () => true,
     refresh: async () => {},
     switchWorkspace: vi.fn(async () => {}),
-    signOut: async () => {},
+    signOut: async () => true,
     pending: 3,
     refreshPending: () => {},
   },

@@ -6,16 +6,8 @@ import { navigate } from '../../app/router';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { invalidatePickerIndex } from '../../features/artifacts/pickerIndex';
+import { lawfulBasisLabel } from '../../lib/labels';
 import { Alert, Button, EmptyState, Skeleton, StatusPill, Table, TableFrame, Tag, Td, THead, Th, Tr, useToast } from '../../ui';
-
-const BASIS_LABEL: Record<string, string> = {
-  consent: 'Consent',
-  legitimate_interest: 'Legitimate interest',
-  contract: 'Contract',
-  legal_obligation: 'Legal obligation',
-};
-
-const basisLabel = (basis: string) => BASIS_LABEL[basis] ?? basis.replace(/_/g, ' ');
 
 const CHANNEL_LABEL: Record<string, string> = {
   email: 'E-mail',
@@ -154,7 +146,7 @@ export default function PurposesPage() {
                     <div className="font-medium text-fg">{p.name}</div>
                     {p.description && <p className="mt-1 max-w-[360px] text-[12px] leading-[18px] text-muted">{p.description}</p>}
                   </Td>
-                  <Td className="whitespace-nowrap">{basisLabel(p.basis)}</Td>
+                  <Td className="whitespace-nowrap">{lawfulBasisLabel(p.basis)}</Td>
                   <Td>
                     {p.channels.length ? (
                       <span className="flex flex-wrap gap-1">

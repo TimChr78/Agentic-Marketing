@@ -1,4 +1,5 @@
 import { type ComponentType, lazy, useEffect } from 'react';
+import { roleLabel } from '../features/settings/roles';
 import { EmptyState, LinkButton } from '../ui';
 import { SettingsLayout } from '../ui/SettingsLayout';
 import { useCrumbs } from './page';
@@ -130,7 +131,7 @@ function NoAccess() {
   useCrumbs([{ label: 'No access' }]);
   return (
     <EmptyState title="Your role can't open this page" action={<LinkButton href="/">Go to Home</LinkButton>}>
-      You are signed in to {workspace?.name} as {workspace?.you.role}. Ask a workspace admin if you need access.
+      You are signed in to {workspace?.name} as {roleLabel(workspace?.you.role ?? '')}. Ask a workspace admin if you need access.
     </EmptyState>
   );
 }

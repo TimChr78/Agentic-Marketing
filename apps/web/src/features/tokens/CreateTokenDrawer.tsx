@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { api, apiForWorkspace, errText } from '../../app/api';
 import type { Membership } from '../../app/session';
 import { Alert, Button, Drawer, Field, Input, Select, useToast } from '../../ui';
+import { roleLabel } from '../settings/roles';
 import { ScopePicker } from './ScopePicker';
 import { membershipsThatCanGrant, type Scope } from './scopes';
 
@@ -100,7 +101,7 @@ export function CreateTokenDrawer({
           <Select value={chosen?.id ?? ''} onChange={(e) => setWorkspaceId(e.target.value)}>
             {grantable.map((m) => (
               <option key={m.id} value={m.id}>
-                {m.name} ({m.role})
+                {m.name} ({roleLabel(m.role)})
               </option>
             ))}
           </Select>

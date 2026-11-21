@@ -38,6 +38,7 @@ afterEach(() => {
 const memberships: Membership[] = [
   { id: 'a', name: 'Brand A', role: 'owner', brand: { siteName: 'Brand A', logoUrl: null, primaryDomain: null } },
   { id: 'b', name: 'Brand B', role: 'viewer', brand: { siteName: 'Brand B', logoUrl: null, primaryDomain: 'brand-b.example' } },
+  { id: 'c', name: 'Brand C', role: 'marketer', brand: { siteName: 'Brand C', logoUrl: null, primaryDomain: null } },
 ];
 
 const renderDrawer = (onCreated = vi.fn()) =>
@@ -54,13 +55,14 @@ const renderDrawer = (onCreated = vi.fn()) =>
   );
 
 describe('token brand picker (#187)', () => {
-  it('offers every brand whose role can grant the chosen scopes', async () => {
+  it('offers every brand whose role can grant the chosen scopes, with readable role names', async () => {
     renderDrawer();
     const select = screen.getByLabelText('Brand') as HTMLSelectElement;
-    expect([...select.options].map((o) => o.text)).toEqual(['Brand A (owner)', 'Brand B (viewer)']);
+    // #1173: a role reads in words; `marketer` is the server key for the Builder role.
+    expect([...select.options].map((o) => o.text)).toEqual(['Brand A (Owner)', 'Brand B (Viewer)', 'Brand C (Builder)']);
 
     await userEvent.click(screen.getByRole('checkbox', { name: /Draft and edit/ }));
-    await waitFor(() => expect([...select.options].map((o) => o.text)).toEqual(['Brand A (owner)']));
+    await waitFor(() => expect([...select.options].map((o) => o.text)).toEqual(['Brand A (Owner)', 'Brand C (Builder)']));
   });
 
   it('creates the token in the chosen brand through that brand’s client', async () => {
