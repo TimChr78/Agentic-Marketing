@@ -276,7 +276,7 @@ function holdOutcome(approval: PendingApproval | null): string {
 
 function digestEmail(publicUrl: string, digests: AgentDigest[]) {
   const subject = digests.length === 1 ? `Daily agent digest: “${digests[0].agent.name}”` : `Daily agent digest: ${digests.length} agents`;
-  const text: string[] = ['What your agents did in the last 24 hours.', ''];
+  const text: string[] = ['What your agents did since your last digest.', ''];
   for (const d of digests) {
     text.push(`Agent: ${d.agent.name}`);
     text.push(`Changes: ${d.counts.allow} allowed, ${d.counts.hold} held, ${d.counts.ask} sent to a person, ${d.counts.deny} refused.`);
@@ -297,7 +297,7 @@ function digestEmail(publicUrl: string, digests: AgentDigest[]) {
   text.push('You receive this daily digest as the sponsor of these agents.');
 
   const html = `<!doctype html><html><body style="font-family:system-ui,sans-serif;color:#111;line-height:1.5">
-<p>What your agents did in the last 24 hours.</p>
+<p>What your agents did since your last digest.</p>
 ${digests
   .map((d) => {
     const list = (title: string, items: string[]) =>
@@ -326,7 +326,9 @@ async function notifyDigest(
   now: Date,
 ): Promise<{ sent: number; at: Date | null }> {
   if (cursor.lastDigestAt && now.getTime() - cursor.lastDigestAt.getTime() < DAY_MS) return { sent: 0, at: null };
-  const since = new Date(now.getTime() - DIGEST_WINDOW_MS);
+  // The window starts where the last complete digest ended, so a retry hours later still covers
+  // the same actions, and a late pass leaves no gap (#1184). A first digest looks back one day.
+  const since = cursor.lastDigestAt ?? new Date(now.getTime() - DIGEST_WINDOW_MS);
   const recent = (
     await tx
       .select()
