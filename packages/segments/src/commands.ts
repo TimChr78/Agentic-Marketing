@@ -1,4 +1,4 @@
-import { artifactTypes, segmentCondition } from '@agentic-marketing/artifacts';
+import { artifactTypes, mergeRepresentative, segmentCondition } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
@@ -351,6 +351,9 @@ export const profileSegments = defineCommand({
     // A segment's id and name are artifact metadata: only a caller that may read artifacts learns
     // them. Membership itself is profile data and still needs profiles:read (0.14.13 review).
     if (!ctx.principal.permissions.has('artifacts:read')) return { segments: [], withheld: true };
+    // Static and snapshot memberships move to the survivor on a merge (#1145); resolve the person
+    // exactly as profiles.get does, or an old link or API id returns no memberships.
+    const profileId = await mergeRepresentative(ctx.tx, ctx.principal.workspaceId, input.profileId);
     const rows = await ctx.tx
       .select({ id: schema.segmentMemberships.segmentId, since: schema.segmentMemberships.since, name: schema.artifacts.name })
       .from(schema.segmentMemberships)
@@ -361,7 +364,7 @@ export const profileSegments = defineCommand({
           eq(schema.artifacts.id, schema.segmentMemberships.segmentId),
         ),
       )
-      .where(eq(schema.segmentMemberships.profileId, input.profileId));
+      .where(and(eq(schema.segmentMemberships.workspaceId, ctx.principal.workspaceId), eq(schema.segmentMemberships.profileId, profileId)));
     return { segments: rows.map((r) => ({ id: r.id, name: r.name, since: r.since.toISOString() })) };
   },
 });

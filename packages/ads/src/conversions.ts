@@ -4,7 +4,7 @@ import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { consentOf } from '@agentic-marketing/events';
 import { accessTokenOf, connectionSecrets, connectorOf, type DeliveryDeps, deliveryHandlers } from '@agentic-marketing/integrations';
-import { consentStateOf, currentConsent, profileForMessage, type ResolvedEvent } from '@agentic-marketing/profiles';
+import { canonicalProfile, consentStateOf, currentConsent, profileForMessage, type ResolvedEvent } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
@@ -76,6 +76,17 @@ async function latestStatus(tx: Tx, ws: string, profileId: string, purpose: stri
   return currentConsent(await consentStateOf(tx, ws, profileId), purpose);
 }
 
+/** The destination's own action id, the part that makes two rules on one connection distinct. */
+function actionKeyOf(dest: {
+  conversionAction?: string;
+  eventName?: string;
+  conversionName?: string;
+  conversionId?: string;
+  event?: string;
+}): string {
+  return dest.conversionAction ?? dest.eventName ?? dest.conversionName ?? dest.conversionId ?? dest.event ?? '';
+}
+
 /** Post-resolve hook: queues the conversions an event triggers. */
 export function conversionHook(deps: { db: Db }) {
   return async (workspaceId: string, resolved: ResolvedEvent[]) => {
@@ -87,8 +98,14 @@ export function conversionHook(deps: { db: Db }) {
       for (const { event: e, profileId } of resolved) {
         const rules = map.rules.filter((r) => r.event === e.name);
         if (!rules.length) continue;
+        // A merge may have committed since the worker resolved the event (#1155): consent and the
+        // delivery's profile id must name today's survivor, not a folded-away row whose
+        // consent_state was deleted by the merge.
+        const person = await canonicalProfile(tx, workspaceId, profileId);
+        if (!person) continue;
+        const canonicalId = person.id;
         const signal = consentOf(e.context);
-        const ledger = await latestStatus(tx, workspaceId, profileId, 'ad_measurement');
+        const ledger = await latestStatus(tx, workspaceId, canonicalId, 'ad_measurement');
         if (!purposeHolds(purposes, 'ad_measurement', signal?.ad_measurement, ledger?.status)) continue;
         const page = e.context.page as { url?: string } | undefined;
         for (const r of rules) {
@@ -103,7 +120,7 @@ export function conversionHook(deps: { db: Db }) {
             ...(currency && /^[A-Z]{3}$/.test(currency) ? { currency } : {}),
             ...(page?.url ? { sourceUrl: page.url } : {}),
             ...(typeof e.context.userAgent === 'string' ? { userAgent: e.context.userAgent } : {}),
-            profileId,
+            profileId: canonicalId,
             adTargeting: signal?.ad_targeting,
           };
           for (const platform of PLATFORMS) {
@@ -119,8 +136,9 @@ export function conversionHook(deps: { db: Db }) {
                 action: platform,
                 payload: { ...conversion, destination: dest },
                 status: 'pending',
-                idempotencyKey: `adc:${platform}:${dest.connection}:${e.messageId}`,
-                profileId,
+                // Rules may share a connection; the destination's action distinguishes them.
+                idempotencyKey: `adc:${platform}:${dest.connection}:${actionKeyOf(dest)}:${e.messageId}`,
+                profileId: canonicalId,
               })
               .onConflictDoNothing();
           }

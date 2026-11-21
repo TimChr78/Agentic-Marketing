@@ -42,13 +42,15 @@ export async function withdraw(
   recordedAt: Date,
   /** The provider event's id, when there is one, so a redelivery adds no evidence row (#936). */
   eventId?: string,
-) {
-  if (!m.profileId) return;
+): Promise<string | null> {
+  if (!m.profileId) return null;
   // A withdrawal needs the canonical profile id only, never decrypted personal data, so it can run
   // under the identity lock. Taking it here as well keeps a direct caller on the protocol.
   await lockIdentity(tx, m.workspaceId);
   const person = await canonicalProfile(tx, m.workspaceId, m.profileId);
-  if (!person) return;
+  // The person is erased or missing: there is no one to withdraw from, and the caller must not
+  // write message events or a consent-change notification for the stale id (#1152).
+  if (!person) return null;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const basis = purposes.find((p) => p.key === m.purpose)?.basis ?? 'consent';
   // Under legitimate interest an unsubscribe is an objection; under consent, a withdrawal.
@@ -65,6 +67,7 @@ export async function withdraw(
       recordedAt,
     },
   ]);
+  return person.id;
 }
 
 /** A STOP suppression that this delivery escalated to a delivery fact (#910). */

@@ -1,3 +1,4 @@
+import { canonicalProfileIds } from '@agentic-marketing/artifacts';
 import type { Db } from '@agentic-marketing/db';
 import type { EventBus, EventStore, MessageEvent } from '@agentic-marketing/events';
 import { acceptInternalItems, PLATFORM_EVENT, sourceLookups } from '@agentic-marketing/ingest';
@@ -69,16 +70,30 @@ export function withEmailProfileEvents(store: EventStore, deps: { db: Db; bus: E
     const byWs = new Map<string, MessageEvent[]>();
     for (const e of events) if (EMAIL_EVENTS[e.type] && e.profileId) byWs.set(e.workspaceId, [...(byWs.get(e.workspaceId) ?? []), e]);
     for (const [ws, list] of byWs) {
+      // A merge may have committed between enqueueing the outbox row and dispatching it (#1145):
+      // merge() moves the person's identifiers to the survivor, so reading the message's original
+      // id would find no identifier and silently drop the customer event. Resolve the batch
+      // through the shared merge walk first.
+      const canonical = await deps.db.withWorkspace(ws, (tx) =>
+        canonicalProfileIds(
+          tx,
+          ws,
+          list.map((e) => e.profileId),
+        ),
+      );
+      const targets = [...new Set([...canonical.values()].filter((id): id is string => id !== null))];
+      if (!targets.length) continue;
       // The person's own id on the bus: their user id, else an anonymous id they are known by.
       const { rows } = await deps.db.admin.query<{ profile_id: string; type: string; value: string }>(
         `SELECT DISTINCT ON (profile_id) profile_id, type, value FROM identifiers
          WHERE workspace_id = $1 AND profile_id = ANY($2) AND type IN ('user_id', 'anonymous_id')
          ORDER BY profile_id, (type = 'user_id') DESC, last_seen DESC`,
-        [ws, [...new Set(list.map((e) => e.profileId))]],
+        [ws, targets],
       );
       const who = new Map(rows.map((r) => [r.profile_id, r.type === 'user_id' ? { userId: r.value } : { anonymousId: r.value }]));
       const items = list.flatMap((e) => {
-        const id = who.get(e.profileId);
+        const person = canonical.get(e.profileId);
+        const id = person ? who.get(person) : undefined;
         if (!id) return [];
         return [
           {

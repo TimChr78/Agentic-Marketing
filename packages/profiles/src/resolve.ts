@@ -343,6 +343,29 @@ async function merge(tx: Tx, workspaceId: string, from: string, into: string, cr
   // Static/snapshot list membership follows and is deduplicated (#396); dynamic memberships are
   // derived from the rule and are left for the next refresh to recompute from the merged traits.
   await tx.execute(sql`SELECT merge_segment_memberships(${from}, ${into})`);
+  // Scores follow the person (#1144): readers (segments, journeys, profiles.scores) only look at
+  // the canonical id, so leaving them on the merged-away row lost them from segments and journeys
+  // and let ai.calibration count an orphan prediction with no identifiers left to match. The
+  // newer score per key wins, as the table holds one row per key.
+  await tx.execute(sql`
+    INSERT INTO profile_scores
+      (workspace_id, profile_id, key, value, confidence, probabilities, model, model_version, call_id, created_at, expires_at)
+    SELECT workspace_id, ${into}, key, value, confidence, probabilities, model, model_version, call_id, created_at, expires_at
+    FROM profile_scores
+    WHERE workspace_id = ${workspaceId} AND profile_id = ${from}
+    ON CONFLICT (workspace_id, profile_id, key) DO UPDATE SET
+      value = EXCLUDED.value,
+      confidence = EXCLUDED.confidence,
+      probabilities = EXCLUDED.probabilities,
+      model = EXCLUDED.model,
+      model_version = EXCLUDED.model_version,
+      call_id = EXCLUDED.call_id,
+      created_at = EXCLUDED.created_at,
+      expires_at = EXCLUDED.expires_at
+    WHERE EXCLUDED.created_at > profile_scores.created_at`);
+  await tx
+    .delete(schema.profileScores)
+    .where(and(eq(schema.profileScores.workspaceId, workspaceId), eq(schema.profileScores.profileId, from)));
 
   const srcPii = (await crypto.open<Record<string, unknown>>(from, src.pii)) ?? {};
   const dstPii = (await crypto.open<Record<string, unknown>>(into, dst.pii)) ?? {};

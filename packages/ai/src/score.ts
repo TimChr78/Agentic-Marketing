@@ -2,6 +2,7 @@ import { decisionQuestions } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
+import { canonicalProfile } from '@agentic-marketing/profiles';
 import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { aiAllowed, redact } from './context';
@@ -302,7 +303,10 @@ export const profileScores = defineCommand({
   auditReads: true,
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
-    const rows = await unexpiredScores(ctx.tx, ctx.principal.workspaceId, input.profileId, input.key);
+    // Scores follow the person on a merge (#1144), so an old id must read the survivor's rows.
+    const person = await canonicalProfile(ctx.tx, ctx.principal.workspaceId, input.profileId);
+    if (!person) return { scores: [] };
+    const rows = await unexpiredScores(ctx.tx, ctx.principal.workspaceId, person.id, input.key);
     return {
       scores: rows.map((r) => ({
         key: r.key,
