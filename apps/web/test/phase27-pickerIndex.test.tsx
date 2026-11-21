@@ -151,6 +151,24 @@ describe('shared picker index (#524)', () => {
     await waitFor(() => expect(screen.getByRole('option', { name: 'segment 3 · live v1' })).toBeTruthy());
   });
 
+  it('reads a loaded picker once when a save both notifies and invalidates its artifact', async () => {
+    const draft = row(4, 'segment', 'seg');
+    h.rows = [draft];
+    render(<ArtifactSelect type="segment" value={undefined} onChange={() => {}} />);
+    await waitFor(() => expect(screen.getByRole('option', { name: 'segment 4 · not live yet' })).toBeTruthy());
+    const before = h.calls.filter((name) => name === 'artifacts.list').length;
+
+    h.rows = [{ ...draft, latestState: 'published', publishedVersion: 1 }];
+    // ArtifactDetailPage does both after a publish: the notice and the direct invalidation.
+    act(() => {
+      invalidateArtifact(draft.id);
+      invalidatePickerArtifact(ws1, draft.id);
+    });
+
+    await waitFor(() => expect(screen.getByRole('option', { name: 'segment 4 · live v1' })).toBeTruthy());
+    expect(h.calls.filter((name) => name === 'artifacts.list').length - before).toBe(1);
+  });
+
   it('does not read a row detail for any row when repeated selectors mount', async () => {
     h.rows = Array.from({ length: 40 }, (_, i) => row(i));
     render(

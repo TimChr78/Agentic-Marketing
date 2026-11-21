@@ -49,7 +49,7 @@ test('the composer separates evidence from consent and holds the estimate behind
   for (const name of ['1 · What', '2 · Who', '3 · When']) {
     await expect(page.getByRole('heading', { name })).toBeVisible();
   }
-  await expect(page.locator('#composer-what').getByText('Marketing e-mail · consent', { exact: true })).toBeVisible();
+  await expect(page.locator('#composer-what').getByText('Marketing e-mail · Consent', { exact: true })).toBeVisible();
 
   // The outer label is the saved broadcast; the nested label is the exact live template.
   await expect(page.locator('[data-preview-source]').first()).toContainText(/Saved v\d+/);
@@ -65,7 +65,7 @@ test('the composer separates evidence from consent and holds the estimate behind
   await expect(page.locator('[data-check="domain"]')).not.toHaveAttribute('data-check-status', 'ready');
   await expect(page.locator('[data-check="domain"]')).toContainText('DKIM not checked — selectors required');
   await expect(page.locator('[data-check="consent"]')).toHaveAttribute('data-check-status', 'ready');
-  await expect(page.locator('[data-check="consent"]')).toContainText('Purpose configured · Marketing e-mail · consent');
+  await expect(page.locator('[data-check="consent"]')).toContainText('Purpose configured · Marketing e-mail · Consent');
   await expect(page.locator('[data-check="consent"]')).toContainText(
     'Per-person consent, topic preferences and suppression are checked at send time.',
   );

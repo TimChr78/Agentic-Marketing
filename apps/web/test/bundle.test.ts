@@ -31,7 +31,8 @@ const ROUTES: { name: string; entries: string[]; budget: number }[] = [
   // The brand switcher and the desktop rail (#180, #190) add a little shell code; the budget keeps
   // the approvals page from drifting into heavy editor territory, not byte-for-byte shell parity.
   { name: 'Approvals list', entries: ['src/pages/approvals/ApprovalsPage.tsx'], budget: 385_000 },
-  { name: 'People list', entries: ['src/pages/audience/PeoplePage.tsx'], budget: 350_000 },
+  // The erasure dialog with a live reason field (#1165) adds under 1 kB to the shared audience chunk.
+  { name: 'People list', entries: ['src/pages/audience/PeoplePage.tsx'], budget: 355_000 },
   { name: 'Messages list', entries: ['src/pages/insights/MessagesPage.tsx'], budget: 350_000 },
 ];
 

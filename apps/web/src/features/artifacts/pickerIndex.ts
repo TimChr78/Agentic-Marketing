@@ -197,6 +197,9 @@ export function refreshPickerIndex(workspaceId: string, type: string, opts: { lo
   return readPickerIndex(workspaceId, type, opts);
 }
 
+/** Keys whose next read is already scheduled, so one mutation's several notices read once. */
+const scheduledReads = new Set<string>();
+
 function reloadEntry(workspaceId: string, type: string) {
   const key = pickerIndexKey(workspaceId, type);
   const entry = entries.get(key);
@@ -209,8 +212,19 @@ function reloadEntry(workspaceId: string, type: string) {
   entry.generation += 1;
   entry.loading = true;
   emit(entry);
-  if (entry.listeners.size > 0) void readPickerIndex(workspaceId, type).catch(() => {});
-  else entries.delete(key);
+  if (entry.listeners.size === 0) {
+    entries.delete(key);
+    return;
+  }
+  // A save both notifies and invalidates its artifact; the drop above happens for each, but the
+  // read starts once, after the current task, so the second notice does not abort the first read.
+  if (scheduledReads.has(key)) return;
+  scheduledReads.add(key);
+  queueMicrotask(() => {
+    scheduledReads.delete(key);
+    const current = entries.get(key);
+    if (current && current.listeners.size > 0 && !current.promise) void readPickerIndex(workspaceId, type).catch(() => {});
+  });
 }
 
 /** Drops the exact workspace/type key, e.g. after creating a new artifact of that type. */
@@ -259,6 +273,7 @@ onArtifactsChanged((id) => {
 /** Test and workspace-switch seam: forget every index. */
 export function resetPickerIndexes() {
   entries.clear();
+  scheduledReads.clear();
 }
 
 /** The shared picker index for one type in the current workspace. */
