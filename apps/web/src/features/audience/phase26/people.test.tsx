@@ -383,6 +383,10 @@ describe('People list (#510)', () => {
     await userEvent.click(within(dialog).getByRole('button', { name: 'Erase person' }));
     await waitFor(() => expect(calls('profiles.erase')).toHaveLength(1));
 
+    // The command only asks for the erasure; ClickHouse cleanup and the exclusion publication run
+    // afterwards, so the toast must not claim they finished.
+    expect(await screen.findByText(/Erasure requested/)).toBeTruthy();
+
     // The invalidation drops the cached pages: the list rereads and no longer presents the erased row.
     await waitFor(() => expect(screen.queryByRole('table', { name: 'People' })).toBeNull());
     expect(screen.getByText('No people yet')).toBeTruthy();

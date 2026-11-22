@@ -319,7 +319,142 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     const status = await executor.execute(erasureStatus, { erasureId: old }, userPrincipal('user_test', d.workspace, 'owner'), {
       surface: 'rest',
     });
-    expect(status).toMatchObject({ status: 'complete', attempts: 0, checkpoints: { clickhouse: true, hotState: true } });
+    // Nothing recorded which identifiers were hashed, so claiming `full` would overstate what was
+    // proven; `complete` still means the SQL rows and keys were gone when the old erasure returned.
+    expect(status).toMatchObject({
+      status: 'complete',
+      exclusion: 'unknown',
+      reason: 'legacy',
+      attempts: 0,
+      checkpoints: { clickhouse: true, hotState: true },
+    });
+  });
+
+  it('reports unknown exclusion for a pre-ledger erasure that kept a cleanup job', async () => {
+    const old = 'era_00000000000000000000000000000002';
+    const profile = 'prf_0000000000000000000000000000aa02';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'legacy erasure with job', '{"profiles":1}')`,
+      [d.workspace, old, profile],
+    );
+    // An earlier release completed the job but had no ledger to record, so `published_at` is null
+    // and there is nothing that proves which identifiers were hashed.
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', now())`,
+      [d.workspace, old, profile],
+    );
+    const { events } = fakeEvents();
+    const { hot } = fakeHot();
+    const executor = createExecutor(d.db, services(events, hot));
+    const status = await executor.execute(erasureStatus, { erasureId: old }, userPrincipal('user_test', d.workspace, 'owner'), {
+      surface: 'rest',
+    });
+    expect(status).toMatchObject({ status: 'complete', exclusion: 'unknown', reason: 'legacy' });
+  });
+
+  it('reports full exclusion for a completed erasure whose ledger rows were all published', async () => {
+    const done = 'era_00000000000000000000000000000004';
+    const profile = 'prf_0000000000000000000000000000aa04';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'ledger erasure', '{"profiles":1}')`,
+      [d.workspace, done, profile],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'profile', 'profile-hash-full', 'dk_exclusion_test', $2, 'full')`,
+      [d.workspace, done],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, published_generation, published_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 1, now(), now())`,
+      [d.workspace, done, profile],
+    );
+    const { events } = fakeEvents();
+    const { hot } = fakeHot();
+    const executor = createExecutor(d.db, services(events, hot));
+    const status = await executor.execute(erasureStatus, { erasureId: done }, userPrincipal('user_test', d.workspace, 'owner'), {
+      surface: 'rest',
+    });
+    expect(status).toMatchObject({ status: 'complete', exclusion: 'full', reason: null, unavailableKinds: [] });
+  });
+
+  it('reports partial exclusion when the ledger could not hash an identifier', async () => {
+    const partial = 'era_00000000000000000000000000000005';
+    const profile = 'prf_0000000000000000000000000000aa05';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'partial erasure', '{"profiles":1}')`,
+      [d.workspace, partial, profile],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'profile', 'profile-hash-partial', 'dk_exclusion_test', $2, 'full'),
+              ($1, 'email', 'matching-hash-partial', 'dk_exclusion_test', $2, 'unavailable')`,
+      [d.workspace, partial],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, published_generation, published_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 1, now(), now())`,
+      [d.workspace, partial, profile],
+    );
+    const { events } = fakeEvents();
+    const { hot } = fakeHot();
+    const executor = createExecutor(d.db, services(events, hot));
+    const status = await executor.execute(erasureStatus, { erasureId: partial }, userPrincipal('user_test', d.workspace, 'owner'), {
+      surface: 'rest',
+    });
+    expect(status).toMatchObject({ status: 'complete', exclusion: 'partial', reason: null, unavailableKinds: ['email'] });
+  });
+
+  it('reports unknown exclusion while a pre-ledger cleanup job is still pending', async () => {
+    const old = 'era_00000000000000000000000000000006';
+    const profile = 'prf_0000000000000000000000000000aa06';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'legacy erasure pending job', '{"profiles":1}')`,
+      [d.workspace, old, profile],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'pending_external')`,
+      [d.workspace, old, profile],
+    );
+    const { events } = fakeEvents();
+    const { hot } = fakeHot();
+    const executor = createExecutor(d.db, services(events, hot));
+    const status = await executor.execute(erasureStatus, { erasureId: old }, userPrincipal('user_test', d.workspace, 'owner'), {
+      surface: 'rest',
+    });
+    // No ledger row records a hashed identifier, whatever the job's publication column says.
+    expect(status).toMatchObject({ status: 'pending', exclusion: 'unknown', reason: 'publication' });
+  });
+
+  it('keeps a pre-ledger job that completed after the upgrade complete, without claiming full', async () => {
+    const old = 'era_00000000000000000000000000000007';
+    const profile = 'prf_0000000000000000000000000000aa07';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'legacy erasure published at generation 0', '{"profiles":1}')`,
+      [d.workspace, old, profile],
+    );
+    // The ledger-aware pipeline ran for this job after the upgrade: it found nothing publishable,
+    // wrote `published_at` at generation 0 and completed. That record proves a publication ran, not
+    // that any identifier was hashed.
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, published_generation, published_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 0, now(), now())`,
+      [d.workspace, old, profile],
+    );
+    const { events } = fakeEvents();
+    const { hot } = fakeHot();
+    const executor = createExecutor(d.db, services(events, hot));
+    const status = await executor.execute(erasureStatus, { erasureId: old }, userPrincipal('user_test', d.workspace, 'owner'), {
+      surface: 'rest',
+    });
+    expect(status).toMatchObject({ status: 'complete', exclusion: 'unknown', reason: 'legacy' });
   });
 
   it('resumes a job another worker committed but never ran', async () => {

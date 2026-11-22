@@ -5,7 +5,6 @@ import {
   ERASURE_PURGE_LEASE_MS,
   erasureWorkspaceKeys,
   recordErasurePurgeSweep,
-  releaseErasurePurge,
   renewErasurePurgeLease,
 } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -58,10 +57,21 @@ export async function runErasurePurgeOnce(deps: ErasurePurgeDeps, opts: ErasureP
     if (!(await renewErasurePurgeLease(deps.db, claim, leaseMs))) continue;
     try {
       const keys = await erasureWorkspaceKeys(deps.db, claim.workspaceId);
+      // The sweep can outlast one 60 s lease: 4 batches over 3 tables with synchronous mutations
+      // can run longer. Renew and check before every batch; a false result means another replica
+      // took the claim, so stop without another delete instead of overlapping its mutations.
+      let leaseLost = false;
+      const checkpoint = async () => {
+        if (leaseLost) return false;
+        const held = await renewErasurePurgeLease(deps.db, claim, leaseMs);
+        if (!held) leaseLost = true;
+        return held;
+      };
       const sweep = keys.length
         ? await deps.events.purgeErasedSubjects(claim.workspaceId, keys, {
             ...(opts.batchSize === undefined ? {} : { batchSize: opts.batchSize }),
             ...(opts.maxBatches === undefined ? {} : { maxBatches: opts.maxBatches }),
+            checkpoint,
           })
         : { deleted: 0, complete: true, tables: [] };
       const recorded = await recordErasurePurgeSweep(deps.db, claim, {
@@ -77,8 +87,12 @@ export async function runErasurePurgeOnce(deps: ErasurePurgeDeps, opts: ErasureP
       if (sweep.complete) result.completed++;
       else result.progressed++;
     } catch (err) {
+      // Keep the claim: a mutation already submitted to ClickHouse can outlive the lease, and
+      // releasing the claim would let another replica start a second one immediately. Letting the
+      // lease expire delays a retry by at most its length while the in-flight work finishes. The
+      // claim token still fences a worker that lost the lease: its next checkpoint fails.
+      //
       // A provider message can echo a key; only the class name and a fixed message are logged.
-      await releaseErasurePurge(deps.db, claim).catch(() => {});
       result.failed++;
       logger.warn(
         { workspaceId: claim.workspaceId, errorClass: err instanceof Error ? err.name : 'other' },
