@@ -918,7 +918,7 @@ export const erasureStatus = defineCommand({
     status: z
       .enum(['pending', 'running', 'complete', 'failed'])
       .describe(
-        'pending: waiting for publication, an in-flight outbox row, the final sweep or subject-key coverage, while the SQL rows and keys are already gone; running: a worker is sweeping; complete: the published exclusions are visible and every stored row has coverage, so reads exclude the erased subject; failed: the retry budget ran out and rows may remain',
+        'pending: waiting for publication, an in-flight outbox row, the final sweep or subject-key coverage, while the SQL rows and keys are already gone; running: a worker is sweeping; complete: with `exclusion: full`, the published exclusions are visible and every stored row has coverage, so reads exclude the erased subject; with `exclusion: unknown` (a legacy erasure), only its SQL deletion finished and read exclusion cannot be verified; failed: the retry budget ran out and rows may remain',
       ),
     reason: z
       .enum(['publication', 'outbox', 'final_sweep', 'subject_key_coverage', 'legacy'])
