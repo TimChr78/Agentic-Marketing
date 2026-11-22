@@ -720,28 +720,52 @@ async function syncEdgeLocked(
       const latest = latestOutboxValues(rows);
       let puts: { key: string; value: string; expiration_ttl: number }[] = [];
       let deletes: string[] = [];
+      // Keys whose rows this pass settles. Puts that cannot be checked against Valkey stay queued.
+      let settled: Set<string> | null = null;
       if (servesSnapshots) {
         const candidates = [...latest].filter(([, value]) => value !== null);
-        const fenced = await tombstonedSnapshotKeys(
-          deps.hot,
-          ws,
-          candidates.map(([key]) => key),
-        );
-        puts = candidates
-          .filter(([key]) => !fenced.has(key))
-          .map(([key, value]) => ({ key, value: JSON.stringify(value), expiration_ttl: KV_SNAPSHOT_TTL_S }));
-        deletes = [...latest].filter(([key, value]) => value === null || fenced.has(key)).map(([key]) => key);
+        const explicit = [...latest].filter(([, value]) => value === null).map(([key]) => key);
+        let fenced: Set<string> | null;
+        try {
+          fenced = await tombstonedSnapshotKeys(
+            deps.hot,
+            ws,
+            candidates.map(([key]) => key),
+          );
+        } catch (err) {
+          // Without Valkey a put cannot be verified, but an erasure delete needs no check: send the
+          // deletes now and leave the puts queued for the next sync (#1203 review).
+          logger.warn({ err, workspace: ws }, 'edge sync could not read the erasure fence; deferring snapshot uploads');
+          fenced = null;
+        }
+        if (fenced) {
+          puts = candidates
+            .filter(([key]) => !fenced.has(key))
+            .map(([key, value]) => ({ key, value: JSON.stringify(value), expiration_ttl: KV_SNAPSHOT_TTL_S }));
+          deletes = [...explicit, ...candidates.filter(([key]) => fenced.has(key)).map(([key]) => key)];
+        } else {
+          deletes = explicit;
+          settled = new Set(explicit);
+        }
       } else {
         deletes = [...latest.keys()];
       }
       if (puts.length) await kv.put(puts);
       if (deletes.length) await kv.delete(deletes);
-      const acknowledged = await deps.db.admin.query(
-        `DELETE FROM edge_outbox WHERE workspace_id = $1 AND id <= $2 AND EXISTS (
-           SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
-        [ws, rows[rows.length - 1].id, t.generation],
-      );
-      if (!acknowledged.rowCount) return;
+      // Acknowledge exactly the rows this pass read and settled. Sequence ids can commit out of
+      // order, so "everything up to the highest id" could drop an erasure delete committed after the
+      // read with a lower id (#1203 review).
+      const ackIds = rows.filter((row) => settled === null || settled.has(row.key)).map((row) => row.id);
+      const acknowledged = ackIds.length
+        ? await deps.db.admin.query(
+            `DELETE FROM edge_outbox WHERE workspace_id = $1 AND id = ANY($2::bigint[]) AND EXISTS (
+               SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
+            [ws, ackIds, t.generation],
+          )
+        : { rowCount: 0 };
+      if (ackIds.length && !acknowledged.rowCount) return;
+      // Deferred puts wait for the next sync; reading the same rows again here would loop.
+      if (settled !== null) break;
       if (rows.length < 5000) break;
     }
     // 4. Backfill: everyone's snapshot, a slice per sync (written through the mirror above).
