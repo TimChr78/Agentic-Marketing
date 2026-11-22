@@ -22,6 +22,12 @@ export interface HotStateIds {
   profileIds?: string[];
 }
 
+/** The ids a snapshot write actually wrote; tombstoned subjects are absent. */
+export interface WrittenHotStateIds {
+  anonymousIds: string[];
+  userIds: string[];
+}
+
 export interface Session {
   pageViews: number;
   firstSeen: string | null;
@@ -47,12 +53,16 @@ export type ClaimOutcome = { state: 'claimed'; token: string } | { state: 'pendi
 export interface HotState {
   /** Counts accepted events into each visitor's session (ingest, before it answers). */
   recordSessions(events: BusEvent[]): Promise<void>;
-  session(workspaceId: string, anonymousId: string): Promise<Session>;
+  /**
+   * Reads a session. A tombstoned anonymous id, or a tombstoned user id passed beside it, has no
+   * session: `/v1/decide` passes both so an erased person cannot personalise through the other id.
+   */
+  session(workspaceId: string, anonymousId: string, userId?: string): Promise<Session>;
   /**
    * Writes a snapshot under every id. Atomic per call: a tombstoned subject is skipped, and the
-   * result says whether any key was written (the edge mirror queues only then, #1196).
+   * result names the ids that were written (the edge mirror queues only those, #1196).
    */
-  writeSnapshot(workspaceId: string, ids: HotStateIds, snapshot: ProfileSnapshot): Promise<boolean>;
+  writeSnapshot(workspaceId: string, ids: HotStateIds, snapshot: ProfileSnapshot): Promise<WrittenHotStateIds>;
   deleteSnapshot(workspaceId: string, ids: HotStateIds): Promise<void>;
   /**
    * Fences these subjects against every later hot-state write (#1196). An erasure calls this before
@@ -63,6 +73,8 @@ export interface HotState {
   tombstone(workspaceId: string, ids: HotStateIds, ttlSeconds?: number): Promise<void>;
   /** Seconds until an anonymous id's tombstone expires; -2 absent, -1 no expiry. */
   tombstoneTtl(workspaceId: string, anonymousId: string): Promise<number>;
+  /** Of these ids, the ones a tombstone fences (the edge mirror drops a queued snapshot for them). */
+  tombstonedIds(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[] }): Promise<WrittenHotStateIds>;
   /** The snapshot for whichever id is known, user id first; a tombstoned subject has none. */
   snapshot(workspaceId: string, ids: { anonymousId?: string; userId?: string }): Promise<ProfileSnapshot | null>;
   /**
@@ -179,37 +191,68 @@ return 0`;
 // later delete removes what it wrote) or sees the tombstone and writes nothing.
 const WRITE_SNAPSHOT = `
 local value, ttl = ARGV[1], tonumber(ARGV[2])
-local written = 0
+local accepted = {}
 for i = 1, #KEYS, 2 do
   if redis.call('EXISTS', KEYS[i + 1]) == 0 then
     redis.call('SET', KEYS[i], value, 'EX', ttl)
-    written = written + 1
+    accepted[#accepted + 1] = (i + 1) / 2
   end
 end
-return written`;
+return accepted`;
 
-// Session writes are per anonymous id: a subject's counters are applied in one script, gated on its
-// tombstone. ARGV is the TTL followed by one JSON object per key pair: first and the field updates.
+// Session writes are per anonymous id: a subject's counters are applied in one script, gated on
+// every id the event named. ARGV is the TTL, the group count, then one JSON object per group: the
+// first timestamp, the field updates, and how many tombstone keys follow its session key. Each
+// group is applied inside pcall, so a value Redis still rejects cannot abort every other visitor;
+// a key this call created is dropped if its writes failed before EXPIRE.
 const RECORD_SESSIONS = `
-local ttl = tonumber(ARGV[1])
+local ttl, groups = tonumber(ARGV[1]), tonumber(ARGV[2])
 local written = 0
-for g = 1, #KEYS / 2 do
-  local session, tombstone = KEYS[2 * g - 1], KEYS[2 * g]
-  if redis.call('EXISTS', tombstone) == 0 then
-    local spec = cjson.decode(ARGV[g + 1])
-    if spec.first then redis.call('HSETNX', session, 'first', spec.first) end
-    for _, op in ipairs(spec.ops) do
-      if op[1] == 'incr' then redis.call('HINCRBY', session, op[2], op[3])
-      elseif op[1] == 'set' then redis.call('HSET', session, op[2], op[3])
-      else redis.call('HSETNX', session, op[2], op[3]) end
+local k = 1
+for g = 1, groups do
+  local session = KEYS[k]
+  k = k + 1
+  local spec = cjson.decode(ARGV[g + 2])
+  local blocked = false
+  for j = 1, spec.tombs do
+    if redis.call('EXISTS', KEYS[k]) == 1 then blocked = true end
+    k = k + 1
+  end
+  if not blocked then
+    local existed = redis.call('EXISTS', session) == 1
+    local ok = pcall(function()
+      if spec.first then redis.call('HSETNX', session, 'first', spec.first) end
+      for _, op in ipairs(spec.ops) do
+        if op[1] == 'incr' then redis.call('HINCRBY', session, op[2], op[3])
+        elseif op[1] == 'set' then redis.call('HSET', session, op[2], op[3])
+        else redis.call('HSETNX', session, op[2], op[3]) end
+      end
+    end)
+    if ok then
+      redis.call('EXPIRE', session, ttl)
+      written = written + 1
+    elseif existed then
+      redis.call('EXPIRE', session, ttl)
+    else
+      -- Never leave a key this call created without a TTL.
+      redis.call('DEL', session)
     end
-    redis.call('EXPIRE', session, ttl)
-    written = written + 1
   end
 end
 return written`;
 
-type SessionWrite = { first?: string; ops: [op: 'incr' | 'set' | 'nx', field: string, value: string][] };
+type SessionWrite = { first?: string; ops: [op: 'incr' | 'set' | 'nx', field: string, value: string][]; tombs: number };
+
+// Session values are the only part of a write a client controls. Keep them strings of a bounded
+// length before they reach Lua: a boolean `page.path` used to abort the script after some writes
+// and before EXPIRE, leaving the session with no TTL (#1196 review).
+const SESSION_PATH_MAX = 2048;
+const SESSION_FIRST_MAX = 64;
+const SESSION_VALUE_MAX = 512;
+
+function boundedText(value: unknown, max: number): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value.slice(0, max) : undefined;
+}
 
 export function valkeyHotState(opts: { url: string; prefix?: string }): HotState {
   const client = new Valkey(opts.url, { lazyConnect: true, maxRetriesPerRequest: 2, enableAutoPipelining: true });
@@ -231,6 +274,7 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
         path?: string;
         referrer?: string;
         utm?: string;
+        tombs: Set<string>;
       };
       const groups = new Map<string, Group>();
       for (const e of events) {
@@ -238,42 +282,55 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
         const k = `${e.workspaceId}\u0000${e.anonymousId}`;
         let g = groups.get(k);
         if (!g) {
-          g = { workspaceId: e.workspaceId, anonymousId: e.anonymousId, counts: new Map(), pageViews: 0 };
-          if (e.timestamp) g.first = e.timestamp;
+          g = { workspaceId: e.workspaceId, anonymousId: e.anonymousId, counts: new Map(), pageViews: 0, tombs: new Set() };
+          if (e.timestamp) g.first = boundedText(e.timestamp, SESSION_FIRST_MAX);
           groups.set(k, g);
         }
-        g.counts.set(`e:${e.name}`, (g.counts.get(`e:${e.name}`) ?? 0) + 1);
+        const name = boundedText(e.name, SESSION_VALUE_MAX) ?? '';
+        g.counts.set(`e:${name}`, (g.counts.get(`e:${name}`) ?? 0) + 1);
         if (e.type === 'page') {
           g.pageViews += 1;
-          const page = (e.context.page ?? {}) as { path?: string; referrer?: string; search?: string };
-          if (page.path) g.path = page.path;
-          if (!g.referrer && page.referrer) g.referrer = page.referrer;
+          const page = (e.context?.page ?? {}) as { path?: unknown; referrer?: unknown; search?: unknown };
+          const path = boundedText(page.path, SESSION_PATH_MAX);
+          if (path) g.path = path;
+          const referrer = boundedText(page.referrer, SESSION_PATH_MAX);
+          if (!g.referrer && referrer) g.referrer = referrer;
+          const search = boundedText(page.search, SESSION_PATH_MAX);
           const utm =
-            new URLSearchParams(page.search ?? '').get('utm_source') ??
-            (e.context.campaign as { source?: string } | undefined)?.source ??
-            null;
+            (search ? new URLSearchParams(search).get('utm_source') : null) ??
+            boundedText((e.context?.campaign as { source?: unknown } | undefined)?.source, SESSION_VALUE_MAX);
           if (!g.utm && utm) g.utm = utm;
         }
+        // Every id the event names can fence the session, even when its anonymous id is new: the
+        // cleanup tombstones user ids, and a late event with an erased user id must not rebuild a
+        // session the erasure claimed (#1196 review).
+        if (e.userId) g.tombs.add(tombKey(e.workspaceId, 'u', e.userId));
+        if (e.profileId) g.tombs.add(tombKey(e.workspaceId, 'p', e.profileId));
       }
       if (!groups.size) return;
+      const ordered = [...groups.values()];
       const keys: string[] = [];
       const specs: string[] = [];
-      for (const g of groups.values()) {
+      for (const g of ordered) {
         const ops: SessionWrite['ops'] = [];
         for (const [field, n] of g.counts) ops.push(['incr', field, String(n)]);
         if (g.pageViews) ops.push(['incr', 'pv', String(g.pageViews)]);
         if (g.path) ops.push(['set', 'path', g.path]);
         if (g.referrer) ops.push(['nx', 'ref', g.referrer]);
         if (g.utm) ops.push(['nx', 'utm', g.utm]);
-        keys.push(sessionKey(g.workspaceId, g.anonymousId), tombKey(g.workspaceId, 'a', g.anonymousId));
-        specs.push(JSON.stringify({ first: g.first, ops } satisfies SessionWrite));
+        const tombs = [tombKey(g.workspaceId, 'a', g.anonymousId), ...g.tombs];
+        keys.push(sessionKey(g.workspaceId, g.anonymousId), ...tombs);
+        specs.push(JSON.stringify({ first: g.first, ops, tombs: tombs.length } satisfies SessionWrite));
       }
-      await client.eval(RECORD_SESSIONS, keys.length, ...keys, SESSION_TTL_S, ...specs);
+      await client.eval(RECORD_SESSIONS, keys.length, ...keys, SESSION_TTL_S, ordered.length, ...specs);
     },
 
-    async session(ws, anon) {
-      // A tombstone makes the id stateless even if the erasure's delete has not run yet.
-      const [tomb, h] = await Promise.all([client.exists(tombKey(ws, 'a', anon)), client.hgetall(sessionKey(ws, anon))]);
+    async session(ws, anon, userId) {
+      // A tombstone makes the id stateless even if the erasure's delete has not run yet. The user
+      // id is a second fence: an erased person's session may still exist under a new anonymous id.
+      const tombs = [tombKey(ws, 'a', anon)];
+      if (userId) tombs.push(tombKey(ws, 'u', userId));
+      const [tomb, h] = await Promise.all([client.exists(...tombs), client.hgetall(sessionKey(ws, anon))]);
       const counts: Record<string, number> = {};
       if (!tomb) for (const [k, v] of Object.entries(h)) if (k.startsWith('e:')) counts[k.slice(2)] = Number(v);
       return {
@@ -288,12 +345,18 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
     },
 
     async writeSnapshot(ws, ids, snap) {
-      const value = JSON.stringify(snap);
-      const keys: string[] = [];
-      for (const a of ids.anonymousIds) keys.push(snapKey(ws, 'a', a), tombKey(ws, 'a', a));
-      for (const u of ids.userIds) keys.push(snapKey(ws, 'u', u), tombKey(ws, 'u', u));
-      if (!keys.length) return false;
-      return Number(await client.eval(WRITE_SNAPSHOT, keys.length, ...keys, value, SNAPSHOT_TTL_S)) > 0;
+      const entries: { kind: 'a' | 'u'; id: string }[] = [
+        ...ids.anonymousIds.map((id) => ({ kind: 'a' as const, id })),
+        ...ids.userIds.map((id) => ({ kind: 'u' as const, id })),
+      ];
+      const written: WrittenHotStateIds = { anonymousIds: [], userIds: [] };
+      if (!entries.length) return written;
+      const keys = entries.flatMap((e) => [snapKey(ws, e.kind, e.id), tombKey(ws, e.kind, e.id)]);
+      const accepted = new Set((await client.eval(WRITE_SNAPSHOT, keys.length, ...keys, JSON.stringify(snap), SNAPSHOT_TTL_S)) as number[]);
+      entries.forEach((e, i) => {
+        if (accepted.has(i + 1)) (e.kind === 'a' ? written.anonymousIds : written.userIds).push(e.id);
+      });
+      return written;
     },
 
     async deleteSnapshot(ws, ids) {
@@ -313,11 +376,28 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
       if (!keys.length) return;
       const multi = client.multi();
       for (const key of new Set(keys)) multi.set(key, '1', 'EX', ttlSeconds);
-      await multi.exec();
+      const replies = await multi.exec();
+      // A reply error (an invalid TTL, for example) would otherwise be discarded: the erasure would
+      // delete and checkpoint without a fence (#1196 review). Throw so the cleanup retries.
+      if (!replies) throw new Error('the hot-state tombstone transaction was not executed');
+      for (const reply of replies) if (Array.isArray(reply) && reply[0]) throw reply[0];
     },
 
     async tombstoneTtl(ws, anon) {
       return client.ttl(tombKey(ws, 'a', anon));
+    },
+
+    async tombstonedIds(ws, ids) {
+      const entries: { kind: 'a' | 'u'; id: string }[] = [
+        ...ids.anonymousIds.map((id) => ({ kind: 'a' as const, id })),
+        ...ids.userIds.map((id) => ({ kind: 'u' as const, id })),
+      ];
+      const hits = await Promise.all(entries.map((e) => client.exists(tombKey(ws, e.kind, e.id))));
+      const fenced: WrittenHotStateIds = { anonymousIds: [], userIds: [] };
+      entries.forEach((e, i) => {
+        if (hits[i]) (e.kind === 'a' ? fenced.anonymousIds : fenced.userIds).push(e.id);
+      });
+      return fenced;
     },
 
     async snapshot(ws, ids) {

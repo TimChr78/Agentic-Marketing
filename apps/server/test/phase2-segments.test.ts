@@ -126,4 +126,12 @@ describe('segments', () => {
     const loop = await api.call('artifacts.updateDraft', { artifactId, content: { condition: { segment: artifactId } } });
     expect((await rejects(api.call('segments.preview', { artifactId, version: loop.version }))).message).toContain('loop');
   });
+
+  it('reports not_found for a segment that never existed, even though its total is derived', async () => {
+    // #1197 review: the derived count must not turn a missing segment into an empty one.
+    const missing = `seg_${'0'.repeat(32)}`;
+    const err = await rejects(t.api(owner).call('segments.members', { artifactId: missing }));
+    expect(err.status).toBe(404);
+    expect(err.message).toContain(`No segment ${missing}`);
+  });
 });
