@@ -254,6 +254,192 @@ describe('recurring physical purge (#1037 part 3)', () => {
     ).toEqual([{ n: 0 }]);
   }, 60_000);
 
+  it('keeps the side entry a late legacy row depends on, instead of reopening its exclusion', async () => {
+    const raceWs = newUuid();
+    const legacy = (name: string, eventId: string): Record<string, unknown> => ({
+      workspace_id: raceWs,
+      event_id: eventId,
+      source_id: 'src_side_race',
+      received_at: '2026-08-03 12:00:00',
+      timestamp: '2026-08-03 12:00:00',
+      type: 'track',
+      name,
+      anonymous_id: '',
+      user_id: '',
+      profile_id: 'prf_side_race',
+      properties: {},
+      traits: {},
+      context: {},
+      consent: {},
+    });
+    // `side-a` backs the row this sweep deletes. `side-b` outlives its base row (an earlier pass
+    // removed it without the side entry), so it is the only thing that can exclude a late
+    // redelivery of that legacy row.
+    await store.client.insert({ table: 'events', values: [legacy('Side race A', 'side-race-a')], format: 'JSONEachRow' });
+    let step = await store.backfillSubjectKeys({ workspaceIds: [raceWs], batchSize: 10 });
+    for (let i = 0; i < 4 && !step.done; i++) step = await store.backfillSubjectKeys({ workspaceIds: [raceWs], batchSize: 10 });
+    expect(step.done).toBe(true);
+    const profileKey = hmac('profile', 'prf_side_race');
+    await store.client.insert({
+      table: 'subject_key_backfill',
+      format: 'JSONEachRow',
+      values: [
+        {
+          workspace_id: raceWs,
+          table_name: 'events',
+          key1: 'Side race B',
+          key2: '',
+          key3: '2026-08-03 12:00:00.000',
+          key4: 'side-race-b',
+          subject_profile: profileKey,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+      ],
+    });
+
+    let checks = 0;
+    const result = await store.purgeErasedSubjects(raceWs, [profileKey], {
+      batchSize: 100,
+      maxBatches: 2,
+      checkpoint: async () => {
+        checks++;
+        // The second checkpoint is the side-table batch, after the base table reached zero. A late
+        // legacy row arrives now: it has no subject keys of its own and depends on `side-b`.
+        if (checks === 2)
+          await store.client.insert({ table: 'events', values: [legacy('Side race B', 'side-race-b')], format: 'JSONEachRow' });
+        return true;
+      },
+    });
+
+    expect(result).toMatchObject({ complete: false });
+    expect(result.tables.find((table) => table.table === 'events')).toEqual({ table: 'events', deleted: 2, remaining: true });
+    // The late row is still there, and the side entry that excludes it was kept.
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, raceWs)).toEqual([
+      { n: 1 },
+    ]);
+    expect(
+      await rows<{ key4: string }>(
+        `SELECT key4 FROM subject_key_backfill FINAL
+          WHERE workspace_id = {ws:UUID} AND table_name = 'events' ORDER BY key4`,
+        {},
+        raceWs,
+      ),
+    ).toEqual([{ key4: 'side-race-b' }]);
+  }, 60_000);
+
+  it('purges more than a thousand rows in several bounded batches within the HTTP parameter limit', async () => {
+    const bulkWs = newUuid();
+    const total = 1_500;
+    // Real-shaped identities are what makes a 1,000-row tuple list exceed ClickHouse's per-field
+    // HTTP limit: a long event name, a long anonymous id, a timestamp and an event id per row.
+    await store.insert(
+      Array.from({ length: total }, (_, i) =>
+        event(i, {
+          workspaceId: bulkWs,
+          profileId: 'prf_bulk_purge',
+          name: `Purge event with a realistic name ${i}`,
+          anonymousId: `bulk-${String(i).padStart(4, '0')}-${'a'.repeat(32)}`,
+        }),
+      ),
+    );
+    const key = hmac('profile', 'prf_bulk_purge');
+    let deletes = 0;
+    const result = await store.purgeErasedSubjects(bulkWs, [key], {
+      maxBatches: 10,
+      checkpoint: async () => {
+        deletes++;
+        return true;
+      },
+    });
+    // Every delete stays under the server's per-field limit, so the sweep neither fails nor retries
+    // forever; it takes more than one request to cover 1,500 rows.
+    expect(deletes).toBeGreaterThan(1);
+    expect(result).toMatchObject({ complete: true, deleted: total });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, bulkWs)).toEqual([
+      { n: 0 },
+    ]);
+  }, 120_000);
+
+  it('measures non-ASCII and escaped identities in URL-encoded bytes, not characters', async () => {
+    const wideWs = newUuid();
+    const total = 400;
+    // CJK text is three UTF-8 bytes and nine bytes percent-encoded per character, and quotes and
+    // backslashes are escaped before encoding; counting characters let a batch reach 261 KB.
+    await store.insert(
+      Array.from({ length: total }, (_, i) =>
+        event(i, {
+          workspaceId: wideWs,
+          profileId: 'prf_wide_purge',
+          name: `購入完了イベント「${i}」 \\ 'quoted' ${'漢字'.repeat(20)}`,
+          anonymousId: `wide-${i}-${'é'.repeat(30)}`,
+        }),
+      ),
+    );
+    const key = hmac('profile', 'prf_wide_purge');
+    const result = await store.purgeErasedSubjects(wideWs, [key], { maxBatches: 10 });
+    expect(result).toMatchObject({ complete: true, deleted: total });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, wideWs)).toEqual([
+      { n: 0 },
+    ]);
+  }, 120_000);
+
+  it('removes an orphaned side entry for each table, whose identity is narrower than four keys', async () => {
+    const sideWs = newUuid();
+    const key = hmac('profile', 'prf_orphan_side');
+    // No base row exists for any of these, so each table goes straight to its side cleanup. A
+    // message event's identity is three columns, while the side table always keeps four keys.
+    await store.client.insert({
+      table: 'subject_key_backfill',
+      format: 'JSONEachRow',
+      values: [
+        {
+          workspace_id: sideWs,
+          table_name: 'events',
+          key1: 'Orphan event',
+          key2: 'orphan-anon',
+          key3: '2026-08-04 12:00:00.000',
+          key4: 'orphan-events',
+          subject_profile: key,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+        {
+          workspace_id: sideWs,
+          table_name: 'message_events',
+          key1: 'orphan-message',
+          key2: 'delivered',
+          key3: 'orphan-message-event',
+          key4: '',
+          subject_profile: key,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+        {
+          workspace_id: sideWs,
+          table_name: 'journey_events',
+          key1: 'orphan-journey',
+          key2: '7',
+          key3: '3',
+          key4: 'entered',
+          subject_profile: key,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+      ],
+    });
+
+    const result = await store.purgeErasedSubjects(sideWs, [key], { batchSize: 100 });
+    expect(result).toMatchObject({ complete: true, deleted: 3 });
+    expect(
+      await rows<{ n: number }>('SELECT count() AS n FROM subject_key_backfill FINAL WHERE workspace_id = {ws:UUID}', {}, sideWs),
+    ).toEqual([{ n: 0 }]);
+  }, 60_000);
+
   it('stops at the batch bound and reports that a later round must continue', async () => {
     const boundedWs = newUuid();
     await store.insert(
@@ -266,6 +452,54 @@ describe('recurring physical purge (#1037 part 3)', () => {
     const second = await store.purgeErasedSubjects(boundedWs, [key], { batchSize: 10, maxBatches: 2 });
     expect(second).toMatchObject({ deleted: 3, complete: true });
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL', {}, boundedWs)).toEqual([{ n: 0 }]);
+  }, 60_000);
+
+  it('measures progress after the delete, so a write that lands mid-batch keeps the table open', async () => {
+    const lateWs = newUuid();
+    await store.insert([event(1, { workspaceId: lateWs, profileId: 'prf_observed', anonymousId: 'observed-1' })]);
+    const key = hmac('profile', 'prf_observed');
+    let wroteLate = false;
+    const result = await store.purgeErasedSubjects(lateWs, [key], {
+      batchSize: 1,
+      maxBatches: 1,
+      checkpoint: async () => {
+        if (!wroteLate) {
+          wroteLate = true;
+          // The checkpoint runs after the fixed batch was selected and before its delete. A write
+          // here is not in that batch, so the delete still removes one row while the table's count
+          // stays the same: `deleted` must report the batch, not the net change.
+          await store.insert([event(2, { workspaceId: lateWs, profileId: 'prf_observed', anonymousId: 'observed-2' })]);
+        }
+        return true;
+      },
+    });
+    expect(result.complete).toBe(false);
+    expect(result.tables.find((table) => table.table === 'events')).toEqual({ table: 'events', deleted: 1, remaining: true });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, lateWs)).toEqual([
+      { n: 1 },
+    ]);
+  }, 60_000);
+
+  it('stops before the next batch when the caller lost its claim', async () => {
+    const claimWs = newUuid();
+    await store.insert([0, 1, 2, 3, 4].map((i) => event(i, { workspaceId: claimWs, profileId: 'prf_claim', anonymousId: `claim-${i}` })));
+    const key = hmac('profile', 'prf_claim');
+    let checks = 0;
+    const result = await store.purgeErasedSubjects(claimWs, [key], {
+      batchSize: 1,
+      maxBatches: 5,
+      checkpoint: async () => {
+        checks++;
+        // The first two batches hold the claim; another replica takes it before a third mutation.
+        return checks <= 2;
+      },
+    });
+    expect(checks).toBe(3);
+    expect(result).toMatchObject({ deleted: 2, complete: false });
+    expect(result.tables).toEqual([{ table: 'events', deleted: 2, remaining: true }]);
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, claimWs)).toEqual([
+      { n: 3 },
+    ]);
   }, 60_000);
 });
 

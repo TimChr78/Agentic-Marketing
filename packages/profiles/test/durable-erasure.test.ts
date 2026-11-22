@@ -410,6 +410,31 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     expect(status).toMatchObject({ status: 'complete', reason: null, exclusion: 'full', attempts: 2 });
   });
 
+  it('keeps a pre-ledger job that completed after the upgrade complete, without claiming full', async () => {
+    const old = 'era_00000000000000000000000000000006';
+    const profile = 'prf_0000000000000000000000000000aa06';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'legacy erasure published at generation 0', '{"profiles":1}')`,
+      [d.workspace, old, profile],
+    );
+    // The ledger-aware pipeline ran for this job after the upgrade: it found nothing publishable,
+    // wrote `published_at` at generation 0 and completed. That record proves a publication ran, not
+    // that any identifier was hashed.
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, published_generation, published_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 0, now(), now())`,
+      [d.workspace, old, profile],
+    );
+    const { events } = fakeEvents();
+    const { hot } = fakeHot();
+    const executor = createExecutor(d.db, services(events, hot));
+    const status = await executor.execute(erasureStatus, { erasureId: old }, userPrincipal('user_test', d.workspace, 'owner'), {
+      surface: 'rest',
+    });
+    expect(status).toMatchObject({ status: 'complete', exclusion: 'unknown', reason: 'legacy' });
+  });
+
   it('reports partial exclusion when the ledger holds an unavailable identifier', async () => {
     const partial = 'era_00000000000000000000000000000005';
     await d.db.admin.query(
