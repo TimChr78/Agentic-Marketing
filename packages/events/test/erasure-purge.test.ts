@@ -329,6 +329,94 @@ describe('recurring physical purge (#1037 part 3)', () => {
     ).toEqual([{ key4: 'side-race-b' }]);
   }, 60_000);
 
+  it('purges more than a thousand rows in several bounded batches within the HTTP parameter limit', async () => {
+    const bulkWs = newUuid();
+    const total = 1_500;
+    // Real-shaped identities are what makes a 1,000-row tuple list exceed ClickHouse's per-field
+    // HTTP limit: a long event name, a long anonymous id, a timestamp and an event id per row.
+    await store.insert(
+      Array.from({ length: total }, (_, i) =>
+        event(i, {
+          workspaceId: bulkWs,
+          profileId: 'prf_bulk_purge',
+          name: `Purge event with a realistic name ${i}`,
+          anonymousId: `bulk-${String(i).padStart(4, '0')}-${'a'.repeat(32)}`,
+        }),
+      ),
+    );
+    const key = hmac('profile', 'prf_bulk_purge');
+    let deletes = 0;
+    const result = await store.purgeErasedSubjects(bulkWs, [key], {
+      maxBatches: 10,
+      checkpoint: async () => {
+        deletes++;
+        return true;
+      },
+    });
+    // Every delete stays under the server's per-field limit, so the sweep neither fails nor retries
+    // forever; it takes more than one request to cover 1,500 rows.
+    expect(deletes).toBeGreaterThan(1);
+    expect(result).toMatchObject({ complete: true, deleted: total });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, bulkWs)).toEqual([
+      { n: 0 },
+    ]);
+  }, 120_000);
+
+  it('removes an orphaned side entry for each table, whose identity is narrower than four keys', async () => {
+    const sideWs = newUuid();
+    const key = hmac('profile', 'prf_orphan_side');
+    // No base row exists for any of these, so each table goes straight to its side cleanup. A
+    // message event's identity is three columns, while the side table always keeps four keys.
+    await store.client.insert({
+      table: 'subject_key_backfill',
+      format: 'JSONEachRow',
+      values: [
+        {
+          workspace_id: sideWs,
+          table_name: 'events',
+          key1: 'Orphan event',
+          key2: 'orphan-anon',
+          key3: '2026-08-04 12:00:00.000',
+          key4: 'orphan-events',
+          subject_profile: key,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+        {
+          workspace_id: sideWs,
+          table_name: 'message_events',
+          key1: 'orphan-message',
+          key2: 'delivered',
+          key3: 'orphan-message-event',
+          key4: '',
+          subject_profile: key,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+        {
+          workspace_id: sideWs,
+          table_name: 'journey_events',
+          key1: 'orphan-journey',
+          key2: '7',
+          key3: '3',
+          key4: 'entered',
+          subject_profile: key,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+      ],
+    });
+
+    const result = await store.purgeErasedSubjects(sideWs, [key], { batchSize: 100 });
+    expect(result).toMatchObject({ complete: true, deleted: 3 });
+    expect(
+      await rows<{ n: number }>('SELECT count() AS n FROM subject_key_backfill FINAL WHERE workspace_id = {ws:UUID}', {}, sideWs),
+    ).toEqual([{ n: 0 }]);
+  }, 60_000);
+
   it('stops at the batch bound and reports that a later round must continue', async () => {
     const boundedWs = newUuid();
     await store.insert(
