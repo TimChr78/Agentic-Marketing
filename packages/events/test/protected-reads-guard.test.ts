@@ -124,13 +124,6 @@ const ALLOWED: { file: string; text: string; why: string }[] = [
     // same statement, bounded to the keys the scope can carry.
     why: 'id-scoped message read',
   },
-  {
-    file: 'packages/events/src/clickhouse.ts',
-    text: 'FROM message_events AS sm FINAL',
-    // The bound of that predicate (#1195): the same scope read inside the same statement, so a row
-    // committed after the width probe is still excluded by the counting query itself.
-    why: 'id-scoped message read bound',
-  },
 ];
 
 describe('protected reads (#1037 part 2)', () => {
@@ -173,17 +166,11 @@ describe('protected reads (#1037 part 2)', () => {
   });
 
   it('every protected view is created by the ClickHouse migrations and filters erased subjects', async () => {
-    const [created, latest] = await Promise.all(
-      ['0009_protected_views.sql', '0010_protected_views_fail_closed.sql'].map(async (file) =>
-        // Comments explain the shape; only the statements are checked.
-        (await readFile(join(ROOT, 'packages/events/clickhouse', file), 'utf8')).replace(/^\s*--.*$/gm, ''),
-      ),
-    );
+    const source = await readFile(join(ROOT, 'packages/events/clickhouse/0009_protected_views.sql'), 'utf8');
+    // Comments explain the shape; only the statements are checked.
+    const migration = source.replace(/^\s*--.*$/gm, '');
     for (const table of PERSON_TABLES) {
-      expect(created).toContain(`CREATE VIEW IF NOT EXISTS ${table}_protected AS`);
-      // An atomic swap: a read during the upgrade never finds the view missing (#1200 review).
-      expect(latest).toContain(`CREATE OR REPLACE VIEW ${table}_protected AS`);
-      expect(latest).not.toContain(`DROP VIEW`);
+      expect(migration).toContain(`CREATE VIEW IF NOT EXISTS ${table}_protected AS`);
       // The views are parameterized on the workspace, and the shared layer always supplies it.
       expect(personReadSource(table, true)).toBe(`${PROTECTED_VIEWS[table]}(ws={ws:UUID})`);
       expect(personReadSource(table, false)).toBe(table);
@@ -191,34 +178,17 @@ describe('protected reads (#1037 part 2)', () => {
     expect(TABLES).toEqual(PERSON_TABLES);
     // The exclusion state is the whole point of a view: one set subquery per view, keyed by the
     // caller's workspace parameter, and one array test over the row's subject keys.
-    expect(created.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length);
-    expect(created.match(/NOT arrayExists\(/g)).toHaveLength(PERSON_TABLES.length);
+    expect(migration.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length);
+    expect(migration.match(/NOT arrayExists\(/g)).toHaveLength(PERSON_TABLES.length);
     // Both the ledger subquery and the backfill side read name the workspace, so each scan uses
     // its table's ordering prefix.
-    expect(created.match(/workspace_id = \{ws:UUID\}/g)).toHaveLength(PERSON_TABLES.length * 2);
-    // The fail-closed successor adds, per view, a one-row existence check for the workspace's
-    // published exclusions (#1195): uncovered rows are hidden only once there is something to
-    // exclude, so a workspace whose publication is still pending keeps its legacy rows readable
-    // for the same window in which the erased subject itself is still readable.
-    // The existence check reads the ledger without FINAL: deduplicating cannot change whether a
-    // workspace has any row, and FINAL would read the whole ledger again.
-    expect(latest.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length);
-    expect(latest.match(/NOT EXISTS \(SELECT 1 FROM erased_subjects WHERE workspace_id = \{ws:UUID\} LIMIT 1\)/g)).toHaveLength(
-      PERSON_TABLES.length,
-    );
-    expect(latest.match(/NOT arrayExists\(/g)).toHaveLength(PERSON_TABLES.length);
-    expect(latest.match(/workspace_id = \{ws:UUID\}/g)).toHaveLength(PERSON_TABLES.length * 3);
-    for (const migration of [created, latest]) {
-      // Neither of the two shapes that failed a review: no per-row ledger array, no per-kind joins.
-      expect(migration).not.toContain('groupUniqArray');
-      expect(migration).not.toContain('LEFT ANTI JOIN');
-      // FINAL belongs inside the view (it returns one logical row per replacing key). A caller that
-      // added it again would merge the view's output, and one that relied on it would silently miss
-      // both the dedupe and the exclusion.
-      expect([...migration.matchAll(/FROM \w+_protected\b/gi)]).toHaveLength(0);
-    }
-    // #1195: a row that is neither complete nor backfilled is unverified, not visible by default.
-    expect(latest.match(/1 AS side_found/g)).toHaveLength(PERSON_TABLES.length);
-    expect(latest.match(/OR NOT EXISTS \(SELECT 1 FROM erased_subjects WHERE/g)).toHaveLength(PERSON_TABLES.length);
+    expect(migration.match(/workspace_id = \{ws:UUID\}/g)).toHaveLength(PERSON_TABLES.length * 2);
+    // Neither of the two shapes that failed a review: no per-row ledger array, no per-kind joins.
+    expect(migration).not.toContain('groupUniqArray');
+    expect(migration).not.toContain('LEFT ANTI JOIN');
+    // FINAL belongs inside the view (it returns one logical row per replacing key). A caller that
+    // added it again would merge the view's output, and one that relied on it would silently miss
+    // both the dedupe and the exclusion.
+    expect([...migration.matchAll(/FROM \w+_protected\b/gi)]).toHaveLength(0);
   });
 });

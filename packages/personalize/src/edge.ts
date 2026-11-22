@@ -32,60 +32,6 @@ export const kvKeys = {
 /** The prefix every snapshot of a workspace shares, so a cleanup can find the ones it can no longer derive. */
 export const snapshotPrefix = (ws: string) => `am:snap:${ws}:`;
 
-/** The hot-state subject a queued snapshot key names, or null for a key this module did not queue. */
-export function snapshotSubject(ws: string, key: string): { kind: 'a' | 'u'; id: string } | null {
-  const prefix = snapshotPrefix(ws);
-  if (!key.startsWith(prefix)) return null;
-  const rest = key.slice(prefix.length);
-  if (rest.length < 3 || (rest[0] !== 'a' && rest[0] !== 'u') || rest[1] !== ':') return null;
-  return { kind: rest[0], id: rest.slice(2) };
-}
-
-/**
- * The last queued value per key. An erasure delete (value null) is terminal for that key (#1196
- * review): a refresh whose local write was accepted before the fence can queue its put after the
- * erasure's delete, and the stale put must not win.
- */
-export function latestOutboxValues(rows: { key: string; value: unknown }[]): Map<string, unknown> {
-  const latest = new Map<string, unknown>();
-  const deleted = new Set<string>();
-  for (const row of rows) {
-    if (row.value === null) {
-      deleted.add(row.key);
-      latest.set(row.key, null);
-    } else if (!deleted.has(row.key)) {
-      latest.set(row.key, row.value);
-    }
-  }
-  return latest;
-}
-
-/**
- * The queued snapshot keys whose subject is tombstoned now. A delete that was already acknowledged
- * does not cover a put that was queued afterwards, so the sync checks the fence again before it
- * writes (#1196 review).
- */
-export async function tombstonedSnapshotKeys(hot: HotState, ws: string, keys: string[]): Promise<Set<string>> {
-  const subjects = new Map<string, { kind: 'a' | 'u'; id: string }>();
-  for (const key of keys) {
-    const subject = snapshotSubject(ws, key);
-    if (subject) subjects.set(key, subject);
-  }
-  if (!subjects.size) return new Set();
-  const listed = [...subjects.values()];
-  const fenced = await hot.tombstonedIds(ws, {
-    anonymousIds: listed.filter((s) => s.kind === 'a').map((s) => s.id),
-    userIds: listed.filter((s) => s.kind === 'u').map((s) => s.id),
-  });
-  const anonymous = new Set(fenced.anonymousIds);
-  const users = new Set(fenced.userIds);
-  const out = new Set<string>();
-  for (const [key, subject] of subjects) {
-    if ((subject.kind === 'a' ? anonymous : users).has(subject.id)) out.add(key);
-  }
-  return out;
-}
-
 /** What remains to remove from KV after serving was turned off: people (snapshots) or everything. */
 export type EdgeCleanupMode = 'snapshots' | 'all';
 
@@ -429,13 +375,12 @@ export function edgeMirror(hot: HotState, db: Db): HotState {
   return {
     ...hot,
     async writeSnapshot(ws, ids, snap) {
-      // A tombstoned subject is refused by the local write (#1196); queueing it to the edge
-      // afterwards would recreate at the edge exactly what the erasure's delete removed. A multi-id
-      // write can be partly accepted, so queue only the ids it wrote (review).
-      const written = await hot.writeSnapshot(ws, ids, snap);
-      if (!written.anonymousIds.length && !written.userIds.length) return written;
-      if (await enabled(ws)) await queue(ws, written, snap).catch((err) => logger.warn({ err }, 'edge snapshot not queued'));
-      return written;
+      // A tombstoned subject is refused by the local write (#1196); queuing it to the edge afterwards
+      // would recreate at the edge exactly what the erasure's delete removed.
+      if (!(await hot.writeSnapshot(ws, ids, snap))) return false;
+      if (!(await enabled(ws))) return true;
+      await queue(ws, ids, snap).catch((err) => logger.warn({ err }, 'edge snapshot not queued'));
+      return true;
     },
     async deleteSnapshot(ws, ids) {
       await hot.deleteSnapshot(ws, ids);
@@ -707,33 +652,21 @@ async function syncEdgeLocked(
       if (gone.length) await kv.delete(gone);
       if (!(await update({ bundleHash: hash, pushedKeys: keys }))) return;
     }
-    // 3. Queued snapshot writes and deletions; the latest per key wins, except that an erasure
-    // delete is terminal for its key. A put whose subject is tombstoned now is dropped too, even
-    // when the delete was acknowledged in an earlier batch. When snapshots are off, every queued
-    // entry is deleted rather than uploaded, and erasure tombstones are never dropped.
+    // 3. Queued snapshot writes and deletions; the latest per key wins. When snapshots are off,
+    // every queued entry is deleted rather than uploaded, and erasure tombstones are never dropped.
     while (!opts.bundleOnly) {
       const { rows } = await deps.db.admin.query<{ id: string; key: string; value: unknown }>(
         'SELECT id, key, value FROM edge_outbox WHERE workspace_id = $1 ORDER BY id LIMIT 5000',
         [ws],
       );
       if (!rows.length) break;
-      const latest = latestOutboxValues(rows);
-      let puts: { key: string; value: string; expiration_ttl: number }[] = [];
-      let deletes: string[] = [];
-      if (servesSnapshots) {
-        const candidates = [...latest].filter(([, value]) => value !== null);
-        const fenced = await tombstonedSnapshotKeys(
-          deps.hot,
-          ws,
-          candidates.map(([key]) => key),
-        );
-        puts = candidates
-          .filter(([key]) => !fenced.has(key))
-          .map(([key, value]) => ({ key, value: JSON.stringify(value), expiration_ttl: KV_SNAPSHOT_TTL_S }));
-        deletes = [...latest].filter(([key, value]) => value === null || fenced.has(key)).map(([key]) => key);
-      } else {
-        deletes = [...latest.keys()];
-      }
+      const latest = new Map(rows.map((r) => [r.key, r.value]));
+      const puts = servesSnapshots
+        ? [...latest]
+            .filter(([, v]) => v !== null)
+            .map(([key, v]) => ({ key, value: JSON.stringify(v), expiration_ttl: KV_SNAPSHOT_TTL_S }))
+        : [];
+      const deletes = servesSnapshots ? [...latest].filter(([, v]) => v === null).map(([key]) => key) : [...latest.keys()];
       if (puts.length) await kv.put(puts);
       if (deletes.length) await kv.delete(deletes);
       const acknowledged = await deps.db.admin.query(

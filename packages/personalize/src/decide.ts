@@ -109,7 +109,7 @@ export function decideApi(deps: { db: Db; hot: HotState }) {
         personalized && wanted.length
           ? await Promise.all([
               deps.hot.snapshot(ws, { anonymousId: req.anonymousId, userId: req.userId }).catch(() => null),
-              req.anonymousId ? deps.hot.session(ws, req.anonymousId, req.userId || undefined).catch(() => null) : Promise.resolve(null),
+              req.anonymousId ? deps.hot.session(ws, req.anonymousId).catch(() => null) : Promise.resolve(null),
             ])
           : [null, null];
       let utmSource: string | null = null;

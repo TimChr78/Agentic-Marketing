@@ -280,9 +280,9 @@ describe('protected reads exclude erased subjects (#1037 part 2)', () => {
   it('excludes them from segment counts, including a row covered only by the backfill side table', async () => {
     expect(await store.countEvents(ws, { name: 'Purchase' })).toEqual([{ anonymousId: 'anon-B', userId: 'user-B', count: 1 }]);
     expect(await store.countEvents(ws, { name: 'Side Only' })).toEqual([]);
-    // No subject coverage and no side entry: the row is unverified, so a workspace with erasures
-    // fails closed and leaves it out of the read until the backfill covers it (#1195).
-    expect(await store.countEvents(ws, { name: 'Uncovered Legacy' })).toEqual([]);
+    // No subject coverage and no side entry: the conservative rule keeps the row visible and
+    // leaves it to the doctor coverage count (the activation gate is part 3).
+    expect(await store.countEvents(ws, { name: 'Uncovered Legacy' })).toEqual([{ anonymousId: 'anon-nobody', userId: '', count: 1 }]);
     const batched: { anonymousId: string }[] = [];
     for await (const batch of store.countEventsBatches(ws, { name: 'Purchase' })) batched.push(...batch);
     expect(batched).toEqual([{ anonymousId: 'anon-B', userId: 'user-B', count: 1 }]);

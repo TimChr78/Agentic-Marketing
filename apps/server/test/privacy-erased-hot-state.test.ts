@@ -209,25 +209,15 @@ describe('an erased person, when a writer was already in flight', () => {
     expect((await t.srv.hot.session(ws, person.anonymousId)).isNew).toBe(true);
 
     // The resolver drops these within the erasure grace window, but ingest records session state
-    // from what it accepted before resolution. The tombstone refuses that write even though the
-    // anonymous id is new, because the erased user id fences the session (#1196 review).
-    const fresh = `anon-fresh-${Date.now()}`;
+    // from what it accepted before resolution. The tombstone refuses that write.
     const late = await sendWith(key)([
-      { type: 'page', anonymousId: fresh, userId: person.userId, name: 'Home', context: { ...consent, page: { path: '/home' } } },
-      {
-        type: 'page',
-        anonymousId: fresh,
-        userId: person.userId,
-        name: 'Pricing',
-        context: { ...consent, page: { path: '/pricing' } },
-      },
+      { type: 'page', anonymousId: person.anonymousId, name: 'Home', context: { ...consent, page: { path: '/home' } } },
+      { type: 'page', anonymousId: person.anonymousId, name: 'Pricing', context: { ...consent, page: { path: '/pricing' } } },
     ]);
     expect(late.status).toBe(200);
-    expect((await t.srv.hot.session(ws, fresh, person.userId)).isNew).toBe(true);
-    expect(await t.srv.hot.snapshot(ws, { anonymousId: fresh, userId: person.userId })).toBeNull();
-    expect(
-      (await decide(key, { anonymousId: fresh, userId: person.userId, placements: ['hero_session'], context: consent })).decisions,
-    ).toEqual([]);
+    expect((await t.srv.hot.session(ws, person.anonymousId)).isNew).toBe(true);
+    expect(await t.srv.hot.snapshot(ws, { anonymousId: person.anonymousId, userId: person.userId })).toBeNull();
+    expect((await decide(key, { anonymousId: person.anonymousId, placements: ['hero_session'], context: consent })).decisions).toEqual([]);
   }, 120_000);
 
   it('an event during the erasure is deleted or refused, and decide never reads it', async () => {

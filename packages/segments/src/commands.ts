@@ -264,9 +264,6 @@ export const segmentMembers = defineCommand({
         )
       : [];
     const emailOf = new Map(emails.filter((e) => e.valueEnc).map((e, i) => [e.profileId, opened[i] ?? null]));
-    // Keep the existence check beside the derived count: a count alone would report 0 for a
-    // segment that never existed (#1197 review).
-    await segmentContentRaw(ctx, input.artifactId);
     // The total is the current membership, for every mode: a stored `segment_runs.members` goes
     // stale between a streaming update and the next recompute, which is exactly how an erased
     // person stayed counted until then (#1197). The count reads the (workspace_id, segment_id)
