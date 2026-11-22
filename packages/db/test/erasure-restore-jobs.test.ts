@@ -84,7 +84,7 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
     expect(jobs.rows[0]).toMatchObject({ state: 'pending_external', selectors, selector_key: selectorKey, selector_kek: 'local-test' });
     // Due at once: the scheduler cleans the restored external stores without an operator step.
     expect(jobs.rows[0]!.next_attempt_at.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
-  });
+  }, 120_000);
 
   it('does not backfill a job for an erasure recorded before durable cleanup', async () => {
     const live = await createDisposableDb('erasure_jobs_nojob_live');
@@ -109,98 +109,165 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
       erasureId,
     ]);
     expect(jobs.rowCount).toBe(0);
-  });
+  }, 120_000);
 
-  it('reopens a job the snapshot already completed, so the restore publishes the exclusions again', async () => {
+  it("leaves a completed erasure's job alone, so a restore does not reopen historical sweeps", async () => {
     const live = await createDisposableDb('erasure_republish_live');
     const restored = await createDisposableDb('erasure_republish_restored');
     open.push(live, restored);
-    const profile = 'prf_0000000000000000000000000000f00d';
-    const erasureId = 'era_0000000000000000000000000000f00d';
-    const ledger = {
-      kind: 'anonymous_id',
-      key: 'e'.repeat(64),
-      version: 'dk_exclusion_republish',
-    };
-    await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
-    await live.db.admin.query(
-      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
-       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'republish restore test', '{"profiles":1}')`,
-      [live.workspace, erasureId, profile],
-    );
-    await live.db.admin.query(
-      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
-       VALUES ($1, $2, $3, $4, $5, 'full')`,
-      [live.workspace, ledger.kind, ledger.key, ledger.version, erasureId],
-    );
-    const published = await live.db.admin.query(
-      `INSERT INTO erasure_cleanup_jobs
-         (workspace_id, erasure_id, profile_ids, state, clickhouse_done, hotstate_done,
-          published_generation, published_at, coverage_cleared_at, completed_at)
-       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', true, true, 7, now(), now(), now())
-       RETURNING published_at`,
-      [live.workspace, erasureId, profile],
-    );
+    const erasureIds: string[] = [];
+    const keys: { erasureId: string; key: string }[] = [];
+    // Many historical erasures that already finished: the restore's final reconciliation publishes
+    // their keys in bulk and must not queue every one for another sweep (#1194 review, item 4).
+    for (let i = 0; i < 25; i++) {
+      const profile = `prf_${i.toString(16).padStart(32, '0')}`;
+      const erasureId = `era_${i.toString(16).padStart(32, '0')}`;
+      const key = i.toString(16).padStart(64, '0');
+      erasureIds.push(erasureId);
+      keys.push({ erasureId, key });
+      await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+      await live.db.admin.query(
+        `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+         VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'completed restore test', '{"profiles":1}')`,
+        [live.workspace, erasureId, profile],
+      );
+      await live.db.admin.query(
+        `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+         VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_republish', $3, 'full')`,
+        [live.workspace, key, erasureId],
+      );
+      await live.db.admin.query(
+        `INSERT INTO erasure_cleanup_jobs
+           (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+            published_generation, published_at, coverage_cleared_at, completed_at)
+         VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 3, true, true, 7, now(), now(), now())`,
+        [live.workspace, erasureId, profile],
+      );
+    }
     const log = await readErasureLog(live.url.toString());
-    expect(log.cleanupJobs?.[0]).toMatchObject({ state: 'complete' });
+    expect(log.cleanupJobs).toHaveLength(25);
+    expect(log.cleanupJobs?.every((job) => job.state === 'complete')).toBe(true);
 
-    // The snapshot is the same database at a point that already held the completed job. Only
+    // The snapshot is the same database at a point that already held every completed job. Only
     // ClickHouse lost the publication, which is not part of the Postgres snapshot.
-    const completed = published.rows[0]!.published_at as Date;
     await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [live.workspace]);
-    await restored.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
-    await restored.db.admin.query(
-      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
-       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'republish restore test', '{"profiles":1}')`,
-      [live.workspace, erasureId, profile],
-    );
-    await restored.db.admin.query(
-      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
-       VALUES ($1, $2, $3, $4, $5, 'full')`,
-      [live.workspace, ledger.kind, ledger.key, ledger.version, erasureId],
-    );
-    await restored.db.admin.query(
-      `INSERT INTO erasure_cleanup_jobs
-         (workspace_id, erasure_id, profile_ids, state, clickhouse_done, hotstate_done,
-          published_generation, published_at, coverage_cleared_at, completed_at)
-       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', true, true, 7, $4, now(), now())`,
-      [live.workspace, erasureId, profile, completed],
-    );
+    for (const [index, erasureId] of erasureIds.entries()) {
+      const profile = `prf_${index.toString(16).padStart(32, '0')}`;
+      await restored.db.admin.query(
+        `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+         VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'completed restore test', '{"profiles":1}')`,
+        [live.workspace, erasureId, profile],
+      );
+      await restored.db.admin.query(
+        `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+         VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_republish', $3, 'full')`,
+        [live.workspace, keys[index]!.key, erasureId],
+      );
+      await restored.db.admin.query(
+        `INSERT INTO erasure_cleanup_jobs
+           (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+            published_generation, published_at, coverage_cleared_at, completed_at)
+         VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 3, true, true, 7, now(), now(), now())`,
+        [live.workspace, erasureId, profile],
+      );
+    }
 
     const replayed = await replayErasures(restored.url.toString(), log);
-    expect(replayed).toMatchObject({ erasures: 1, profiles: 1, cleanupJobs: 1 });
-    const select = `SELECT state, attempts, next_attempt_at, clickhouse_done, hotstate_done,
-                           published_generation, published_at, coverage_cleared_at, completed_at
-                      FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2`;
-    const reopened = await restored.db.admin.query<{
+    // Nothing was re-queued: the restore reconciles the ledger in bulk, not by reopening every job.
+    expect(replayed).toMatchObject({ erasures: 25, cleanupJobs: 0 });
+    const jobs = await restored.db.admin.query<{
       state: string;
       attempts: number;
-      next_attempt_at: Date;
       published_generation: number | null;
       published_at: Date | null;
-      coverage_cleared_at: Date | null;
       completed_at: Date | null;
-    }>(select, [live.workspace, erasureId]);
-    expect(reopened.rows[0]).toMatchObject({
-      state: 'pending_external',
-      attempts: 0,
-      clickhouse_done: false,
-      hotstate_done: false,
-      published_generation: null,
-      published_at: null,
-      coverage_cleared_at: null,
-      completed_at: null,
-    });
-    // Due at once: the worker republishes without an operator step.
-    expect(reopened.rows[0]!.next_attempt_at.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+    }>(
+      `SELECT state, attempts, published_generation, published_at, completed_at
+         FROM erasure_cleanup_jobs WHERE workspace_id = $1 ORDER BY erasure_id`,
+      [live.workspace],
+    );
+    expect(jobs.rowCount).toBe(25);
+    for (const job of jobs.rows)
+      expect(job).toMatchObject({
+        state: 'complete',
+        attempts: 3,
+        published_generation: '7',
+        published_at: expect.any(Date),
+        completed_at: expect.any(Date),
+      });
+
     // The restored ledger is what makes the read layer take the protected path for this workspace.
     expect(await erasureLedgerChecker(restored.db)(live.workspace)).toBe(true);
 
-    // A second replay leaves the same queued state (idempotent).
-    await replayErasures(restored.url.toString(), log);
-    const again = await restored.db.admin.query(select, [live.workspace, erasureId]);
-    expect(again.rows[0]).toMatchObject({ state: 'pending_external', published_at: null, published_generation: null });
-  });
+    // A second replay changes nothing either.
+    expect(await replayErasures(restored.url.toString(), log)).toMatchObject({ cleanupJobs: 0 });
+    const again = await restored.db.admin.query<{ state: string }>('SELECT state FROM erasure_cleanup_jobs WHERE workspace_id = $1', [
+      live.workspace,
+    ]);
+    expect(again.rows.every((job) => job.state === 'complete')).toBe(true);
+  }, 120_000);
+
+  it('reopens a job the snapshot still carried as unfinished, so its remaining sweep runs', async () => {
+    const live = await createDisposableDb('erasure_unfinished_live');
+    const restored = await createDisposableDb('erasure_unfinished_restored');
+    open.push(live, restored);
+    const profile = 'prf_0000000000000000000000000000feed';
+    const erasureId = 'era_0000000000000000000000000000feed';
+    await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    await live.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'unfinished restore test', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_republish', $3, 'full')`,
+      [live.workspace, 'f'.repeat(64), erasureId],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, published_generation)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'failed', 36, true, 4)`,
+      [live.workspace, erasureId, profile],
+    );
+    const log = await readErasureLog(live.url.toString());
+
+    await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [live.workspace]);
+    await restored.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'unfinished restore test', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await restored.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, published_generation)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'failed', 36, true, 4)`,
+      [live.workspace, erasureId, profile],
+    );
+
+    const replayed = await replayErasures(restored.url.toString(), log);
+    expect(replayed.cleanupJobs).toBe(1);
+    const { rows } = await restored.db.admin.query<{
+      state: string;
+      attempts: number;
+      next_attempt_at: Date;
+      clickhouse_done: boolean;
+      published_generation: number | null;
+      published_at: Date | null;
+    }>(
+      `SELECT state, attempts, next_attempt_at, clickhouse_done, published_generation, published_at
+         FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2`,
+      [live.workspace, erasureId],
+    );
+    expect(rows[0]).toMatchObject({
+      state: 'pending_external',
+      attempts: 0,
+      clickhouse_done: false,
+      published_generation: null,
+      published_at: null,
+    });
+    expect(rows[0]!.next_attempt_at.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+  }, 120_000);
 
   it('migrates a pre-0108 snapshot before replaying, so the restored cleanup jobs exist', async () => {
     const live = await createDisposableDb('erasure_jobs_pre0108_live');
@@ -244,5 +311,5 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
       erasureId,
     ]);
     expect(jobs.rows[0]).toMatchObject({ state: 'pending_external', selectors, selector_key: selectorKey });
-  });
+  }, 120_000);
 });

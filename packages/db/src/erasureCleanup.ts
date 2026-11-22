@@ -646,7 +646,7 @@ export async function runErasurePublicationBacklog(
  * successful publication, after the FINAL read, so concurrent publishers each move it exactly once
  * and a read can never observe a new epoch before the rows behind it are visible.
  */
-export async function noteErasedSubjectsVisible(db: Db, workspaceId: string): Promise<void> {
+export async function noteErasedSubjectsVisible(db: Pick<Db, 'admin'>, workspaceId: string): Promise<void> {
   await db.admin.query(
     `INSERT INTO erasure_generations (workspace_id, visible_publications, visible_at) VALUES ($1, 1, now())
      ON CONFLICT (workspace_id) DO UPDATE
@@ -726,7 +726,7 @@ export async function erasureWorkspaceKeys(db: Db, workspaceId: string): Promise
  * statement, so two workers publishing for the same workspace can never take the same value and a
  * generation never moves backwards.
  */
-export async function nextErasureGeneration(db: Db, workspaceId: string): Promise<number> {
+export async function nextErasureGeneration(db: Pick<Db, 'admin'>, workspaceId: string): Promise<number> {
   const { rows } = await db.admin.query<{ generation: number | string }>(
     `INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, 1)
      ON CONFLICT (workspace_id) DO UPDATE

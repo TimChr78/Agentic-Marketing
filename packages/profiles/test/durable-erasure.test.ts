@@ -322,6 +322,34 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     expect(status).toMatchObject({ status: 'complete', attempts: 0, checkpoints: { clickhouse: true, hotState: true } });
   });
 
+  it('keeps a legacy completed job complete when it has no publishable ledger row (#1194)', async () => {
+    const old = 'era_00000000000000000000000000000002';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY['prf_0000000000000000000000000000aa02']::text[], 'user_test', 'pre-publication erasure', '{"profiles":1}')`,
+      [d.workspace, old],
+    );
+    // Migration 0112 added the publication record; a job completed before it has none, and no
+    // ledger row either (the ledger arrived in the same release). There is nothing to publish, so
+    // the erasure must keep its complete status rather than reporting pending forever.
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, coverage_cleared_at, completed_at)
+       VALUES ($1, $2, ARRAY['prf_0000000000000000000000000000aa02']::text[], 'complete', 1, true, true,
+               NULL, NULL, NULL, now())`,
+      [d.workspace, old],
+    );
+    const { events } = fakeEvents();
+    const { hot } = fakeHot();
+    const executor = createExecutor(d.db, services(events, hot));
+    const status = await executor.execute(erasureStatus, { erasureId: old }, userPrincipal('user_test', d.workspace, 'owner'), {
+      surface: 'rest',
+    });
+    // Same shape as the no-job legacy case (#1199): nothing proves which identifiers were hashed.
+    expect(status).toMatchObject({ status: 'complete', reason: 'legacy', exclusion: 'unknown', attempts: 1 });
+  });
+
   it('resumes a job another worker committed but never ran', async () => {
     const profile = 'prf_0000000000000000000000000000e001';
     await seedPerson(profile);

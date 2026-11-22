@@ -911,7 +911,7 @@ export const erasureStatus = defineCommand({
   name: 'profiles.erasureStatus',
   title: 'Read an erasure’s status',
   description:
-    'Whether an erasure’s logical completion and physical purge have finished. The person’s SQL rows and keys are already gone when profiles.erase returns. `complete` means the erasure’s exclusion ledger was published to ClickHouse and confirmed visible, and the workspace has no person-linked rows without subject-key coverage, so every application read started afterwards excludes the erased subject — including rows written later. It does not mean the physical rows are gone: `purge` reports that separate, eventual milestone, and late writes keep being swept. `exclusion` is `partial` when an e-mail or phone identifier had no recoverable plaintext and could not be hashed; `unavailableKinds` names those kinds. The scheduler’s subject-key backfill must reach zero uncovered rows before an erasure can complete. Erasures recorded before durable cleanup existed have no job and report complete when they have no publishable ledger row.',
+    'Whether an erasure’s logical completion and physical purge have finished. The person’s SQL rows and keys are already gone when profiles.erase returns. `complete` means the erasure’s exclusion ledger was published to ClickHouse and confirmed visible, and the workspace has no person-linked rows without subject-key coverage, so every application read started afterwards excludes the erased subject — including rows written later. It does not mean the physical rows are gone: `purge` reports that separate, eventual milestone, and late writes keep being swept. `exclusion` is `partial` when an e-mail or phone identifier had no recoverable plaintext and could not be hashed; `unavailableKinds` names those kinds. It is `unknown` for a legacy erasure with no publishable ledger row, where nothing proves which identifiers were hashed; `reason` then reports `legacy`. The scheduler’s subject-key backfill must reach zero uncovered rows before an erasure can complete. Erasures recorded before durable cleanup existed have no job and report complete when they have no publishable ledger row.',
   input: z.object({ erasureId: z.string().regex(/^era_[0-9a-f]{32}$/) }),
   output: z.object({
     erasureId: z.string(),
@@ -921,13 +921,17 @@ export const erasureStatus = defineCommand({
         'pending: waiting for publication, an in-flight outbox row, the final sweep or subject-key coverage, while the SQL rows and keys are already gone; running: a worker is sweeping; complete: the published exclusions are visible and every stored row has coverage, so reads exclude the erased subject; failed: the retry budget ran out and rows may remain',
       ),
     reason: z
-      .enum(['publication', 'outbox', 'final_sweep', 'subject_key_coverage'])
+      .enum(['publication', 'outbox', 'final_sweep', 'subject_key_coverage', 'legacy'])
       .nullable()
-      .describe('Why a pending or running erasure has not completed yet; null once it is complete or failed'),
+      .describe(
+        'Why a pending or running erasure has not completed yet; `legacy` for a completed erasure recorded before the durable ledger, whose exclusion coverage is unknown; null otherwise',
+      ),
     exclusion: z
-      .enum(['full', 'partial'])
-      .describe('partial when an e-mail/phone identifier could not be recovered and is therefore not hashed for exclusion'),
-    unavailableKinds: z.array(z.string()).describe('The kinds behind `exclusion: partial`; empty when full'),
+      .enum(['full', 'partial', 'unknown'])
+      .describe(
+        'partial when an e-mail/phone identifier could not be recovered and is therefore not hashed for exclusion; unknown for a legacy erasure with no publishable ledger row, where nothing records which identifiers were hashed',
+      ),
+    unavailableKinds: z.array(z.string()).describe('The kinds behind `exclusion: partial`; empty unless exclusion is partial'),
     counts: z.record(z.string(), z.number()),
     profiles: z.number().int().describe('Profiles in the erased merged family'),
     attempts: z.number().int(),
@@ -967,10 +971,13 @@ export const erasureStatus = defineCommand({
     const job = await erasureCleanupJob(ctx.tx, ctx.principal.workspaceId, erasureId);
     // A job with an unpublished ledger row is not complete under the activated contract. An erasure
     // with no job and nothing publishable (a legacy erasure, or one with only unavailable rows) is.
-    // A job left `complete` without a publication record is not complete either (#1194): a restore
-    // clears `published_at` on a job it keeps, so this stays honest even if only the record was
-    // cleared rather than the whole state.
-    const unpublishedJob = job !== null && job.publishedAt === null;
+    // A job left `complete` without a publication record is not complete either when the erasure has
+    // a publishable ledger row (#1194): a restore republishes that ledger before it finishes, and a
+    // job that still has no record afterwards would be lying. A job from before the durable ledger
+    // (or migration 0112) has no such row and nothing to publish, so it keeps its legacy status
+    // instead of reporting `pending` forever.
+    const unpublishedJob = job !== null && job.publishedAt === null && ledger.full > 0;
+    const legacy = ledger.full === 0 && ledger.unavailable === 0 && (job === null || job.state === 'complete');
     const awaitingPublication = (job === null || unpublishedJob) && ledger.full > 0;
     const complete = !awaitingPublication && (job === null || (job.state === 'complete' && !unpublishedJob));
     const status = job
@@ -980,8 +987,9 @@ export const erasureStatus = defineCommand({
       : awaitingPublication
         ? ('pending' as const)
         : ('complete' as const);
-    const reason =
-      complete || status === 'failed'
+    const reason = legacy
+      ? ('legacy' as const)
+      : complete || status === 'failed'
         ? null
         : (job?.completionReason ?? (job?.publishedAt === null || awaitingPublication ? 'publication' : null));
     const purgeProgress = await erasurePurgeProgress(ctx.tx, ctx.principal.workspaceId, job ? job.publishedGeneration : 0);
@@ -994,7 +1002,7 @@ export const erasureStatus = defineCommand({
       erasureId,
       status,
       reason,
-      exclusion: ledger.unavailable > 0 ? ('partial' as const) : ('full' as const),
+      exclusion: legacy ? ('unknown' as const) : ledger.unavailable > 0 ? ('partial' as const) : ('full' as const),
       unavailableKinds: ledger.unavailableKinds,
       counts: erasure.counts,
       profiles: erasure.profileIds.length,

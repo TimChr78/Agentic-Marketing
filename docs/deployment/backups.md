@@ -168,13 +168,19 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
    replace anything without it. Replay is idempotent, so restoring twice is safe, and entries for
    workspaces the snapshot no longer contains are skipped.
 3. It then restores ClickHouse, if asked, and reports how many profiles, tombstones, erasure keys,
-   exclusion keys and generations were replayed. A replayed erasure is not complete again until its
-   exclusion is published: the restored cleanup job starts pending, republishes the workspace's
-   `erased_subjects` rows and cleans the restored ClickHouse and hot state. That includes a job the
-   snapshot already carried as complete — the replay clears its publication record and sweep
-   checkpoints, so an erasure cannot stay `complete` while the restored ClickHouse has lost its
-   exclusions (#1194). The restore also resets the workspace's `purged_generation` to `0`, so the
-   scheduler's recurring physical purge sweeps the restored event rows again.
+   exclusion keys and generations were replayed. Its last step runs after every ClickHouse load:
+   it reconciles the **restored** `erasure_keys` ledger with `erased_subjects`, re-inserting the
+   full-coverage keys the ClickHouse point is missing in batches and confirming they are visible
+   before it reports success. Only then does it mark the corresponding cleanup jobs published. That
+   covers every restore shape — a Postgres-only restore, an older `--clickhouse` file, both, and a
+   fresh target — because it reads the ledger from the restored database rather than the live log (a
+   fresh target has no live entries to replay). A job the snapshot already carried as complete is
+   not reopened or swept again: the reconciliation publishes its keys in bulk, and the recurring
+   physical purge handles restored rows. A job that was still unfinished is queued for its remaining
+   sweep. The restore also resets the workspace's `purged_generation` to `0`, so the scheduler's
+   recurring physical purge sweeps the restored event rows again. If the restore stops before this
+   reconciliation, it leaves a marker in the restored database and the app refuses to serve reads
+   until a restore completes, so a completed erasure is never readable again in between (#1194).
 
 A person erased after the snapshot therefore stays erased: no profile, no identifiers, no profile
 key, no consent, and the tombstones that stop late events from recreating them. Only keyed hashes
@@ -183,10 +189,11 @@ and wrapped keys are replayed; no plaintext personal data is copied.
 The replay covers Postgres. `am restore --clickhouse` inserts the event export as it was at snapshot
 time, so event rows of a replayed person can still be present with their pseudonymous ids and
 non-personal properties; the per-profile key that sealed their personal data is deleted again, so
-that data stays unreadable. Protected reads exclude the person once the restored cleanup job has
-republished the exclusion, and the reset purge deletes the matching rows in bounded batches. If the
-erasure procedure must remove event rows before that pass runs, restore ClickHouse from a backup
-taken after the erasure, or re-take the `--clickhouse` backup after applying erasures.
+that data stays unreadable. Protected reads exclude the person once the restore has reconciled the
+exclusion, which it does before it reports success, and the reset purge deletes the matching rows in
+bounded batches. If the erasure procedure must remove event rows before that pass runs, restore
+ClickHouse from a backup taken after the erasure, or re-take the `--clickhouse` backup after
+applying erasures.
 `am doctor`/`am smoke` and the erasure retention job keep operating on the restored data.
 
 
@@ -321,6 +328,10 @@ contents but does not create them.
 
 `am restore`:
 
+- refuses to run while an application process is still connected to the target database. Every
+  server pool announces `agentic-marketing` in `pg_stat_activity`; an open connection means a
+  scheduler or worker could republish an erasure between the Postgres load and the ClickHouse load,
+  which then replaces the published exclusions. Stop the app first, as above.
 - reports the snapshot time in its final line (`snapshot <createdAt>`);
 - reads `erasures` and `erasure_tombstones` from the live database before touching it, and replays
   them after loading Postgres (see [Retention and erased people](#retention-and-erased-people));
@@ -333,6 +344,10 @@ contents but does not create them.
   touched, naming the key the backup needs and the `MASTER_KEY_PREVIOUS` option. A backup without a
   key check logs that it cannot be verified and continues.
 - creates or updates the `am_app` role before loading, so the dump's `GRANT`s to it apply;
+- after the last ClickHouse load, reconciles the restored erasure ledger with `erased_subjects`
+  (see [Retention and erased people](#retention-and-erased-people)) and does not report success
+  until every key is visible; a restore that stops before that leaves a marker in the database and
+  the app refuses to serve reads until a restore completes;
 - runs `pg_restore --clean --if-exists --no-owner`, then unwraps a real data key from the restored
   database before reporting success (a second proof that provider, connector and profile secrets
   will be readable), then reports the restored version.

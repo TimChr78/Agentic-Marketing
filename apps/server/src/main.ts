@@ -1,5 +1,5 @@
 import { migrateAuth } from '@agentic-marketing/auth';
-import { migrate, migrationFiles, recordServerVersion } from '@agentic-marketing/db';
+import { migrate, migrationFiles, recordServerVersion, restoreReconciliationPending } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
 import { endpointLocation, initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
 import { serve } from '@hono/node-server';
@@ -51,6 +51,19 @@ if (!config.skipMigrations) {
 const protocolProblem = await writerProtocolMismatch(db.admin);
 if (protocolProblem) {
   logger.error(protocolProblem);
+  process.exit(1);
+}
+
+// A restore writes this marker after replacing Postgres and clears it only once the restored
+// erasure ledger is visible in ClickHouse (#1194). Serving in between could pair a complete
+// erasure with a ClickHouse point that never saw its exclusions, so fail closed before any
+// listener opens: rerunning `am restore` completes the reconciliation.
+const pendingRestore = await restoreReconciliationPending(db.admin);
+if (pendingRestore) {
+  logger.error(
+    `A restore of ${pendingRestore.backup} started at ${pendingRestore.startedAt} did not finish reconciling erasure exclusions. ` +
+      'Refusing to serve person-linked reads until it does; run `am restore` for that backup again to completion.',
+  );
   process.exit(1);
 }
 

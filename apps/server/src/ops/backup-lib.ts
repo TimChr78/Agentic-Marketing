@@ -22,6 +22,7 @@ import {
 } from '@agentic-marketing/db';
 import pg from 'pg';
 import { keyProviderFromEnv } from '../keys';
+import { assertDatabaseDrained, finishRestoreReconciliation, markRestoreStarted } from './restore-reconcile';
 
 // Backup and restore without loading the full server configuration: an operator must be able to
 // run them with only DATABASE_URL (and CLICKHOUSE_URL for events), even when other secrets are
@@ -1331,6 +1332,11 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   const databaseUrl = opts.databaseUrl ?? env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is not set');
 
+  // The documented drain, enforced (#1194): a scheduler that is still running can publish an
+  // erasure between the replay and the ClickHouse load, and the load then replaces the published
+  // exclusions with an older point. Refuse before anything is written.
+  await assertDatabaseDrained(databaseUrl);
+
   // migrate() recreates the role on every start, but it does not re-run the GRANTs from applied
   // migrations. The dump keeps ACLs, so the grants come back with pg_restore; the role must exist
   // before those GRANT statements run. Reuse the same role helper as migrate().
@@ -1387,6 +1393,11 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     log('restoring Postgres (this replaces the current database)');
     await restorePostgres(databaseUrl, manifestPath(dir, manifest.postgres.file));
 
+    // From here until the final reconciliation the restored database may pair a job that says it
+    // published with a ClickHouse point that never saw its keys. Mark the restore as unfinished so
+    // a server started in between refuses to serve instead of returning erased people (#1194).
+    await markRestoreStarted(databaseUrl, dir);
+
     // The pre-restore check used the sealed value in the manifest; this proves the key also opens a
     // real data key in the restored data, still before the app is started. `--skip-key-check`
     // deliberately overrides both. A backup written without a key reference has nothing to compare.
@@ -1430,6 +1441,24 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     log('restoring ClickHouse');
     await restoreClickHouse({ runDir: dir, tables: manifest.clickhouse.tables as ClickHouseTableEntry[], env, log });
   }
+
+  // The last step, after every ClickHouse load (#1194). The restored Postgres ledger is the source:
+  // a fresh target has no live log to replay, and an older ClickHouse point may lack exclusions for
+  // a job the dump already carried as complete. Only after the keys are confirmed visible does this
+  // mark the jobs published and clear the fail-closed marker.
+  log('reconciling restored erasure exclusions with ClickHouse');
+  const reconciled = await finishRestoreReconciliation({
+    databaseUrl,
+    env,
+    log,
+  });
+  if (reconciled.keys)
+    log(
+      `erasure exclusions reconciled: ${reconciled.keys} key(s) across ${reconciled.workspaces} workspace(s), ` +
+        `${reconciled.inserted} re-published in ${reconciled.batches} batch(es), ${reconciled.jobs} cleanup job(s) confirmed`,
+    );
+  else log('no restored erasure exclusions to reconcile');
+
   log('restore complete; start the app again (it applies any migrations this version still needs)');
   return manifest;
 }

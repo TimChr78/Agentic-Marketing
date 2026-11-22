@@ -19,7 +19,7 @@ import {
 } from '@agentic-marketing/auth';
 import { createExecutor, type Services, userPrincipal } from '@agentic-marketing/commands';
 import { AppError, newUuid, RESOLVED_CLIENT_IP_HEADER, remoteAddressFromEnv, resolveClientIp } from '@agentic-marketing/core';
-import { createDb, erasureLedgerChecker, normalizeHost, normalizePathPrefix } from '@agentic-marketing/db';
+import { APP_DATABASE_APPLICATION_NAME, createDb, erasureLedgerChecker, normalizeHost, normalizePathPrefix } from '@agentic-marketing/db';
 import { emailRoutes, linkSigner, pushRoutes } from '@agentic-marketing/email';
 import { clickHouseStore, lazyNatsBus } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
@@ -85,6 +85,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   const db = createDb({
     adminUrl: config.adminDatabaseUrl,
     appUrl: config.appDatabaseUrl,
+    applicationName: APP_DATABASE_APPLICATION_NAME,
     // A Postgres restart or failover terminates idle pooled clients; without a listener Node exits.
     // Report the reason through telemetry, never the connection string or password.
     onIdleError: (err, pool) => logger.warn({ pool, reason: err.message }, 'a postgres connection failed while idle; it was removed'),
