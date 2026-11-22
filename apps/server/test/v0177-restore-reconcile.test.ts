@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../../packages/db/test/disposable';
 import { reconcileRestoredErasureExclusions } from '../src/ops/restore-reconcile';
@@ -123,5 +125,157 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     expect(again).toMatchObject({ workspaces: 1, keys: 3, inserted: 0, batches: 0, jobs: 2 });
     expect(published).toHaveLength(2);
     expect(visibilityCalls.map((chunk) => chunk.length)).toEqual([2, 1, 2, 1]);
+  }, 120_000);
+
+  it('cleans a completed job’s outbox rows before confirming it complete (#1194 review)', async () => {
+    const d = await createDisposableDb('restore_outbox');
+    open.push(d);
+    const erasureId = 'era_00000000000000000000000000000c33';
+    const erasedProfile = 'prf_00000000000000000000000000000002';
+    const otherProfile = 'prf_00000000000000000000000000000003';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'restore outbox test', '{"profiles":1}')`,
+      [d.workspace, erasureId, erasedProfile],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_reconcile', $3, 'full')`,
+      [d.workspace, 'd'.repeat(64), erasureId],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, coverage_cleared_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 2, true, true, 4, now(), now(), now())`,
+      [d.workspace, erasureId, erasedProfile],
+    );
+    // The pre-erasure snapshot can carry rows queued before the erasure. The failed ones are what
+    // the worker's own final pass would drop; the pending one would otherwise be published by the
+    // started app after the restore.
+    const outbox = [
+      { id: 'ob_segment_failed', kind: 'segment_change', state: 'failed', profile: erasedProfile, batch: true },
+      { id: 'ob_message_failed', kind: 'message_event', state: 'failed', profile: erasedProfile, batch: true },
+      { id: 'ob_message_pending', kind: 'message_event', state: 'pending', profile: erasedProfile, batch: true },
+      { id: 'ob_other_failed', kind: 'message_event', state: 'failed', profile: otherProfile, batch: true },
+    ];
+    for (const row of outbox)
+      await d.db.admin.query(
+        `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts)
+         VALUES ($1, $2, $3, $4::jsonb, $2, $5, 3)`,
+        [
+          d.workspace,
+          row.id,
+          row.kind,
+          JSON.stringify({
+            events: [{ workspaceId: d.workspace, properties: { profile_id: row.profile }, profileId: row.profile }],
+          }),
+          row.state,
+        ],
+      );
+
+    const published: string[] = [];
+    const events = {
+      async erasedSubjectKeys() {
+        return new Set<string>();
+      },
+      async publishErasedSubjects(rows: readonly { key: string }[]) {
+        for (const row of rows) published.push(row.key);
+      },
+      async erasedSubjectsVisible() {
+        return true;
+      },
+    };
+    const result = await reconcileRestoredErasureExclusions({ databaseUrl: d.url.toString(), events, log: () => {} });
+    expect(result).toMatchObject({ workspaces: 1, inserted: 1, jobs: 1, outboxRows: 3, outboxDeferred: 0 });
+    expect(published).toEqual(['d'.repeat(64)]);
+
+    const left = await d.db.admin.query<{ id: string }>(`SELECT id FROM outbox WHERE workspace_id = $1`, [d.workspace]);
+    expect(left.rows.map((row) => row.id)).toEqual(['ob_other_failed']);
+    const job = await d.db.admin.query<{ state: string; published_at: Date | null }>(
+      'SELECT state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1',
+      [d.workspace],
+    );
+    expect(job.rows[0]).toMatchObject({ state: 'complete' });
+    expect(job.rows[0]!.published_at).toBeInstanceOf(Date);
+  }, 120_000);
+
+  it('reconciles a restored ledger row as a non-BYPASSRLS table owner (#1194 review)', async () => {
+    const d = await createDisposableDb('restore_reconcile_rls');
+    open.push(d);
+    const erasureId = 'era_00000000000000000000000000000d44';
+    const key = 'e'.repeat(64);
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY['prf_00000000000000000000000000000004']::text[], 'user_test', 'restore rls test', '{"profiles":1}')`,
+      [d.workspace, erasureId],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_reconcile', $3, 'full')`,
+      [d.workspace, key, erasureId],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, coverage_cleared_at, completed_at)
+       VALUES ($1, $2, ARRAY['prf_00000000000000000000000000000004']::text[], 'complete', 1, true, true,
+               3, now(), now(), now())`,
+      [d.workspace, erasureId],
+    );
+
+    // A small install runs the restore as the owner of the tables, which is subject to FORCE RLS.
+    // The ledger is invisible to that role until each transaction names its workspace.
+    const suffix = randomBytes(4).toString('hex');
+    const role = `am_restore_owner_${suffix}`;
+    await d.db.admin.query(`CREATE ROLE ${role} LOGIN PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
+    for (const table of ['erasure_keys', 'erasure_cleanup_jobs', 'erasure_generations', 'outbox'])
+      await d.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
+    const limited = new URL(d.url.toString());
+    limited.username = role;
+    limited.password = 'rls-password';
+
+    // Prove the premise: the owner sees no ledger row without `app.workspace_id`.
+    const asOwner = new pg.Client({ connectionString: limited.toString() });
+    await asOwner.connect();
+    try {
+      const { rows } = await asOwner.query<{ n: number }>(`SELECT count(*)::int AS n FROM erasure_keys`);
+      expect(rows[0]?.n).toBe(0);
+    } finally {
+      await asOwner.end();
+    }
+
+    const published: string[] = [];
+    const events = {
+      async erasedSubjectKeys() {
+        return new Set<string>();
+      },
+      async publishErasedSubjects(rows: readonly { key: string }[]) {
+        for (const row of rows) published.push(row.key);
+      },
+      async erasedSubjectsVisible() {
+        return true;
+      },
+    };
+    const result = await reconcileRestoredErasureExclusions({
+      databaseUrl: limited.toString(),
+      events,
+      log: () => {},
+    });
+    expect(result).toMatchObject({ workspaces: 1, keys: 1, inserted: 1, jobs: 1, outboxRows: 0 });
+    expect(published).toEqual([key]);
+
+    // FORCE is back after the enumeration transaction, and the job was confirmed.
+    const forced = await d.db.admin.query<{ forced: boolean }>(
+      `SELECT relforcerowsecurity AS forced FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = 'erasure_keys'`,
+    );
+    expect(forced.rows[0]?.forced).toBe(true);
+    const job = await d.db.admin.query<{ state: string; published_at: Date | null }>(
+      'SELECT state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1',
+      [d.workspace],
+    );
+    expect(job.rows[0]).toMatchObject({ state: 'complete' });
+    expect(job.rows[0]!.published_at).toBeInstanceOf(Date);
   }, 120_000);
 });

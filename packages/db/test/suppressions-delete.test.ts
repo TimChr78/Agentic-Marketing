@@ -124,6 +124,7 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'segment_memberships',
       'segment_list_members',
       'profile_scores',
+      'restore_fence',
     ])
       await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
     await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);

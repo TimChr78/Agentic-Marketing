@@ -2,12 +2,14 @@ import { execFile } from 'node:child_process';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { erasureLedgerChecker, RESTORE_ADVISORY_LOCK_KEY } from '@agentic-marketing/db';
+import { APP_DATABASE_APPLICATION_NAME, erasureLedgerChecker, RESTORE_ADVISORY_LOCK_KEY } from '@agentic-marketing/db';
 import { clickHouseStore } from '@agentic-marketing/events';
 import { runErasureCleanupOnce, subjectKeyHasher } from '@agentic-marketing/profiles';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { buildTestCli } from '../../../test-support/cli';
 import {
   type BackupManifest,
   createBackup,
@@ -16,7 +18,7 @@ import {
   restoreErasureLogPath,
   restoreLockPath,
 } from '../src/ops/backup-lib';
-import { clearRestoreFenceForUrl, finishRestoreReconciliation, restoreStartupBlock } from '../src/ops/restore-reconcile';
+import { acquireRestoreStartupLock, clearRestoreFenceForUrl, finishRestoreReconciliation } from '../src/ops/restore-reconcile';
 import { APP_ROLE, startTestServer, testDatabaseUrl, testPort, type User } from './harness';
 
 // #1194 review: a restore can pair a Postgres snapshot that already contains a completed cleanup
@@ -34,6 +36,7 @@ const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 const stamp = Date.now();
 const AT = '2026-11-12T10:00:00.000Z';
 const exec = promisify(execFile);
+const root = fileURLToPath(new URL('../../..', import.meta.url));
 
 type Server = Awaited<ReturnType<typeof startTestServer>>;
 interface Person {
@@ -236,6 +239,59 @@ async function fenceRow(databaseUrl: string): Promise<{ backup: string; started_
   }
 }
 
+/**
+ * What a server start would do: take the shared restore lock, read the fence, release. The message
+ * is null when a start is allowed. A shared lock is compatible with the test server's own shared
+ * lock; only a restore's exclusive lock conflicts.
+ */
+async function startupBlock(databaseUrl: string): Promise<string | null> {
+  try {
+    const lock = await acquireRestoreStartupLock(databaseUrl, { waitMs: 500 });
+    await lock.release();
+    return null;
+  } catch (err) {
+    return (err as Error).message;
+  }
+}
+
+/**
+ * A row for the erased identity in the ClickHouse point. A protected read can only prove the
+ * reconciliation by hiding something that exists: with no row, the assertion passes even when the
+ * final step is bypassed (#1194 review).
+ */
+async function ensureRawEvent(eventId: string, who: Person, hashes: Hashes): Promise<void> {
+  if ((await chCount(`SELECT count() AS n FROM events FINAL WHERE event_id = '${eventId}'`)) === 0)
+    await ch(rawInsert(eventId, who, hashes));
+  await eventually(
+    () => chCount(`SELECT count() AS n FROM events FINAL WHERE event_id = '${eventId}'`),
+    (count) => count === 1,
+  );
+}
+
+/** Runs the built `am` artifact, as an operator would. */
+function cli(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number; stdout: string; stderr: string }> {
+  return buildTestCli().then(
+    (path) =>
+      new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+        const child = execFile(process.execPath, [path, ...args], {
+          cwd: root,
+          env: { ...process.env, ...env },
+          maxBuffer: 4 * 1024 * 1024,
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout?.on('data', (chunk) => {
+          stdout += chunk;
+        });
+        child.stderr?.on('data', (chunk) => {
+          stderr += chunk;
+        });
+        child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
+        child.stdin?.end();
+      }),
+  );
+}
+
 beforeAll(async () => {
   t = await startTestServer(DB, PORT, {}, { erasureCleanup: false, erasurePurge: false });
   owner = await t.signUp(`republish-${stamp}@example.com`);
@@ -294,10 +350,114 @@ afterAll(async () => {
 });
 
 describe('a restore reconciles erasure exclusions itself (#1194)', () => {
-  it('refuses to restore while an app process is still connected', async () => {
-    await expect(restoreBackup({ dir: backupPath, env: restoreEnv(testDatabaseUrl(t.dbName).toString()), log: () => {} })).rejects.toThrow(
-      /application process\(es\) are still connected/,
+  it('refuses to restore while a server holds the restore lock, even with its pools idle', async () => {
+    // A real server process takes the shared lock for its lifetime before it migrates. Idle pools
+    // are exactly the case the old `pg_stat_activity` check missed: no connection says "busy", but
+    // the server could wake up and republish during the load.
+    await eventually(
+      async () => t.srv.db.app.waitingCount === 0 && t.srv.db.admin.waitingCount === 0,
+      (idle) => idle,
     );
+    await expect(restoreBackup({ dir: backupPath, env: restoreEnv(testDatabaseUrl(t.dbName).toString()), log: () => {} })).rejects.toThrow(
+      /Stop every app, worker and scheduler first/,
+    );
+  }, 60_000);
+
+  it('still names a connected app process that does not hold the lock (drain diagnostic)', async () => {
+    // A process from a build that announces the app name but takes no shared lock (or one whose
+    // lock connection was lost before it exited) is caught by the documented drain check.
+    if (!serverClosed) {
+      await t.close();
+      serverClosed = true;
+    }
+    const databaseUrl = testDatabaseUrl(t.dbName).toString();
+    const legacy = new pg.Client({ connectionString: databaseUrl, application_name: APP_DATABASE_APPLICATION_NAME });
+    await legacy.connect();
+    try {
+      await expect(restoreBackup({ dir: backupPath, env: restoreEnv(databaseUrl), log: () => {} })).rejects.toThrow(
+        /application process\(es\) are still connected/,
+      );
+    } finally {
+      await legacy.end();
+    }
+  }, 60_000);
+
+  it('refuses to start while a restore holds the exclusive lock', async () => {
+    const databaseUrl = testDatabaseUrl(t.dbName).toString();
+    const holder = new pg.Client({ connectionString: databaseUrl });
+    await holder.connect();
+    try {
+      const { rows } = await holder.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [RESTORE_ADVISORY_LOCK_KEY]);
+      expect(rows[0]?.locked).toBe(true);
+      expect(await startupBlock(databaseUrl)).toMatch(/A restore is running/);
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
+      await holder.end();
+    }
+    expect(await startupBlock(databaseUrl)).toBeNull();
+  }, 60_000);
+
+  it('takes the lock before `am migrate` runs a migration', async () => {
+    // An empty target: if the lock were taken after `migrate` (or not at all), the CLI would create
+    // the schema. With a restore holding the exclusive lock it must refuse before that.
+    const target = await createEmptyDatabase('restore_lock_before_migrate');
+    const holder = new pg.Client({ connectionString: target.url });
+    await holder.connect();
+    try {
+      const { rows } = await holder.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [RESTORE_ADVISORY_LOCK_KEY]);
+      expect(rows[0]?.locked).toBe(true);
+      const result = await cli(['migrate'], {
+        DATABASE_URL: target.url,
+        APP_DB_ROLE: APP_ROLE.appRole,
+        APP_DB_PASSWORD: APP_ROLE.appRolePassword,
+        AUTH_SECRET: 'test-secret-test-secret-test-secret-123',
+        MASTER_KEY: Buffer.alloc(32, 7).toString('base64'),
+        CLICKHOUSE_URL: CH_URL,
+        CLICKHOUSE_DATABASE: t.dbName,
+        NATS_URL: process.env.NATS_URL ?? 'nats://127.0.0.1:4222',
+        NATS_NAMESPACE: t.dbName,
+        VALKEY_URL: process.env.VALKEY_URL ?? 'redis://127.0.0.1:6379',
+        VALKEY_PREFIX: t.dbName,
+      });
+      expect(result.code).toBe(1);
+      expect(result.stderr).toMatch(/A restore is running/);
+      const probe = new pg.Client({ connectionString: target.url });
+      await probe.connect();
+      try {
+        const { rows: schema } = await probe.query<{ present: boolean }>(
+          "SELECT to_regclass('public.schema_migrations') IS NOT NULL AS present",
+        );
+        expect(schema[0]?.present).toBe(false);
+      } finally {
+        await probe.end();
+      }
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
+      await holder.end();
+      await target.drop();
+    }
+  }, 120_000);
+
+  it('reports a lost lock connection so the process can exit', async () => {
+    const databaseUrl = testDatabaseUrl(t.dbName).toString();
+    let lostWith = '';
+    const lock = await acquireRestoreStartupLock(databaseUrl, { onLost: (err) => (lostWith = err.message) });
+    try {
+      const terminator = new pg.Client({ connectionString: databaseUrl });
+      await terminator.connect();
+      try {
+        await terminator.query('SELECT pg_terminate_backend($1)', [lock.pid]);
+      } finally {
+        await terminator.end();
+      }
+      await eventually(
+        async () => lostWith,
+        (message) => message.length > 0,
+      );
+      expect(lostWith).toMatch(/terminat|connection/i);
+    } finally {
+      await lock.release();
+    }
   }, 60_000);
 
   it('publishes the restored ledger before returning, so a protected read excludes the person', async () => {
@@ -305,14 +465,21 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
     // job: nothing in the live log needs replaying, so only the restored ledger can repair this.
     await ch(`DELETE FROM erased_subjects WHERE workspace_id = '${ws}'`);
     expect(await chCount(`SELECT count() AS n FROM erased_subjects FINAL WHERE workspace_id = '${ws}'`)).toBe(0);
+    // The Postgres-only shape leaves ClickHouse untouched, so this row is what a bypassed final
+    // step would serve; without it the assertion below would pass for the wrong reason.
+    await ensureRawEvent('pg-only-point', person, fixtureHashes);
 
-    await t.close();
-    serverClosed = true;
-    await restoreBackup({ dir: backupPath, env: restoreEnv(testDatabaseUrl(t.dbName).toString()), log: () => {} });
+    if (!serverClosed) {
+      await t.close();
+      serverClosed = true;
+    }
+    const databaseUrl = testDatabaseUrl(t.dbName).toString();
+    await restoreBackup({ dir: backupPath, env: restoreEnv(databaseUrl), log: () => {} });
 
     // No scheduler ran: the exclusion has to be in place when the restore returns.
-    expect(await protectedRead(testDatabaseUrl(t.dbName).toString(), person)).toEqual([]);
-    const pool = new pg.Pool({ connectionString: testDatabaseUrl(t.dbName).toString() });
+    expect(await chCount("SELECT count() AS n FROM events FINAL WHERE event_id = 'pg-only-point'")).toBe(1);
+    expect(await protectedRead(databaseUrl, person)).toEqual([]);
+    const pool = new pg.Pool({ connectionString: databaseUrl });
     try {
       const { rows } = await pool.query<{ state: string; published_at: Date | null }>(
         'SELECT state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1',
@@ -325,8 +492,27 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
       await pool.end();
     }
     // The fence was raised before pg_restore and survives it; only reconciliation clears it.
-    expect(await fenceRow(testDatabaseUrl(t.dbName).toString())).toBeNull();
-    expect(await restoreStartupBlock(testDatabaseUrl(t.dbName).toString())).toBeNull();
+    expect(await fenceRow(databaseUrl)).toBeNull();
+    expect(await startupBlock(databaseUrl)).toBeNull();
+  }, 180_000);
+
+  it('fails that Postgres-only case when the reconciliation is bypassed', async () => {
+    // The control the review asked for: the same shape and the same row, with the last step
+    // skipped. The protected read returns the row, which is what a failed (or stubbed) final step
+    // would serve, and the fence keeps a server from starting.
+    const databaseUrl = testDatabaseUrl(t.dbName).toString();
+    await ch(`DELETE FROM erased_subjects WHERE workspace_id = '${ws}'`);
+    await ensureRawEvent('pg-only-point', person, fixtureHashes);
+    await restoreBackup({ dir: backupPath, env: restoreEnv(databaseUrl), log: () => {}, skipReconciliation: true });
+
+    expect(await chCount("SELECT count() AS n FROM events FINAL WHERE event_id = 'pg-only-point'")).toBe(1);
+    expect((await protectedRead(databaseUrl, person)).map((event) => event.eventId)).toContain('pg-only-point');
+    expect(await fenceRow(databaseUrl)).toMatchObject({ backup: backupPath });
+    expect(await startupBlock(databaseUrl)).toMatch(/did not finish reconciling erasure exclusions/);
+
+    await finishRestoreReconciliation({ databaseUrl, env: restoreEnv(databaseUrl), log: () => {} });
+    expect(await protectedRead(databaseUrl, person)).toEqual([]);
+    expect(await fenceRow(databaseUrl)).toBeNull();
   }, 180_000);
 
   it('covers a fresh target, whose dump carries the completed job but has no live log to replay', async () => {
@@ -334,6 +520,7 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
     const pool = new pg.Pool({ connectionString: target.url, max: 2 });
     try {
       await ch(`DELETE FROM erased_subjects WHERE workspace_id = '${ws}'`);
+      await ensureRawEvent('fresh-target-point', person, fixtureHashes);
       await restoreBackup({
         dir: backupPath,
         env: restoreEnv(target.url),
@@ -345,6 +532,7 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
         [ws],
       );
       expect(rows[0]?.n).toBeGreaterThan(0);
+      expect(await chCount("SELECT count() AS n FROM events FINAL WHERE event_id = 'fresh-target-point'")).toBe(1);
       expect(await protectedRead(target.url, person)).toEqual([]);
       const job = await pool.query<{ state: string; published_at: Date | null }>(
         'SELECT state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1',
@@ -355,11 +543,20 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
       // The fence table existed before the replacement and was not part of the dump; the restore
       // can clear it afterwards (a dropped table would silently lose the interlock).
       expect(await fenceRow(target.url)).toBeNull();
+
+      // The same target and row with the final step skipped: readable, and the fence stays.
+      await ch(`DELETE FROM erased_subjects WHERE workspace_id = '${ws}'`);
+      await restoreBackup({ dir: backupPath, env: restoreEnv(target.url), log: () => {}, skipReconciliation: true });
+      expect(await chCount("SELECT count() AS n FROM events FINAL WHERE event_id = 'fresh-target-point'")).toBe(1);
+      expect((await protectedRead(target.url, person)).map((event) => event.eventId)).toContain('fresh-target-point');
+      expect(await startupBlock(target.url)).toMatch(/did not finish reconciling erasure exclusions/);
+      await finishRestoreReconciliation({ databaseUrl: target.url, env: restoreEnv(target.url), log: () => {} });
+      expect(await protectedRead(target.url, person)).toEqual([]);
     } finally {
       await pool.end().catch(() => {});
       await target.drop();
     }
-  }, 240_000);
+  }, 300_000);
 
   it('restores an older ClickHouse file and then republishes the exclusions', async () => {
     // The backup's ClickHouse part was exported before the erasure, so loading it removes
@@ -380,9 +577,9 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
   }, 300_000);
 
   it('leaves the pre-erasure row readable when reconciliation is bypassed, then hides it after it runs', async () => {
-    // This is the control for the tests above: with the last step skipped, the same restore leaves
-    // the older point's row readable through the protected view. Without the fence too, nothing
-    // would stop a server from serving it, which is why startup refuses while it is raised.
+    // This is the control for the older-ClickHouse shape: with the last step skipped, the same
+    // restore leaves that point's row readable through the protected view. Without the fence too,
+    // nothing would stop a server from serving it, which is why startup refuses while it is raised.
     await ch(`DELETE FROM erased_subjects WHERE workspace_id = '${ws}'`);
     if ((await chCount("SELECT count() AS n FROM events FINAL WHERE event_id = 'older-point'")) === 0)
       await ch(rawInsert('older-point', person, fixtureHashes));
@@ -392,20 +589,21 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
 
     // Readable *before* reconciliation, on the restored ledger: this is what a bypassed (or
     // failed) final step would serve.
+    expect(await chCount("SELECT count() AS n FROM events FINAL WHERE event_id = 'older-point'")).toBe(1);
     const readable = await protectedRead(databaseUrl, person);
     expect(readable.map((event) => event.eventId)).toContain('older-point');
     // The fence survived `pg_restore` (the dump excludes it) and blocks a server start.
     expect(await fenceRow(databaseUrl)).toMatchObject({ backup: backupPath });
-    expect(await restoreStartupBlock(databaseUrl)).toMatch(/did not finish reconciling erasure exclusions/);
+    expect(await startupBlock(databaseUrl)).toMatch(/did not finish reconciling erasure exclusions/);
 
     // Running the real last step confirms the ledger, hides the row and clears the fence.
     await finishRestoreReconciliation({ databaseUrl, env: restoreEnv(databaseUrl), log: () => {} });
     expect(await protectedRead(databaseUrl, person)).toEqual([]);
     expect(await fenceRow(databaseUrl)).toBeNull();
-    expect(await restoreStartupBlock(databaseUrl)).toBeNull();
+    expect(await startupBlock(databaseUrl)).toBeNull();
   }, 300_000);
 
-  it('refuses a second restore while another holds the advisory lock', async () => {
+  it('refuses a second restore and a same-time `--clear-fence` while another holds the lock', async () => {
     const databaseUrl = testDatabaseUrl(t.dbName).toString();
     const holder = new pg.Client({ connectionString: databaseUrl });
     await holder.connect();
@@ -415,13 +613,15 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
       await expect(restoreBackup({ dir: backupPath, env: restoreEnv(databaseUrl), log: () => {} })).rejects.toThrow(
         /another restore is running/,
       );
+      // `--clear-fence` takes the same lock, so it cannot delete the fence under a live restore.
+      await expect(clearRestoreFenceForUrl(databaseUrl)).rejects.toThrow(/another restore is running/);
       // A server start is refused while the restore lock is held, not only while the fence exists.
-      expect(await restoreStartupBlock(databaseUrl)).toMatch(/A restore is running/);
+      expect(await startupBlock(databaseUrl)).toMatch(/A restore is running/);
     } finally {
       await holder.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
       await holder.end();
     }
-    expect(await restoreStartupBlock(databaseUrl)).toBeNull();
+    expect(await startupBlock(databaseUrl)).toBeNull();
   }, 60_000);
 
   it('keeps the fence when pg_restore fails, so a half-applied restore cannot serve', async () => {
@@ -438,10 +638,10 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
     ).rejects.toThrow(/simulated pg_restore failure/);
 
     expect(await fenceRow(databaseUrl)).toMatchObject({ backup: backupPath });
-    expect(await restoreStartupBlock(databaseUrl)).toMatch(/did not finish reconciling erasure exclusions/);
+    expect(await startupBlock(databaseUrl)).toMatch(/did not finish reconciling erasure exclusions/);
     // The deliberate escape hatch, and only it, can abandon the restore.
     expect(await clearRestoreFenceForUrl(databaseUrl)).toBe(true);
-    expect(await restoreStartupBlock(databaseUrl)).toBeNull();
+    expect(await startupBlock(databaseUrl)).toBeNull();
     expect(await clearRestoreFenceForUrl(databaseUrl)).toBe(false);
   }, 120_000);
 

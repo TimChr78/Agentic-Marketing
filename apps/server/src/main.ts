@@ -9,7 +9,7 @@ import { prefixOf } from './domains';
 import { publicOnly } from './http/public-only';
 import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
 import { offlineChecks } from './ops/checks';
-import { restoreStartupBlock } from './ops/restore-reconcile';
+import { acquireRestoreStartupLock } from './ops/restore-reconcile';
 import { createShutdown, drainHttpServers, drainWorkers, HTTP_DRAIN_TIMEOUT_MS, type HttpListener } from './shutdown';
 import { COMMIT, VERSION } from './version';
 import { startScheduler, startWorkers } from './workers';
@@ -39,6 +39,27 @@ try {
 
 const srv = createServer(config);
 const { app, db, requestAborts } = srv;
+
+// The restore interlock (#1194 review): every server process takes the restore advisory lock
+// shared on a dedicated connection *before* its first migration, reads the fence under that lock
+// and keeps both until shutdown. A restore holds the same lock exclusively for its whole run, so
+// this refuses to start while one is in progress; a raised fence refuses too. Taking it before the
+// migrations is what keeps a restore from replacing the schema under a starting process, and
+// keeping it means a restore cannot start while any role is still serving, even with idle pools.
+// If the lock connection is lost, the process exits: without the lock it can no longer prove the
+// interlock, and a supervisor restarts it (which re-acquires the lock or refuses on the fence).
+let restoreLock: Awaited<ReturnType<typeof acquireRestoreStartupLock>>;
+try {
+  restoreLock = await acquireRestoreStartupLock(config.adminDatabaseUrl, {
+    onLost: (err) => {
+      logger.error({ reason: err.message }, 'the restore lock connection was lost; exiting so no read is served without it');
+      process.exit(1);
+    },
+  });
+} catch (err) {
+  logger.error((err as Error).message);
+  process.exit(1);
+}
 if (!config.skipMigrations) {
   await preUpgradeBackup(db, config);
   await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
@@ -56,15 +77,11 @@ if (protocolProblem) {
 }
 
 // A restore raises its fence before replacing Postgres and clears it only once the restored
-// erasure ledger is visible in ClickHouse; while it runs it holds the restore advisory lock
-// (#1194). Serving in either state could pair a complete erasure with a ClickHouse point that
-// never saw its exclusions, so fail closed before any listener opens. Rerunning `am restore`
-// completes the reconciliation; `am restore --clear-fence` abandons it deliberately.
-const restoreBlock = await restoreStartupBlock(config.adminDatabaseUrl);
-if (restoreBlock) {
-  logger.error(restoreBlock);
-  process.exit(1);
-}
+// erasure ledger is visible in ClickHouse, while holding the restore lock exclusively (#1194).
+// The fence was already checked under the startup lock above; serving in either state could pair
+// a complete erasure with a ClickHouse point that never saw its exclusions, so that check happens
+// before any listener opens. Rerunning `am restore` completes the reconciliation;
+// `am restore --clear-fence` abandons it deliberately.
 
 // The version this database last ran, so the next pre-upgrade backup knows where its data came from.
 // Also with SKIP_MIGRATIONS (a migration job ran first); never a reason not to start.
@@ -118,6 +135,9 @@ const shutdown = createShutdown({
     { name: 'events', close: () => srv.events.close() },
     { name: 'hotstate', close: () => srv.hot.close() },
     { name: 'database', close: () => db.close() },
+    // Release the restore interlock last: the pools are closed, the workers are drained, and no
+    // request can still be served. Holding it any longer would only delay an operator's restore.
+    { name: 'restore-lock', close: () => restoreLock.release() },
     { name: 'telemetry', close: () => shutdownTelemetry() },
   ],
 });

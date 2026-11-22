@@ -13,8 +13,21 @@ issues: [1194]
   fence row in `public.restore_fence`, a table no backup contains, so a `pg_restore` that commits
   changes and then fails still fails closed. A server refuses to start while the fence exists or
   while a restore holds the lock, and only a completed reconciliation (or the deliberate
-  `am restore --clear-fence`) removes it. A session advisory lock refuses a second, overlapping
-  restore, and is held from before the drain check until the fence is cleared.
+  `am restore --clear-fence`) removes it.
+- Every server process and `am migrate` now takes the restore lock **shared on a dedicated
+  connection before running migrations** and holds it until shutdown, so a restore is refused even
+  when a running app's pools are idle, and a starting process cannot migrate under a restore. The
+  process exits if that connection is lost. `am restore` takes the same lock exclusively and
+  `--clear-fence` takes it before touching the fence, so neither can run under the other.
+- Reconciliation now runs per workspace with `app.workspace_id` set, so a restore run as a
+  non-BYPASSRLS table owner (where FORCE RLS hides `erasure_keys`) reconciles the restored ledger
+  instead of silently clearing the fence. A completed job is confirmed only after its outbox rows
+  naming the erased profile are removed, including rows the snapshot left pending.
+- The restore tests now write a real pre-erasure ClickHouse row for the erased identity in the
+  Postgres-only and fresh-target shapes, and prove that shape fails (the row is readable) when the
+  reconciliation is bypassed. The interlock has tests for a running server with idle pools, a
+  start refused under the exclusive lock, `am migrate` taking the lock before its first migration,
+  a lost lock connection, and `--clear-fence` refused under the lock.
 - Completed jobs are published in bulk instead of being reopened for a fresh sweep, including a
   job the live log says was complete when the snapshot predates the job row; an unfinished job is
   queued for its remaining sweep. If a restore stops before reconciliation, it leaves the fence in

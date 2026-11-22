@@ -13,6 +13,7 @@ import { createServer } from '../src/app';
 import { loadConfig } from '../src/config';
 import { prefixOf } from '../src/domains';
 import { publicOnly } from '../src/http/public-only';
+import { acquireRestoreStartupLock } from '../src/ops/restore-reconcile';
 import type { Commands } from '../src/registry';
 import { startScheduler, startWorkers, type WorkerLoop } from '../src/workers';
 import {
@@ -458,6 +459,9 @@ export async function startTestServer(
     ...env,
   });
   const srv = createServer(config);
+  // main.ts takes the restore interlock before its first migration and holds it until shutdown;
+  // the harness does the same, so a test server behaves like a real process towards `am restore`.
+  const restoreLock = await acquireRestoreStartupLock(config.adminDatabaseUrl);
   await resetClickHouse(config.clickhouse.url, dbName);
   if (!migrated) {
     await migrate(srv.db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole });
@@ -598,6 +602,7 @@ export async function startTestServer(
           { name: 'clickhouse', close: () => srv.events.close() },
           { name: 'valkey', close: () => srv.hot.close() },
           { name: 'postgres', close: () => srv.db.close(), inspect: () => databaseReport(pgUrl, srv.db) },
+          { name: 'restore-lock', close: () => restoreLock.release() },
         ],
         { budgetMs: CLOSE_BUDGET_MS, stageMs: CLOSE_STAGE_MS },
       );

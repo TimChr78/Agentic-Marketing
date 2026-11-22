@@ -1484,7 +1484,9 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     if (reconciled.keys)
       log(
         `erasure exclusions reconciled: ${reconciled.keys} key(s) across ${reconciled.workspaces} workspace(s), ` +
-          `${reconciled.inserted} re-published in ${reconciled.batches} batch(es), ${reconciled.jobs} cleanup job(s) confirmed`,
+          `${reconciled.inserted} re-published in ${reconciled.batches} batch(es), ${reconciled.jobs} cleanup job(s) confirmed` +
+          (reconciled.outboxRows ? `, ${reconciled.outboxRows} outbox row(s) removed` : '') +
+          (reconciled.outboxDeferred ? `, ${reconciled.outboxDeferred} job(s) left queued for the outbox` : ''),
       );
     else log('no restored erasure exclusions to reconcile');
 

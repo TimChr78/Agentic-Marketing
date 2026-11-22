@@ -181,11 +181,15 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
    fresh target — because it reads the ledger from the restored database rather than the live log (a
    fresh target has no live entries to replay). A job the snapshot already carried as complete is
    not reopened or swept again: the reconciliation publishes its keys in bulk, and the recurring
-   physical purge handles restored rows. A job that was still unfinished is queued for its remaining
-   sweep. The restore also resets the workspace's `purged_generation` to `0`, so the scheduler's
-   recurring physical purge sweeps the restored event rows again. If the restore stops before this
-   reconciliation, it leaves a fence row in `public.restore_fence` and the app refuses to start
-   until a restore completes, so a completed erasure is never readable again in between (#1194).
+   physical purge handles restored rows. Before it confirms such a job complete it also removes the
+   outbox rows its final worker pass would have removed — failed and delivered rows can still name
+   the person (a confirmation token, a click URL), and because the restore holds the exclusive lock
+   no dispatcher is running, so rows still pending are removed too rather than published after the
+   start. A job that was still unfinished is queued for its remaining sweep. The restore also resets
+   the workspace's `purged_generation` to `0`, so the scheduler's recurring physical purge sweeps
+   the restored event rows again. If the restore stops before this reconciliation, it leaves a
+   fence row in `public.restore_fence` and the app refuses to start until a restore completes, so a
+   completed erasure is never readable again in between (#1194).
 
 A person erased after the snapshot therefore stays erased: no profile, no identifiers, no profile
 key, no consent, and the tombstones that stop late events from recreating them. Only keyed hashes
@@ -333,15 +337,19 @@ contents but does not create them.
 
 `am restore`:
 
-- takes one restore advisory lock for the whole run, so a second `am restore` — even of another
-  backup directory — is refused with `another restore is running` instead of racing the first
-  through its fence and ClickHouse load. Keeping the lock takes a dedicated database session, so a
-  transaction-pooling PgBouncer is not a suitable `DATABASE_URL` for this command;
-- refuses to run while an application process is still connected to the target database. Every
-  server pool announces `agentic-marketing` in `pg_stat_activity`; an open connection means a
-  scheduler or worker could republish an erasure between the Postgres load and the ClickHouse load,
-  which then replaces the published exclusions. The check runs after the advisory lock, so a server
-  that starts *after* it is caught by the fence at startup. Stop the app first, as above.
+- takes one **exclusive** restore advisory lock for the whole run, so a second `am restore` — even of
+  another backup directory — is refused with `another restore is running`, and so is every server
+  start, `am migrate` and `am restore --clear-fence`. Every server process (every role) and
+  `am migrate` take the same lock **shared** on a dedicated connection before their first migration
+  and keep it until they shut down, so a restore is refused while any of them is running, even when
+  its database pools are idle. The refusal says to stop every app, worker and scheduler first.
+  Keeping the lock takes a dedicated database session, so a transaction-pooling PgBouncer is not a
+  suitable `DATABASE_URL` for either side;
+- refuses to run while an application process is still connected to the target database. That is
+  the same shared lock; the `application_name` check remains as an extra diagnostic for a process
+  from an older build (or one whose lock connection was lost before it exited). An open connection
+  means a scheduler or worker could republish an erasure between the Postgres load and the
+  ClickHouse load, which then replaces the published exclusions. Stop the app first, as above.
 - reports the snapshot time in its final line (`snapshot <createdAt>`);
 - reads `erasures` and `erasure_tombstones` from the live database before touching it, and replays
   them after loading Postgres (see [Retention and erased people](#retention-and-erased-people));
@@ -356,8 +364,13 @@ contents but does not create them.
 - creates or updates the `am_app` role before loading, so the dump's `GRANT`s to it apply;
 - **raises the restore fence before replacing Postgres.** The row lives in `public.restore_fence`,
   which every dump excludes, so `pg_restore --clean` cannot drop it even when it commits changes
-  and then fails. A server that finds the row refuses to start (`apps/server/src/main.ts`), and a
-  server started while a restore holds the lock is refused too;
+  and then fails. A server that finds the row refuses to start (`apps/server/src/main.ts`). It does
+  that check while holding the shared restore lock, and it takes that lock **before** running
+  Postgres or ClickHouse migrations, so a restore never overlaps a starting process. The process
+  keeps the lock and its connection until shutdown (released after the workers drain and the pools
+  close). If that connection drops, the server logs the reason and exits; a supervisor restarts it,
+  which either re-acquires the lock or refuses on the fence. It is a dedicated connection, so it
+  does not consume an app-pool slot;
 - runs `pg_restore --clean --if-exists --no-owner`, then unwraps a real data key from the restored
   database before reporting success (a second proof that provider, connector and profile secrets
   will be readable);
@@ -400,9 +413,11 @@ log, loads ClickHouse, reconciles the ledger and clears the fence only at the en
 idempotent, so this is safe even when the first attempt got as far as ClickHouse.
 
 If the restore must be abandoned, `am restore --clear-fence` removes the fence after a warning and
-a typed confirmation (or `--yes` for a non-interactive run). It does not reconcile anything: start
-the app only when you know `erased_subjects` holds the exclusions the restored ledger needs, or you
-accept that reads may return someone whose erasure was reported complete before the backup.
+a typed confirmation (or `--yes` for a non-interactive run). It takes the same **exclusive** lock
+as a restore first, so it refuses while a restore or any app, worker or scheduler still holds it.
+It does not reconcile anything: start the app only when you know `erased_subjects` holds the
+exclusions the restored ledger needs, or you accept that reads may return someone whose erasure was
+reported complete before the backup.
 
 ```
 docker compose run --rm app am restore --clear-fence --yes
