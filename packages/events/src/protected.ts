@@ -3,7 +3,8 @@
  *
  * Every application read of person-linked ClickHouse data goes through a view that removes any
  * row whose subject keys match the workspace's durable erasure ledger. The views are created by
- * packages/events/clickhouse/0009_protected_views.sql; they are not a convenience: a read that
+ * packages/events/clickhouse/0009_protected_views.sql and re-created by its 0010 successor; they
+ * are not a convenience: a read that
  * names a base table directly bypasses the erasure completion contract, so
  * `packages/events/test/protected-reads-guard.test.ts` fails when a source file does that outside
  * the maintenance paths (sink inserts, erasure sweeps, backfill, migrations).
