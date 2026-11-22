@@ -219,6 +219,6 @@ describe('protected reads (#1037 part 2)', () => {
     }
     // #1195: a row that is neither complete nor backfilled is unverified, not visible by default.
     expect(latest.match(/1 AS side_found/g)).toHaveLength(PERSON_TABLES.length);
-    expect(latest.match(/OR NOT EXISTS \(SELECT 1 FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length);
+    expect(latest.match(/OR NOT EXISTS \(SELECT 1 FROM erased_subjects WHERE/g)).toHaveLength(PERSON_TABLES.length);
   });
 });
