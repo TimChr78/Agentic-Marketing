@@ -123,6 +123,8 @@ export interface ReplayErasuresResult {
   tombstones: number;
   /** Cleanup jobs recreated or reopened for the replayed erasures that were not complete yet. */
   cleanupJobs: number;
+  /** Completed jobs recreated as complete because the live log had one the snapshot predates. */
+  completedJobs: number;
   /** Erasure-key ledger rows re-inserted into the restored database. */
   keys: number;
   /** Wrapped exclusion data keys re-inserted into the restored database. */
@@ -432,6 +434,7 @@ export async function replayErasures(
     profiles: 0,
     tombstones: 0,
     cleanupJobs: 0,
+    completedJobs: 0,
     keys: 0,
     exclusionKeys: 0,
     generations: 0,
@@ -552,15 +555,20 @@ export async function replayErasures(
             // Only this erasure's own ledger rows justify a job: another erasure's keys in the same
             // workspace must not re-open work for this one.
             if (job || entries.keys.some((key) => key.erasureId === erasure.id)) {
-              // Only a job the snapshot did not finish is reopened (~#1194). A complete job stays
-              // complete: the restore's final reconciliation publishes and verifies its ledger keys
-              // instead of making the scheduler sweep every historical erasure again, and a job
-              // that was still pending, running or failed is queued for its remaining sweep. The
-              // upsert is idempotent: a second replay rewrites the same queued state.
+              // Only a job the snapshot did not finish is reopened (~#1194). A job the live log says
+              // was complete is inserted as complete, even on a snapshot old enough that the dump
+              // predates the job row: the restore's final reconciliation publishes and verifies its
+              // ledger keys in bulk instead of making the scheduler sweep every historical erasure
+              // again. A job that was still pending, running or failed is queued for its remaining
+              // sweep. The upsert is idempotent: a second replay rewrites the same queued state.
+              const wasComplete = job?.state === 'complete';
               const inserted = await client.query(
                 `INSERT INTO erasure_cleanup_jobs
-                   (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek)
-                 VALUES ($1, $2, $3, $4, $5, $6)
+                   (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek,
+                    state, clickhouse_done, hotstate_done, completed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6,
+                         CASE WHEN $7 THEN 'complete' ELSE 'pending_external' END,
+                         $7, $7, CASE WHEN $7 THEN now() ELSE NULL END)
                  ON CONFLICT (workspace_id, erasure_id) DO UPDATE
                    SET profile_ids = EXCLUDED.profile_ids,
                        state = 'pending_external',
@@ -586,9 +594,18 @@ export async function replayErasures(
                                            ELSE EXCLUDED.selector_kek END,
                        updated_at = now()
                  WHERE erasure_cleanup_jobs.state <> 'complete'`,
-                [workspaceId, erasure.id, erasure.profileIds, job?.selectors ?? null, job?.selectorKey ?? null, job?.selectorKek ?? null],
+                [
+                  workspaceId,
+                  erasure.id,
+                  erasure.profileIds,
+                  job?.selectors ?? null,
+                  job?.selectorKey ?? null,
+                  job?.selectorKek ?? null,
+                  wasComplete,
+                ],
               );
-              result.cleanupJobs += inserted.rowCount ?? 0;
+              if (wasComplete) result.completedJobs += inserted.rowCount ?? 0;
+              else result.cleanupJobs += inserted.rowCount ?? 0;
             }
           }
           result.erasures += 1;
@@ -711,63 +728,6 @@ export async function replayErasures(
   });
 }
 
-/**
- * The installation setting that marks a restore as unfinished (#1194). It is written after the
- * Postgres replacement and cleared only when the restore has reconciled the restored erasure ledger
- * with ClickHouse. A server refuses to serve reads while it is present: a restore that stopped
- * before reconciliation can pair a complete job with `erased_subjects` rows that are missing, and
- * the publication window for a new erasure does not apply to one that was already reported complete.
- */
-export const RESTORE_RECONCILIATION_SETTING = 'erasure_restore_reconciliation';
-
-export interface RestoreReconciliationState {
-  /** The backup directory being restored, for the operator; never secret. */
-  backup: string;
-  startedAt: string;
-}
-
-type SettingClient = Pick<pg.Pool, 'query'> | Pick<pg.Client, 'query'>;
-
-function isMissingSettingsTable(err: unknown): boolean {
-  return (err as { code?: string }).code === '42P01';
-}
-
-/** Marks the restore as unfinished before any erasure work runs. Tolerates a snapshot older than the setting table. */
-export async function markRestoreReconciliationPending(client: SettingClient, state: RestoreReconciliationState): Promise<void> {
-  try {
-    await client.query(
-      `INSERT INTO installation_settings (key, value) VALUES ($1, $2::jsonb)
-       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-      [RESTORE_RECONCILIATION_SETTING, JSON.stringify(state)],
-    );
-  } catch (err) {
-    // A snapshot from before the settings table cannot have the ledger either, so there is nothing
-    // to reconcile and no read can be misled by a missing marker.
-    if (!isMissingSettingsTable(err)) throw err;
-  }
-}
-
-/** Clears the marker after the restored ledger is visible in ClickHouse. */
-export async function clearRestoreReconciliationPending(client: SettingClient): Promise<void> {
-  try {
-    await client.query('DELETE FROM installation_settings WHERE key = $1', [RESTORE_RECONCILIATION_SETTING]);
-  } catch (err) {
-    if (!isMissingSettingsTable(err)) throw err;
-  }
-}
-
-/**
- * The pending restore marker, or null. Read at startup before any listener opens, so a restore that
- * stopped before reconciliation fails closed instead of serving erased people again (#1194).
- */
-export async function restoreReconciliationPending(client: SettingClient): Promise<RestoreReconciliationState | null> {
-  try {
-    const { rows } = await client.query<{ value: RestoreReconciliationState }>('SELECT value FROM installation_settings WHERE key = $1', [
-      RESTORE_RECONCILIATION_SETTING,
-    ]);
-    return rows[0]?.value ?? null;
-  } catch (err) {
-    if (isMissingSettingsTable(err)) return null;
-    throw err;
-  }
-}
+// The restore interlock that replaced the settings marker lives in `restoreFence.ts` (#1194). It is
+// written before Postgres is replaced, not after, so a `pg_restore` that commits and then fails also
+// leaves a fence behind.

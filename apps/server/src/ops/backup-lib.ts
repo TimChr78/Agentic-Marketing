@@ -22,7 +22,7 @@ import {
 } from '@agentic-marketing/db';
 import pg from 'pg';
 import { keyProviderFromEnv } from '../keys';
-import { assertDatabaseDrained, finishRestoreReconciliation, markRestoreStarted } from './restore-reconcile';
+import { acquireRestoreSessionLock, assertDatabaseDrained, finishRestoreReconciliation, markRestoreStarted } from './restore-reconcile';
 
 // Backup and restore without loading the full server configuration: an operator must be able to
 // run them with only DATABASE_URL (and CLICKHOUSE_URL for events), even when other secrets are
@@ -114,6 +114,13 @@ export interface RestoreBackupOptions {
    * log in place, exactly as a migration or replay error does, so a retry can replay it.
    */
   replay?: (databaseUrl: string, log: ErasureLog, opts: ReplayErasuresAfterMigrateOptions) => Promise<ReplayErasuresResult>;
+  /**
+   * Test seam: replaces the `pg_restore` call. A failure here must leave the restore fence in
+   * place, exactly as a real `pg_restore` that commits and then fails does (#1194 review).
+   */
+  pgRestore?: (databaseUrl: string, dumpFile: string) => Promise<void>;
+  /** Test seam: stops after the Postgres/ClickHouse loads, leaving reconciliation and the fence. */
+  skipReconciliation?: boolean;
 }
 
 export interface VerifyBackupOptions {
@@ -380,9 +387,16 @@ function newestRelease(version: string | null): string | null {
   return version?.split('–').at(-1)?.trim() || null;
 }
 
-/** Runs pg_dump -Fc --no-owner; connection details travel through PG* variables. */
+/**
+ * Runs pg_dump -Fc --no-owner; connection details travel through PG* variables.
+ *
+ * `public.restore_fence` is excluded on purpose (#1194): the fence must survive `pg_restore --clean`
+ * so an interrupted restore still fails closed. `pg_restore` only drops objects the archive names,
+ * so leaving the table out of the dump is what protects it. Excluding a table that an older
+ * database does not have is harmless.
+ */
 export async function dumpPostgres(databaseUrl: string, outFile: string): Promise<void> {
-  await run('pg_dump', ['-Fc', '--no-owner', '--file', outFile], postgresClientEnv(databaseUrl));
+  await run('pg_dump', ['-Fc', '--no-owner', '--exclude-table=public.restore_fence', '--file', outFile], postgresClientEnv(databaseUrl));
 }
 
 /** Runs pg_restore --clean --if-exists --no-owner against DATABASE_URL. */
@@ -1332,31 +1346,40 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   const databaseUrl = opts.databaseUrl ?? env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is not set');
 
-  // The documented drain, enforced (#1194): a scheduler that is still running can publish an
-  // erasure between the replay and the ClickHouse load, and the load then replaces the published
-  // exclusions with an older point. Refuse before anything is written.
-  await assertDatabaseDrained(databaseUrl);
-
-  // migrate() recreates the role on every start, but it does not re-run the GRANTs from applied
-  // migrations. The dump keeps ACLs, so the grants come back with pg_restore; the role must exist
-  // before those GRANT statements run. Reuse the same role helper as migrate().
-  const role = await ensureAppRoleInDatabase(databaseUrl, {
-    appRole: env.APP_DB_ROLE?.trim() || 'am_app',
-    appRolePassword: env.APP_DB_PASSWORD,
-  });
-  if (!role.exists) throw new Error(`Postgres role ${role.role} does not exist; set APP_DB_PASSWORD so the restore can create it`);
-
-  // Read the erasure log from the live database before it is replaced. A snapshot taken before an
-  // erasure still contains that person and their key; replaying the log afterwards removes them
-  // again (#144). This is also why a restore must not proceed when the log cannot be read.
-  //
-  // The union of this attempt's live log and a matching saved capture is published next to the
-  // backup first: a failure after the replacement (a migration or replay error, a key check) must
-  // not lose erasures recorded after the snapshot, and an erasure recorded between a failed
-  // pre-replacement attempt and its retry must still be replayed. Replay is idempotent.
-  const capturePath = restoreErasureLogPath(dir);
-  const release = await acquireRestoreLock(restoreLockPath(dir));
+  // One restore at a time (#1194 review): the session advisory lock is taken before the drain check
+  // and held until the fence is cleared. It is server state, not data, so `pg_restore` cannot drop
+  // it, and a second restore is refused even when it uses another backup directory. The drain check
+  // runs *after* it, so a server that starts after the check is caught by the fence/startup check.
+  const session = await acquireRestoreSessionLock(databaseUrl);
+  let releaseFileLock: (() => Promise<void>) | undefined;
   try {
+    // The documented drain, enforced (#1194): a scheduler that is still running can publish an
+    // erasure between the replay and the ClickHouse load, and the load then replaces the published
+    // exclusions with an older point. Refuse before anything is written.
+    await assertDatabaseDrained(databaseUrl);
+
+    // migrate() recreates the role on every start, but it does not re-run the GRANTs from applied
+    // migrations. The dump keeps ACLs, so the grants come back with pg_restore; the role must exist
+    // before those GRANT statements run. Reuse the same role helper as migrate().
+    const role = await ensureAppRoleInDatabase(databaseUrl, {
+      appRole: env.APP_DB_ROLE?.trim() || 'am_app',
+      appRolePassword: env.APP_DB_PASSWORD,
+    });
+    if (!role.exists) throw new Error(`Postgres role ${role.role} does not exist; set APP_DB_PASSWORD so the restore can create it`);
+
+    // Read the erasure log from the live database before it is replaced. A snapshot taken before an
+    // erasure still contains that person and their key; replaying the log afterwards removes them
+    // again (#144). This is also why a restore must not proceed when the log cannot be read.
+    //
+    // The union of this attempt's live log and a matching saved capture is published next to the
+    // backup first: a failure after the replacement (a migration or replay error, a key check) must
+    // not lose erasures recorded after the snapshot, and an erasure recorded between a failed
+    // pre-replacement attempt and its retry must still be replayed. Replay is idempotent. The file
+    // lock is held through ClickHouse and reconciliation, so the same backup cannot be restored
+    // twice at once.
+    const capturePath = restoreErasureLogPath(dir);
+    releaseFileLock = await acquireRestoreLock(restoreLockPath(dir));
+
     const binding: RestoreCaptureBinding = {
       target: await restoreTargetIdentity(databaseUrl),
       backup: `${dir}|${manifest.createdAt}|${manifest.postgres.sha256}`,
@@ -1390,13 +1413,15 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
         'APP_DB_PASSWORD is required to replay erasures during a restore: it applies pending migrations before the replay. Postgres has not been replaced.',
       );
 
-    log('restoring Postgres (this replaces the current database)');
-    await restorePostgres(databaseUrl, manifestPath(dir, manifest.postgres.file));
-
-    // From here until the final reconciliation the restored database may pair a job that says it
-    // published with a ClickHouse point that never saw its keys. Mark the restore as unfinished so
-    // a server started in between refuses to serve instead of returning erased people (#1194).
+    // The fence is raised *before* the replacement (#1194 review): `pg_restore --clean` can commit
+    // changes and then fail, and a marker written afterwards would miss exactly that case. The row
+    // lives in a table no dump contains, so it survives the restore and only reconciliation clears
+    // it. A server started between this point and reconciliation refuses to serve reads.
     await markRestoreStarted(databaseUrl, dir);
+    log('restore fence raised; Postgres replacement starts now');
+
+    log('restoring Postgres (this replaces the current database)');
+    await (opts.pgRestore ?? restorePostgres)(databaseUrl, manifestPath(dir, manifest.postgres.file));
 
     // The pre-restore check used the sealed value in the manifest; this proves the key also opens a
     // real data key in the restored data, still before the app is started. `--skip-key-check`
@@ -1418,6 +1443,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
         `erasures replayed: ${replayed.profiles} profile(s) removed from the restored snapshot, ` +
           `${replayed.tombstones} tombstone(s) restored` +
           (replayed.cleanupJobs ? `, ${replayed.cleanupJobs} cleanup job(s) queued to republish the exclusions` : '') +
+          (replayed.completedJobs ? `, ${replayed.completedJobs} completed job(s) restored without another sweep` : '') +
           (replayed.keys ? `, ${replayed.keys} erasure key(s) restored` : '') +
           (replayed.exclusionKeys ? `, ${replayed.exclusionKeys} exclusion key(s) restored` : '') +
           (replayed.generations ? `, ${replayed.generations} exclusion generation(s) replayed` : '') +
@@ -1433,34 +1459,41 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
         log(`warning: the erasure log at ${capturePath} was not written by this restore; it was left in place`);
       log('no erasures to replay; the snapshot has nothing to resurrect');
     }
+
+    if (opts.clickhouse && manifest.clickhouse) {
+      log('restoring ClickHouse');
+      await restoreClickHouse({ runDir: dir, tables: manifest.clickhouse.tables as ClickHouseTableEntry[], env, log });
+    }
+
+    if (opts.skipReconciliation) {
+      // Test seam: the fence stays raised, exactly as a reconciliation that threw would leave it.
+      log('reconciliation skipped (test seam); the restore fence stays raised');
+      return manifest;
+    }
+
+    // The last step, after every ClickHouse load (#1194). The restored Postgres ledger is the source:
+    // a fresh target has no live log to replay, and an older ClickHouse point may lack exclusions for
+    // a job the dump already carried as complete. Only after the keys are confirmed visible does this
+    // mark the jobs published and clear the fence.
+    log('reconciling restored erasure exclusions with ClickHouse');
+    const reconciled = await finishRestoreReconciliation({
+      databaseUrl,
+      env,
+      log,
+    });
+    if (reconciled.keys)
+      log(
+        `erasure exclusions reconciled: ${reconciled.keys} key(s) across ${reconciled.workspaces} workspace(s), ` +
+          `${reconciled.inserted} re-published in ${reconciled.batches} batch(es), ${reconciled.jobs} cleanup job(s) confirmed`,
+      );
+    else log('no restored erasure exclusions to reconcile');
+
+    log('restore complete; start the app again (it applies any migrations this version still needs)');
+    return manifest;
   } finally {
-    await release();
+    await releaseFileLock?.();
+    await session.release();
   }
-
-  if (opts.clickhouse && manifest.clickhouse) {
-    log('restoring ClickHouse');
-    await restoreClickHouse({ runDir: dir, tables: manifest.clickhouse.tables as ClickHouseTableEntry[], env, log });
-  }
-
-  // The last step, after every ClickHouse load (#1194). The restored Postgres ledger is the source:
-  // a fresh target has no live log to replay, and an older ClickHouse point may lack exclusions for
-  // a job the dump already carried as complete. Only after the keys are confirmed visible does this
-  // mark the jobs published and clear the fail-closed marker.
-  log('reconciling restored erasure exclusions with ClickHouse');
-  const reconciled = await finishRestoreReconciliation({
-    databaseUrl,
-    env,
-    log,
-  });
-  if (reconciled.keys)
-    log(
-      `erasure exclusions reconciled: ${reconciled.keys} key(s) across ${reconciled.workspaces} workspace(s), ` +
-        `${reconciled.inserted} re-published in ${reconciled.batches} batch(es), ${reconciled.jobs} cleanup job(s) confirmed`,
-    );
-  else log('no restored erasure exclusions to reconcile');
-
-  log('restore complete; start the app again (it applies any migrations this version still needs)');
-  return manifest;
 }
 
 // A small standard 5-field cron matcher, UTC only. It deliberately supports just the syntax the

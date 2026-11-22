@@ -63,6 +63,11 @@ am-manual-0.2.5-20261027T031500Z/
     some_table_without_a_row_policy.native
 ```
 
+The Postgres dump excludes `public.restore_fence`, the small table that records an unfinished
+restore (see [After a failed or interrupted restore](#after-a-failed-or-interrupted-restore)). It is
+deliberately not part of any backup: `pg_restore --clean` can then never drop the fence of an
+interrupted restore.
+
 Tables whose `workspace_id` has a ClickHouse row policy (`events`, `message_events`,
 `journey_events` and `ad_spend` by default) are exported once per workspace with `SQL_workspace`
 set. A plain `SELECT` under that policy would return no rows, which is why 0.2.4 produced empty
@@ -179,7 +184,7 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
    physical purge handles restored rows. A job that was still unfinished is queued for its remaining
    sweep. The restore also resets the workspace's `purged_generation` to `0`, so the scheduler's
    recurring physical purge sweeps the restored event rows again. If the restore stops before this
-   reconciliation, it leaves a marker in the restored database and the app refuses to serve reads
+   reconciliation, it leaves a fence row in `public.restore_fence` and the app refuses to start
    until a restore completes, so a completed erasure is never readable again in between (#1194).
 
 A person erased after the snapshot therefore stays erased: no profile, no identifiers, no profile
@@ -328,10 +333,15 @@ contents but does not create them.
 
 `am restore`:
 
+- takes one restore advisory lock for the whole run, so a second `am restore` — even of another
+  backup directory — is refused with `another restore is running` instead of racing the first
+  through its fence and ClickHouse load. Keeping the lock takes a dedicated database session, so a
+  transaction-pooling PgBouncer is not a suitable `DATABASE_URL` for this command;
 - refuses to run while an application process is still connected to the target database. Every
   server pool announces `agentic-marketing` in `pg_stat_activity`; an open connection means a
   scheduler or worker could republish an erasure between the Postgres load and the ClickHouse load,
-  which then replaces the published exclusions. Stop the app first, as above.
+  which then replaces the published exclusions. The check runs after the advisory lock, so a server
+  that starts *after* it is caught by the fence at startup. Stop the app first, as above.
 - reports the snapshot time in its final line (`snapshot <createdAt>`);
 - reads `erasures` and `erasure_tombstones` from the live database before touching it, and replays
   them after loading Postgres (see [Retention and erased people](#retention-and-erased-people));
@@ -344,13 +354,19 @@ contents but does not create them.
   touched, naming the key the backup needs and the `MASTER_KEY_PREVIOUS` option. A backup without a
   key check logs that it cannot be verified and continues.
 - creates or updates the `am_app` role before loading, so the dump's `GRANT`s to it apply;
-- after the last ClickHouse load, reconciles the restored erasure ledger with `erased_subjects`
-  (see [Retention and erased people](#retention-and-erased-people)) and does not report success
-  until every key is visible; a restore that stops before that leaves a marker in the database and
-  the app refuses to serve reads until a restore completes;
+- **raises the restore fence before replacing Postgres.** The row lives in `public.restore_fence`,
+  which every dump excludes, so `pg_restore --clean` cannot drop it even when it commits changes
+  and then fails. A server that finds the row refuses to start (`apps/server/src/main.ts`), and a
+  server started while a restore holds the lock is refused too;
 - runs `pg_restore --clean --if-exists --no-owner`, then unwraps a real data key from the restored
   database before reporting success (a second proof that provider, connector and profile secrets
-  will be readable), then reports the restored version.
+  will be readable);
+- after the last ClickHouse load, reconciles the restored erasure ledger with `erased_subjects`
+  (see [Retention and erased people](#retention-and-erased-people)) and does not report success
+  until every key is visible; only then does it clear the fence. The final visibility read is
+  batched, so a workspace with tens of thousands of keys does not exceed ClickHouse's parameter
+  size;
+- reports the restored version and clears the fence last.
 
 `--skip-key-check` skips both key checks. Use it only when you know the secrets are not needed (for
 example, restoring a database only to recover profiles and consent); the app will otherwise fail
@@ -374,6 +390,23 @@ from an older release, starting the app applies the missing migrations.
 Postgres and ClickHouse are separate systems: the command restores Postgres first and ClickHouse
 second. If the ClickHouse step fails (for example, a table was not created yet), the Postgres data
 is already back; fix the table and run the same restore again.
+
+### After a failed or interrupted restore
+
+The fence is deliberately not cleared on failure: only a completed reconciliation (or an explicit
+override) removes it. Keep every app, worker and scheduler stopped, fix the cause, and rerun the
+same restore. The retry overwrites the fence, replaces Postgres again, replays the captured erasure
+log, loads ClickHouse, reconciles the ledger and clears the fence only at the end. Replay is
+idempotent, so this is safe even when the first attempt got as far as ClickHouse.
+
+If the restore must be abandoned, `am restore --clear-fence` removes the fence after a warning and
+a typed confirmation (or `--yes` for a non-interactive run). It does not reconcile anything: start
+the app only when you know `erased_subjects` holds the exclusions the restored ledger needs, or you
+accept that reads may return someone whose erasure was reported complete before the backup.
+
+```
+docker compose run --rm app am restore --clear-fence --yes
+```
 
 Restore is deliberately not a merge: rows written after the backup are gone. Erasures recorded in
 the live database since the snapshot are the one exception, because they are replayed. Verify before

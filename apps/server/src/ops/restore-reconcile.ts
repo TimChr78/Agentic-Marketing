@@ -1,9 +1,11 @@
 import {
   APP_DATABASE_APPLICATION_NAME,
-  clearRestoreReconciliationPending,
-  markRestoreReconciliationPending,
+  clearRestoreFence,
   nextErasureGeneration,
   noteErasedSubjectsVisible,
+  RESTORE_ADVISORY_LOCK_KEY,
+  raiseRestoreFence,
+  restoreFenceState,
 } from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore, type SubjectKeyKind } from '@agentic-marketing/events';
 import pg from 'pg';
@@ -24,6 +26,11 @@ import pg from 'pg';
  * confirmed visible does this mark the corresponding jobs published; a job that was still
  * unfinished is left queued for its remaining sweep, and a completed one is not reopened. The
  * existing bounded recurring purge handles restored rows physically.
+ *
+ * A crash anywhere between the Postgres replacement and this step leaves the fence row in
+ * `public.restore_fence` (written before the replacement, excluded from every dump) and the
+ * session-level restore lock gone with the process. A server refuses to start while the fence
+ * exists; rerunning the same restore clears it after reconciliation (#1194 review).
  */
 
 /** What one reconciliation did, for the restore log and its tests. */
@@ -163,7 +170,18 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
         );
         result.batches += 1;
       }
-      if (!(await events.erasedSubjectsVisible(workspaceId, keys)))
+      // Chunk the FINAL visibility read: one HTTP parameter with every key of a large workspace hit
+      // ClickHouse's "Field value too long" at 10,000 keys. The inserts above are already batched;
+      // the confirmation must be too. Every chunk checks its own set, so the whole list is still
+      // confirmed before a job is marked published.
+      let visible = true;
+      for (let offset = 0; offset < keys.length; offset += batchSize) {
+        if (!(await events.erasedSubjectsVisible(workspaceId, keys.slice(offset, offset + batchSize)))) {
+          visible = false;
+          break;
+        }
+      }
+      if (!visible)
         throw new Error(
           `the restored erasure exclusions for workspace ${workspaceId} are not visible in ClickHouse after the publication; ` +
             'reads stay blocked until a restore completes the reconciliation',
@@ -218,26 +236,109 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
 }
 
 /**
- * Runs the whole final step: reconcile the restored ledger, then clear the marker the caller wrote
- * after the Postgres load. A reconciliation failure leaves the marker in place, so a server started
- * in between still refuses to serve.
+ * Runs the whole final step: reconcile the restored ledger, then clear the fence the caller raised
+ * before the Postgres replacement. A reconciliation failure leaves the fence in place, so a server
+ * started in between still refuses to serve.
  */
 export async function finishRestoreReconciliation(opts: ReconcileRestoreOptions): Promise<ReconcileRestoreResult> {
   const result = await reconcileRestoredErasureExclusions(opts);
   const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: 1 });
   try {
-    await clearRestoreReconciliationPending(pool);
+    await clearRestoreFence(pool);
   } finally {
     await pool.end().catch(() => {});
   }
   return result;
 }
 
-/** Exposed for the restore path: writes the fail-closed marker after the Postgres replacement. */
+/**
+ * Raises the fence before anything replaces Postgres (#1194). The row lives outside every dump, so
+ * a `pg_restore` that commits and then fails leaves it behind; a retry overwrites it and a server
+ * started in between refuses to serve reads. It is deliberately not cleared on failure: only
+ * reconciliation (or the explicit `am restore --clear-fence`) may remove it.
+ */
 export async function markRestoreStarted(databaseUrl: string, backup: string): Promise<void> {
   const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
   try {
-    await markRestoreReconciliationPending(pool, { backup, startedAt: new Date().toISOString() });
+    await raiseRestoreFence(pool, { backup, startedAt: new Date().toISOString() });
+  } finally {
+    await pool.end().catch(() => {});
+  }
+}
+
+/** The advisory lock a restore holds on one dedicated session for its whole run. */
+export interface RestoreSessionLock {
+  release(): Promise<void>;
+}
+
+/**
+ * Takes the exclusive restore advisory lock (#1194). It is session state, not data, so it survives
+ * `pg_restore`; a second restore — even one restoring another backup directory — is refused instead
+ * of racing the first through its marker and ClickHouse load. The caller must hold it until the
+ * fence is cleared.
+ */
+export async function acquireRestoreSessionLock(databaseUrl: string): Promise<RestoreSessionLock> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [RESTORE_ADVISORY_LOCK_KEY]);
+    if (!rows[0]?.locked)
+      throw new Error(
+        'another restore is running: it holds the restore advisory lock on this database. Wait for it to finish, then retry.',
+      );
+  } catch (err) {
+    await client.end().catch(() => {});
+    throw err;
+  }
+  return {
+    async release() {
+      await client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
+      await client.end().catch(() => {});
+    },
+  };
+}
+
+/**
+ * What a server start must refuse for (#1194), or null when it may serve. Runs before any listener
+ * opens. An unfinished restore is a fence row; a restore in progress holds the exclusive advisory
+ * lock, which a shared attempt fails to get. The shared lock is released immediately when it was
+ * taken: startup only needs to prove no restore is active, not to keep restores out afterwards
+ * (the drain check covers a server that was already running).
+ */
+export async function restoreStartupBlock(databaseUrl: string): Promise<string | null> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const fence = await restoreFenceState(client);
+    if (fence)
+      return (
+        `A restore of ${fence.backup} started at ${fence.startedAt} did not finish reconciling erasure exclusions. ` +
+        'Refusing to serve person-linked reads until it does; run `am restore` for that backup again to completion, ' +
+        'or `am restore --clear-fence` to abandon it deliberately.'
+      );
+    const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock_shared($1) AS locked', [
+      RESTORE_ADVISORY_LOCK_KEY,
+    ]);
+    if (!rows[0]?.locked) return 'A restore is running on this database. Stop it or wait for it to finish before starting the app.';
+    await client.query('SELECT pg_advisory_unlock_shared($1)', [RESTORE_ADVISORY_LOCK_KEY]);
+    return null;
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/**
+ * The deliberate escape hatch behind `am restore --clear-fence`. It only removes the fence; the
+ * caller has to have decided that the ClickHouse exclusions are correct (or acceptable) already.
+ * Returns false when there was no fence to clear.
+ */
+export async function clearRestoreFenceForUrl(databaseUrl: string): Promise<boolean> {
+  const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+  try {
+    const before = await restoreFenceState(pool);
+    if (!before) return false;
+    await clearRestoreFence(pool);
+    return true;
   } finally {
     await pool.end().catch(() => {});
   }

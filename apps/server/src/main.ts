@@ -1,5 +1,5 @@
 import { migrateAuth } from '@agentic-marketing/auth';
-import { migrate, migrationFiles, recordServerVersion, restoreReconciliationPending } from '@agentic-marketing/db';
+import { migrate, migrationFiles, recordServerVersion } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
 import { endpointLocation, initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
 import { serve } from '@hono/node-server';
@@ -9,6 +9,7 @@ import { prefixOf } from './domains';
 import { publicOnly } from './http/public-only';
 import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
 import { offlineChecks } from './ops/checks';
+import { restoreStartupBlock } from './ops/restore-reconcile';
 import { createShutdown, drainHttpServers, drainWorkers, HTTP_DRAIN_TIMEOUT_MS, type HttpListener } from './shutdown';
 import { COMMIT, VERSION } from './version';
 import { startScheduler, startWorkers } from './workers';
@@ -54,16 +55,14 @@ if (protocolProblem) {
   process.exit(1);
 }
 
-// A restore writes this marker after replacing Postgres and clears it only once the restored
-// erasure ledger is visible in ClickHouse (#1194). Serving in between could pair a complete
-// erasure with a ClickHouse point that never saw its exclusions, so fail closed before any
-// listener opens: rerunning `am restore` completes the reconciliation.
-const pendingRestore = await restoreReconciliationPending(db.admin);
-if (pendingRestore) {
-  logger.error(
-    `A restore of ${pendingRestore.backup} started at ${pendingRestore.startedAt} did not finish reconciling erasure exclusions. ` +
-      'Refusing to serve person-linked reads until it does; run `am restore` for that backup again to completion.',
-  );
+// A restore raises its fence before replacing Postgres and clears it only once the restored
+// erasure ledger is visible in ClickHouse; while it runs it holds the restore advisory lock
+// (#1194). Serving in either state could pair a complete erasure with a ClickHouse point that
+// never saw its exclusions, so fail closed before any listener opens. Rerunning `am restore`
+// completes the reconciliation; `am restore --clear-fence` abandons it deliberately.
+const restoreBlock = await restoreStartupBlock(config.adminDatabaseUrl);
+if (restoreBlock) {
+  logger.error(restoreBlock);
   process.exit(1);
 }
 

@@ -207,6 +207,67 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
     expect(again.rows.every((job) => job.state === 'complete')).toBe(true);
   }, 120_000);
 
+  it('recreates a completed job as complete when the snapshot predates the job row (#1194 review)', async () => {
+    const live = await createDisposableDb('erasure_predates_live');
+    const restored = await createDisposableDb('erasure_predates_restored');
+    open.push(live, restored);
+    const profile = 'prf_0000000000000000000000000000beef';
+    const erasureId = 'era_0000000000000000000000000000beef';
+    const key = 'a'.repeat(64);
+    await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    await live.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'predates snapshot', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_predates', $3, 'full')`,
+      [live.workspace, key, erasureId],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, coverage_cleared_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 3, true, true, 7, now(), now(), now())`,
+      [live.workspace, erasureId, profile],
+    );
+    const log = await readErasureLog(live.url.toString());
+    expect(log.cleanupJobs).toMatchObject([{ state: 'complete' }]);
+
+    // The snapshot is older than the job row: it carries the erasure and its ledger (both written
+    // in the erasure's transaction) but no cleanup job. Replaying the live job must not queue a
+    // sweep for work that already finished; reconciliation confirms the ledger keys in bulk.
+    await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [live.workspace]);
+    await restored.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'predates snapshot', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await restored.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_predates', $3, 'full')`,
+      [live.workspace, key, erasureId],
+    );
+
+    const replayed = await replayErasures(restored.url.toString(), log);
+    expect(replayed).toMatchObject({ erasures: 1, cleanupJobs: 0, completedJobs: 1 });
+    const { rows } = await restored.db.admin.query<{
+      state: string;
+      attempts: number;
+      next_attempt_at: Date;
+      completed_at: Date | null;
+      published_at: Date | null;
+    }>(
+      `SELECT state, attempts, next_attempt_at, completed_at, published_at
+         FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2`,
+      [live.workspace, erasureId],
+    );
+    expect(rows[0]).toMatchObject({ state: 'complete', attempts: 0, completed_at: expect.any(Date), published_at: null });
+    // Reconciliation later marks it published; the replay itself added no sweep.
+    expect(rows[0]!.next_attempt_at.getTime()).toBeGreaterThan(Date.now() - 1000);
+  }, 120_000);
+
   it('reopens a job the snapshot still carried as unfinished, so its remaining sweep runs', async () => {
     const live = await createDisposableDb('erasure_unfinished_live');
     const restored = await createDisposableDb('erasure_unfinished_restored');

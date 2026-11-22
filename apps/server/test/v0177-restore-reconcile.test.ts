@@ -52,6 +52,7 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     // The ClickHouse point still holds one of the two complete erasure's keys; the rest were lost.
     const present = new Set<string>([keys[0]!.key]);
     const published: { key: string; generation: number; erasureId: string }[] = [];
+    const visibilityCalls: string[][] = [];
     const events = {
       async erasedSubjectKeys() {
         return new Set(present);
@@ -63,19 +64,24 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
         }
       },
       async erasedSubjectsVisible(_workspaceId: string, wanted: readonly string[]) {
+        visibilityCalls.push([...wanted]);
         return wanted.every((key) => present.has(key));
       },
     };
 
+    // Three keys at two per FINAL read: more than one chunk, which is what broke at 10,000 keys
+    // ("Field value too long") when the whole set travelled in one parameter (#1194 review).
     const result = await reconcileRestoredErasureExclusions({
       databaseUrl: d.url.toString(),
       events,
       log: () => {},
+      batchSize: 2,
     });
     expect(result).toMatchObject({ workspaces: 1, keys: 3, inserted: 2, batches: 1, jobs: 2 });
     expect(published).toHaveLength(2);
     expect(published.every((row) => row.generation === 1)).toBe(true);
     expect(published.map((row) => row.key).sort()).toEqual([keys[1]!.key, keys[2]!.key].sort());
+    expect(visibilityCalls.map((chunk) => chunk.length)).toEqual([2, 1]);
 
     const jobs = await d.db.admin.query<{
       erasure_id: string;
@@ -113,8 +119,9 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     expect(generations.rows[0]?.purged_generation).toBe('0');
 
     // Idempotent: everything is visible and every job is already published.
-    const again = await reconcileRestoredErasureExclusions({ databaseUrl: d.url.toString(), events, log: () => {} });
+    const again = await reconcileRestoredErasureExclusions({ databaseUrl: d.url.toString(), events, log: () => {}, batchSize: 2 });
     expect(again).toMatchObject({ workspaces: 1, keys: 3, inserted: 0, batches: 0, jobs: 2 });
     expect(published).toHaveLength(2);
+    expect(visibilityCalls.map((chunk) => chunk.length)).toEqual([2, 1, 2, 1]);
   }, 120_000);
 });

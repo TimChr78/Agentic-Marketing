@@ -1,18 +1,28 @@
 import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 import { resolveUserPath, restoreBackup } from './backup-lib';
+import { clearRestoreFenceForUrl } from './restore-reconcile';
 
-const USAGE = 'usage: am restore <backup-dir> [--force] [--clickhouse] [--skip-key-check] [--yes]';
+const USAGE =
+  'usage: am restore <backup-dir> [--force] [--clickhouse] [--skip-key-check] [--yes]\n' + '       am restore --clear-fence [--yes]';
 
 export async function run(args: string[]): Promise<number> {
   const options = {
     force: { type: 'boolean' as const },
     clickhouse: { type: 'boolean' as const },
     'skip-key-check': { type: 'boolean' as const },
+    'clear-fence': { type: 'boolean' as const },
     yes: { type: 'boolean' as const },
     help: { type: 'boolean' as const, short: 'h' },
   };
-  let values: { force?: boolean; clickhouse?: boolean; 'skip-key-check'?: boolean; yes?: boolean; help?: boolean };
+  let values: {
+    force?: boolean;
+    clickhouse?: boolean;
+    'skip-key-check'?: boolean;
+    'clear-fence'?: boolean;
+    yes?: boolean;
+    help?: boolean;
+  };
   let positionals: string[];
   try {
     ({ values, positionals } = parseArgs({ args, options, allowPositionals: true }));
@@ -25,6 +35,43 @@ export async function run(args: string[]): Promise<number> {
     console.log(USAGE);
     return 0;
   }
+
+  if (values['clear-fence']) {
+    console.error('--clear-fence removes the fence an unfinished restore left behind. It does NOT reconcile');
+    console.error('the restored erasure ledger with ClickHouse: reads may return people whose erasure was');
+    console.error('reported complete before the backup, unless the reconciliation already succeeded.');
+    console.error('Use it only when you know the exclusions are correct, or accept that they are not.');
+    if (!values.yes) {
+      if (!process.stdin.isTTY) {
+        console.error('Refusing without --yes: there is no terminal to confirm on.');
+        return 1;
+      }
+      const readline = createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const answer = await readline.question('Type "clear fence" to continue: ');
+        if (answer.trim().toLowerCase() !== 'clear fence') {
+          console.error('aborted');
+          return 1;
+        }
+      } finally {
+        readline.close();
+      }
+    }
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) {
+      console.error('DATABASE_URL is not set');
+      return 1;
+    }
+    try {
+      const cleared = await clearRestoreFenceForUrl(databaseUrl);
+      console.log(cleared ? 'restore fence cleared' : 'no restore fence was raised');
+      return 0;
+    } catch (err) {
+      console.error(`could not clear the restore fence: ${(err as Error).message}`);
+      return 1;
+    }
+  }
+
   const backupDir = positionals[0];
   if (!backupDir) {
     console.error(USAGE);

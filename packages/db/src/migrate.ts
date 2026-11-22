@@ -147,6 +147,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0117_stranded_segment_memberships.sql': '0.17.2',
   '0118_ad_conversion_idempotency_keys.sql': '0.17.6',
   '0119_stranded_profile_scores.sql': '0.17.6',
+  '0120_restore_fence.sql': '0.17.7',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
