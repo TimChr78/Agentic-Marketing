@@ -27,7 +27,7 @@ import { bodyLimit, ingestApi } from '@agentic-marketing/ingest';
 import { egressFetch, egressHttp2, inboundApi, oauthRoutes, safeRequest } from '@agentic-marketing/integrations';
 import { journeyImpact } from '@agentic-marketing/journeys';
 import { decideApi, edgeMirror } from '@agentic-marketing/personalize';
-import { erasureLedgerMatchingIdentifiers, subjectKeyHasher } from '@agentic-marketing/profiles';
+import { subjectKeyHasher } from '@agentic-marketing/profiles';
 import { refreshPeople } from '@agentic-marketing/segments';
 import { endpointLocation, logger } from '@agentic-marketing/telemetry';
 import { oauthProviderAuthServerMetadata, oauthProviderOpenIdConfigMetadata } from '@better-auth/oauth-provider';
@@ -589,30 +589,7 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   if (publicEdge) app.route('/', decideApi({ db, hot }));
   if (publicEdge) app.route('/', pushRoutes({ db, kp: keyProvider }));
   if (publicEdge)
-    app.route(
-      '/',
-      ingestApi({
-        db,
-        bus,
-        hot,
-        clientIpHeaders: config.clientIpHeaders,
-        trustedProxyCidrs: config.trustedProxyCidrs,
-        // Session state for a late event: the durable ledger says whether the anonymous id was
-        // erased, so ingest can delete the session it wrote before resolution dropped the event
-        // (#1196).
-        erasedAnonymousIds: async (workspaceId, anonymousIds) =>
-          db.withWorkspace(workspaceId, async (tx) =>
-            (
-              await erasureLedgerMatchingIdentifiers(
-                tx,
-                workspaceId,
-                keyProvider,
-                anonymousIds.map((value) => ({ kind: 'anonymous_id' as const, value })),
-              )
-            ).map((identifier) => identifier.value),
-          ),
-      }),
-    );
+    app.route('/', ingestApi({ db, bus, hot, clientIpHeaders: config.clientIpHeaders, trustedProxyCidrs: config.trustedProxyCidrs }));
   if (config.roles.has('api'))
     app.route(
       '/',

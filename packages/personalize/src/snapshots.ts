@@ -53,28 +53,4 @@ async function refreshSlice(deps: { db: Db; hot: HotState }, workspaceId: string
       ),
     ),
   );
-  // The read above can predate an erasure whose final hot-state delete then runs before these
-  // writes land, which would leave a snapshot `/v1/decide` personalises from (#1196). Re-check
-  // after the write: an erased profile has no row (a merge keeps one), so delete the snapshots the
-  // slice just wrote. If the erasure commits after this check, its sweep runs after the write and
-  // deletes it. A process that dies between the write and this check leaves the keys to their TTL,
-  // as with any partially completed refresh.
-  const written = new Set(data.profiles.map((p) => p.id));
-  if (!written.size) return;
-  const alive = await deps.db.withWorkspace(
-    workspaceId,
-    (tx) =>
-      tx
-        .select({ id: schema.profiles.id })
-        .from(schema.profiles)
-        .where(inArray(schema.profiles.id, [...written])),
-    { snapshot: true },
-  );
-  const present = new Set(alive.map((p) => p.id));
-  const gone = data.ids.filter((i) => written.has(i.profileId) && !present.has(i.profileId));
-  if (gone.length)
-    await deps.hot.deleteSnapshot(workspaceId, {
-      anonymousIds: gone.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-      userIds: gone.filter((i) => i.type === 'user_id').map((i) => i.value),
-    });
 }

@@ -45,7 +45,7 @@ export interface ErasureCleanupDeps {
   db: Db;
   kp: KeyProvider;
   events: Pick<EventStore, 'deleteEventsOf' | 'publishErasedSubjects' | 'erasedSubjectsVisible' | 'subjectKeyCoverage'>;
-  hot?: Pick<HotState, 'deleteSnapshot'>;
+  hot?: Pick<HotState, 'deleteSnapshot' | 'tombstone'>;
 }
 
 export interface ErasureCleanupOptions {
@@ -231,11 +231,21 @@ export async function runErasureCleanupOnce(deps: ErasureCleanupDeps, opts: Eras
       }
       if (final || !claim.hotstateDone) {
         stage = 'hot_state_error';
-        if (deps.hot)
+        if (deps.hot) {
+          // Fence before deleting (#1196). Every hot-state write checks its subject's tombstone in
+          // the same atomic Valkey operation, so a write that landed before this point is removed by
+          // the delete below and a write after it is refused. The fence outlives the snapshot TTL, so
+          // a refresh that was in flight when the erasure ran cannot recreate what it deletes.
+          await deps.hot.tombstone(claim.workspaceId, {
+            anonymousIds: selectors.anonymousIds,
+            userIds: selectors.userIds,
+            profileIds: claim.profileIds,
+          });
           await deps.hot.deleteSnapshot(claim.workspaceId, {
             anonymousIds: selectors.anonymousIds,
             userIds: selectors.userIds,
           });
+        }
         if (!(await markErasureCleanupCheckpoint(deps.db, claim, 'hotstate'))) {
           logger.debug({ erasureId: claim.erasureId }, 'erasure hot-state checkpoint was stale');
           continue;

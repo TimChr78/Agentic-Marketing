@@ -375,9 +375,12 @@ export function edgeMirror(hot: HotState, db: Db): HotState {
   return {
     ...hot,
     async writeSnapshot(ws, ids, snap) {
-      await hot.writeSnapshot(ws, ids, snap);
-      if (!(await enabled(ws))) return;
+      // A tombstoned subject is refused by the local write (#1196); queuing it to the edge afterwards
+      // would recreate at the edge exactly what the erasure's delete removed.
+      if (!(await hot.writeSnapshot(ws, ids, snap))) return false;
+      if (!(await enabled(ws))) return true;
       await queue(ws, ids, snap).catch((err) => logger.warn({ err }, 'edge snapshot not queued'));
+      return true;
     },
     async deleteSnapshot(ws, ids) {
       await hot.deleteSnapshot(ws, ids);

@@ -171,13 +171,6 @@ export interface IngestDeps {
   bus: EventBus;
   /** Session state for the decision API, written before the request is answered. */
   hot?: HotState;
-  /**
-   * Which of these anonymous ids belong to an erased person, from the durable erasure ledger.
-   * Session state is written from accepted events before identity resolution, so a late event can
-   * rebuild a session after the erasure's final hot-state delete, and `/v1/decide` would read it.
-   * Ingest asks this after the write and deletes the sessions it just recreated (#1196).
-   */
-  erasedAnonymousIds?: (workspaceId: string, anonymousIds: string[]) => Promise<string[]>;
   /** Headers with the client IP, in trust order (e.g. cf-connecting-ip, x-forwarded-for). */
   clientIpHeaders?: string[];
   /** When set, forwarding headers are trusted only from these proxy/loopback ranges. */
@@ -332,28 +325,8 @@ export function ingestApi(deps: IngestDeps) {
       if (!accepted.length && rejected.length) return c.json({ success: false, error: 'invalid_events', rejected }, 400, cors);
       const { duplicates } = accepted.length ? await deps.bus.publish(accepted) : { duplicates: 0 };
       // Session state is best effort: the events are safely on the bus already.
-      if (accepted.length && deps.hot) {
+      if (accepted.length && deps.hot)
         await deps.hot.recordSessions(accepted).catch((err) => logger.warn({ err }, 'session state not updated'));
-        // An erased person's ids are dropped by the resolver, but this session write happened
-        // before it, and an erasure's final hot-state delete may already have run (#1196). Check
-        // the durable ledger after the write and delete what this batch just recreated. A failed
-        // check deletes the whole batch's sessions: hot state is rebuildable, and leaving a
-        // possible erased person's session is the outcome this check exists to prevent.
-        const anonymousIds = [...new Set(accepted.map((e) => e.anonymousId).filter((id) => !!id))];
-        if (anonymousIds.length && deps.erasedAnonymousIds) {
-          let erased: string[];
-          try {
-            erased = await deps.erasedAnonymousIds(source.workspaceId, anonymousIds);
-          } catch (err) {
-            logger.warn({ err }, 'erasure ledger check after session write failed; deleting the sessions it wrote');
-            erased = anonymousIds;
-          }
-          if (erased.length)
-            await deps.hot
-              .deleteSnapshot(source.workspaceId, { anonymousIds: erased, userIds: [] })
-              .catch((err) => logger.warn({ err }, 'erased session state not deleted'));
-        }
-      }
       if (rejected.length) logger.warn({ source: source.id, rejected: rejected.length }, 'ingest rejected events');
       return c.json(
         {
