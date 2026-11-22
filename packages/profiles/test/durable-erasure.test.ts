@@ -330,6 +330,30 @@ describe.skipIf(!hasTestDatabase())('durable two-stage erasure (#978 part 2b)', 
     });
   });
 
+  it('reports unknown exclusion for a pre-ledger erasure that kept a cleanup job', async () => {
+    const old = 'era_00000000000000000000000000000002';
+    const profile = 'prf_0000000000000000000000000000aa02';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'legacy erasure with job', '{"profiles":1}')`,
+      [d.workspace, old, profile],
+    );
+    // An earlier release completed the job but had no ledger to record, so `published_at` is null
+    // and there is nothing that proves which identifiers were hashed.
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', now())`,
+      [d.workspace, old, profile],
+    );
+    const { events } = fakeEvents();
+    const { hot } = fakeHot();
+    const executor = createExecutor(d.db, services(events, hot));
+    const status = await executor.execute(erasureStatus, { erasureId: old }, userPrincipal('user_test', d.workspace, 'owner'), {
+      surface: 'rest',
+    });
+    expect(status).toMatchObject({ status: 'complete', exclusion: 'unknown', reason: 'legacy' });
+  });
+
   it('resumes a job another worker committed but never ran', async () => {
     const profile = 'prf_0000000000000000000000000000e001';
     await seedPerson(profile);

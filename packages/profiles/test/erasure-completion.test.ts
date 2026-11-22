@@ -280,4 +280,34 @@ describe.skipIf(!hasTestDatabase())('erasure logical completion and physical pur
     expect(Number(row.rows[0]?.purged_generation)).toBe(0);
     expect(row.rows[0]?.purge_claim_token).toBe(second.claimToken);
   }, 60_000);
+
+  it('keeps its purge claim after a failure, so an in-flight mutation is not overlapped', async () => {
+    const workspace = newUuid();
+    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Purge failure', 'none')", [workspace]);
+    await d.db.admin.query('INSERT INTO erasure_generations (workspace_id, generation, visible_publications) VALUES ($1, 1, 1)', [
+      workspace,
+    ]);
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'profile', 'failure-key', 'dk_exclusion_test', 'era_failure', 'full')`,
+      [workspace],
+    );
+    const events = {
+      async purgeErasedSubjects(id: string) {
+        if (id === workspace) throw new Error('clickhouse unavailable');
+        return { deleted: 0, complete: true, tables: [] };
+      },
+    } as unknown as EventStore;
+
+    const result = await runErasurePurgeOnce({ db: d.db, events }, { batch: 100 });
+    expect(result.failed).toBeGreaterThanOrEqual(1);
+    const row = await d.db.admin.query<{ purge_claim_token: string | null; purge_lease_until: Date | null }>(
+      'SELECT purge_claim_token, purge_lease_until FROM erasure_generations WHERE workspace_id = $1',
+      [workspace],
+    );
+    // Releasing the claim here would let another replica submit a second mutation while the failed
+    // one may still be running; the lease expires on its own instead.
+    expect(row.rows[0]?.purge_claim_token).not.toBeNull();
+    expect(row.rows[0]?.purge_lease_until?.getTime() ?? 0).toBeGreaterThan(Date.now());
+  }, 60_000);
 });

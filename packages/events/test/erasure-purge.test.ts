@@ -254,6 +254,81 @@ describe('recurring physical purge (#1037 part 3)', () => {
     ).toEqual([{ n: 0 }]);
   }, 60_000);
 
+  it('keeps the side entry a late legacy row depends on, instead of reopening its exclusion', async () => {
+    const raceWs = newUuid();
+    const legacy = (name: string, eventId: string): Record<string, unknown> => ({
+      workspace_id: raceWs,
+      event_id: eventId,
+      source_id: 'src_side_race',
+      received_at: '2026-08-03 12:00:00',
+      timestamp: '2026-08-03 12:00:00',
+      type: 'track',
+      name,
+      anonymous_id: '',
+      user_id: '',
+      profile_id: 'prf_side_race',
+      properties: {},
+      traits: {},
+      context: {},
+      consent: {},
+    });
+    // `side-a` backs the row this sweep deletes. `side-b` outlives its base row (an earlier pass
+    // removed it without the side entry), so it is the only thing that can exclude a late
+    // redelivery of that legacy row.
+    await store.client.insert({ table: 'events', values: [legacy('Side race A', 'side-race-a')], format: 'JSONEachRow' });
+    let step = await store.backfillSubjectKeys({ workspaceIds: [raceWs], batchSize: 10 });
+    for (let i = 0; i < 4 && !step.done; i++) step = await store.backfillSubjectKeys({ workspaceIds: [raceWs], batchSize: 10 });
+    expect(step.done).toBe(true);
+    const profileKey = hmac('profile', 'prf_side_race');
+    await store.client.insert({
+      table: 'subject_key_backfill',
+      format: 'JSONEachRow',
+      values: [
+        {
+          workspace_id: raceWs,
+          table_name: 'events',
+          key1: 'Side race B',
+          key2: '',
+          key3: '2026-08-03 12:00:00.000',
+          key4: 'side-race-b',
+          subject_profile: profileKey,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+      ],
+    });
+
+    let checks = 0;
+    const result = await store.purgeErasedSubjects(raceWs, [profileKey], {
+      batchSize: 100,
+      maxBatches: 2,
+      checkpoint: async () => {
+        checks++;
+        // The second checkpoint is the side-table batch, after the base table reached zero. A late
+        // legacy row arrives now: it has no subject keys of its own and depends on `side-b`.
+        if (checks === 2)
+          await store.client.insert({ table: 'events', values: [legacy('Side race B', 'side-race-b')], format: 'JSONEachRow' });
+        return true;
+      },
+    });
+
+    expect(result).toMatchObject({ complete: false });
+    expect(result.tables.find((table) => table.table === 'events')).toEqual({ table: 'events', deleted: 2, remaining: true });
+    // The late row is still there, and the side entry that excludes it was kept.
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, raceWs)).toEqual([
+      { n: 1 },
+    ]);
+    expect(
+      await rows<{ key4: string }>(
+        `SELECT key4 FROM subject_key_backfill FINAL
+          WHERE workspace_id = {ws:UUID} AND table_name = 'events' ORDER BY key4`,
+        {},
+        raceWs,
+      ),
+    ).toEqual([{ key4: 'side-race-b' }]);
+  }, 60_000);
+
   it('stops at the batch bound and reports that a later round must continue', async () => {
     const boundedWs = newUuid();
     await store.insert(
@@ -279,15 +354,16 @@ describe('recurring physical purge (#1037 part 3)', () => {
       checkpoint: async () => {
         if (!wroteLate) {
           wroteLate = true;
-          // The checkpoint runs after the pre-delete count and before the delete. A write here used
-          // to be invisible to `deleted`/`done`, which were derived from that earlier count.
+          // The checkpoint runs after the fixed batch was selected and before its delete. A write
+          // here is not in that batch, so the delete still removes one row while the table's count
+          // stays the same: `deleted` must report the batch, not the net change.
           await store.insert([event(2, { workspaceId: lateWs, profileId: 'prf_observed', anonymousId: 'observed-2' })]);
         }
         return true;
       },
     });
     expect(result.complete).toBe(false);
-    expect(result.tables.find((table) => table.table === 'events')).toEqual({ table: 'events', deleted: 0, remaining: true });
+    expect(result.tables.find((table) => table.table === 'events')).toEqual({ table: 'events', deleted: 1, remaining: true });
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, lateWs)).toEqual([
       { n: 1 },
     ]);

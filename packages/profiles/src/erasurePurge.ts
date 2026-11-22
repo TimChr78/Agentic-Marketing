@@ -5,7 +5,6 @@ import {
   ERASURE_PURGE_LEASE_MS,
   erasureWorkspaceKeys,
   recordErasurePurgeSweep,
-  releaseErasurePurge,
   renewErasurePurgeLease,
 } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -88,8 +87,12 @@ export async function runErasurePurgeOnce(deps: ErasurePurgeDeps, opts: ErasureP
       if (sweep.complete) result.completed++;
       else result.progressed++;
     } catch (err) {
+      // Keep the claim: a mutation already submitted to ClickHouse can outlive the lease, and
+      // releasing the claim would let another replica start a second one immediately. Letting the
+      // lease expire delays a retry by at most its length while the in-flight work finishes. The
+      // claim token still fences a worker that lost the lease: its next checkpoint fails.
+      //
       // A provider message can echo a key; only the class name and a fixed message are logged.
-      await releaseErasurePurge(deps.db, claim).catch(() => {});
       result.failed++;
       logger.warn(
         { workspaceId: claim.workspaceId, errorClass: err instanceof Error ? err.name : 'other' },

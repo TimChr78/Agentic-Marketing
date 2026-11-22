@@ -202,7 +202,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
       await api.call('profiles.erase', { profileId: p.id, reason: reason.trim() || 'Erasure request' });
       // Any list that still holds this person in a cached page must reread (#595).
       notifyPeopleChanged();
-      toast.success('Erased this person. Their e-mail and phone stay suppressed.');
+      toast.success('Erasure requested. Their e-mail and phone stay suppressed while cleanup finishes in the background.');
       navigate('/audience/people', { replace: true });
     } catch (e) {
       setErasing(false);
