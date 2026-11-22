@@ -201,7 +201,8 @@ describe('e-mail end to end', () => {
       Type: 'HardBounce',
       Description: 'Unknown user',
       MessageID: 'pm-x',
-      BouncedAt: '2026-10-22T09:00:00Z',
+      // Recent, not a fixed date: messages.stats counts the last 30 days, so a fixed date ages out.
+      BouncedAt: new Date(Date.now() - 3_600_000).toISOString(),
       Metadata: { am_message_id: messages[0].id },
     };
     expect((await fetch(`${t.base}${webhookPath}x`, { method: 'POST', body: JSON.stringify(bounce) })).status).toBe(404);
