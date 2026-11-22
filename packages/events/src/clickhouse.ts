@@ -633,6 +633,13 @@ function messageStatsConditions(
  * counted for an erased profile. `side_found` mirrors the protected view: a row that is neither
  * complete nor backfilled is unverified, so it is not returned.
  */
+/**
+ * The scoped source reads `message_events` twice in one statement (the key bound and the rows).
+ * Pin one storage snapshot for the whole query so both see the same parts even where a settings
+ * profile turned the default off; otherwise the #1195 race returns (#1200 review).
+ */
+export const SCOPED_SNAPSHOT_SETTINGS = { enable_shared_storage_snapshot_in_query: 1 } as const;
+
 function messageScopedSource(where: string, scopeWhere: string): string {
   const scopeKeys = `SELECT DISTINCT arrayJoin([sm.subject_profile, ss.side_profile]) AS k
       FROM message_events AS sm FINAL ${messageSideJoin('sm', 'ss')}
@@ -640,7 +647,7 @@ function messageScopedSource(where: string, scopeWhere: string): string {
   return `(SELECT m.* FROM message_events AS m FINAL ${messageSideJoin('m')}
       WHERE ${where}
         AND (m.subject_coverage = 'full' OR s.side_found = 1
-             OR NOT EXISTS (SELECT 1 FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID} LIMIT 1))
+             OR NOT EXISTS (SELECT 1 FROM erased_subjects WHERE workspace_id = {ws:UUID} LIMIT 1))
         AND ${messageEffectiveProfile('m')} NOT IN (
           SELECT key FROM erased_subjects FINAL
            WHERE workspace_id = {ws:UUID} AND key IN (${scopeKeys})
@@ -671,6 +678,7 @@ export function messageEventCountQuery(workspaceId: string, q: MessageEventCount
       )} AS m GROUP BY m.profile_id`,
       query_params: params,
       format: 'JSONEachRow' as const,
+      clickhouse_settings: SCOPED_SNAPSHOT_SETTINGS,
     };
   }
   return {
@@ -1447,6 +1455,7 @@ export function clickHouseStore(opts: {
                 GROUP BY type`,
         query_params: params,
         format: 'JSONEachRow',
+        ...(scoped ? { clickhouse_settings: SCOPED_SNAPSHOT_SETTINGS } : {}),
       });
       return Object.fromEntries((await rs.json<{ type: string; c: number }>()).map((r) => [r.type, Number(r.c)]));
     },

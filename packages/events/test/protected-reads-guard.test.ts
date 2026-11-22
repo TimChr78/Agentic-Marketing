@@ -181,7 +181,9 @@ describe('protected reads (#1037 part 2)', () => {
     );
     for (const table of PERSON_TABLES) {
       expect(created).toContain(`CREATE VIEW IF NOT EXISTS ${table}_protected AS`);
-      expect(latest).toContain(`CREATE VIEW ${table}_protected AS`);
+      // An atomic swap: a read during the upgrade never finds the view missing (#1200 review).
+      expect(latest).toContain(`CREATE OR REPLACE VIEW ${table}_protected AS`);
+      expect(latest).not.toContain(`DROP VIEW`);
       // The views are parameterized on the workspace, and the shared layer always supplies it.
       expect(personReadSource(table, true)).toBe(`${PROTECTED_VIEWS[table]}(ws={ws:UUID})`);
       expect(personReadSource(table, false)).toBe(table);
@@ -198,7 +200,12 @@ describe('protected reads (#1037 part 2)', () => {
     // published exclusions (#1195): uncovered rows are hidden only once there is something to
     // exclude, so a workspace whose publication is still pending keeps its legacy rows readable
     // for the same window in which the erased subject itself is still readable.
-    expect(latest.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length * 2);
+    // The existence check reads the ledger without FINAL: deduplicating cannot change whether a
+    // workspace has any row, and FINAL would read the whole ledger again.
+    expect(latest.match(/FROM erased_subjects FINAL/g)).toHaveLength(PERSON_TABLES.length);
+    expect(latest.match(/NOT EXISTS \(SELECT 1 FROM erased_subjects WHERE workspace_id = \{ws:UUID\} LIMIT 1\)/g)).toHaveLength(
+      PERSON_TABLES.length,
+    );
     expect(latest.match(/NOT arrayExists\(/g)).toHaveLength(PERSON_TABLES.length);
     expect(latest.match(/workspace_id = \{ws:UUID\}/g)).toHaveLength(PERSON_TABLES.length * 3);
     for (const migration of [created, latest]) {

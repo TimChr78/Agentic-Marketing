@@ -18,11 +18,9 @@
 -- legacy rows adds no privacy in that window.
 --
 -- Nothing else changes: the views are still parameterized on `{ws:UUID}`, dedupe with FINAL, and
--- exclude with one set per query over the row's at most sixteen subject keys. Recreating them needs
--- a drop first because 0009 created them with IF NOT EXISTS.
-DROP VIEW IF EXISTS events_protected;
-
-CREATE VIEW events_protected AS
+-- exclude with one set per query over the row's at most sixteen subject keys. CREATE OR REPLACE swaps
+-- each view atomically, so a read during the upgrade never finds a view missing (#1200 review).
+CREATE OR REPLACE VIEW events_protected AS
 SELECT e.*
 FROM events AS e FINAL
 LEFT JOIN (
@@ -80,11 +78,9 @@ WHERE NOT arrayExists(
   ]
 )
 AND (e.subject_coverage = 'full' OR s.side_found = 1
-     OR NOT EXISTS (SELECT 1 FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID} LIMIT 1));
+     OR NOT EXISTS (SELECT 1 FROM erased_subjects WHERE workspace_id = {ws:UUID} LIMIT 1));
 
-DROP VIEW IF EXISTS message_events_protected;
-
-CREATE VIEW message_events_protected AS
+CREATE OR REPLACE VIEW message_events_protected AS
 SELECT m.*
 FROM message_events AS m FINAL
 LEFT JOIN (
@@ -140,11 +136,9 @@ WHERE NOT arrayExists(
   ]
 )
 AND (m.subject_coverage = 'full' OR s.side_found = 1
-     OR NOT EXISTS (SELECT 1 FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID} LIMIT 1));
+     OR NOT EXISTS (SELECT 1 FROM erased_subjects WHERE workspace_id = {ws:UUID} LIMIT 1));
 
-DROP VIEW IF EXISTS journey_events_protected;
-
-CREATE VIEW journey_events_protected AS
+CREATE OR REPLACE VIEW journey_events_protected AS
 SELECT j.*
 FROM journey_events AS j FINAL
 LEFT JOIN (
@@ -202,4 +196,4 @@ WHERE NOT arrayExists(
   ]
 )
 AND (j.subject_coverage = 'full' OR s.side_found = 1
-     OR NOT EXISTS (SELECT 1 FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID} LIMIT 1));
+     OR NOT EXISTS (SELECT 1 FROM erased_subjects WHERE workspace_id = {ws:UUID} LIMIT 1));

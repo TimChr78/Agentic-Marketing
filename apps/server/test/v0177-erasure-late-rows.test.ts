@@ -16,7 +16,8 @@ const PORT = testPort(3592);
 const DB = 'test_v0177_erasure_late_rows';
 const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 const stamp = Date.now();
-const AT = '2026-11-12T10:00:00.000Z';
+// Relative, so the 40-day count window never ages the fixture out (#1200 review).
+const AT = new Date(Date.now() - 86_400_000).toISOString();
 
 type Server = Awaited<ReturnType<typeof startTestServer>>;
 let t: Server;
