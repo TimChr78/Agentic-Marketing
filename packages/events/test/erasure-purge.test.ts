@@ -362,6 +362,29 @@ describe('recurring physical purge (#1037 part 3)', () => {
     ]);
   }, 120_000);
 
+  it('measures non-ASCII and escaped identities in URL-encoded bytes, not characters', async () => {
+    const wideWs = newUuid();
+    const total = 400;
+    // CJK text is three UTF-8 bytes and nine bytes percent-encoded per character, and quotes and
+    // backslashes are escaped before encoding; counting characters let a batch reach 261 KB.
+    await store.insert(
+      Array.from({ length: total }, (_, i) =>
+        event(i, {
+          workspaceId: wideWs,
+          profileId: 'prf_wide_purge',
+          name: `購入完了イベント「${i}」 \\ 'quoted' ${'漢字'.repeat(20)}`,
+          anonymousId: `wide-${i}-${'é'.repeat(30)}`,
+        }),
+      ),
+    );
+    const key = hmac('profile', 'prf_wide_purge');
+    const result = await store.purgeErasedSubjects(wideWs, [key], { maxBatches: 10 });
+    expect(result).toMatchObject({ complete: true, deleted: total });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, wideWs)).toEqual([
+      { n: 0 },
+    ]);
+  }, 120_000);
+
   it('removes an orphaned side entry for each table, whose identity is narrower than four keys', async () => {
     const sideWs = newUuid();
     const key = hmac('profile', 'prf_orphan_side');

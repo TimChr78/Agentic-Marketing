@@ -836,13 +836,12 @@ const PURGE_PARAM_BUDGET = 32 * 1024;
 
 /** Bytes one value costs inside a query parameter: quoted, with the client's escaping. */
 function quotedBytes(value: string): number {
-  let bytes = 2;
-  for (let index = 0; index < value.length; index++) {
-    const code = value.charCodeAt(index);
-    // The client escapes a quote, a backslash, a tab, a newline and a carriage return to two bytes.
-    bytes += code === 9 || code === 10 || code === 13 || code === 39 || code === 92 ? 2 : 1;
-  }
-  return bytes;
+  // The parameter travels URL-encoded: measure what the server's field limit sees, not UTF-16
+  // code units. A CJK character is three UTF-8 bytes and nine bytes percent-encoded (#1199 review).
+  let escaped = "'";
+  for (const ch of value)
+    escaped += ch === '\t' ? '\\t' : ch === '\n' ? '\\n' : ch === '\r' ? '\\r' : ch === "'" || ch === '\\' ? `\\${ch}` : ch;
+  return encodeURIComponent(`${escaped}'`).length;
 }
 
 /**
@@ -853,16 +852,19 @@ function quotedBytes(value: string): number {
 function identityChunks(ids: string[][]): string[][][] {
   const chunks: string[][][] = [];
   let chunk: string[][] = [];
-  // `[` and `]` around the array, and one comma between tuples.
-  let bytes = 2;
+  // `[` and `]` around the array, and one comma between tuples; each is three bytes URL-encoded.
+  const SEP = encodeURIComponent(',').length;
+  const OPEN_CLOSE = encodeURIComponent('[]').length;
+  let bytes = OPEN_CLOSE;
   for (const id of ids) {
-    const rendered = 2 + id.reduce((total, value) => total + quotedBytes(value), Math.max(0, id.length - 1));
-    if (chunk.length && bytes + 1 + rendered > PURGE_PARAM_BUDGET) {
+    const rendered =
+      encodeURIComponent('()').length + id.reduce((total, value) => total + quotedBytes(value), Math.max(0, id.length - 1) * SEP);
+    if (chunk.length && bytes + SEP + rendered > PURGE_PARAM_BUDGET) {
       chunks.push(chunk);
       chunk = [];
-      bytes = 2;
+      bytes = OPEN_CLOSE;
     }
-    bytes += (chunk.length ? 1 : 0) + rendered;
+    bytes += (chunk.length ? SEP : 0) + rendered;
     chunk.push(id);
   }
   if (chunk.length) chunks.push(chunk);
