@@ -626,6 +626,13 @@ function messageStatsConditions(
 }
 
 /**
+ * The scoped source reads `message_events` twice in one statement (the key bound and the rows).
+ * Pin one storage snapshot for the whole query so both see the same parts even where a settings
+ * profile turned the default off; otherwise the #1195 race returns (#1200 review).
+ */
+export const SCOPED_SNAPSHOT_SETTINGS = { enable_shared_storage_snapshot_in_query: 1 } as const;
+
+/**
  * The id-scoped message-event source (#1037 part 2): the protected views' predicate with the
  * workspace's exclusion set bounded to the subject keys this scope's own rows carry, so a broadcast
  * guardrail does not build the whole ledger. The bound is derived inside the same statement as the
@@ -633,13 +640,6 @@ function messageStatsConditions(
  * counted for an erased profile. `side_found` mirrors the protected view: a row that is neither
  * complete nor backfilled is unverified, so it is not returned.
  */
-/**
- * The scoped source reads `message_events` twice in one statement (the key bound and the rows).
- * Pin one storage snapshot for the whole query so both see the same parts even where a settings
- * profile turned the default off; otherwise the #1195 race returns (#1200 review).
- */
-export const SCOPED_SNAPSHOT_SETTINGS = { enable_shared_storage_snapshot_in_query: 1 } as const;
-
 function messageScopedSource(where: string, scopeWhere: string): string {
   const scopeKeys = `SELECT DISTINCT arrayJoin([sm.subject_profile, ss.side_profile]) AS k
       FROM message_events AS sm FINAL ${messageSideJoin('sm', 'ss')}
