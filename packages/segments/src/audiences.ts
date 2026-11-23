@@ -311,7 +311,7 @@ async function resolveSelectors(ctx: CommandContext, input: z.output<typeof Sele
   };
 }
 
-/** Recomputes the visible count in segment_runs, which segments.members and the UI read. */
+/** Records the run's own recompute count; `segments.members` derives its total from memberships (#1197). */
 async function recordRun(tx: Tx, workspaceId: string, seg: PublishedSegment, entered: number, exited: number) {
   const [row] = await tx
     .select({ n: sql<number>`count(*)::int` })

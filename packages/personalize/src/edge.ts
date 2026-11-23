@@ -32,6 +32,60 @@ export const kvKeys = {
 /** The prefix every snapshot of a workspace shares, so a cleanup can find the ones it can no longer derive. */
 export const snapshotPrefix = (ws: string) => `am:snap:${ws}:`;
 
+/** The hot-state subject a queued snapshot key names, or null for a key this module did not queue. */
+export function snapshotSubject(ws: string, key: string): { kind: 'a' | 'u'; id: string } | null {
+  const prefix = snapshotPrefix(ws);
+  if (!key.startsWith(prefix)) return null;
+  const rest = key.slice(prefix.length);
+  if (rest.length < 3 || (rest[0] !== 'a' && rest[0] !== 'u') || rest[1] !== ':') return null;
+  return { kind: rest[0], id: rest.slice(2) };
+}
+
+/**
+ * The last queued value per key. An erasure delete (value null) is terminal for that key (#1196
+ * review): a refresh whose local write was accepted before the fence can queue its put after the
+ * erasure's delete, and the stale put must not win.
+ */
+export function latestOutboxValues(rows: { key: string; value: unknown }[]): Map<string, unknown> {
+  const latest = new Map<string, unknown>();
+  const deleted = new Set<string>();
+  for (const row of rows) {
+    if (row.value === null) {
+      deleted.add(row.key);
+      latest.set(row.key, null);
+    } else if (!deleted.has(row.key)) {
+      latest.set(row.key, row.value);
+    }
+  }
+  return latest;
+}
+
+/**
+ * The queued snapshot keys whose subject is tombstoned now. A delete that was already acknowledged
+ * does not cover a put that was queued afterwards, so the sync checks the fence again before it
+ * writes (#1196 review).
+ */
+export async function tombstonedSnapshotKeys(hot: HotState, ws: string, keys: string[]): Promise<Set<string>> {
+  const subjects = new Map<string, { kind: 'a' | 'u'; id: string }>();
+  for (const key of keys) {
+    const subject = snapshotSubject(ws, key);
+    if (subject) subjects.set(key, subject);
+  }
+  if (!subjects.size) return new Set();
+  const listed = [...subjects.values()];
+  const fenced = await hot.tombstonedIds(ws, {
+    anonymousIds: listed.filter((s) => s.kind === 'a').map((s) => s.id),
+    userIds: listed.filter((s) => s.kind === 'u').map((s) => s.id),
+  });
+  const anonymous = new Set(fenced.anonymousIds);
+  const users = new Set(fenced.userIds);
+  const out = new Set<string>();
+  for (const [key, subject] of subjects) {
+    if ((subject.kind === 'a' ? anonymous : users).has(subject.id)) out.add(key);
+  }
+  return out;
+}
+
 /** What remains to remove from KV after serving was turned off: people (snapshots) or everything. */
 export type EdgeCleanupMode = 'snapshots' | 'all';
 
@@ -375,9 +429,13 @@ export function edgeMirror(hot: HotState, db: Db): HotState {
   return {
     ...hot,
     async writeSnapshot(ws, ids, snap) {
-      await hot.writeSnapshot(ws, ids, snap);
-      if (!(await enabled(ws))) return;
-      await queue(ws, ids, snap).catch((err) => logger.warn({ err }, 'edge snapshot not queued'));
+      // A tombstoned subject is refused by the local write (#1196); queueing it to the edge
+      // afterwards would recreate at the edge exactly what the erasure's delete removed. A multi-id
+      // write can be partly accepted, so queue only the ids it wrote (review).
+      const written = await hot.writeSnapshot(ws, ids, snap);
+      if (!written.anonymousIds.length && !written.userIds.length) return written;
+      if (await enabled(ws)) await queue(ws, written, snap).catch((err) => logger.warn({ err }, 'edge snapshot not queued'));
+      return written;
     },
     async deleteSnapshot(ws, ids) {
       await hot.deleteSnapshot(ws, ids);
@@ -649,29 +707,63 @@ async function syncEdgeLocked(
       if (gone.length) await kv.delete(gone);
       if (!(await update({ bundleHash: hash, pushedKeys: keys }))) return;
     }
-    // 3. Queued snapshot writes and deletions; the latest per key wins. When snapshots are off,
-    // every queued entry is deleted rather than uploaded, and erasure tombstones are never dropped.
+    // 3. Queued snapshot writes and deletions; the latest per key wins, except that an erasure
+    // delete is terminal for its key. A put whose subject is tombstoned now is dropped too, even
+    // when the delete was acknowledged in an earlier batch. When snapshots are off, every queued
+    // entry is deleted rather than uploaded, and erasure tombstones are never dropped.
     while (!opts.bundleOnly) {
       const { rows } = await deps.db.admin.query<{ id: string; key: string; value: unknown }>(
         'SELECT id, key, value FROM edge_outbox WHERE workspace_id = $1 ORDER BY id LIMIT 5000',
         [ws],
       );
       if (!rows.length) break;
-      const latest = new Map(rows.map((r) => [r.key, r.value]));
-      const puts = servesSnapshots
-        ? [...latest]
-            .filter(([, v]) => v !== null)
-            .map(([key, v]) => ({ key, value: JSON.stringify(v), expiration_ttl: KV_SNAPSHOT_TTL_S }))
-        : [];
-      const deletes = servesSnapshots ? [...latest].filter(([, v]) => v === null).map(([key]) => key) : [...latest.keys()];
+      const latest = latestOutboxValues(rows);
+      let puts: { key: string; value: string; expiration_ttl: number }[] = [];
+      let deletes: string[] = [];
+      if (servesSnapshots) {
+        const candidates = [...latest].filter(([, value]) => value !== null);
+        const explicit = [...latest].filter(([, value]) => value === null).map(([key]) => key);
+        let fenced: Set<string> | null;
+        try {
+          fenced = await tombstonedSnapshotKeys(
+            deps.hot,
+            ws,
+            candidates.map(([key]) => key),
+          );
+        } catch (err) {
+          // Without Valkey a put cannot be verified, but an erasure delete needs no check: send the
+          // deletes now and leave the puts queued for the next sync (#1203 review).
+          logger.warn({ err, workspace: ws }, 'edge sync could not read the erasure fence; deferring snapshot uploads');
+          fenced = null;
+        }
+        if (fenced) {
+          puts = candidates
+            .filter(([key]) => !fenced.has(key))
+            .map(([key, value]) => ({ key, value: JSON.stringify(value), expiration_ttl: KV_SNAPSHOT_TTL_S }));
+          deletes = [...explicit, ...candidates.filter(([key]) => fenced.has(key)).map(([key]) => key)];
+        } else {
+          // The puts at the head of the queue stay deferred, so a delete queued behind a full batch
+          // of them would never be read. Send every queued delete instead (#1203 review).
+          if (!(await drainOutboxDeletes(deps, ws, kv, t.generation))) return;
+          break;
+        }
+      } else {
+        deletes = [...latest.keys()];
+      }
       if (puts.length) await kv.put(puts);
       if (deletes.length) await kv.delete(deletes);
-      const acknowledged = await deps.db.admin.query(
-        `DELETE FROM edge_outbox WHERE workspace_id = $1 AND id <= $2 AND EXISTS (
-           SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
-        [ws, rows[rows.length - 1].id, t.generation],
-      );
-      if (!acknowledged.rowCount) return;
+      // Acknowledge exactly the rows this pass read and settled. Sequence ids can commit out of
+      // order, so "everything up to the highest id" could drop an erasure delete committed after the
+      // read with a lower id (#1203 review).
+      const ackIds = rows.map((row) => row.id);
+      const acknowledged = ackIds.length
+        ? await deps.db.admin.query(
+            `DELETE FROM edge_outbox WHERE workspace_id = $1 AND id = ANY($2::bigint[]) AND EXISTS (
+               SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
+            [ws, ackIds, t.generation],
+          )
+        : { rowCount: 0 };
+      if (ackIds.length && !acknowledged.rowCount) return;
       if (rows.length < 5000) break;
     }
     // 4. Backfill: everyone's snapshot, a slice per sync (written through the mirror above).
@@ -830,5 +922,50 @@ export async function runEdgeSync(deps: EdgeDeps & { tickMs?: number }, signal: 
       logger.error({ err }, 'edge sync round failed');
     }
     await sleep(deps.tickMs ?? 1000, signal);
+  }
+}
+
+/**
+ * Sends every queued snapshot delete while the erasure fence cannot be read. A delete is terminal
+ * for its key, so the rows read for that key (earlier and later puts included) are settled with it;
+ * other puts stay queued until a sync can check them. Acknowledges exactly the rows it read, under
+ * the same generation check as the main loop. Returns false when the target moved.
+ */
+async function drainOutboxDeletes(
+  deps: EdgeDeps,
+  ws: string,
+  kv: { delete(keys: string[]): Promise<void> },
+  generation: number,
+): Promise<boolean> {
+  // Stop at the deletes queued when the drain started, so a steady stream of new erasures cannot
+  // hold this workspace's sync (and the scheduler behind it) forever; newer ones wait for the next
+  // tick (#1203 review).
+  const {
+    rows: [{ upto }],
+  } = await deps.db.admin.query<{ upto: string | null }>(
+    'SELECT max(id) AS upto FROM edge_outbox WHERE workspace_id = $1 AND value IS NULL',
+    [ws],
+  );
+  if (upto === null) return true;
+  for (;;) {
+    const { rows } = await deps.db.admin.query<{ id: string; key: string }>(
+      `WITH doomed AS (
+         SELECT DISTINCT key FROM (
+           SELECT key FROM edge_outbox WHERE workspace_id = $1 AND value IS NULL AND id <= $2 ORDER BY id LIMIT 5000) d)
+       SELECT o.id, o.key FROM edge_outbox o JOIN doomed USING (key) WHERE o.workspace_id = $1 ORDER BY o.id`,
+      [ws, upto],
+    );
+    if (!rows.length) return true;
+    const keys = [...new Set(rows.map((row) => row.key))];
+    await kv.delete(keys);
+    const acknowledged = await deps.db.admin.query(
+      `DELETE FROM edge_outbox WHERE workspace_id = $1 AND id = ANY($2::bigint[]) AND EXISTS (
+         SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
+      [ws, rows.map((row) => row.id), generation],
+    );
+    // Loop until nothing up to the mark is left: the limit counts delete rows, and a key queued
+    // twice makes a full batch yield fewer distinct keys (#1203 review). Every pass acknowledges
+    // what it read.
+    if (!acknowledged.rowCount) return false;
   }
 }

@@ -264,19 +264,18 @@ export const segmentMembers = defineCommand({
         )
       : [];
     const emailOf = new Map(emails.filter((e) => e.valueEnc).map((e, i) => [e.profileId, opened[i] ?? null]));
-    // Read the raw mode: a definition that no longer parses must still list its stored members.
-    const content = await segmentContentRaw(ctx, input.artifactId);
-    let total: number | null;
-    if ((content.mode ?? 'dynamic') === 'dynamic') {
-      const [run] = await ctx.tx.select().from(schema.segmentRuns).where(eq(schema.segmentRuns.segmentId, input.artifactId));
-      total = run?.members ?? null;
-    } else {
-      const [row] = await ctx.tx
-        .select({ n: sql<number>`count(*)::int` })
-        .from(schema.segmentMemberships)
-        .where(eq(schema.segmentMemberships.segmentId, input.artifactId));
-      total = row?.n ?? 0;
-    }
+    // Keep the existence check beside the derived count: a count alone would report 0 for a
+    // segment that never existed (#1197 review).
+    await segmentContentRaw(ctx, input.artifactId);
+    // The total is the current membership, for every mode: a stored `segment_runs.members` goes
+    // stale between a streaming update and the next recompute, which is exactly how an erased
+    // person stayed counted until then (#1197). The count reads the (workspace_id, segment_id)
+    // primary key, so it is an index scan even for a large segment.
+    const [row] = await ctx.tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(schema.segmentMemberships)
+      .where(eq(schema.segmentMemberships.segmentId, input.artifactId));
+    const total = row?.n ?? 0;
     return {
       members: rows.map((r) => ({
         profileId: r.profileId,

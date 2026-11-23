@@ -97,12 +97,16 @@ const fakeEvents = () => {
 
 const fakeHot = () => {
   const calls: { workspaceId: string; anonymousIds: string[]; userIds: string[] }[] = [];
+  const fences: { workspaceId: string; anonymousIds: string[]; userIds: string[]; profileIds: string[] }[] = [];
   const hot = {
+    async tombstone(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[]; profileIds?: string[] }) {
+      fences.push({ workspaceId, anonymousIds: ids.anonymousIds, userIds: ids.userIds, profileIds: ids.profileIds ?? [] });
+    },
     async deleteSnapshot(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[] }) {
       calls.push({ workspaceId, ...ids });
     },
   } as unknown as HotState;
-  return { hot, calls };
+  return { hot, calls, fences };
 };
 
 const services = (events: EventStore, hot: HotState) =>

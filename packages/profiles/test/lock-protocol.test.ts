@@ -442,7 +442,7 @@ describe.skipIf(!hasTestDatabase())('identity lock protocol (#978 part 3)', () =
         await deleteMayResolve;
       },
     } as unknown as EventStore;
-    const hot = { async deleteSnapshot() {} } as unknown as HotState;
+    const hot = { async tombstone() {}, async deleteSnapshot() {} } as unknown as HotState;
     // The real scheduler path: claim the committed job and block inside publication first.
     // The interval is zero here so the test can drive the distinct final pass immediately.
     const worker = runErasureCleanupOnce({ db: d.db, kp, events: eventStore, hot }, { finalSweepMs: 0 });
