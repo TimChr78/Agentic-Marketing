@@ -720,8 +720,6 @@ async function syncEdgeLocked(
       const latest = latestOutboxValues(rows);
       let puts: { key: string; value: string; expiration_ttl: number }[] = [];
       let deletes: string[] = [];
-      // Keys whose rows this pass settles. Puts that cannot be checked against Valkey stay queued.
-      let settled: Set<string> | null = null;
       if (servesSnapshots) {
         const candidates = [...latest].filter(([, value]) => value !== null);
         const explicit = [...latest].filter(([, value]) => value === null).map(([key]) => key);
@@ -744,8 +742,10 @@ async function syncEdgeLocked(
             .map(([key, value]) => ({ key, value: JSON.stringify(value), expiration_ttl: KV_SNAPSHOT_TTL_S }));
           deletes = [...explicit, ...candidates.filter(([key]) => fenced.has(key)).map(([key]) => key)];
         } else {
-          deletes = explicit;
-          settled = new Set(explicit);
+          // The puts at the head of the queue stay deferred, so a delete queued behind a full batch
+          // of them would never be read. Send every queued delete instead (#1203 review).
+          if (!(await drainOutboxDeletes(deps, ws, kv, t.generation))) return;
+          break;
         }
       } else {
         deletes = [...latest.keys()];
@@ -755,7 +755,7 @@ async function syncEdgeLocked(
       // Acknowledge exactly the rows this pass read and settled. Sequence ids can commit out of
       // order, so "everything up to the highest id" could drop an erasure delete committed after the
       // read with a lower id (#1203 review).
-      const ackIds = rows.filter((row) => settled === null || settled.has(row.key)).map((row) => row.id);
+      const ackIds = rows.map((row) => row.id);
       const acknowledged = ackIds.length
         ? await deps.db.admin.query(
             `DELETE FROM edge_outbox WHERE workspace_id = $1 AND id = ANY($2::bigint[]) AND EXISTS (
@@ -764,8 +764,6 @@ async function syncEdgeLocked(
           )
         : { rowCount: 0 };
       if (ackIds.length && !acknowledged.rowCount) return;
-      // Deferred puts wait for the next sync; reading the same rows again here would loop.
-      if (settled !== null) break;
       if (rows.length < 5000) break;
     }
     // 4. Backfill: everyone's snapshot, a slice per sync (written through the mirror above).
@@ -924,5 +922,38 @@ export async function runEdgeSync(deps: EdgeDeps & { tickMs?: number }, signal: 
       logger.error({ err }, 'edge sync round failed');
     }
     await sleep(deps.tickMs ?? 1000, signal);
+  }
+}
+
+/**
+ * Sends every queued snapshot delete while the erasure fence cannot be read. A delete is terminal
+ * for its key, so the rows read for that key (earlier and later puts included) are settled with it;
+ * other puts stay queued until a sync can check them. Acknowledges exactly the rows it read, under
+ * the same generation check as the main loop. Returns false when the target moved.
+ */
+async function drainOutboxDeletes(
+  deps: EdgeDeps,
+  ws: string,
+  kv: { delete(keys: string[]): Promise<void> },
+  generation: number,
+): Promise<boolean> {
+  for (;;) {
+    const { rows } = await deps.db.admin.query<{ id: string; key: string }>(
+      `WITH doomed AS (
+         SELECT DISTINCT key FROM (
+           SELECT key FROM edge_outbox WHERE workspace_id = $1 AND value IS NULL ORDER BY id LIMIT 5000) d)
+       SELECT o.id, o.key FROM edge_outbox o JOIN doomed USING (key) WHERE o.workspace_id = $1 ORDER BY o.id`,
+      [ws],
+    );
+    if (!rows.length) return true;
+    const keys = [...new Set(rows.map((row) => row.key))];
+    await kv.delete(keys);
+    const acknowledged = await deps.db.admin.query(
+      `DELETE FROM edge_outbox WHERE workspace_id = $1 AND id = ANY($2::bigint[]) AND EXISTS (
+         SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
+      [ws, rows.map((row) => row.id), generation],
+    );
+    if (!acknowledged.rowCount) return false;
+    if (keys.length < 5000) return true;
   }
 }

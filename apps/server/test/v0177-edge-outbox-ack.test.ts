@@ -126,4 +126,25 @@ describe('edge outbox acknowledgement (#1203)', () => {
     expect(await outboxKeys()).toEqual([]);
     expect(kv.has(snapKey('unverified-put'))).toBe(true);
   });
+
+  it('reaches an erasure delete queued behind a full batch of puts while Valkey is unavailable', async () => {
+    kv.set(snapKey('erased-behind-puts'), { stale: true });
+    await t.srv.db.admin.query(
+      `INSERT INTO edge_outbox (workspace_id, key, value)
+       SELECT $1, $2 || g, '{"traits":{},"segments":[]}'::jsonb FROM generate_series(1, 5000) AS g`,
+      [ws, snapKey('queued-put-')],
+    );
+    await queue(snapKey('erased-behind-puts'), null);
+    const down = Object.create(t.srv.hot) as HotState;
+    down.tombstonedIds = async () => {
+      throw new Error('Valkey unavailable');
+    };
+    await syncEdge(deps(down), ws);
+    expect(kv.has(snapKey('erased-behind-puts'))).toBe(false);
+    const left = await outboxKeys();
+    expect(left).toHaveLength(5000);
+    expect(left).not.toContain(snapKey('erased-behind-puts'));
+    await syncEdge(deps(), ws);
+    expect(await outboxKeys()).toEqual([]);
+  });
 });
