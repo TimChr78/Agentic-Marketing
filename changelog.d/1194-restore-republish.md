@@ -23,6 +23,22 @@ issues: [1194]
   non-BYPASSRLS table owner (where FORCE RLS hides `erasure_keys`) reconciles the restored ledger
   instead of silently clearing the fence. A completed job is confirmed only after its outbox rows
   naming the erased profile are removed, including rows the snapshot left pending.
+- Each per-workspace reconciliation query now names its workspace explicitly. A restore commonly
+  runs as a superuser or a role with `BYPASSRLS`, which does not isolate tenants by itself; without
+  the predicate every workspace's keys were published into whichever workspace was being handled.
+- The live erasure log is read for every workspace when the restore runs as the table owner under
+  FORCE RLS: the owner lifts FORCE for one transaction and the lift rolls back with it, so the
+  erasures and keys recorded since the snapshot are replayed instead of reading as empty. The
+  replay reads the restored workspace list the same way, so an owner no longer skips every entry
+  as if its workspace had disappeared. A role that can see neither the whole log nor all
+  workspaces refuses the restore before Postgres is replaced, rather than replaying nothing.
+- A completed cleanup job with no publishable key at all — an erasure recorded before the durable
+  ledger, or one whose publication held no full-coverage key — still gets its final outbox pass
+  after a restore, so a restored pending row naming the erased person is not delivered by the app
+  that starts next.
+- Losing the restore lock now stops the children the restore started (`pg_dump`, `pg_restore`)
+  before it fails: SIGTERM, then SIGKILL, instead of leaving a child writing into a database that
+  another restore may already own.
 - The restore tests now write a real pre-erasure ClickHouse row for the erased identity in the
   Postgres-only and fresh-target shapes, and prove that shape fails (the row is readable) when the
   reconciliation is bypassed. The interlock has tests for a running server with idle pools, a

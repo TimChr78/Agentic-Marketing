@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { accessSync, createReadStream, createWriteStream, constants as fsConstants, readFileSync, statSync } from 'node:fs';
@@ -186,14 +186,47 @@ export function postgresClientEnv(databaseUrl: string): NodeJS.ProcessEnv {
   return env;
 }
 
-function run(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+/**
+ * Children a backup or restore currently has running (`pg_dump`, `pg_restore`). They are tracked so
+ * a lost restore lock can end them: a child that outlives its parent keeps writing into a database
+ * another restore may already own (#1204 review).
+ */
+const restoreChildren = new Set<ChildProcess>();
+
+/** How long a child gets to exit after SIGTERM before it is killed outright. */
+const RESTORE_CHILD_KILL_GRACE_MS = 2_000;
+
+/** How many children this process still has running. Exported for the lock-loss test. */
+export function runningRestoreChildren(): number {
+  return restoreChildren.size;
+}
+
+/**
+ * Stops every child a backup or restore started (#1204 review). A restore holds the exclusive
+ * restore lock for its whole run; when that connection is lost, the process can no longer prove the
+ * interlock, so it must not leave a `pg_restore` running. SIGTERM first — `pg_restore` rolls its
+ * open transaction back — and SIGKILL for a child that ignores it.
+ */
+export function stopRestoreChildren(): void {
+  if (!restoreChildren.size) return;
+  for (const child of restoreChildren) child.kill('SIGTERM');
+  const escalate = setTimeout(() => {
+    for (const child of restoreChildren) child.kill('SIGKILL');
+  }, RESTORE_CHILD_KILL_GRACE_MS);
+  escalate.unref();
+}
+
+/** Runs one child process for a backup or restore, and keeps it in `restoreChildren` while it runs. */
+export function runRestoreChild(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<void> {
   return new Promise((done, fail) => {
     const child = spawn(command, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] });
+    restoreChildren.add(child);
     let stderr = '';
     let settled = false;
     const finish = (err?: Error) => {
       if (settled) return;
       settled = true;
+      restoreChildren.delete(child);
       if (err) fail(err);
       else done();
     };
@@ -396,7 +429,11 @@ function newestRelease(version: string | null): string | null {
  * database does not have is harmless.
  */
 export async function dumpPostgres(databaseUrl: string, outFile: string): Promise<void> {
-  await run('pg_dump', ['-Fc', '--no-owner', '--exclude-table=public.restore_fence', '--file', outFile], postgresClientEnv(databaseUrl));
+  await runRestoreChild(
+    'pg_dump',
+    ['-Fc', '--no-owner', '--exclude-table=public.restore_fence', '--file', outFile],
+    postgresClientEnv(databaseUrl),
+  );
 }
 
 /** Runs pg_restore --clean --if-exists --no-owner against DATABASE_URL. */
@@ -406,7 +443,7 @@ export async function restorePostgres(databaseUrl: string, dumpFile: string): Pr
   // The database name is safe in argv; the password stays in PGPASSWORD.
   const args = ['--clean', '--if-exists', '--no-owner', '--dbname', clientEnv.PGDATABASE, dumpFile];
   try {
-    await run('pg_restore', args, clientEnv);
+    await runRestoreChild('pg_restore', args, clientEnv);
   } catch (err) {
     // pg_dump 18 writes `SET transaction_timeout = 0` (a 17+ setting) into every archive, including
     // one read from a 16 server, and pg_restore 18 then gets one error from that statement when the
@@ -999,7 +1036,7 @@ export async function verifyBackup(opts: VerifyBackupOptions): Promise<{ dir: st
   // `pg_restore --list` reads the archive without a database: it catches a truncated or corrupt
   // custom-format dump that happens to keep its hash. A missing client is only a warning.
   try {
-    await run('pg_restore', ['--list', manifestPath(dir, manifest.postgres.file)], {});
+    await runRestoreChild('pg_restore', ['--list', manifestPath(dir, manifest.postgres.file)], {});
   } catch (err) {
     if (/was not found/.test((err as Error).message)) log('warning: pg_restore was not found; the dump archive structure was not checked');
     else throw new Error(`postgres.dump is not a readable pg_dump archive: ${(err as Error).message}`);
@@ -1350,7 +1387,16 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   // and held until the fence is cleared. It is server state, not data, so `pg_restore` cannot drop
   // it, and a second restore is refused even when it uses another backup directory. The drain check
   // runs *after* it, so a server that starts after the check is caught by the fence/startup check.
-  const session = await acquireRestoreSessionLock(databaseUrl);
+  // Losing the connection loses the lock: every child the restore started is stopped at once, and
+  // the restore fails with that reason instead of finishing on a lock it no longer holds (#1204
+  // review). The fence stays raised, so nothing serves reads from a half-restored database.
+  let lockLost: Error | null = null;
+  const session = await acquireRestoreSessionLock(databaseUrl, {
+    onLost: (err) => {
+      lockLost = err;
+      stopRestoreChildren();
+    },
+  });
   let releaseFileLock: (() => Promise<void>) | undefined;
   try {
     // The documented drain, enforced (#1194): a scheduler that is still running can publish an
@@ -1467,6 +1513,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
 
     if (opts.skipReconciliation) {
       // Test seam: the fence stays raised, exactly as a reconciliation that threw would leave it.
+      if (lockLost) throw lockLost;
       log('reconciliation skipped (test seam); the restore fence stays raised');
       return manifest;
     }
@@ -1488,10 +1535,18 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
           (reconciled.outboxRows ? `, ${reconciled.outboxRows} outbox row(s) removed` : '') +
           (reconciled.outboxDeferred ? `, ${reconciled.outboxDeferred} job(s) left queued for the outbox` : ''),
       );
+    else if (reconciled.outboxRows)
+      // A completed erasure with no publishable key has no exclusion to reconcile, but its outbox
+      // rows still named the erased person (#1204 review).
+      log(`restored erasure cleanup: no exclusion key needed publishing, ${reconciled.outboxRows} outbox row(s) removed`);
     else log('no restored erasure exclusions to reconcile');
 
+    if (lockLost) throw lockLost;
     log('restore complete; start the app again (it applies any migrations this version still needs)');
     return manifest;
+  } catch (err) {
+    // A child stopped by the lock loss reports its own exit code; the operator needs the reason.
+    throw lockLost ?? err;
   } finally {
     await releaseFileLock?.();
     await session.release();

@@ -185,7 +185,9 @@ retention period also widens it: the newest snapshot is then older than `BACKUP_
    outbox rows its final worker pass would have removed — failed and delivered rows can still name
    the person (a confirmation token, a click URL), and because the restore holds the exclusive lock
    no dispatcher is running, so rows still pending are removed too rather than published after the
-   start. A job that was still unfinished is queued for its remaining sweep. The restore also resets
+   start. That outbox pass also covers a completed job with no publishable key at all — an erasure
+   recorded before the durable ledger, or one whose publication held no full-coverage key. A job
+   that was still unfinished is queued for its remaining sweep. The restore also resets
    the workspace's `purged_generation` to `0`, so the scheduler's recurring physical purge sweeps
    the restored event rows again. If the restore stops before this reconciliation, it leaves a
    fence row in `public.restore_fence` and the app refuses to start until a restore completes, so a
@@ -352,7 +354,12 @@ contents but does not create them.
   ClickHouse load, which then replaces the published exclusions. Stop the app first, as above.
 - reports the snapshot time in its final line (`snapshot <createdAt>`);
 - reads `erasures` and `erasure_tombstones` from the live database before touching it, and replays
-  them after loading Postgres (see [Retention and erased people](#retention-and-erased-people));
+  them after loading Postgres (see [Retention and erased people](#retention-and-erased-people)).
+  Every tenant table it reads is under `FORCE ROW LEVEL SECURITY`; run the restore as the table
+  owner (the default for a small install) or as a role with `BYPASSRLS`. The owner lifts FORCE for
+  one transaction and the lift is rolled back with it, so the log is read for every workspace. A
+  role that is neither the owner nor able to bypass RLS is refused before Postgres is replaced,
+  because it would see an empty log and replay nothing;
 - checks every file's size and SHA-256 before touching the database — and for `--clickhouse`, every
   ClickHouse file before the first `TRUNCATE`;
 - refuses a manifest whose migration head is newer than this build knows, with a message to upgrade

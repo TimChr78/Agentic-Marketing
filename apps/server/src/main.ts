@@ -7,7 +7,7 @@ import { createServer } from './app';
 import { ConfigError, loadConfig } from './config';
 import { prefixOf } from './domains';
 import { publicOnly } from './http/public-only';
-import { createBackup, keepDaysFromEnv } from './ops/backup-lib';
+import { createBackup, keepDaysFromEnv, stopRestoreChildren } from './ops/backup-lib';
 import { offlineChecks } from './ops/checks';
 import { acquireRestoreStartupLock } from './ops/restore-reconcile';
 import { createShutdown, drainHttpServers, drainWorkers, HTTP_DRAIN_TIMEOUT_MS, type HttpListener } from './shutdown';
@@ -53,6 +53,8 @@ try {
   restoreLock = await acquireRestoreStartupLock(config.adminDatabaseUrl, {
     onLost: (err) => {
       logger.error({ reason: err.message }, 'the restore lock connection was lost; exiting so no read is served without it');
+      // A pre-upgrade `pg_dump` started by this process must not outlive the interlock (#1204 review).
+      stopRestoreChildren();
       process.exit(1);
     },
   });

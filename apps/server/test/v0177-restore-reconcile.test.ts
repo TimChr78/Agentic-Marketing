@@ -1,8 +1,10 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { RESTORE_ADVISORY_LOCK_KEY } from '@agentic-marketing/db';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../../packages/db/test/disposable';
-import { reconcileRestoredErasureExclusions } from '../src/ops/restore-reconcile';
+import { runningRestoreChildren, runRestoreChild, stopRestoreChildren } from '../src/ops/backup-lib';
+import { acquireRestoreSessionLock, reconcileRestoredErasureExclusions } from '../src/ops/restore-reconcile';
 
 // The restore's final step (#1194). It must publish only what the ClickHouse point lost, record the
 // confirmation on the jobs, and leave a completed job complete instead of reopening every
@@ -200,6 +202,140 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     expect(job.rows[0]!.published_at).toBeInstanceOf(Date);
   }, 120_000);
 
+  it('publishes each workspace’s restored ledger only into that workspace (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_reconcile_multi');
+    open.push(d);
+    // A second tenant: RLS would separate these rows for the app, but a restore commonly runs as a
+    // superuser or a BYPASSRLS role, which sees both workspaces in one query. Every publication
+    // row must still name the workspace whose ledger it came from.
+    const other = randomUUID();
+    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Other restore', 'none')", [other]);
+    const fixtures = [
+      {
+        workspace: d.workspace,
+        erasureId: 'era_00000000000000000000000000000e55',
+        key: 'f'.repeat(64),
+        profile: 'prf_00000000000000000000000000000005',
+      },
+      {
+        workspace: other,
+        erasureId: 'era_00000000000000000000000000000e66',
+        key: '1'.repeat(64),
+        profile: 'prf_00000000000000000000000000000006',
+      },
+    ];
+    for (const fixture of fixtures) {
+      await d.db.admin.query(
+        `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+         VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'multi-workspace reconcile test', '{"profiles":1}')`,
+        [fixture.workspace, fixture.erasureId, fixture.profile],
+      );
+      await d.db.admin.query(
+        `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+         VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_reconcile', $3, 'full')`,
+        [fixture.workspace, fixture.key, fixture.erasureId],
+      );
+      await d.db.admin.query(
+        `INSERT INTO erasure_cleanup_jobs
+           (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+            published_generation, published_at, coverage_cleared_at, completed_at)
+         VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 1, true, true, 2, now(), now(), now())`,
+        [fixture.workspace, fixture.erasureId, fixture.profile],
+      );
+    }
+
+    // ClickHouse state is per workspace: a key published under the wrong workspace would never hide
+    // that person's reads, and would leak the key into a tenant it does not belong to.
+    const present = new Map<string, Set<string>>();
+    const published: { workspaceId: string; key: string }[] = [];
+    const events = {
+      async erasedSubjectKeys(workspaceId: string) {
+        return new Set(present.get(workspaceId) ?? []);
+      },
+      async publishErasedSubjects(rows: readonly { workspaceId: string; key: string }[]) {
+        for (const row of rows) {
+          published.push({ workspaceId: row.workspaceId, key: row.key });
+          const keys = present.get(row.workspaceId) ?? new Set<string>();
+          keys.add(row.key);
+          present.set(row.workspaceId, keys);
+        }
+      },
+      async erasedSubjectsVisible(workspaceId: string, wanted: readonly string[]) {
+        const keys = present.get(workspaceId) ?? new Set<string>();
+        return wanted.every((key) => keys.has(key));
+      },
+    };
+
+    const result = await reconcileRestoredErasureExclusions({ databaseUrl: d.url.toString(), events, log: () => {} });
+    expect(result).toMatchObject({ workspaces: 2, keys: 2, inserted: 2, jobs: 2 });
+    const byWorkspace = (a: { workspaceId: string }, b: { workspaceId: string }) => (a.workspaceId < b.workspaceId ? -1 : 1);
+    expect(published.sort(byWorkspace)).toEqual(fixtures.map(({ workspace, key }) => ({ workspaceId: workspace, key })).sort(byWorkspace));
+  }, 120_000);
+
+  it('cleans a completed job’s outbox rows even when it has no publishable keys (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_outbox_nokeys');
+    open.push(d);
+    const erasureId = 'era_00000000000000000000000000000f77';
+    const erasedProfile = 'prf_00000000000000000000000000000007';
+    const otherProfile = 'prf_00000000000000000000000000000008';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'restore keyless outbox test', '{"profiles":1}')`,
+      [d.workspace, erasureId, erasedProfile],
+    );
+    // A job that completed before the durable ledger (or on a generation-0 publication) has no
+    // publishable key at all. Its final outbox pass still has to happen after a restore.
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 4, true, true, 0, NULL, now())`,
+      [d.workspace, erasureId, erasedProfile],
+    );
+    const outbox = [
+      { id: 'ob_keyless_failed', state: 'failed', profile: erasedProfile },
+      { id: 'ob_keyless_pending', state: 'pending', profile: erasedProfile },
+      { id: 'ob_keyless_other', state: 'failed', profile: otherProfile },
+    ];
+    for (const row of outbox)
+      await d.db.admin.query(
+        `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts)
+         VALUES ($1, $2, 'message_event', $3::jsonb, $2, $4, 3)`,
+        [
+          d.workspace,
+          row.id,
+          JSON.stringify({
+            events: [{ workspaceId: d.workspace, properties: { profile_id: row.profile }, profileId: row.profile }],
+          }),
+          row.state,
+        ],
+      );
+
+    const published: string[] = [];
+    const events = {
+      async erasedSubjectKeys() {
+        return new Set<string>();
+      },
+      async publishErasedSubjects(rows: readonly { key: string }[]) {
+        for (const row of rows) published.push(row.key);
+      },
+      async erasedSubjectsVisible() {
+        return true;
+      },
+    };
+    const result = await reconcileRestoredErasureExclusions({ databaseUrl: d.url.toString(), events, log: () => {} });
+    // Nothing was publishable, so nothing is claimed as published, but the outbox is cleaned.
+    expect(result).toMatchObject({ workspaces: 0, keys: 0, inserted: 0, jobs: 0, outboxRows: 2, outboxDeferred: 0 });
+    expect(published).toEqual([]);
+    const left = await d.db.admin.query<{ id: string }>('SELECT id FROM outbox WHERE workspace_id = $1', [d.workspace]);
+    expect(left.rows.map((row) => row.id)).toEqual(['ob_keyless_other']);
+    const job = await d.db.admin.query<{ state: string; published_at: Date | null }>(
+      'SELECT state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1',
+      [d.workspace],
+    );
+    expect(job.rows[0]).toMatchObject({ state: 'complete', published_at: null });
+  }, 120_000);
+
   it('reconciles a restored ledger row as a non-BYPASSRLS table owner (#1194 review)', async () => {
     const d = await createDisposableDb('restore_reconcile_rls');
     open.push(d);
@@ -277,5 +413,52 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     );
     expect(job.rows[0]).toMatchObject({ state: 'complete' });
     expect(job.rows[0]!.published_at).toBeInstanceOf(Date);
+  }, 120_000);
+
+  it('reports a lost exclusive restore lock and stops its children (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_session_lock_lost');
+    open.push(d);
+    const databaseUrl = d.url.toString();
+    let lost = '';
+    // A stand-in for `pg_restore`: a child that outlives the lock holder would keep writing into a
+    // database another restore may already own. Its rejection is handled from the start, because
+    // the lock loss can stop it before the assertion below runs.
+    const child = runRestoreChild(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {}).then(
+      () => 'exited' as const,
+      () => 'killed' as const,
+    );
+    const session = await acquireRestoreSessionLock(databaseUrl, {
+      onLost: (err) => {
+        lost = err.message;
+        stopRestoreChildren();
+      },
+    });
+    try {
+      const found = Date.now() + 5_000;
+      while (runningRestoreChildren() === 0 && Date.now() < found) await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(runningRestoreChildren()).toBe(1);
+      // The backend that holds the session lock, found the way an operator would: by its lock.
+      const finder = new pg.Client({ connectionString: databaseUrl });
+      await finder.connect();
+      try {
+        const { rows } = await finder.query<{ pid: number }>(
+          `SELECT pid FROM pg_locks
+            WHERE locktype = 'advisory' AND objid = $1 AND objsubid = 1 AND granted AND pid <> pg_backend_pid()`,
+          [RESTORE_ADVISORY_LOCK_KEY],
+        );
+        expect(rows).toHaveLength(1);
+        await finder.query('SELECT pg_terminate_backend($1)', [rows[0]!.pid]);
+      } finally {
+        await finder.end();
+      }
+      await expect(child).resolves.toBe('killed');
+      const deadline = Date.now() + 15_000;
+      while (!lost && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(lost).toMatch(/terminat|connection/i);
+      expect(runningRestoreChildren()).toBe(0);
+    } finally {
+      stopRestoreChildren();
+      await session.release();
+    }
   }, 120_000);
 });

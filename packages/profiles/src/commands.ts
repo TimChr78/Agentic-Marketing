@@ -874,7 +874,7 @@ export const eraseProfile = defineCommand({
   name: 'profiles.erase',
   title: 'Erase a person (erasure request)',
   description:
-    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again. The person’s SQL rows and keys are gone when this returns `pending`; a durable job publishes their exclusion keys to ClickHouse, sweeps events and the decision API’s hot state, and `profiles.erasureStatus` reports logical completion separately from physical purge progress. Once status reports complete, every application query started afterwards excludes the erased subject, including rows written later (#1037).',
+    'Permanently remove a person: profile and merged profiles, identifiers, consent ledger and events. Their encryption key is destroyed, so copies in backups become unreadable. Hashes of their e-mail and phone are kept on a suppression list so they are never contacted again. The person’s SQL rows and keys are gone when this returns `pending`; a durable job publishes their exclusion keys to ClickHouse, sweeps events and the decision API’s hot state, and `profiles.erasureStatus` reports logical completion separately from physical purge progress. Once status reports complete with `exclusion: full`, every application query started afterwards excludes the erased subject, including rows written later (#1037); `partial` and `unknown` qualify that claim as profiles.erasureStatus describes.',
   input: z.object({ profileId: ProfileId, reason: z.string().min(1).max(500).describe('E.g. "Erasure request by e-mail on 2026-10-22"') }),
   output: z.object({
     erasureId: z.string(),
@@ -918,7 +918,7 @@ export const erasureStatus = defineCommand({
     status: z
       .enum(['pending', 'running', 'complete', 'failed'])
       .describe(
-        'pending: waiting for publication, an in-flight outbox row, the final sweep or subject-key coverage, while the SQL rows and keys are already gone; running: a worker is sweeping; complete: the published exclusions are visible and every stored row has coverage, so reads exclude the erased subject; failed: the retry budget ran out and rows may remain',
+        'pending: waiting for publication, an in-flight outbox row, the final sweep or subject-key coverage, while the SQL rows and keys are already gone; running: a worker is sweeping; complete: with `exclusion: full`, the published exclusions are visible and every stored row has coverage, so reads exclude the erased subject; with `exclusion: partial` only the identifiers that could be hashed are excluded, and with `exclusion: unknown` (a legacy erasure) nothing proves they were, so read exclusion is not verified; failed: the retry budget ran out and rows may remain',
       ),
     reason: z
       .enum(['publication', 'outbox', 'final_sweep', 'subject_key_coverage', 'legacy'])

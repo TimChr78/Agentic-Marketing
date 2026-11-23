@@ -10,6 +10,7 @@ import { createServer } from './app';
 import { resolvePassword } from './cli-password';
 import { ConfigError, loadConfig } from './config';
 import { runLoadTest } from './loadtest';
+import { stopRestoreChildren } from './ops/backup-lib';
 import { acquireRestoreStartupLock } from './ops/restore-reconcile';
 import { resetPasswordForEmail } from './passwordReset';
 import { COMMIT, VERSION } from './version';
@@ -174,6 +175,7 @@ async function admin(command: string, rest: string[]) {
     restoreLock = await acquireRestoreStartupLock(config.adminDatabaseUrl, {
       onLost: (err) => {
         console.error(`the restore lock connection was lost (${err.message}); exiting`);
+        stopRestoreChildren();
         process.exit(1);
       },
     });

@@ -117,22 +117,26 @@ export async function assertDatabaseDrained(databaseUrl: string): Promise<void> 
 }
 
 /**
- * Workspaces whose restored ledger has publishable keys.
+ * Workspaces whose restored table holds rows matching `where`.
  *
- * `erasure_keys` is under `FORCE ROW LEVEL SECURITY`, so a table owner without `BYPASSRLS` (the
- * small-install case) reads zero rows even though it owns the data, and the restore would clear the
- * fence without contacting ClickHouse (#1194 review). The plain read covers a superuser or a role
- * with `BYPASSRLS`; when it returns nothing, ask the catalog whether RLS is hiding rows:
+ * `erasure_keys` and `erasure_cleanup_jobs` are under `FORCE ROW LEVEL SECURITY`, so a table owner
+ * without `BYPASSRLS` (the small-install case) reads zero rows even though it owns the data, and the
+ * restore would clear the fence without contacting ClickHouse (#1194 review). The plain read covers
+ * a superuser or a role with `BYPASSRLS`; when it returns nothing, ask the catalog whether RLS is
+ * hiding rows:
  *
  * - the same role is the table owner and FORCE is on: lift FORCE for one transaction to read the
  *   distinct workspace ids, then put it back. The app role is never the table owner, so its policy
  *   is enforced throughout; the lift only exempts the owner, which is the restore itself.
  * - the role is neither the owner nor can bypass RLS: refuse instead of silently reconciling
  *   nothing. The caller leaves the fence raised, so no server can start on an unverified point.
+ *
+ * A superuser or `BYPASSRLS` role sees every workspace's rows at once, so the scan itself is not
+ * tenant-scoped: every query that follows must name its workspace (#1204 review).
  */
-async function listRestoredLedgerWorkspaces(pool: pg.Pool): Promise<string[]> {
+async function listRestoredWorkspaces(pool: pg.Pool, table: string, where: string): Promise<string[]> {
   const read = (client: Pick<pg.Pool, 'query'>) =>
-    client.query<{ id: string }>(`SELECT DISTINCT workspace_id::text AS id FROM erasure_keys WHERE coverage = 'full' ORDER BY 1`);
+    client.query<{ id: string }>(`SELECT DISTINCT workspace_id::text AS id FROM ${table} WHERE ${where} ORDER BY 1`);
   const plain = await read(pool);
   if (plain.rows.length) return plain.rows.map((row) => row.id);
 
@@ -144,15 +148,16 @@ async function listRestoredLedgerWorkspaces(pool: pg.Pool): Promise<string[]> {
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
        JOIN pg_roles r ON r.rolname = current_user
-      WHERE n.nspname = 'public' AND c.relname = 'erasure_keys'`,
+      WHERE n.nspname = 'public' AND c.relname = $1`,
+    [table],
   );
   const state = rows[0];
-  // No ledger table, or a role that can see all rows: the ledger really is empty.
+  // No such table, or a role that can see all rows: the table really is empty.
   if (!state || state.bypass || (state.is_owner && !state.forced)) return [];
   if (!state.is_owner)
     throw new Error(
-      `the restored erasure ledger is hidden by row-level security from role ${state.role}: it is not the owner of ` +
-        'erasure_keys and does not have BYPASSRLS. Run the restore as the table owner or a role with BYPASSRLS; the ' +
+      `the restored ${table} is hidden by row-level security from role ${state.role}: it is not the owner of ` +
+        `${table} and does not have BYPASSRLS. Run the restore as the table owner or a role with BYPASSRLS; the ` +
         'fence stays raised so no server can start on an unreconciled point.',
     );
 
@@ -160,9 +165,9 @@ async function listRestoredLedgerWorkspaces(pool: pg.Pool): Promise<string[]> {
   try {
     await client.query('BEGIN');
     // Transactional DDL: a rollback restores FORCE, so a crash cannot leave the owner exempt.
-    await client.query('ALTER TABLE public.erasure_keys NO FORCE ROW LEVEL SECURITY');
+    await client.query(`ALTER TABLE public.${table} NO FORCE ROW LEVEL SECURITY`);
     const ids = await read(client);
-    await client.query('ALTER TABLE public.erasure_keys FORCE ROW LEVEL SECURITY');
+    await client.query(`ALTER TABLE public.${table} FORCE ROW LEVEL SECURITY`);
     await client.query('COMMIT');
     return ids.rows.map((row) => row.id);
   } catch (err) {
@@ -232,80 +237,94 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
     );
     if (!table.rows[0]?.present) return result;
 
-    const workspaceIds = await listRestoredLedgerWorkspaces(pool);
+    const workspaceIds = [
+      ...new Set([
+        ...(await listRestoredWorkspaces(pool, 'erasure_keys', "coverage = 'full'")),
+        // A completed job with no publishable key at all (a generation-0 publication, or one from
+        // before the durable ledger) still has to clean its erased profiles' outbox rows (#1204
+        // review), so its workspace is visited even though there is nothing to publish.
+        ...(await listRestoredWorkspaces(pool, 'erasure_cleanup_jobs', "state = 'complete'")),
+      ]),
+    ].sort();
     for (const workspaceId of workspaceIds) {
       const { ledger, jobs } = await inWorkspace(pool, workspaceId, async (client) => {
+        // The workspace predicate is explicit: a restore commonly runs as a superuser or a
+        // BYPASSRLS role, and `app.workspace_id` alone would then hand this workspace every other
+        // workspace's keys (#1204 review).
         const ledger = await client.query<LedgerRow>(
           `SELECT workspace_id, erasure_id, kind, key_value, key_version
              FROM erasure_keys
-            WHERE coverage = 'full'
+            WHERE workspace_id = $1 AND coverage = 'full'
             ORDER BY workspace_id, erasure_id, kind, key_value, key_version`,
+          [workspaceId],
         );
         const erasureIds = [...new Set(ledger.rows.map((row) => row.erasure_id))];
-        const jobs = erasureIds.length
-          ? await client.query<JobRow>(
-              `SELECT erasure_id, state, profile_ids FROM erasure_cleanup_jobs
-                WHERE workspace_id = $1 AND erasure_id = ANY($2::text[])`,
-              [workspaceId, erasureIds],
-            )
-          : undefined;
-        return { ledger: ledger.rows, jobs: jobs?.rows ?? [] };
+        // Every completed job needs its final outbox pass, whether or not it has a key to publish;
+        // an unfinished one needs it only to record its publication.
+        const jobs = await client.query<JobRow>(
+          `SELECT erasure_id, state, profile_ids FROM erasure_cleanup_jobs
+            WHERE workspace_id = $1 AND (state = 'complete' OR erasure_id = ANY($2::text[]))
+            ORDER BY erasure_id`,
+          [workspaceId, erasureIds],
+        );
+        return { ledger: ledger.rows, jobs: jobs.rows };
       });
-      if (!ledger.length) continue;
 
       const keys = [...new Set(ledger.map((row) => row.key_value))];
       const erasureIds = [...new Set(ledger.map((row) => row.erasure_id))];
-      const existing = await events.erasedSubjectKeys(workspaceId);
-      const missing = ledger.filter((row) => !existing.has(row.key_value));
-      // A new generation for the whole restored publication: a retry or a later restore can never
-      // make the confirmed state regress. Inserting only the missing keys keeps the work bounded by
-      // what the ClickHouse point actually lost.
-      const generation = await inWorkspace(pool, workspaceId, (client) => nextErasureGeneration({ admin: client }, workspaceId));
-      const recordedAt = new Date().toISOString();
-      for (let offset = 0; offset < missing.length; offset += batchSize) {
-        const batch = missing.slice(offset, offset + batchSize);
-        await events.publishErasedSubjects(
-          batch.map((row) => ({
-            workspaceId,
-            kind: row.kind as SubjectKeyKind,
-            key: row.key_value,
-            keyVersion: row.key_version,
-            erasureId: row.erasure_id,
-            generation,
-            recordedAt,
-          })),
-        );
-        result.batches += 1;
-      }
-      // Chunk the FINAL visibility read: one HTTP parameter with every key of a large workspace hit
-      // ClickHouse's "Field value too long" at 10,000 keys. The inserts above are already batched;
-      // the confirmation must be too. Every chunk checks its own set, so the whole list is still
-      // confirmed before a job is marked published.
-      let visible = true;
-      for (let offset = 0; offset < keys.length; offset += batchSize) {
-        if (!(await events.erasedSubjectsVisible(workspaceId, keys.slice(offset, offset + batchSize)))) {
-          visible = false;
-          break;
+      let missing: LedgerRow[] = [];
+      let generation: number | null = null;
+      if (keys.length) {
+        const existing = await events.erasedSubjectKeys(workspaceId);
+        missing = ledger.filter((row) => !existing.has(row.key_value));
+        // A new generation for the whole restored publication: a retry or a later restore can never
+        // make the confirmed state regress. Inserting only the missing keys keeps the work bounded by
+        // what the ClickHouse point actually lost.
+        const publishGeneration = await inWorkspace(pool, workspaceId, (client) => nextErasureGeneration({ admin: client }, workspaceId));
+        generation = publishGeneration;
+        const recordedAt = new Date().toISOString();
+        for (let offset = 0; offset < missing.length; offset += batchSize) {
+          const batch = missing.slice(offset, offset + batchSize);
+          await events.publishErasedSubjects(
+            batch.map((row) => ({
+              workspaceId,
+              kind: row.kind as SubjectKeyKind,
+              key: row.key_value,
+              keyVersion: row.key_version,
+              erasureId: row.erasure_id,
+              generation: publishGeneration,
+              recordedAt,
+            })),
+          );
+          result.batches += 1;
         }
+        // Chunk the FINAL visibility read: one HTTP parameter with every key of a large workspace hit
+        // ClickHouse's "Field value too long" at 10,000 keys. The inserts above are already batched;
+        // the confirmation must be too. Every chunk checks its own set, so the whole list is still
+        // confirmed before a job is marked published.
+        let visible = true;
+        for (let offset = 0; offset < keys.length; offset += batchSize) {
+          if (!(await events.erasedSubjectsVisible(workspaceId, keys.slice(offset, offset + batchSize)))) {
+            visible = false;
+            break;
+          }
+        }
+        if (!visible)
+          throw new Error(
+            `the restored erasure exclusions for workspace ${workspaceId} are not visible in ClickHouse after the publication; ` +
+              'reads stay blocked until a restore completes the reconciliation',
+          );
       }
-      if (!visible)
-        throw new Error(
-          `the restored erasure exclusions for workspace ${workspaceId} are not visible in ClickHouse after the publication; ` +
-            'reads stay blocked until a restore completes the reconciliation',
-        );
 
       const confirmed = await inWorkspace(pool, workspaceId, async (client) => {
-        // The cache epoch moves only after the FINAL read; the restored process has no warm cache,
-        // but a publication that moved the epoch before its rows were visible is exactly what this
-        // rule exists to prevent.
-        await noteErasedSubjectsVisible({ admin: client }, workspaceId);
-
         // A completed job is not reopened for another sweep, so its final worker pass never runs
         // after a restore. Do the outbox half of that pass here: failed and delivered rows can
         // still name the person (a DOI token, a click URL), and a requeue could deliver one after
         // the job says complete. The restore's exclusive lock proves no dispatcher is running, so
         // pending and delivering rows are removed too instead of being waited for, which is what
-        // the worker's barrier would do had it not been stopped (#1194 review).
+        // the worker's barrier would do had it not been stopped (#1194 review). This runs for every
+        // completed job: one whose erasure has no publishable key still has an outbox to clean
+        // (#1204 review).
         const clean = new Set<string>();
         let outboxRows = 0;
         let outboxDeferred = 0;
@@ -320,10 +339,18 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
           }
         }
 
+        if (generation === null) return { jobs: 0, outboxRows, outboxDeferred };
+
+        // The cache epoch moves only after the FINAL read; the restored process has no warm cache,
+        // but a publication that moved the epoch before its rows were visible is exactly what this
+        // rule exists to prevent.
+        await noteErasedSubjectsVisible({ admin: client }, workspaceId);
+
         // Only now may the jobs say they published. A finished job whose outbox is clean stays
         // complete and is not queued for another sweep; an unfinished one, or a finished one the
         // outbox still blocks, is made due so its remaining sweep runs. The marker and the
-        // confirmed keys are what protect reads in between.
+        // confirmed keys are what protect reads in between. A completed job with no publishable key
+        // is not in `erasureIds`, so it keeps its state and its publication record untouched.
         const published = await client.query(
           `UPDATE erasure_cleanup_jobs
               SET published_generation = $2,
@@ -353,17 +380,25 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
         return { jobs: published.rowCount ?? 0, outboxRows, outboxDeferred };
       });
 
-      result.workspaces += 1;
-      result.keys += keys.length;
-      result.inserted += missing.length;
+      if (keys.length) {
+        result.workspaces += 1;
+        result.keys += keys.length;
+        result.inserted += missing.length;
+      }
       result.jobs += confirmed.jobs;
       result.outboxRows += confirmed.outboxRows;
       result.outboxDeferred += confirmed.outboxDeferred;
-      log(
-        `workspace ${workspaceId}: ${keys.length} restored exclusion key(s), ` +
-          `${missing.length} re-published under generation ${generation}, ${confirmed.jobs} cleanup job(s) confirmed` +
-          (confirmed.outboxRows ? `, ${confirmed.outboxRows} outbox row(s) removed` : ''),
-      );
+      if (keys.length)
+        log(
+          `workspace ${workspaceId}: ${keys.length} restored exclusion key(s), ` +
+            `${missing.length} re-published under generation ${generation}, ${confirmed.jobs} cleanup job(s) confirmed` +
+            (confirmed.outboxRows ? `, ${confirmed.outboxRows} outbox row(s) removed` : ''),
+        );
+      else if (confirmed.outboxRows || confirmed.outboxDeferred)
+        log(
+          `workspace ${workspaceId}: no publishable restored key, ${confirmed.outboxRows} outbox row(s) removed` +
+            (confirmed.outboxDeferred ? `, ${confirmed.outboxDeferred} completed job(s) left queued for the outbox` : ''),
+        );
     }
     return result;
   } finally {
@@ -408,14 +443,27 @@ export interface RestoreSessionLock {
   release(): Promise<void>;
 }
 
+export interface RestoreSessionLockOptions {
+  /**
+   * Called once if the lock connection is lost before `release()`. The restore no longer holds the
+   * interlock — another restore may take it — so the caller must stop the work it started, children
+   * included, and fail (#1204 review).
+   */
+  onLost?: (err: Error) => void;
+}
+
 /**
  * Takes the exclusive restore advisory lock (#1194). It is session state, not data, so it survives
  * `pg_restore`; a second restore — even one restoring another backup directory — is refused instead
  * of racing the first through its marker and ClickHouse load. A running server holds the same lock
  * shared from before its migrations until shutdown, so an app process that is still up refuses the
  * restore even when its pools are idle. The caller must hold it until the fence is cleared.
+ *
+ * Losing the connection loses the lock. `onLost` lets the restore stop its spawned children before
+ * it exits, instead of leaving a `pg_restore` writing into a database another restore may own
+ * (#1204 review).
  */
-export async function acquireRestoreSessionLock(databaseUrl: string): Promise<RestoreSessionLock> {
+export async function acquireRestoreSessionLock(databaseUrl: string, opts: RestoreSessionLockOptions = {}): Promise<RestoreSessionLock> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
@@ -429,8 +477,17 @@ export async function acquireRestoreSessionLock(databaseUrl: string): Promise<Re
     await client.end().catch(() => {});
     throw err;
   }
+  let released = false;
+  const lost = (err: Error) => {
+    if (!released) opts.onLost?.(err);
+  };
+  // Keep a listener on both events: pg emits 'error' when the backend is terminated, and without
+  // one Node would treat it as an unhandled error and exit without the caller's cleanup.
+  client.on('error', lost);
+  client.on('end', () => lost(new Error('the restore lock connection ended unexpectedly')));
   return {
     async release() {
+      released = true;
       await client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
       await client.end().catch(() => {});
     },

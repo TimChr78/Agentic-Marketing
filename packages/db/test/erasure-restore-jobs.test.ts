@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { erasureLedgerChecker } from '../src/erasureCleanup';
 import { readErasureLog, replayErasures, replayErasuresAfterMigrate } from '../src/erasures';
@@ -372,5 +374,165 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
       erasureId,
     ]);
     expect(jobs.rows[0]).toMatchObject({ state: 'pending_external', selectors, selector_key: selectorKey });
+  }, 120_000);
+
+  it('reads every workspace’s erasures and keys as a non-BYPASSRLS table owner (#1204 review)', async () => {
+    const live = await createDisposableDb('erasure_log_owner');
+    open.push(live);
+    const profile = 'prf_0000000000000000000000000000e0e0';
+    const erasureId = 'era_0000000000000000000000000000e0e0';
+    const key = 'a'.repeat(64);
+    await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    await live.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'owner log test', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_tombstones (workspace_id, ident_hash, erased_at, erasure_id)
+       VALUES ($1, $2, now(), $3)`,
+      [live.workspace, 'b'.repeat(64), erasureId],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_owner', $3, 'full')`,
+      [live.workspace, key, erasureId],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, coverage_cleared_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 1, true, true, 4, now(), now(), now())`,
+      [live.workspace, erasureId, profile],
+    );
+
+    // A small install runs `am restore` as the owner of every table, which is subject to FORCE RLS.
+    // Without a workspace set, that role reads zero of each table and the restore would replay
+    // nothing (#1204 review).
+    const suffix = randomBytes(4).toString('hex');
+    const role = `am_restore_log_owner_${suffix}`;
+    await live.db.admin.query(`CREATE ROLE ${role} LOGIN PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
+    const owned = [
+      'data_keys',
+      'erasure_cleanup_jobs',
+      'erasure_generations',
+      'erasure_keys',
+      'erasure_tombstones',
+      'erasures',
+      'warehouse_erasure_key_tracking',
+      'warehouse_erasure_keys',
+    ];
+    for (const table of owned) await live.db.admin.query(`ALTER TABLE ${table} OWNER TO ${role}`);
+    const forcedBefore = await live.db.admin.query<{ relname: string; forced: boolean }>(
+      `SELECT c.relname, c.relforcerowsecurity AS forced FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = ANY($1::text[]) ORDER BY 1`,
+      [owned],
+    );
+    const limited = new URL(live.url.toString());
+    limited.username = role;
+    limited.password = 'rls-password';
+
+    // Prove the premise: the owner sees nothing without `app.workspace_id`.
+    const asOwner = new pg.Client({ connectionString: limited.toString() });
+    await asOwner.connect();
+    try {
+      for (const table of ['erasures', 'erasure_keys', 'erasure_cleanup_jobs']) {
+        const { rows } = await asOwner.query<{ n: number }>(`SELECT count(*)::int AS n FROM ${table}`);
+        expect(rows[0]?.n).toBe(0);
+      }
+    } finally {
+      await asOwner.end();
+    }
+
+    const log = await readErasureLog(limited.toString());
+    expect(log.erasures).toHaveLength(1);
+    expect(log.erasures[0]).toMatchObject({ workspaceId: live.workspace, id: erasureId });
+    expect(log.keys).toHaveLength(1);
+    expect(log.keys?.[0]).toMatchObject({ workspaceId: live.workspace, erasureId, keyValue: key });
+    expect(log.cleanupJobs).toHaveLength(1);
+    expect(log.cleanupJobs?.[0]).toMatchObject({ workspaceId: live.workspace, erasureId, state: 'complete' });
+    expect(log.tombstones).toHaveLength(1);
+
+    // The FORCE lift was transactional: every table's FORCE flag is exactly as it was before.
+    const forced = await live.db.admin.query<{ relname: string; forced: boolean }>(
+      `SELECT c.relname, c.relforcerowsecurity AS forced FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = ANY($1::text[]) ORDER BY 1`,
+      [owned],
+    );
+    expect(forced.rows.filter((row) => row.forced).length).toBeGreaterThan(0);
+    expect(forced.rows).toEqual(forcedBefore.rows);
+  }, 120_000);
+
+  it('replays the whole log as a non-BYPASSRLS table owner (#1204 review)', async () => {
+    const live = await createDisposableDb('erasure_owner_replay_live');
+    const restored = await createDisposableDb('erasure_owner_replay_restored');
+    open.push(live, restored);
+    const profile = 'prf_0000000000000000000000000000aa11';
+    const erasureId = 'era_0000000000000000000000000000aa11';
+    const key = 'c'.repeat(64);
+    await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    await live.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'owner replay test', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_owner', $3, 'full')`,
+      [live.workspace, key, erasureId],
+    );
+    // The restored snapshot predates the erasure: the person and an identifier are back.
+    await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [live.workspace]);
+    await restored.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    await restored.db.admin.query('INSERT INTO identifiers (workspace_id, profile_id, type, value) VALUES ($1, $2, $3, $4)', [
+      live.workspace,
+      profile,
+      'user_id',
+      'owner-replay-user',
+    ]);
+
+    // Every table belongs to the small install's own role, which FORCE RLS applies to as well.
+    const role = `am_restore_owner_replay_${randomBytes(4).toString('hex')}`;
+    await live.db.admin.query(`CREATE ROLE ${role} LOGIN PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
+    for (const db of [live, restored]) {
+      const { rows } = await db.db.admin.query<{ tablename: string }>("SELECT tablename FROM pg_tables WHERE schemaname = 'public'");
+      for (const { tablename } of rows) await db.db.admin.query(`ALTER TABLE "${tablename}" OWNER TO "${role}"`);
+    }
+    const urlFor = (db: typeof live) => {
+      const url = new URL(db.url.toString());
+      url.username = role;
+      url.password = 'rls-password';
+      return url.toString();
+    };
+
+    // The workspace list, the erasures and the keys all have to be read for the replay to work: the
+    // owner sees none of them without a workspace set, and a skipped entry resurrects the person.
+    const log = await readErasureLog(urlFor(live));
+    expect(log.erasures).toHaveLength(1);
+    expect(log.keys).toHaveLength(1);
+    const replayed = await replayErasures(urlFor(restored), log);
+    expect(replayed).toMatchObject({ workspaces: 1, erasures: 1, profiles: 1, keys: 1, skipped: 0 });
+    const left = await restored.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [live.workspace, profile]);
+    expect(left.rowCount).toBe(0);
+  }, 120_000);
+
+  it('refuses the log when the role can neither own nor bypass its row-level security (#1204 review)', async () => {
+    const live = await createDisposableDb('erasure_log_reader');
+    open.push(live);
+    const erasureId = 'era_0000000000000000000000000000f0f0';
+    await live.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY['prf_0000000000000000000000000000f0f0']::text[], 'user_test', 'reader log test', '{"profiles":1}')`,
+      [live.workspace, erasureId],
+    );
+    const role = `am_restore_log_reader_${randomBytes(4).toString('hex')}`;
+    await live.db.admin.query(`CREATE ROLE ${role} LOGIN PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
+    // Reading is allowed; row-level security still hides every row from a role that is not the
+    // owner. Returning an empty log would let the restore drop the erasures without a word.
+    await live.db.admin.query(`GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${role}`);
+    const limited = new URL(live.url.toString());
+    limited.username = role;
+    limited.password = 'rls-password';
+    await expect(readErasureLog(limited.toString())).rejects.toThrow(/hidden by row-level security from role/);
   }, 120_000);
 });
