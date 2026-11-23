@@ -395,10 +395,10 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
     await stale.connect();
     try {
       const started = Date.now();
-      await expect(restoreBackup({ dir: backupPath, env: restoreEnv(databaseUrl), log: () => {}, drainTimeoutMs: 300 })).rejects.toThrow(
+      await expect(restoreBackup({ dir: backupPath, env: restoreEnv(databaseUrl), log: () => {}, drainTimeoutMs: 2_000 })).rejects.toThrow(
         /a previous restore's work is still running/,
       );
-      expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
       // It refused before the destructive steps: no fence was raised for this attempt.
       expect(await fenceRow(databaseUrl)).toBeNull();
     } finally {

@@ -89,7 +89,8 @@ issues: [1194]
   the restore's backends from a successor's drain.
 - A restore that notices its lock is gone now checks the abort signal before migrating, before
   opening the replay connection and before every replay statement, and before each ClickHouse
-  visibility chunk, so no write or request follows the lock loss even when the signal already fired.
+  visibility chunk, so it starts no new step, statement or request after the lock loss. A step
+  already in flight (a migration, the role setup, the erasure-log read) still runs to its end.
 - The restore's ClickHouse load now inserts synchronously (`async_insert=0`), so an insert stays visible
   to a successor's drain until it has landed instead of flushing from the async buffer after the
   successor's `TRUNCATE`.

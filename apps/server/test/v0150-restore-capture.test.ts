@@ -83,6 +83,9 @@ const envFor = (d: Disposable) => ({
   DATABASE_URL: d.url.toString(),
   APP_DB_ROLE: 'am_ops_test_app',
   APP_DB_PASSWORD: 'am_ops_test_password',
+  // A restore checks ClickHouse for an earlier run's work (#1204 review), so it needs the test
+  // stack's endpoint rather than the localhost default.
+  CLICKHOUSE_URL: process.env.CLICKHOUSE_URL ?? 'http://localhost:8123',
 });
 
 const readCapture = async (path: string): Promise<Capture> => JSON.parse(await readFile(path, 'utf8')) as Capture;

@@ -730,12 +730,13 @@ describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work 
     await stale.connect();
     try {
       const started = Date.now();
-      await expect(assertRestoreWorkDrained(databaseUrl, { timeoutMs: 300, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } })).rejects.toThrow(
-        /a previous restore's work is still running/,
-      );
+      await expect(
+        assertRestoreWorkDrained(databaseUrl, { timeoutMs: 2_000, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } }),
+      ).rejects.toThrow(/a previous restore's work is still running/);
       // It waited for the bound instead of proceeding, and the drain's own connection did not
-      // count itself.
-      expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+      // count itself. (A generous bound keeps a slow probe under load from ending the wait with a
+      // timeout message instead.)
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
     } finally {
       await stale.end();
     }
@@ -754,7 +755,7 @@ describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work 
     const running = new URL(CH_URL);
     running.searchParams.set('database', 'default');
     running.searchParams.set('query_id', queryId);
-    running.searchParams.set('query', 'SELECT sleep(2)');
+    running.searchParams.set('query', 'SELECT sleep(3)'); // ClickHouse's per-block maximum
     // Leave the query in flight; the request is what system.processes shows, not its result.
     const sleeping = fetch(running, { method: 'POST' }).then(
       (response) => response.text(),
@@ -771,7 +772,8 @@ describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work 
         if (Date.now() > listedBy) throw new Error('the marked ClickHouse query never appeared in system.processes');
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      await expect(assertRestoreWorkDrained(d.url.toString(), { timeoutMs: 300, pollMs: 25, env: drainEnv })).rejects.toThrow(
+      // The bound must end well before the 3 s query does, yet leave a slow probe room to answer.
+      await expect(assertRestoreWorkDrained(d.url.toString(), { timeoutMs: 1_000, pollMs: 25, env: drainEnv })).rejects.toThrow(
         /a previous restore's work is still running/,
       );
     } finally {
@@ -829,7 +831,7 @@ describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work 
           pollMs: 25,
           env: { CLICKHOUSE_URL: 'http://clickhouse.test:8123' },
         }),
-      ).rejects.toThrow(/ClickHouse|timed out|aborted/i);
+      ).rejects.toThrow(/did not finish within/);
     } finally {
       globalThis.fetch = realFetch;
     }
