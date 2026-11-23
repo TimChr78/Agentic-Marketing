@@ -147,4 +147,25 @@ describe('edge outbox acknowledgement (#1203)', () => {
     await syncEdge(deps(), ws);
     expect(await outboxKeys()).toEqual([]);
   });
+
+  it('drains every delete while Valkey is unavailable even when a batch repeats a key', async () => {
+    // A put makes the sync consult the fence. Then 5,001 delete rows with one key queued twice:
+    // the drain's first batch holds only 4,999 distinct keys.
+    await queue(snapKey('deferred-put'), { traits: {}, segments: [] });
+    await queue(snapKey('del-1'), null);
+    await t.srv.db.admin.query(
+      `INSERT INTO edge_outbox (workspace_id, key, value) SELECT $1, $2 || g, NULL FROM generate_series(1, 5000) AS g`,
+      [ws, snapKey('del-')],
+    );
+    kv.set(snapKey('del-5000'), { stale: true });
+    const down = Object.create(t.srv.hot) as HotState;
+    down.tombstonedIds = async () => {
+      throw new Error('Valkey unavailable');
+    };
+    await syncEdge(deps(down), ws);
+    expect(kv.has(snapKey('del-5000'))).toBe(false);
+    expect(await outboxKeys()).toEqual([snapKey('deferred-put')]);
+    await syncEdge(deps(), ws);
+    expect(await outboxKeys()).toEqual([]);
+  });
 });

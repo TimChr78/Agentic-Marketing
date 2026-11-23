@@ -953,7 +953,8 @@ async function drainOutboxDeletes(
          SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
       [ws, rows.map((row) => row.id), generation],
     );
+    // Loop until nothing is left: the limit counts delete rows, and a key queued twice makes a full
+    // batch yield fewer distinct keys (#1203 review). Every pass acknowledges what it read.
     if (!acknowledged.rowCount) return false;
-    if (keys.length < 5000) return true;
   }
 }
