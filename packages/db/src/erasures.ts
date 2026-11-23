@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { migrate } from './migrate';
+import { withApplicationName } from './pool';
 
 // Erasures live in the database they protect, so a restore from a snapshot taken before an
 // erasure would bring the erased person back (#144). `am restore` reads this log from the live
@@ -139,18 +140,49 @@ export interface ReplayErasuresOptions {
   log?: (message: string) => void;
   /** Announce `application_name` on the connection, so a restore can identify its own work. */
   applicationName?: string;
+  /**
+   * Aborted when the restore loses its exclusive lock (#1204 review). Checked before the replay
+   * opens its connection and before every statement: another restore may already own the database,
+   * and a late write would land in its run.
+   */
+  signal?: AbortSignal;
 }
 
 interface ClientScope {
   databaseUrl: string;
   applicationName?: string;
+  signal?: AbortSignal;
+}
+
+/** The error an aborted restore must fail with, whether the signal carried one or not. */
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('the restore was aborted because its exclusive lock connection was lost');
+}
+
+function assertNotAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortReason(signal);
 }
 
 async function withClient<T>(scope: ClientScope, fn: (client: pg.Client) => Promise<T>): Promise<T> {
+  assertNotAborted(scope.signal);
   const client = new pg.Client({
-    connectionString: scope.databaseUrl,
-    ...(scope.applicationName === undefined ? {} : { application_name: scope.applicationName }),
+    // The URL's `application_name` takes precedence over the option in node-postgres, so a restore's
+    // own name has to be set in the connection string too (#1204 review).
+    connectionString:
+      scope.applicationName === undefined ? scope.databaseUrl : withApplicationName(scope.databaseUrl, scope.applicationName),
   });
+  if (scope.signal) {
+    // Every statement the replay issues goes through `client.query`; guarding it there covers the
+    // erasure writes, the tombstone and ledger inserts and the helper functions they call.
+    const signal = scope.signal;
+    const run = client.query.bind(client) as unknown as (...args: unknown[]) => Promise<unknown>;
+    client.query = ((...args: unknown[]) => {
+      assertNotAborted(signal);
+      return run(...args);
+    }) as unknown as typeof client.query;
+  }
   await client.connect();
   try {
     return await fn(client);
@@ -527,9 +559,10 @@ export async function replayErasuresAfterMigrate(
   log: ErasureLog,
   opts: ReplayErasuresAfterMigrateOptions,
 ): Promise<ReplayErasuresResult> {
+  // Migrating is a write. A restore that has already lost its lock must not even start (#1204).
+  assertNotAborted(opts.signal);
   const pool = new pg.Pool({
-    connectionString: databaseUrl,
-    ...(opts.applicationName === undefined ? {} : { application_name: opts.applicationName }),
+    connectionString: opts.applicationName === undefined ? databaseUrl : withApplicationName(databaseUrl, opts.applicationName),
   });
   try {
     await migrate(pool, {
@@ -540,9 +573,12 @@ export async function replayErasuresAfterMigrate(
   } finally {
     await pool.end();
   }
+  // Checked again before the replay connection opens: the migrations can take a while.
+  assertNotAborted(opts.signal);
   return replayErasures(databaseUrl, log, {
     ...(opts.log ? { log: opts.log } : {}),
     ...(opts.applicationName === undefined ? {} : { applicationName: opts.applicationName }),
+    ...(opts.signal === undefined ? {} : { signal: opts.signal }),
   });
 }
 
@@ -570,7 +606,8 @@ export async function replayErasures(
   if (!log.erasures.length && !log.tombstones.length && !log.keys?.length && !log.exclusionKeys?.length && !log.generations?.length)
     return result;
 
-  return withClient({ databaseUrl, applicationName: opts.applicationName }, async (client) => {
+  const scope = { databaseUrl, applicationName: opts.applicationName, ...(opts.signal ? { signal: opts.signal } : {}) };
+  return withClient(scope, async (client) => {
     // A restore run as the table owner must still see every workspace here; otherwise every captured
     // entry is "skipped" as if the snapshot no longer had its workspace (#1204 review).
     const workspaces = await listRestoredWorkspaceIds(client);

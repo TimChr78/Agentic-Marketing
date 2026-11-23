@@ -20,9 +20,12 @@ import {
   readDataKeySample,
   readErasureLog,
   replayErasuresAfterMigrate,
+  withApplicationName,
+  withRestoreAppName,
 } from '@agentic-marketing/db';
 import pg from 'pg';
 import { keyProviderFromEnv } from '../keys';
+import { clickhouseEndpoint } from './clickhouse-endpoint';
 import {
   acquireRestoreSessionLock,
   assertDatabaseDrained,
@@ -545,7 +548,9 @@ export function isOnlyIgnoredTransactionTimeout(message: string, targetMajor: nu
 
 async function onlyRejectedTransactionTimeout(databaseUrl: string, message: string): Promise<boolean> {
   if (!message.includes('transaction_timeout')) return false;
-  const client = new pg.Client({ connectionString: databaseUrl });
+  // The restore's probe announces the restore's name too: a successor's drain must see it, and a
+  // `DATABASE_URL` that names another application_name must not win (#1204 review).
+  const client = new pg.Client({ connectionString: withRestoreAppName(databaseUrl) });
   try {
     await client.connect();
     const { rows } = await client.query<{ num: string }>("SELECT current_setting('server_version_num') AS num");
@@ -666,20 +671,6 @@ function assertIdentifier(value: string, what: string): string {
 }
 
 const quoteIdentifier = (value: string) => `\`${assertIdentifier(value, 'ClickHouse')}\``;
-
-function clickhouseEndpoint(raw: string | undefined): { url: URL; headers: Record<string, string> } {
-  const url = new URL(raw?.trim() || 'http://localhost:8123');
-  const headers: Record<string, string> = {};
-  if (url.username || url.password) {
-    const user = decodeURIComponent(url.username);
-    const password = decodeURIComponent(url.password);
-    headers.authorization = `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
-    url.username = '';
-    url.password = '';
-  }
-  url.pathname = url.pathname.replace(/\/$/, '');
-  return { url, headers };
-}
 
 async function clickhouseRequest(
   endpoint: { url: URL; headers: Record<string, string> },
@@ -1169,8 +1160,9 @@ const sameBinding = (a: RestoreCaptureBinding, b: RestoreCaptureBinding) => a.ta
 /** Identifies the database a capture belongs to, with a host/database fallback when pg_control is unreadable. */
 export async function restoreTargetIdentity(databaseUrl: string, opts: { applicationName?: string } = {}): Promise<string> {
   const client = new pg.Client({
-    connectionString: databaseUrl,
-    ...(opts.applicationName === undefined ? {} : { application_name: opts.applicationName }),
+    // A restore's identity probe is one of its own connections, so it announces its name in the URL
+    // where node-postgres gives it precedence (#1204 review).
+    connectionString: opts.applicationName === undefined ? databaseUrl : withApplicationName(databaseUrl, opts.applicationName),
   });
   try {
     await client.connect();
@@ -1592,6 +1584,9 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
         appRole: role.role,
         appRolePassword: env.APP_DB_PASSWORD ?? '',
         applicationName: RESTORE_APPLICATION_NAME,
+        // A restore that notices its lock loss must not migrate or write anything afterwards
+        // (#1204 review).
+        signal: lockLoss.signal,
         log,
       });
       assertLock();

@@ -1,12 +1,14 @@
 import pg from 'pg';
+import { withApplicationName } from './pool';
 
 // Read-only helpers for `am backup`/`am restore`, which deliberately run without the server
 // configuration and only need DATABASE_URL (plus a key provider when they can have one).
 
 async function withClient<T>(scope: { databaseUrl: string; applicationName?: string }, fn: (client: pg.Client) => Promise<T>): Promise<T> {
   const client = new pg.Client({
-    connectionString: scope.databaseUrl,
-    ...(scope.applicationName === undefined ? {} : { application_name: scope.applicationName }),
+    // The URL wins over the option in node-postgres, so the name has to be set there too (#1204 review).
+    connectionString:
+      scope.applicationName === undefined ? scope.databaseUrl : withApplicationName(scope.databaseUrl, scope.applicationName),
   });
   await client.connect();
   try {

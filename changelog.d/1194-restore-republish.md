@@ -77,3 +77,16 @@ issues: [1194]
   keeps its own pending reason. It no longer uses the publication record to decide legacy status.
   The restore's end-of-run test suite also reads through the restored target's ledger and asserts
   the pre-erasure row is readable when reconciliation is bypassed, then excluded after it runs.
+- The drain now finds a predecessor's ClickHouse work by the database each running query uses
+  (`current_database`), not by the probe's own database, and it probes the endpoint the ClickHouse
+  load resolves — `CLICKHOUSE_URL`, or `http://localhost:8123` when it is unset — so a Postgres-only
+  restore is checked against the same ClickHouse point a later load would replace. Both halves of
+  the probe end at the drain's deadline instead of waiting on a stalled server, and a URL that
+  points at a load balancer or a multi-node cluster covers only the node it resolves to: pin one
+  node's URL for a restore.
+- Every PostgreSQL connection a restore opens announces `am-restore` in the connection string, so a
+  `DATABASE_URL` that carries its own `?application_name=` (a pooler's name, say) can no longer hide
+  the restore's backends from a successor's drain.
+- A restore that notices its lock is gone now checks the abort signal before migrating, before
+  opening the replay connection and before every replay statement, and before each ClickHouse
+  visibility chunk, so no write or request follows the lock loss even when the signal already fired.

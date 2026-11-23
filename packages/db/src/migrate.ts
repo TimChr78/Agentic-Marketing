@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { sha256 } from '@agentic-marketing/core';
 import pg from 'pg';
+import { withApplicationName } from './pool';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../migrations', import.meta.url));
 const LOCK_KEY = 7_340_001; // arbitrary constant: one migrator at a time across pods
@@ -355,8 +356,9 @@ export async function ensureAppRoleInDatabase(
   const role = opts.appRole ?? 'am_app';
   if (!roleName.test(role)) throw new Error(`Invalid app role name ${role}`);
   const client = new pg.Client({
-    connectionString: databaseUrl,
-    ...(opts.applicationName === undefined ? {} : { application_name: opts.applicationName }),
+    // The connection string's `application_name` takes precedence over the option in
+    // node-postgres, so a restore's role setup must set it in the URL (#1204 review).
+    connectionString: opts.applicationName === undefined ? databaseUrl : withApplicationName(databaseUrl, opts.applicationName),
   });
   await client.connect();
   try {

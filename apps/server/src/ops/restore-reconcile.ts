@@ -12,9 +12,11 @@ import {
   type RestoreFenceState,
   raiseRestoreFence,
   restoreFenceState,
+  withRestoreAppName,
 } from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore, type SubjectKeyKind } from '@agentic-marketing/events';
-import pg from 'pg';
+import pg, { type QueryConfig } from 'pg';
+import { type ClickHouseEndpoint, clickhouseEndpoint, clickhouseUrl } from './clickhouse-endpoint';
 
 /**
  * The last step of `am restore` (#1194): make sure ClickHouse's `erased_subjects` holds every
@@ -129,7 +131,7 @@ function assertRestoreNotAborted(signal: AbortSignal | undefined): void {
  * but does not take the shared lock (or one whose lock connection was lost before it exited).
  */
 export async function assertDatabaseDrained(databaseUrl: string): Promise<void> {
-  const client = new pg.Client({ connectionString: databaseUrl, application_name: RESTORE_APPLICATION_NAME });
+  const client = new pg.Client({ connectionString: withRestoreAppName(databaseUrl) });
   await client.connect();
   try {
     const { rows } = await client.query<{ n: number | string }>(
@@ -166,6 +168,11 @@ export function restoreClickHouseQueryId(): string {
 /** How long a successor restore waits for a predecessor's tagged work to disappear. */
 const RESTORE_WORK_DRAIN_TIMEOUT_MS = 60_000;
 const RESTORE_WORK_DRAIN_POLL_MS = 250;
+/**
+ * The floor for one probe request. A poll that starts with almost no time left still gets a
+ * complete round trip instead of a client timeout that would mask the drain's own refusal.
+ */
+const RESTORE_WORK_PROBE_MIN_MS = 250;
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -183,45 +190,36 @@ export interface RestoreWorkDrainOptions {
   log?: (message: string) => void;
 }
 
-interface ClickHouseDrainEndpoint {
-  url: URL;
-  headers: Record<string, string>;
-}
-
-/**
- * The ClickHouse endpoint for the drain probe. The probe itself is sent **without** the restore
- * marker, so it cannot count its own query in `system.processes`. A run whose environment sets no
- * `CLICKHOUSE_URL` has no configured ClickHouse target to inspect; its ClickHouse half is skipped
- * (and a restore that needs ClickHouse fails closed in its own steps).
- */
-function clickHouseDrainEndpoint(env: NodeJS.ProcessEnv): ClickHouseDrainEndpoint | null {
-  const raw = env.CLICKHOUSE_URL?.trim();
-  if (!raw) return null;
-  const url = new URL(raw);
-  const headers: Record<string, string> = {};
-  if (url.username || url.password) {
-    const user = decodeURIComponent(url.username);
-    const password = decodeURIComponent(url.password);
-    headers.authorization = `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
-    url.username = '';
-    url.password = '';
-  }
-  url.pathname = url.pathname.replace(/\/$/, '');
-  return { url, headers };
-}
-
 /** How many ClickHouse requests carrying the restore marker are running right now. */
-async function countRunningRestoreClickHouseQueries(endpoint: ClickHouseDrainEndpoint, database: string): Promise<number> {
+async function countRunningRestoreClickHouseQueries(endpoint: ClickHouseEndpoint, database: string, timeoutMs: number): Promise<number> {
   const target = new URL(endpoint.url);
   // `system` always exists; the restore's own database is a parameter, so a target database that
   // is fresh or absent does not make the probe fail.
   target.searchParams.set('database', 'system');
   target.searchParams.set('param_db', database);
+  // `current_database` is the running query's own database (`system.processes.current_database`).
+  // A bare `database` in this statement resolves to the probe's own database — always `system` —
+  // so it would never match a restore writing elsewhere (#1204 review).
   target.searchParams.set(
     'query',
-    `SELECT count() FROM system.processes WHERE startsWith(query_id, '${RESTORE_CLICKHOUSE_QUERY_PREFIX}') AND database = {db:String}`,
+    `SELECT count() FROM system.processes WHERE startsWith(query_id, '${RESTORE_CLICKHOUSE_QUERY_PREFIX}') AND current_database = {db:String}`,
   );
-  const response = await fetch(target, { headers: endpoint.headers });
+  let response: Response;
+  const timeout = Math.max(RESTORE_WORK_PROBE_MIN_MS, timeoutMs);
+  try {
+    // The probe is bounded by the drain's deadline: a ClickHouse that accepted the request and
+    // never answers must not hold the restore open (#1204 review).
+    response = await fetch(target, { headers: endpoint.headers, signal: AbortSignal.timeout(timeout) });
+  } catch (err) {
+    const stalled = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    throw new Error(
+      stalled
+        ? `could not check ClickHouse for running restore work: the request did not finish within ${timeout} ms. ` +
+            'Refusing to start a restore before its ClickHouse work can be seen.'
+        : `could not check ClickHouse for running restore work: ${(err as Error).message}. ` +
+            'Refusing to start a restore before its ClickHouse work can be seen.',
+    );
+  }
   if (!response.ok) {
     const detail = (await response.text()).slice(0, 1_000).trim();
     throw new Error(
@@ -229,7 +227,22 @@ async function countRunningRestoreClickHouseQueries(endpoint: ClickHouseDrainEnd
         'Refusing to start a restore before its ClickHouse work can be seen.',
     );
   }
-  const count = Number((await response.text()).trim());
+  let text: string;
+  try {
+    // The body is part of the same request: a server that sends headers and then stalls is bounded
+    // by the same signal.
+    text = await response.text();
+  } catch (err) {
+    const stalled = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    throw new Error(
+      stalled
+        ? `could not check ClickHouse for running restore work: the response did not finish within ${timeout} ms. ` +
+            'Refusing to start a restore before its ClickHouse work can be seen.'
+        : `could not check ClickHouse for running restore work: ${(err as Error).message}. ` +
+            'Refusing to start a restore before its ClickHouse work can be seen.',
+    );
+  }
+  const count = Number(text.trim());
   if (!Number.isFinite(count)) throw new Error('ClickHouse returned an unreadable count for running restore work');
   return count;
 }
@@ -257,25 +270,36 @@ export async function assertRestoreWorkDrained(databaseUrl: string, opts: Restor
   const timeoutMs = Math.max(0, opts.timeoutMs ?? RESTORE_WORK_DRAIN_TIMEOUT_MS);
   const pollMs = Math.max(1, opts.pollMs ?? RESTORE_WORK_DRAIN_POLL_MS);
   const exclude = [...(opts.excludePids ?? [])];
-  const endpoint = clickHouseDrainEndpoint(env);
+  // Resolved the way the ClickHouse load and the reconciliation resolve it, so a deployment
+  // without `CLICKHOUSE_URL` still probes the default endpoint they write to (#1204 review). The
+  // probe itself is sent **without** the restore marker, so it cannot count its own query.
+  const endpoint: ClickHouseEndpoint = clickhouseEndpoint(env.CLICKHOUSE_URL);
   const clickhouseDatabase = env.CLICKHOUSE_DATABASE?.trim() || 'am';
   const deadline = Date.now() + timeoutMs;
   // The probe announces the same name as the restore, so it is on the list of connections a later
-  // successor waits for; `pid <> pg_backend_pid()` keeps it from counting itself here.
-  const client = new pg.Client({ connectionString: databaseUrl, application_name: RESTORE_APPLICATION_NAME });
+  // successor waits for; `pid <> pg_backend_pid()` keeps it from counting itself here. The
+  // connection gets the whole bound; each poll below gets the part still left (#1204 review).
+  const client = new pg.Client({
+    connectionString: withRestoreAppName(databaseUrl),
+    connectionTimeoutMillis: Math.max(RESTORE_WORK_PROBE_MIN_MS, timeoutMs),
+  });
   await client.connect();
   try {
     for (;;) {
-      const { rows } = await client.query<{ n: number | string }>(
-        `SELECT count(*)::int AS n FROM pg_stat_activity
+      const remaining = Math.max(1, deadline - Date.now());
+      const { rows } = await client.query<{ n: number | string }>({
+        text: `SELECT count(*)::int AS n FROM pg_stat_activity
           WHERE datname = current_database()
             AND application_name = $1
             AND pid <> pg_backend_pid()
             AND NOT (pid = ANY($2::int[]))`,
-        [RESTORE_APPLICATION_NAME, exclude],
-      );
+        values: [RESTORE_APPLICATION_NAME, exclude],
+        // node-postgres reads a per-query `query_timeout` at runtime; its types only declare the
+        // client option, hence the cast. A hung poll still ends at the drain's bound.
+        query_timeout: Math.max(RESTORE_WORK_PROBE_MIN_MS, remaining),
+      } as QueryConfig & { query_timeout: number });
       const backends = Number(rows[0]?.n ?? 0);
-      const queries = endpoint ? await countRunningRestoreClickHouseQueries(endpoint, clickhouseDatabase) : 0;
+      const queries = await countRunningRestoreClickHouseQueries(endpoint, clickhouseDatabase, Math.max(1, deadline - Date.now()));
       if (backends === 0 && queries === 0) return;
       if (Date.now() >= deadline)
         throw new Error(
@@ -395,13 +419,14 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
   };
   const log = opts.log ?? (() => {});
   const batchSize = Math.max(1, Math.trunc(opts.batchSize ?? DEFAULT_BATCH_SIZE));
-  const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: 2, application_name: RESTORE_APPLICATION_NAME });
+  const pool = new pg.Pool({ connectionString: withRestoreAppName(opts.databaseUrl), max: 2 });
   const env = opts.env ?? process.env;
   const signal = opts.signal;
   const store =
     opts.events === undefined
       ? clickHouseStore({
-          url: env.CLICKHOUSE_URL ?? 'http://localhost:8123',
+          // The same resolved endpoint (`CLICKHOUSE_URL` or its default) the drain probes.
+          url: clickhouseUrl(env.CLICKHOUSE_URL),
           database: env.CLICKHOUSE_DATABASE?.trim() || 'am',
           // Every exclusion read and publication this store issues is tagged, so a successor's
           // drain finds it in `system.processes` (#1204 review).
@@ -498,6 +523,9 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
         // confirmed before a job is marked published.
         let visible = true;
         for (let offset = 0; offset < keys.length; offset += batchSize) {
+          // A read is a request too: the installed client sends even with an already-aborted
+          // signal, so check before each chunk (#1204 review).
+          assertRestoreNotAborted(signal);
           if (!(await events.erasedSubjectsVisible(workspaceId, keys.slice(offset, offset + batchSize)))) {
             visible = false;
             break;
@@ -624,7 +652,7 @@ export async function finishRestoreReconciliation(opts: ReconcileRestoreOptions)
     await clearRestoreFence(opts.fenceClient, opts.fence);
     return result;
   }
-  const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: 1, application_name: RESTORE_APPLICATION_NAME });
+  const pool = new pg.Pool({ connectionString: withRestoreAppName(opts.databaseUrl), max: 1 });
   try {
     assertRestoreNotAborted(opts.signal);
     await clearRestoreFence(pool, opts.fence);
@@ -689,7 +717,7 @@ export interface RestoreSessionLockOptions {
 export async function acquireRestoreSessionLock(databaseUrl: string, opts: RestoreSessionLockOptions = {}): Promise<RestoreSessionLock> {
   // The lock session announces the restore name too: a successor's drain must see it, and excludes
   // it by PID while this attempt is the successor (#1204 review).
-  const client = new pg.Client({ connectionString: databaseUrl, application_name: RESTORE_APPLICATION_NAME });
+  const client = new pg.Client({ connectionString: withRestoreAppName(databaseUrl) });
   await client.connect();
   let pid = 0;
   try {

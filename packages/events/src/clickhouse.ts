@@ -326,9 +326,19 @@ export async function applyRowPolicies(
   }
 }
 
-async function acceptsWorkspaceSetting(client: ClickHouseClient) {
+/**
+ * Whether the server takes `SQL_` custom settings. A restore's store tags the probe with its
+ * `query_id` and passes its lock-loss signal, so a successor's drain sees it and a lost lock
+ * cancels it instead of leaving an untagged request behind (#1204 review).
+ */
+async function acceptsWorkspaceSetting(client: ClickHouseClient, opts: { signal?: AbortSignal; queryIdPrefix?: string } = {}) {
   try {
-    await client.command({ query: 'SELECT 1', clickhouse_settings: { SQL_workspace: '' } as never });
+    await client.command({
+      query: 'SELECT 1',
+      clickhouse_settings: { SQL_workspace: '' } as never,
+      ...(opts.queryIdPrefix ? { query_id: `${opts.queryIdPrefix}${randomUUID()}` } : {}),
+      ...(opts.signal ? { abort_signal: opts.signal } : {}),
+    });
     return true;
   } catch {
     return false;
@@ -935,7 +945,10 @@ export function clickHouseStore(opts: {
   // Whether the server takes the SQL_workspace setting; when it does, every query names its workspace.
   let accepts: Promise<boolean> | undefined;
   const settingsFor = async (workspaceId: string): Promise<Record<string, string>> => {
-    accepts ??= acceptsWorkspaceSetting(client);
+    accepts ??= acceptsWorkspaceSetting(client, {
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.queryIdPrefix ? { queryIdPrefix: opts.queryIdPrefix } : {}),
+    });
     return (await accepts) ? { SQL_workspace: workspaceId } : {};
   };
   type QueryArgs = Parameters<ClickHouseClient['query']>[0];

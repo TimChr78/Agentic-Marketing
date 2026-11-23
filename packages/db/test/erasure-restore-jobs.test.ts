@@ -3,6 +3,7 @@ import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { erasureLedgerChecker } from '../src/erasureCleanup';
 import { readErasureLog, replayErasures, replayErasuresAfterMigrate } from '../src/erasures';
+import { RESTORE_APPLICATION_NAME } from '../src/pool';
 import { createDisposableDb, hasTestDatabase } from './disposable';
 
 // A restore from a snapshot taken before an erasure brings the person back (#144). The SQL log
@@ -534,5 +535,44 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
     limited.username = role;
     limited.password = 'rls-password';
     await expect(readErasureLog(limited.toString())).rejects.toThrow(/hidden by row-level security from role/);
+  }, 120_000);
+
+  it('replays nothing when its abort signal already fired (#1204 review)', async () => {
+    const live = await createDisposableDb('erasure_abort_live');
+    const restored = await createDisposableDb('erasure_abort_restored');
+    open.push(live, restored);
+    const profile = 'prf_0000000000000000000000000000ab0a';
+    const erasureId = 'era_0000000000000000000000000000ab0a';
+    await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    await live.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'abort test', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    const log = await readErasureLog(live.url.toString());
+    expect(log.erasures).toHaveLength(1);
+    // The restored snapshot still holds the person, so a replay would erase them.
+    await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [live.workspace]);
+    await restored.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+
+    const abort = new AbortController();
+    abort.abort(new Error('the restore lock was lost'));
+    await expect(
+      replayErasuresAfterMigrate(restored.url.toString(), log, {
+        appRolePassword: 'not-used',
+        applicationName: RESTORE_APPLICATION_NAME,
+        signal: abort.signal,
+      }),
+    ).rejects.toThrow(/restore lock was lost/);
+    // Nothing ran: the lock is already gone, so even the migration and the first write were refused.
+    const profiles = await restored.db.admin.query('SELECT id FROM profiles WHERE workspace_id = $1 AND id = $2', [
+      live.workspace,
+      profile,
+    ]);
+    expect(profiles.rows).toHaveLength(1);
+    const erasures = await restored.db.admin.query('SELECT id FROM erasures WHERE workspace_id = $1', [live.workspace]);
+    expect(erasures.rows).toEqual([]);
+    const jobs = await restored.db.admin.query('SELECT erasure_id FROM erasure_cleanup_jobs WHERE workspace_id = $1', [live.workspace]);
+    expect(jobs.rows).toEqual([]);
   }, 120_000);
 });

@@ -358,10 +358,18 @@ contents but does not create them.
   `a previous restore's work is still running` if either is still there. The advisory lock cannot
   fence work on other connections: the role setup, migration, erasure replay and reconciliation
   pools, the `pg_restore` child and ClickHouse `TRUNCATE`/`INSERT` requests all carry the marker.
-  A restore that loses its lock stops issuing new work and cancels in-flight ClickHouse requests.
-  Residual limit: a run cut off by a network partition it has not yet noticed can still issue one
-  request after the successor's check, so after a failed restore make sure the old `am restore`
-  process has exited before retrying.
+  A `DATABASE_URL` whose query string names another `application_name` does not change this: every
+  connection a restore opens sets `am-restore` in the connection string, where the driver gives it
+  precedence. The ClickHouse probe resolves the same endpoint the load and reconciliation use
+  (`CLICKHOUSE_URL`, default `http://localhost:8123`) and runs in the target database, so a
+  deployment that leaves the variable unset is still checked; if that endpoint cannot be reached
+  within the drain's deadline the restore refuses rather than running unverified. With a URL that
+  points at a load balancer or a multi-node cluster, `system.processes` shows only the node the
+  endpoint resolves to, so a restore must use a pinned single-node URL (there is no cluster setting
+  to widen the probe). A restore that loses its lock stops issuing new work and cancels in-flight
+  ClickHouse requests. Residual limit: a run cut off by a network partition it has not yet noticed
+  can still issue one request after the successor's check, so after a failed restore make sure the
+  old `am restore` process has exited before retrying.
 - reports the snapshot time in its final line (`snapshot <createdAt>`);
 - reads `erasures` and `erasure_tombstones` from the live database before touching it, and replays
   them after loading Postgres (see [Retention and erased people](#retention-and-erased-people)).

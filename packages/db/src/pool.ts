@@ -32,6 +32,24 @@ export const APP_DATABASE_APPLICATION_NAME = 'agentic-marketing';
 export const RESTORE_APPLICATION_NAME = 'am-restore';
 
 /**
+ * A connection string that announces `applicationName`, replacing whatever the URL's query string
+ * named (#1204 review). node-postgres gives `?application_name=` in the connection string
+ * precedence over the client option, so setting only the option on a `DATABASE_URL` that already
+ * carries one silently announces the other name — and a restore's leftover work would then escape
+ * the successor's drain.
+ */
+export function withApplicationName(databaseUrl: string, applicationName: string): string {
+  const url = new URL(databaseUrl);
+  url.searchParams.set('application_name', applicationName);
+  return url.toString();
+}
+
+/** The connection string every restore connection uses: it announces {@link RESTORE_APPLICATION_NAME}. */
+export function withRestoreAppName(databaseUrl: string): string {
+  return withApplicationName(databaseUrl, RESTORE_APPLICATION_NAME);
+}
+
+/**
  * These are **session** advisory locks: the lock belongs to the PostgreSQL backend that ran the
  * statement. They are incompatible with PgBouncer (or another pooler) in **transaction** pooling
  * mode, where that backend can be handed to a different client between statements; use session

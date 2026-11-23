@@ -10,6 +10,7 @@ import {
   type RestoreFenceState,
   raiseRestoreFence,
   restoreFenceState,
+  withRestoreAppName,
 } from '@agentic-marketing/db';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -628,6 +629,49 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     }
   }, 120_000);
 
+  it('issues no second visibility check after its signal aborts (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_visibility_abort');
+    open.push(d);
+    const erasureId = 'era_00000000000000000000000000000ab1';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY['prf_00000000000000000000000000000ab1']::text[], 'user_test', 'abort test', '{"profiles":1}')`,
+      [d.workspace, erasureId],
+    );
+    for (const key of ['a'.repeat(64), 'b'.repeat(64)])
+      await d.db.admin.query(
+        `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+         VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_abort', $3, 'full')`,
+        [d.workspace, key, erasureId],
+      );
+
+    // The lock is lost while the first chunk's answer is in flight; the installed client would
+    // still send the next request with an already-aborted signal, so the loop checks first.
+    const abort = new AbortController();
+    const checks: string[][] = [];
+    await expect(
+      reconcileRestoredErasureExclusions({
+        databaseUrl: d.url.toString(),
+        batchSize: 1,
+        signal: abort.signal,
+        log: () => {},
+        events: {
+          async erasedSubjectKeys() {
+            return new Set<string>();
+          },
+          async publishErasedSubjects() {},
+          async erasedSubjectsVisible(_workspaceId, keys) {
+            checks.push([...keys]);
+            abort.abort(new Error('the restore lock was lost'));
+            return true;
+          },
+        },
+      }),
+    ).rejects.toThrow(/restore lock was lost/);
+    // Two keys in one-key chunks: only the first chunk's request went out.
+    expect(checks).toHaveLength(1);
+  }, 120_000);
+
   it('cleans a completed job’s outbox when the restored snapshot predates the erasure ledger (#1204 review)', async () => {
     const d = await createDisposableDb('restore_outbox_no_ledger');
     open.push(d);
@@ -703,10 +747,12 @@ describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work 
     const d = await createDisposableDb('restore_drain_ch');
     open.push(d);
     const queryId = `${RESTORE_CLICKHOUSE_QUERY_PREFIX}drain-${randomUUID()}`;
-    // The drain probes `system.processes` for this database; run the marked query in the same one.
-    const drainEnv = { CLICKHOUSE_URL: CH_URL, CLICKHOUSE_DATABASE: 'system' };
+    // The probe runs in `system` but must look at each running query's own database
+    // (`current_database`); `database` there is the probe's constant. Run the marked request in the
+    // restore's target database, not in `system`, so a stale predicate misses it (#1204 review).
+    const drainEnv = { CLICKHOUSE_URL: CH_URL, CLICKHOUSE_DATABASE: 'default' };
     const running = new URL(CH_URL);
-    running.searchParams.set('database', 'system');
+    running.searchParams.set('database', 'default');
     running.searchParams.set('query_id', queryId);
     running.searchParams.set('query', 'SELECT sleep(2)');
     // Leave the query in flight; the request is what system.processes shows, not its result.
@@ -734,6 +780,92 @@ describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work 
     // After the marked request ended, the drain has nothing left to wait for.
     await assertRestoreWorkDrained(d.url.toString(), { timeoutMs: 2_000, pollMs: 25, env: drainEnv });
   }, 60_000);
+
+  it('probes the default ClickHouse endpoint when CLICKHOUSE_URL is unset (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_drain_ch_default');
+    open.push(d);
+    // The ClickHouse load and the reconciliation fall back to localhost:8123 when the environment
+    // names no URL. A drain that skipped ClickHouse there would let a predecessor write into the
+    // point the successor's own load is about to replace, so it must probe the same endpoint.
+    const requested: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requested.push(String(input));
+      return new Response('0', { status: 200 });
+    }) as typeof fetch;
+    try {
+      await assertRestoreWorkDrained(d.url.toString(), { timeoutMs: 1_000, pollMs: 25, env: {} });
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(requested).toHaveLength(1);
+    const probe = new URL(requested[0]!);
+    expect(probe.host).toBe('localhost:8123');
+    expect(probe.searchParams.get('database')).toBe('system');
+    expect(probe.searchParams.get('query')).toContain('current_database');
+  }, 60_000);
+
+  it('ends a stalled ClickHouse probe at its bound and refuses (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_drain_ch_stall');
+    open.push(d);
+    // A ClickHouse that accepts the probe and never answers. The drain's own deadline has to abort
+    // it; a client without a timeout would keep the restore waiting forever.
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) {
+          reject(new Error('the drain probe had no deadline'));
+          return;
+        }
+        signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')), { once: true });
+      });
+    }) as typeof fetch;
+    const started = Date.now();
+    try {
+      await expect(
+        assertRestoreWorkDrained(d.url.toString(), {
+          timeoutMs: 200,
+          pollMs: 25,
+          env: { CLICKHOUSE_URL: 'http://clickhouse.test:8123' },
+        }),
+      ).rejects.toThrow(/ClickHouse|timed out|aborted/i);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    expect(Date.now() - started).toBeLessThan(1_000);
+  }, 60_000);
+
+  it('announces am-restore even when the connection string names another application_name (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_appname_override');
+    open.push(d);
+    const url = new URL(d.url.toString());
+    // node-postgres gives `?application_name=` precedence over the client option, so a restore that
+    // only set the option would announce `maintenance` and be invisible to a successor's drain.
+    url.searchParams.set('application_name', 'maintenance');
+    url.searchParams.set('sslmode', 'disable');
+    // The helper sets the name in the URL and leaves the other parameters alone.
+    const tagged = new URL(withRestoreAppName(url.toString()));
+    expect(tagged.searchParams.get('application_name')).toBe(RESTORE_APPLICATION_NAME);
+    expect(tagged.searchParams.get('sslmode')).toBe('disable');
+    expect(tagged.host).toBe(url.host);
+    const session = await acquireRestoreSessionLock(url.toString());
+    try {
+      const observer = new pg.Client({ connectionString: d.url.toString() });
+      await observer.connect();
+      try {
+        const { rows } = await observer.query<{ application_name: string }>(
+          'SELECT application_name FROM pg_stat_activity WHERE pid = $1',
+          [session.pid],
+        );
+        expect(rows[0]?.application_name).toBe(RESTORE_APPLICATION_NAME);
+      } finally {
+        await observer.end();
+      }
+    } finally {
+      await session.release();
+    }
+  }, 120_000);
 });
 
 describe('a restore tags and stops its own work (#1204 review)', () => {
