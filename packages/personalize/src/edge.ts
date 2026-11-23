@@ -937,13 +937,23 @@ async function drainOutboxDeletes(
   kv: { delete(keys: string[]): Promise<void> },
   generation: number,
 ): Promise<boolean> {
+  // Stop at the deletes queued when the drain started, so a steady stream of new erasures cannot
+  // hold this workspace's sync (and the scheduler behind it) forever; newer ones wait for the next
+  // tick (#1203 review).
+  const {
+    rows: [{ upto }],
+  } = await deps.db.admin.query<{ upto: string | null }>(
+    'SELECT max(id) AS upto FROM edge_outbox WHERE workspace_id = $1 AND value IS NULL',
+    [ws],
+  );
+  if (upto === null) return true;
   for (;;) {
     const { rows } = await deps.db.admin.query<{ id: string; key: string }>(
       `WITH doomed AS (
          SELECT DISTINCT key FROM (
-           SELECT key FROM edge_outbox WHERE workspace_id = $1 AND value IS NULL ORDER BY id LIMIT 5000) d)
+           SELECT key FROM edge_outbox WHERE workspace_id = $1 AND value IS NULL AND id <= $2 ORDER BY id LIMIT 5000) d)
        SELECT o.id, o.key FROM edge_outbox o JOIN doomed USING (key) WHERE o.workspace_id = $1 ORDER BY o.id`,
-      [ws],
+      [ws, upto],
     );
     if (!rows.length) return true;
     const keys = [...new Set(rows.map((row) => row.key))];
@@ -953,8 +963,9 @@ async function drainOutboxDeletes(
          SELECT 1 FROM edge_targets WHERE workspace_id = $1 AND generation = $3)`,
       [ws, rows.map((row) => row.id), generation],
     );
-    // Loop until nothing is left: the limit counts delete rows, and a key queued twice makes a full
-    // batch yield fewer distinct keys (#1203 review). Every pass acknowledges what it read.
+    // Loop until nothing up to the mark is left: the limit counts delete rows, and a key queued
+    // twice makes a full batch yield fewer distinct keys (#1203 review). Every pass acknowledges
+    // what it read.
     if (!acknowledged.rowCount) return false;
   }
 }

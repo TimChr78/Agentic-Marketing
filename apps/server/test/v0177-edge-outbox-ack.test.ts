@@ -23,6 +23,7 @@ let owner: User;
 let ws: string;
 let pause: { path: string; entered: ReturnType<typeof deferred>; release: ReturnType<typeof deferred> } | undefined;
 const kv = new Map<string, unknown>();
+let onDelete: (() => Promise<void>) | undefined;
 const NAMESPACE = 'e'.repeat(32);
 const snapKey = (id: string) => `am:snap:${ws}:a:${id}`;
 const deps = (hot: HotState = t.srv.hot) => ({ db: t.srv.db, hot, kp: t.srv.keyProvider, egress: t.srv.egress });
@@ -53,8 +54,10 @@ beforeAll(async () => {
       }
       let result: unknown[] = [];
       if (match[2] === '/bulk' && req.method === 'PUT') for (const entry of body) kv.set(entry.key, JSON.parse(entry.value));
-      else if (match[2] === '/bulk/delete') for (const key of body) kv.delete(key);
-      else if (match[2] === '/keys')
+      else if (match[2] === '/bulk/delete') {
+        for (const key of body) kv.delete(key);
+        await onDelete?.();
+      } else if (match[2] === '/keys')
         result = [...kv.keys()].filter((key) => key.startsWith(url.searchParams.get('prefix') ?? '')).map((name) => ({ name }));
       res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ success: true, errors: [], result }));
     } catch {
@@ -165,6 +168,32 @@ describe('edge outbox acknowledgement (#1203)', () => {
     await syncEdge(deps(down), ws);
     expect(kv.has(snapKey('del-5000'))).toBe(false);
     expect(await outboxKeys()).toEqual([snapKey('deferred-put')]);
+    await syncEdge(deps(), ws);
+    expect(await outboxKeys()).toEqual([]);
+  });
+
+  it('stops the outage drain at the deletes queued when it started', async () => {
+    await queue(snapKey('deferred-put-2'), { traits: {}, segments: [] });
+    await queue(snapKey('first-delete'), null);
+    // Every KV delete queues another erasure delete, as a steady stream of erasures would.
+    let added = 0;
+    onDelete = async () => {
+      if (added >= 50) return; // a safety stop for the old, unbounded loop
+      added++;
+      await queue(snapKey(`streamed-delete-${added}`), null);
+    };
+    const down = Object.create(t.srv.hot) as HotState;
+    down.tombstonedIds = async () => {
+      throw new Error('Valkey unavailable');
+    };
+    try {
+      await syncEdge(deps(down), ws);
+    } finally {
+      onDelete = undefined;
+    }
+    // One pass: the delete that was queued at the start went out, the one it triggered waits.
+    expect(added).toBe(1);
+    expect(await outboxKeys()).toEqual([snapKey('deferred-put-2'), snapKey('streamed-delete-1')]);
     await syncEdge(deps(), ws);
     expect(await outboxKeys()).toEqual([]);
   });
