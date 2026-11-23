@@ -251,7 +251,9 @@ describe('singleton artifacts stay unique (#869)', () => {
       expect(rejected).toHaveLength(1);
       const err = (rejected[0] as PromiseRejectedResult).reason as { code: string; message: string };
       expect(err.code).toBe('conflict');
-      expect(err.message).not.toMatch(/internal|500/i);
+      // Word boundaries: the conflict message names the existing brand's id, and a random id can
+      // contain "500" (#1216).
+      expect(err.message).not.toMatch(/\binternal\b|\b500\b/i);
       const rows = await t.srv.db.admin.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM artifacts WHERE workspace_id = $1 AND type = 'brand'",
         [ws],
