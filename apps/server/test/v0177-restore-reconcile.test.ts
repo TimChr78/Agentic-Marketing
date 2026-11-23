@@ -437,13 +437,15 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
       const found = Date.now() + 5_000;
       while (runningRestoreChildren() === 0 && Date.now() < found) await new Promise((resolve) => setTimeout(resolve, 20));
       expect(runningRestoreChildren()).toBe(1);
-      // The backend that holds the session lock, found the way an operator would: by its lock.
+      // The backend that holds the session lock, found the way an operator would: by its lock. The
+      // key is per database, and other servers on the same cluster hold it in theirs.
       const finder = new pg.Client({ connectionString: databaseUrl });
       await finder.connect();
       try {
         const { rows } = await finder.query<{ pid: number }>(
           `SELECT pid FROM pg_locks
-            WHERE locktype = 'advisory' AND objid = $1 AND objsubid = 1 AND granted AND pid <> pg_backend_pid()`,
+            WHERE locktype = 'advisory' AND objid = $1 AND objsubid = 1 AND granted AND pid <> pg_backend_pid()
+              AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
           [RESTORE_ADVISORY_LOCK_KEY],
         );
         expect(rows).toHaveLength(1);
