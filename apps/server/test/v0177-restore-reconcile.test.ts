@@ -1,11 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   clearRestoreFence,
   RESTORE_ADVISORY_LOCK_KEY,
+  RESTORE_APPLICATION_NAME,
   type RestoreFenceState,
   raiseRestoreFence,
   restoreFenceState,
@@ -13,8 +14,14 @@ import {
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../../packages/db/test/disposable';
-import { runningRestoreChildren, runRestoreChild, stopRestoreChildren } from '../src/ops/backup-lib';
-import { acquireRestoreSessionLock, finishRestoreReconciliation, reconcileRestoredErasureExclusions } from '../src/ops/restore-reconcile';
+import { restoreClickHouse, restorePostgres, runningRestoreChildren, runRestoreChild, stopRestoreChildren } from '../src/ops/backup-lib';
+import {
+  acquireRestoreSessionLock,
+  assertRestoreWorkDrained,
+  finishRestoreReconciliation,
+  RESTORE_CLICKHOUSE_QUERY_PREFIX,
+  reconcileRestoredErasureExclusions,
+} from '../src/ops/restore-reconcile';
 
 // The restore's final step (#1194). It must publish only what the ClickHouse point lost, record the
 // confirmation on the jobs, and leave a completed job complete instead of reopening every
@@ -24,6 +31,8 @@ const open: Awaited<ReturnType<typeof createDisposableDb>>[] = [];
 afterAll(async () => {
   for (const d of open) await d.close().catch(() => {});
 });
+
+const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 
 describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusions (#1194)', () => {
   it('re-publishes only missing keys, then marks the jobs published without reopening complete ones', async () => {
@@ -664,4 +673,117 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     const left = await d.db.admin.query('SELECT id FROM outbox WHERE workspace_id = $1', [d.workspace]);
     expect(left.rows).toEqual([]);
   }, 120_000);
+});
+
+// #1204 review: the exclusive advisory lock is held on one session, so it cannot fence the work the
+// previous restore issues on its other connections. A successor waits until that work is gone.
+describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work (#1204 review)', () => {
+  it('waits for another backend tagged am-restore, then refuses once its bound passes', async () => {
+    const d = await createDisposableDb('restore_drain_pg');
+    open.push(d);
+    const databaseUrl = d.url.toString();
+    const stale = new pg.Client({ connectionString: databaseUrl, application_name: RESTORE_APPLICATION_NAME });
+    await stale.connect();
+    try {
+      const started = Date.now();
+      await expect(assertRestoreWorkDrained(databaseUrl, { timeoutMs: 300, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } })).rejects.toThrow(
+        /a previous restore's work is still running/,
+      );
+      // It waited for the bound instead of proceeding, and the drain's own connection did not
+      // count itself.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+    } finally {
+      await stale.end();
+    }
+    // Once the tagged backend is gone the same drain passes immediately.
+    await assertRestoreWorkDrained(databaseUrl, { timeoutMs: 1_000, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } });
+  }, 60_000);
+
+  it('waits for a running ClickHouse request that carries the restore marker', async () => {
+    const d = await createDisposableDb('restore_drain_ch');
+    open.push(d);
+    const queryId = `${RESTORE_CLICKHOUSE_QUERY_PREFIX}drain-${randomUUID()}`;
+    // The drain probes `system.processes` for this database; run the marked query in the same one.
+    const drainEnv = { CLICKHOUSE_URL: CH_URL, CLICKHOUSE_DATABASE: 'system' };
+    const running = new URL(CH_URL);
+    running.searchParams.set('database', 'system');
+    running.searchParams.set('query_id', queryId);
+    running.searchParams.set('query', 'SELECT sleep(2)');
+    // Leave the query in flight; the request is what system.processes shows, not its result.
+    const sleeping = fetch(running, { method: 'POST' }).then(
+      (response) => response.text(),
+      () => 'killed',
+    );
+    try {
+      // Wait until ClickHouse lists the marked query as running before draining against it.
+      const listedBy = Date.now() + 10_000;
+      for (;;) {
+        const probe = new URL(CH_URL);
+        probe.searchParams.set('query', `SELECT count() FROM system.processes WHERE query_id = '${queryId}'`);
+        const text = await fetch(probe).then((response) => response.text());
+        if (Number(text.trim()) > 0) break;
+        if (Date.now() > listedBy) throw new Error('the marked ClickHouse query never appeared in system.processes');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await expect(assertRestoreWorkDrained(d.url.toString(), { timeoutMs: 300, pollMs: 25, env: drainEnv })).rejects.toThrow(
+        /a previous restore's work is still running/,
+      );
+    } finally {
+      await sleeping;
+    }
+    // After the marked request ended, the drain has nothing left to wait for.
+    await assertRestoreWorkDrained(d.url.toString(), { timeoutMs: 2_000, pollMs: 25, env: drainEnv });
+  }, 60_000);
+});
+
+describe('a restore tags and stops its own work (#1204 review)', () => {
+  it('sends no further ClickHouse request after its signal aborts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'am-restore-ch-abort-'));
+    const files = ['one.native', 'two.native'];
+    for (const file of files) await writeFile(join(dir, file), 'x');
+    const controller = new AbortController();
+    const requests: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests.push(String(input));
+      // The lock is lost while the first request is in flight.
+      controller.abort(new Error('the restore lock was lost'));
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      await expect(
+        restoreClickHouse({
+          runDir: dir,
+          tables: [{ name: 'events', totalRowsBefore: 0, files: files.map((file) => ({ file, bytes: 1, sha256: 'x', rows: 0 })) }],
+          url: 'http://clickhouse.test:8123',
+          database: 'am',
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/the restore lock was lost/);
+      // Only the TRUNCATE went out: the insert was refused before it was sent.
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatch(/TRUNCATE/);
+      // Every request the restore issues carries the marker the successor waits on.
+      expect(requests[0]).toContain(`query_id=${RESTORE_CLICKHOUSE_QUERY_PREFIX}`);
+    } finally {
+      globalThis.fetch = realFetch;
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('runs pg_restore with PGAPPNAME=am-restore', async () => {
+    const bin = await mkdtemp(join(tmpdir(), 'am-restore-pgappname-'));
+    const out = join(bin, 'pgappname.txt');
+    // A stand-in `pg_restore` that records the libpq application name its parent handed it.
+    await writeFile(join(bin, 'pg_restore'), `#!/bin/sh\nprintf '%s' "$PGAPPNAME" > "${out}"\n`, { mode: 0o755 });
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath ?? ''}`;
+    try {
+      await restorePostgres('postgres://am:am@127.0.0.1:5432/am_test', join(bin, 'unused.dump'));
+      expect(await readFile(out, 'utf8')).toBe(RESTORE_APPLICATION_NAME);
+    } finally {
+      process.env.PATH = oldPath;
+      await rm(bin, { recursive: true, force: true });
+    }
+  }, 60_000);
 });

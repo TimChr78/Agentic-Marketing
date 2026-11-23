@@ -352,6 +352,16 @@ contents but does not create them.
   from an older build (or one whose lock connection was lost before it exited). An open connection
   means a scheduler or worker could republish an erasure between the Postgres load and the
   ClickHouse load, which then replaces the published exclusions. Stop the app first, as above.
+- waits for a previous restore's work before it writes. Right after taking the lock it polls for up
+  to 60 seconds until no other backend on the target database announces `application_name =
+  am-restore` and no ClickHouse request carries the `am-restore-` query marker, then refuses with
+  `a previous restore's work is still running` if either is still there. The advisory lock cannot
+  fence work on other connections: the role setup, migration, erasure replay and reconciliation
+  pools, the `pg_restore` child and ClickHouse `TRUNCATE`/`INSERT` requests all carry the marker.
+  A restore that loses its lock stops issuing new work and cancels in-flight ClickHouse requests.
+  Residual limit: a run cut off by a network partition it has not yet noticed can still issue one
+  request after the successor's check, so after a failed restore make sure the old `am restore`
+  process has exited before retrying.
 - reports the snapshot time in its final line (`snapshot <createdAt>`);
 - reads `erasures` and `erasure_tombstones` from the live database before touching it, and replays
   them after loading Postgres (see [Retention and erased people](#retention-and-erased-people)).
@@ -419,9 +429,14 @@ same restore. The retry overwrites the fence, replaces Postgres again, replays t
 log, loads ClickHouse, reconciles the ledger and clears the fence only at the end. Replay is
 idempotent, so this is safe even when the first attempt got as far as ClickHouse.
 
+If the lock was lost, the retry first waits for the failed run's database and ClickHouse work to
+stop (see above). Make sure the old `am restore` process has exited: a run cut off by a network
+partition it has not yet noticed can still issue a request after that check.
+
 If the restore must be abandoned, `am restore --clear-fence` removes the fence after a warning and
 a typed confirmation (or `--yes` for a non-interactive run). It takes the same **exclusive** lock
-as a restore first, so it refuses while a restore or any app, worker or scheduler still holds it.
+as a restore first, so it refuses while a restore or any app, worker or scheduler still holds it,
+and it waits for a previous restore's tagged work to stop before it writes, like a restore.
 It does not reconcile anything: start the app only when you know `erased_subjects` holds the
 exclusions the restored ledger needs, or you accept that reads may return someone whose erasure was
 reported complete before the backup.

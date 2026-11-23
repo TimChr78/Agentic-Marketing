@@ -51,6 +51,22 @@ issues: [1194]
   reconciliation is bypassed. The interlock has tests for a running server with idle pools, a
   start refused under the exclusive lock, `am migrate` taking the lock before its first migration,
   a lost lock connection, and `--clear-fence` refused under the lock.
+- A lost restore lock no longer lets a second restore race the first one's work. Every PostgreSQL
+  connection a restore opens announces `application_name = am-restore` (`PGAPPNAME` for the
+  `pg_restore`/`pg_dump` children), and every ClickHouse request it issues carries an
+  `am-restore-` `query_id`. Right after taking the exclusive lock — before any write — a restore
+  (and `am restore --clear-fence`) polls for up to 60 seconds until no other backend on the target
+  database and no ClickHouse request with that marker is running, then refuses with
+  `a previous restore's work is still running` instead of racing it.
+- A restore that notices its lock was lost now also stops issuing ClickHouse work: the abort signal
+  reaches the ClickHouse load (TRUNCATE and every INSERT, with in-flight requests cancelled),
+  in-flight exclusion publications, and the reconciliation's generation-allocation, outbox and
+  purge-reset writes. Residual limit: a run cut off by a network partition it has not yet noticed
+  can still issue one request after a successor's drain check, so an operator retrying after a
+  lock-loss failure should make sure the old `am restore` process has exited.
+- New restore tests cover a successor waiting on a tagged `am-restore` backend and on a running
+  ClickHouse query with the marker (refusing after a short bound in both cases), a ClickHouse load
+  that sends nothing after its signal aborts, and `pg_restore` running with `PGAPPNAME=am-restore`.
 - Completed jobs are published in bulk instead of being reopened for a fresh sweep, including a
   job the live log says was complete when the snapshot predates the job row; an unfinished job is
   queued for its remaining sweep. If a restore stops before reconciliation, it leaves the fence in

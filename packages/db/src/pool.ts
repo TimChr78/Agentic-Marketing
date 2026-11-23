@@ -24,6 +24,14 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 export const APP_DATABASE_APPLICATION_NAME = 'agentic-marketing';
 
 /**
+ * The `application_name` every PostgreSQL connection a restore opens announces (#1204 review).
+ * The advisory lock only fences the session that holds it; a restore writes through pools, helper
+ * clients and `pg_restore`'s own backend, so a successor finds that leftover work by this name
+ * before it writes anything.
+ */
+export const RESTORE_APPLICATION_NAME = 'am-restore';
+
+/**
  * These are **session** advisory locks: the lock belongs to the PostgreSQL backend that ran the
  * statement. They are incompatible with PgBouncer (or another pooler) in **transaction** pooling
  * mode, where that backend can be handed to a different client between statements; use session

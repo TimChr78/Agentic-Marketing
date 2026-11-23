@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   APP_DATABASE_APPLICATION_NAME,
   clearRestoreFence,
@@ -7,6 +8,7 @@ import {
   nextErasureGeneration,
   noteErasedSubjectsVisible,
   RESTORE_ADVISORY_LOCK_KEY,
+  RESTORE_APPLICATION_NAME,
   type RestoreFenceState,
   raiseRestoreFence,
   restoreFenceState,
@@ -127,7 +129,7 @@ function assertRestoreNotAborted(signal: AbortSignal | undefined): void {
  * but does not take the shared lock (or one whose lock connection was lost before it exited).
  */
 export async function assertDatabaseDrained(databaseUrl: string): Promise<void> {
-  const client = new pg.Client({ connectionString: databaseUrl });
+  const client = new pg.Client({ connectionString: databaseUrl, application_name: RESTORE_APPLICATION_NAME });
   await client.connect();
   try {
     const { rows } = await client.query<{ n: number | string }>(
@@ -144,6 +146,147 @@ export async function assertDatabaseDrained(databaseUrl: string): Promise<void> 
           'a scheduler or worker could republish an erasure between the Postgres load and the ClickHouse load. ' +
           'Stop every app, worker and scheduler process first (docker compose stop app), then retry.',
       );
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/**
+ * The marker every ClickHouse request a restore issues carries in its `query_id` (#1204 review).
+ * The advisory lock only fences the lock session, so a successor finds the predecessor's ClickHouse
+ * work in `system.processes` by this prefix before it writes.
+ */
+export const RESTORE_CLICKHOUSE_QUERY_PREFIX = 'am-restore-';
+
+/** A fresh `query_id` for one ClickHouse request a restore issues. */
+export function restoreClickHouseQueryId(): string {
+  return `${RESTORE_CLICKHOUSE_QUERY_PREFIX}${randomUUID()}`;
+}
+
+/** How long a successor restore waits for a predecessor's tagged work to disappear. */
+const RESTORE_WORK_DRAIN_TIMEOUT_MS = 60_000;
+const RESTORE_WORK_DRAIN_POLL_MS = 250;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export interface RestoreWorkDrainOptions {
+  /** How long to wait before refusing. Default 60 s; tests pass a short bound. */
+  timeoutMs?: number;
+  /** Delay between polls. Default 250 ms. */
+  pollMs?: number;
+  /**
+   * Backends to ignore. The successor's own lock session announces the restore name too, so the
+   * caller passes its PID; the drain's own check connection excludes itself.
+   */
+  excludePids?: readonly number[];
+  env?: NodeJS.ProcessEnv;
+  log?: (message: string) => void;
+}
+
+interface ClickHouseDrainEndpoint {
+  url: URL;
+  headers: Record<string, string>;
+}
+
+/**
+ * The ClickHouse endpoint for the drain probe. The probe itself is sent **without** the restore
+ * marker, so it cannot count its own query in `system.processes`. A run whose environment sets no
+ * `CLICKHOUSE_URL` has no configured ClickHouse target to inspect; its ClickHouse half is skipped
+ * (and a restore that needs ClickHouse fails closed in its own steps).
+ */
+function clickHouseDrainEndpoint(env: NodeJS.ProcessEnv): ClickHouseDrainEndpoint | null {
+  const raw = env.CLICKHOUSE_URL?.trim();
+  if (!raw) return null;
+  const url = new URL(raw);
+  const headers: Record<string, string> = {};
+  if (url.username || url.password) {
+    const user = decodeURIComponent(url.username);
+    const password = decodeURIComponent(url.password);
+    headers.authorization = `Basic ${Buffer.from(`${user}:${password}`).toString('base64')}`;
+    url.username = '';
+    url.password = '';
+  }
+  url.pathname = url.pathname.replace(/\/$/, '');
+  return { url, headers };
+}
+
+/** How many ClickHouse requests carrying the restore marker are running right now. */
+async function countRunningRestoreClickHouseQueries(endpoint: ClickHouseDrainEndpoint, database: string): Promise<number> {
+  const target = new URL(endpoint.url);
+  // `system` always exists; the restore's own database is a parameter, so a target database that
+  // is fresh or absent does not make the probe fail.
+  target.searchParams.set('database', 'system');
+  target.searchParams.set('param_db', database);
+  target.searchParams.set(
+    'query',
+    `SELECT count() FROM system.processes WHERE startsWith(query_id, '${RESTORE_CLICKHOUSE_QUERY_PREFIX}') AND database = {db:String}`,
+  );
+  const response = await fetch(target, { headers: endpoint.headers });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 1_000).trim();
+    throw new Error(
+      `could not check ClickHouse for running restore work (${response.status}): ${detail || response.statusText}. ` +
+        'Refusing to start a restore before its ClickHouse work can be seen.',
+    );
+  }
+  const count = Number((await response.text()).trim());
+  if (!Number.isFinite(count)) throw new Error('ClickHouse returned an unreadable count for running restore work');
+  return count;
+}
+
+/**
+ * Waits until the previous restore's work is observably gone (#1204 review).
+ *
+ * The restore holds its exclusive advisory lock on one dedicated session, but it writes through
+ * pools and helper clients (`pg_restore`'s own backend included) and issues ClickHouse TRUNCATEs and
+ * inserts. None of that is fenced by the advisory lock: if the predecessor's lock session drops, a
+ * successor can take the lock while the predecessor is still writing. So the successor waits — right
+ * after taking the lock, before any write — for both of these:
+ *
+ * - no other backend on this database announces {@link RESTORE_APPLICATION_NAME}, and
+ * - no ClickHouse request carries the {@link RESTORE_CLICKHOUSE_QUERY_PREFIX} marker.
+ *
+ * A predecessor that notices its own lock loss stops issuing work (the abort signal threaded
+ * through its steps), so this normally clears quickly. If it stays busy past the bound, the restore
+ * refuses instead of racing it. Residual limit: a run cut off by a network partition it has not yet
+ * noticed can still issue one request after this check; make sure the old `am restore` process has
+ * exited before retrying after a lock-loss failure.
+ */
+export async function assertRestoreWorkDrained(databaseUrl: string, opts: RestoreWorkDrainOptions = {}): Promise<void> {
+  const env = opts.env ?? process.env;
+  const timeoutMs = Math.max(0, opts.timeoutMs ?? RESTORE_WORK_DRAIN_TIMEOUT_MS);
+  const pollMs = Math.max(1, opts.pollMs ?? RESTORE_WORK_DRAIN_POLL_MS);
+  const exclude = [...(opts.excludePids ?? [])];
+  const endpoint = clickHouseDrainEndpoint(env);
+  const clickhouseDatabase = env.CLICKHOUSE_DATABASE?.trim() || 'am';
+  const deadline = Date.now() + timeoutMs;
+  // The probe announces the same name as the restore, so it is on the list of connections a later
+  // successor waits for; `pid <> pg_backend_pid()` keeps it from counting itself here.
+  const client = new pg.Client({ connectionString: databaseUrl, application_name: RESTORE_APPLICATION_NAME });
+  await client.connect();
+  try {
+    for (;;) {
+      const { rows } = await client.query<{ n: number | string }>(
+        `SELECT count(*)::int AS n FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND application_name = $1
+            AND pid <> pg_backend_pid()
+            AND NOT (pid = ANY($2::int[]))`,
+        [RESTORE_APPLICATION_NAME, exclude],
+      );
+      const backends = Number(rows[0]?.n ?? 0);
+      const queries = endpoint ? await countRunningRestoreClickHouseQueries(endpoint, clickhouseDatabase) : 0;
+      if (backends === 0 && queries === 0) return;
+      if (Date.now() >= deadline)
+        throw new Error(
+          `a previous restore's work is still running (${backends} PostgreSQL connection(s)` +
+            `${queries ? `, ${queries} ClickHouse request(s)` : ''} still tagged ${RESTORE_APPLICATION_NAME}): ` +
+            'it could still write into the database this restore is about to replace, so this restore refuses to start. ' +
+            'Wait until that run has stopped and retry.',
+        );
+      opts.log?.(`waiting for a previous restore's work to stop (${backends} PostgreSQL connection(s), ${queries} ClickHouse request(s))`);
+      await sleep(pollMs);
+    }
   } finally {
     await client.end().catch(() => {});
   }
@@ -252,17 +395,21 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
   };
   const log = opts.log ?? (() => {});
   const batchSize = Math.max(1, Math.trunc(opts.batchSize ?? DEFAULT_BATCH_SIZE));
-  const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: 2 });
+  const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: 2, application_name: RESTORE_APPLICATION_NAME });
   const env = opts.env ?? process.env;
+  const signal = opts.signal;
   const store =
     opts.events === undefined
       ? clickHouseStore({
           url: env.CLICKHOUSE_URL ?? 'http://localhost:8123',
           database: env.CLICKHOUSE_DATABASE?.trim() || 'am',
+          // Every exclusion read and publication this store issues is tagged, so a successor's
+          // drain finds it in `system.processes` (#1204 review).
+          queryIdPrefix: RESTORE_CLICKHOUSE_QUERY_PREFIX,
+          ...(signal ? { signal } : {}),
         })
       : undefined;
   const events = opts.events ?? store!;
-  const signal = opts.signal;
   try {
     assertRestoreNotAborted(signal);
     // The durable ledger arrived in 0.17.0 (#1204 review): a snapshot from before it has no
@@ -377,6 +524,9 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
         let outboxRows = 0;
         let outboxDeferred = 0;
         for (const job of jobs.filter((row) => row.state === 'complete')) {
+          // Each job's outbox pass is a write: after a lost lock another restore may own the
+          // database, so check before every job, not only before the whole transaction (#1204).
+          assertRestoreNotAborted(signal);
           outboxRows += await dropErasedProfileOutbox({ admin: client }, workspaceId, job.profile_ids, {
             includeUndelivered: true,
           });
@@ -420,6 +570,7 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
         );
         // A restored ClickHouse may carry rows from before a physical purge, so purge progress is not
         // evidence after a load: reset it and let the bounded recurring sweep run again (#1037 part 3).
+        assertRestoreNotAborted(signal);
         await client.query(
           `UPDATE erasure_generations
               SET purged_generation = 0, purge_last_sweep_at = NULL,
@@ -473,7 +624,7 @@ export async function finishRestoreReconciliation(opts: ReconcileRestoreOptions)
     await clearRestoreFence(opts.fenceClient, opts.fence);
     return result;
   }
-  const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: 1 });
+  const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: 1, application_name: RESTORE_APPLICATION_NAME });
   try {
     assertRestoreNotAborted(opts.signal);
     await clearRestoreFence(pool, opts.fence);
@@ -510,6 +661,8 @@ export interface RestoreSessionLock {
    * (#1204 review); it must not be used after `release()`.
    */
   readonly client: Pick<pg.Client, 'query'>;
+  /** The backend PID holding the lock, so a successor's drain can leave its own session out. */
+  readonly pid: number;
   release(): Promise<void>;
 }
 
@@ -534,8 +687,11 @@ export interface RestoreSessionLockOptions {
  * (#1204 review).
  */
 export async function acquireRestoreSessionLock(databaseUrl: string, opts: RestoreSessionLockOptions = {}): Promise<RestoreSessionLock> {
-  const client = new pg.Client({ connectionString: databaseUrl });
+  // The lock session announces the restore name too: a successor's drain must see it, and excludes
+  // it by PID while this attempt is the successor (#1204 review).
+  const client = new pg.Client({ connectionString: databaseUrl, application_name: RESTORE_APPLICATION_NAME });
   await client.connect();
+  let pid = 0;
   try {
     const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [RESTORE_ADVISORY_LOCK_KEY]);
     if (!rows[0]?.locked)
@@ -543,6 +699,8 @@ export async function acquireRestoreSessionLock(databaseUrl: string, opts: Resto
         'another restore is running, or an app, worker or scheduler still holds the restore lock. ' +
           'Stop every app, worker and scheduler first, then retry.',
       );
+    const backend = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    pid = Number(backend.rows[0]?.pid ?? 0);
   } catch (err) {
     await client.end().catch(() => {});
     throw err;
@@ -557,6 +715,7 @@ export async function acquireRestoreSessionLock(databaseUrl: string, opts: Resto
   client.on('end', () => lost(new Error('the restore lock connection ended unexpectedly')));
   return {
     client,
+    pid,
     async release() {
       released = true;
       await client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
@@ -585,8 +744,6 @@ export interface RestoreStartupLockOptions {
 
 const RESTORE_STARTUP_WAIT_MS = 3_000;
 const RESTORE_STARTUP_POLL_MS = 100;
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const fenceBlockMessage = (fence: RestoreFenceState) =>
   `A restore of ${fence.backup} started at ${fence.startedAt} did not finish reconciling erasure exclusions. ` +
@@ -664,9 +821,12 @@ export async function acquireRestoreStartupLock(databaseUrl: string, opts: Resto
  * that the ClickHouse exclusions are correct (or acceptable) already. Returns false when there was
  * no fence to clear.
  */
-export async function clearRestoreFenceForUrl(databaseUrl: string): Promise<boolean> {
+export async function clearRestoreFenceForUrl(databaseUrl: string, opts: RestoreWorkDrainOptions = {}): Promise<boolean> {
   const session = await acquireRestoreSessionLock(databaseUrl);
   try {
+    // A previous restore's work is drained here too: the fence may be cleared only once no other
+    // tagged connection or ClickHouse request could still write into this database (#1204 review).
+    await assertRestoreWorkDrained(databaseUrl, { ...opts, excludePids: [...(opts.excludePids ?? []), session.pid] });
     // Both the read and the delete go through the locked session, so the escape hatch cannot clear
     // a fence after losing the interlock it was granted under (#1204 review).
     const before = await restoreFenceState(session.client);

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import type {} from '@agentic-marketing/commands';
 import { type ClickHouseClient, createClient, TupleParam } from '@clickhouse/client';
@@ -904,6 +904,17 @@ export function clickHouseStore(opts: {
    * fail closed rather than guess that a workspace has nothing to exclude.
    */
   hasErasures?: (workspaceId: string) => Promise<boolean>;
+  /**
+   * Aborted when every request this store issues must stop (#1204 review). The restore passes its
+   * lock-loss signal so an in-flight exclusion publication is cancelled rather than landing after
+   * another restore may own the database.
+   */
+  signal?: AbortSignal;
+  /**
+   * Prefix for each request's `query_id` (#1204 review). A restore sets it so a successor finds an
+   * in-flight exclusion publication in ClickHouse's `system.processes` before it writes.
+   */
+  queryIdPrefix?: string;
 }): EventStore {
   const client = createClient({
     ...clientOptions(opts.url),
@@ -928,10 +939,22 @@ export function clickHouseStore(opts: {
     return (await accepts) ? { SQL_workspace: workspaceId } : {};
   };
   type QueryArgs = Parameters<ClickHouseClient['query']>[0];
+  const abort = () => (opts.signal ? { abort_signal: opts.signal } : {});
+  const queryId = () => (opts.queryIdPrefix ? { query_id: `${opts.queryIdPrefix}${randomUUID()}` } : {});
   const query = async (workspaceId: string, args: QueryArgs & { format: 'JSONEachRow' }) =>
-    client.query({ ...args, clickhouse_settings: { ...args.clickhouse_settings, ...((await settingsFor(workspaceId)) as object) } });
+    client.query({
+      ...args,
+      ...abort(),
+      ...queryId(),
+      clickhouse_settings: { ...args.clickhouse_settings, ...((await settingsFor(workspaceId)) as object) },
+    });
   const command = async (workspaceId: string, args: Parameters<ClickHouseClient['command']>[0]) =>
-    client.command({ ...args, clickhouse_settings: { ...args.clickhouse_settings, ...((await settingsFor(workspaceId)) as object) } });
+    client.command({
+      ...args,
+      ...abort(),
+      ...queryId(),
+      clickhouse_settings: { ...args.clickhouse_settings, ...((await settingsFor(workspaceId)) as object) },
+    });
   const countQuery = (
     workspaceId: string,
     q: {
@@ -1548,6 +1571,8 @@ export function clickHouseStore(opts: {
       await client.insert({
         table: 'erased_subjects',
         format: 'JSONEachRow',
+        ...abort(),
+        ...queryId(),
         clickhouse_settings: SYNC_INSERT,
         values: rows.map((row) => ({
           workspace_id: row.workspaceId,

@@ -14,6 +14,7 @@ import {
   latestMigration,
   listWorkspaceIds,
   migrationHead,
+  RESTORE_APPLICATION_NAME,
   type ReplayErasuresAfterMigrateOptions,
   type ReplayErasuresResult,
   readDataKeySample,
@@ -22,7 +23,14 @@ import {
 } from '@agentic-marketing/db';
 import pg from 'pg';
 import { keyProviderFromEnv } from '../keys';
-import { acquireRestoreSessionLock, assertDatabaseDrained, finishRestoreReconciliation, markRestoreStarted } from './restore-reconcile';
+import {
+  acquireRestoreSessionLock,
+  assertDatabaseDrained,
+  assertRestoreWorkDrained,
+  finishRestoreReconciliation,
+  markRestoreStarted,
+  restoreClickHouseQueryId,
+} from './restore-reconcile';
 
 // Backup and restore without loading the full server configuration: an operator must be able to
 // run them with only DATABASE_URL (and CLICKHOUSE_URL for events), even when other secrets are
@@ -121,6 +129,11 @@ export interface RestoreBackupOptions {
   pgRestore?: (databaseUrl: string, dumpFile: string) => Promise<void>;
   /** Test seam: stops after the Postgres/ClickHouse loads, leaving reconciliation and the fence. */
   skipReconciliation?: boolean;
+  /**
+   * How long to wait for a previous restore's tagged database and ClickHouse work to stop before
+   * refusing. Default 60 s; tests pass a short bound (#1204 review).
+   */
+  drainTimeoutMs?: number;
 }
 
 export interface VerifyBackupOptions {
@@ -180,6 +193,10 @@ export function postgresClientEnv(databaseUrl: string): NodeJS.ProcessEnv {
     PGUSER: decodeURIComponent(url.username),
     PGPASSWORD: decodeURIComponent(url.password),
     PGDATABASE: decodeURIComponent(url.pathname.replace(/^\//, '')),
+    // The backup/restore children are not covered by the parent's session advisory lock: their
+    // own backend keeps writing (pg_restore) until they exit. A successor restore finds them by
+    // this application name (#1204 review).
+    PGAPPNAME: RESTORE_APPLICATION_NAME,
   };
   const sslmode = url.searchParams.get('sslmode');
   if (sslmode) env.PGSSLMODE = sslmode;
@@ -414,7 +431,7 @@ export async function assertRestoredDataKey(
       'the restore loaded Postgres, but no key provider is configured, so provider and connector secrets cannot be read. ' +
         'Set MASTER_KEY (or KEY_PROVIDER and its settings) and run `am restore` again.',
     );
-  const sample = await readDataKeySample(databaseUrl);
+  const sample = await readDataKeySample(databaseUrl, { applicationName: RESTORE_APPLICATION_NAME });
   if (!sample) {
     log('the restored database has no data keys; there is no sealed secret to check');
     return;
@@ -670,10 +687,14 @@ async function clickhouseRequest(
   query: string,
   init: RequestInit = {},
   params: Record<string, string> = {},
+  queryId?: string,
 ): Promise<Response> {
   const target = new URL(endpoint.url);
   target.searchParams.set('query', query);
   target.searchParams.set('database', database);
+  // A restore tags every request it issues, so a successor finds its leftover work in
+  // `system.processes` before it writes (#1204 review).
+  if (queryId) target.searchParams.set('query_id', queryId);
   // Custom settings travel as query parameters with their SQL_ prefix (the server allows only
   // that prefix by default); SQL_workspace is what the row policy reads.
   for (const [key, value] of Object.entries(params)) target.searchParams.set(key, value);
@@ -812,24 +833,51 @@ export async function restoreClickHouse(opts: {
   url?: string;
   database?: string;
   log?: (message: string) => void;
+  /**
+   * Aborted when the restore loses its exclusive lock (#1204 review). Checked before every
+   * TRUNCATE and INSERT, and passed to fetch so an in-flight request is cancelled too: nothing may
+   * be written after another restore may own the database.
+   */
+  signal?: AbortSignal;
 }): Promise<void> {
   const env = opts.env ?? process.env;
   const database = assertIdentifier(opts.database ?? (env.CLICKHOUSE_DATABASE?.trim() || 'am'), 'ClickHouse database');
   const endpoint = clickhouseEndpoint(opts.url ?? env.CLICKHOUSE_URL);
+  const assertNotAborted = () => {
+    if (!opts.signal?.aborted) return;
+    throw opts.signal.reason instanceof Error ? opts.signal.reason : new Error('the restore was aborted');
+  };
   for (const table of opts.tables) {
     const name = assertIdentifier(table.name, 'ClickHouse table');
+    assertNotAborted();
     opts.log?.(`restoring ClickHouse ${database}.${name}`);
-    await clickhouseRequest(endpoint, database, `TRUNCATE TABLE ${quoteIdentifier(database)}.${quoteIdentifier(name)}`, { method: 'POST' });
+    await clickhouseRequest(
+      endpoint,
+      database,
+      `TRUNCATE TABLE ${quoteIdentifier(database)}.${quoteIdentifier(name)}`,
+      { method: 'POST', signal: opts.signal },
+      {},
+      restoreClickHouseQueryId(),
+    );
     for (const file of table.files) {
       const path = resolve(opts.runDir, file.file);
       if (!path.startsWith(resolve(opts.runDir) + sep)) throw new Error(`manifest path escapes the backup: ${file.file}`);
       // Inserts are not filtered by a SELECT policy, so each workspace's file goes in as-is.
-      await clickhouseRequest(endpoint, database, `INSERT INTO ${quoteIdentifier(database)}.${quoteIdentifier(name)} FORMAT Native`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/octet-stream' },
-        body: Readable.toWeb(createReadStream(path)) as unknown as BodyInit,
-        duplex: 'half',
-      } as RequestInit);
+      assertNotAborted();
+      await clickhouseRequest(
+        endpoint,
+        database,
+        `INSERT INTO ${quoteIdentifier(database)}.${quoteIdentifier(name)} FORMAT Native`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/octet-stream' },
+          body: Readable.toWeb(createReadStream(path)) as unknown as BodyInit,
+          duplex: 'half',
+          signal: opts.signal,
+        } as RequestInit,
+        {},
+        restoreClickHouseQueryId(),
+      );
     }
   }
 }
@@ -1119,8 +1167,11 @@ interface RestoreCapture {
 const sameBinding = (a: RestoreCaptureBinding, b: RestoreCaptureBinding) => a.target === b.target && a.backup === b.backup;
 
 /** Identifies the database a capture belongs to, with a host/database fallback when pg_control is unreadable. */
-export async function restoreTargetIdentity(databaseUrl: string): Promise<string> {
-  const client = new pg.Client({ connectionString: databaseUrl });
+export async function restoreTargetIdentity(databaseUrl: string, opts: { applicationName?: string } = {}): Promise<string> {
+  const client = new pg.Client({
+    connectionString: databaseUrl,
+    ...(opts.applicationName === undefined ? {} : { application_name: opts.applicationName }),
+  });
   try {
     await client.connect();
     const { rows } = await client.query<{ system: string; database: string }>(
@@ -1432,6 +1483,16 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   });
   let releaseFileLock: (() => Promise<void>) | undefined;
   try {
+    // A previous run's lock session may be gone while its pools, children or ClickHouse requests
+    // are still writing: the advisory lock cannot fence them. Wait until that tagged work is gone,
+    // before any write, and refuse rather than race it (#1204 review).
+    await assertRestoreWorkDrained(databaseUrl, {
+      ...(opts.drainTimeoutMs === undefined ? {} : { timeoutMs: opts.drainTimeoutMs }),
+      env,
+      excludePids: [session.pid],
+      log,
+    });
+    assertLock();
     // The documented drain, enforced (#1194): a scheduler that is still running can publish an
     // erasure between the replay and the ClickHouse load, and the load then replaces the published
     // exclusions with an older point. Refuse before anything is written.
@@ -1444,6 +1505,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     const role = await ensureAppRoleInDatabase(databaseUrl, {
       appRole: env.APP_DB_ROLE?.trim() || 'am_app',
       appRolePassword: env.APP_DB_PASSWORD,
+      applicationName: RESTORE_APPLICATION_NAME,
     });
     if (!role.exists) throw new Error(`Postgres role ${role.role} does not exist; set APP_DB_PASSWORD so the restore can create it`);
     assertLock();
@@ -1462,7 +1524,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     releaseFileLock = await acquireRestoreLock(restoreLockPath(dir));
 
     const binding: RestoreCaptureBinding = {
-      target: await restoreTargetIdentity(databaseUrl),
+      target: await restoreTargetIdentity(databaseUrl, { applicationName: RESTORE_APPLICATION_NAME }),
       backup: `${dir}|${manifest.createdAt}|${manifest.postgres.sha256}`,
     };
     const capture = await readRestoreCapture(capturePath);
@@ -1472,7 +1534,10 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
           `not to ${binding.target} for ${binding.backup}. Remove that file deliberately if it is stale; a restore never reuses another target's log.`,
       );
     log(`reading erasures recorded in the live database (snapshot from ${manifest.createdAt})`);
-    const erasureLog = unionErasureLogs(capture?.log ?? null, await readErasureLog(databaseUrl));
+    const erasureLog = unionErasureLogs(
+      capture?.log ?? null,
+      await readErasureLog(databaseUrl, { applicationName: RESTORE_APPLICATION_NAME }),
+    );
     // The durable ledger, its wrapped keys and the publication generations are part of what a
     // restore must put back (#1037): a workspace can have ledger rows and an exclusion key without
     // any erasure or tombstone row the older check looked at.
@@ -1526,6 +1591,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       const replayed = await (opts.replay ?? replayErasuresAfterMigrate)(databaseUrl, erasureLog, {
         appRole: role.role,
         appRolePassword: env.APP_DB_PASSWORD ?? '',
+        applicationName: RESTORE_APPLICATION_NAME,
         log,
       });
       assertLock();
@@ -1554,7 +1620,13 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     if (opts.clickhouse && manifest.clickhouse) {
       assertLock();
       log('restoring ClickHouse');
-      await restoreClickHouse({ runDir: dir, tables: manifest.clickhouse.tables as ClickHouseTableEntry[], env, log });
+      await restoreClickHouse({
+        runDir: dir,
+        tables: manifest.clickhouse.tables as ClickHouseTableEntry[],
+        env,
+        log,
+        signal: lockLoss.signal,
+      });
       assertLock();
     }
 

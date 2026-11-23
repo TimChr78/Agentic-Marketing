@@ -137,10 +137,20 @@ export interface ReplayErasuresResult {
 
 export interface ReplayErasuresOptions {
   log?: (message: string) => void;
+  /** Announce `application_name` on the connection, so a restore can identify its own work. */
+  applicationName?: string;
 }
 
-async function withClient<T>(databaseUrl: string, fn: (client: pg.Client) => Promise<T>): Promise<T> {
-  const client = new pg.Client({ connectionString: databaseUrl });
+interface ClientScope {
+  databaseUrl: string;
+  applicationName?: string;
+}
+
+async function withClient<T>(scope: ClientScope, fn: (client: pg.Client) => Promise<T>): Promise<T> {
+  const client = new pg.Client({
+    connectionString: scope.databaseUrl,
+    ...(scope.applicationName === undefined ? {} : { application_name: scope.applicationName }),
+  });
   await client.connect();
   try {
     return await fn(client);
@@ -274,8 +284,8 @@ async function listRestoredWorkspaceIds(client: pg.Client): Promise<Set<string>>
  * neither table; it then has no erasures to replay. Throws when the log cannot be read, because
  * restoring without it could resurrect people.
  */
-export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
-  return withClient(databaseUrl, async (client) => {
+export async function readErasureLog(databaseUrl: string, opts: { applicationName?: string } = {}): Promise<ErasureLog> {
+  return withClient({ databaseUrl, applicationName: opts.applicationName }, async (client) => {
     // The whole log is read in one transaction when FORCE has to be lifted, so a failure anywhere
     // rolls the lift back and no reader ever sees a half-read log.
     const tables = await tableRls(client, RESTORE_LOG_TABLES);
@@ -517,7 +527,10 @@ export async function replayErasuresAfterMigrate(
   log: ErasureLog,
   opts: ReplayErasuresAfterMigrateOptions,
 ): Promise<ReplayErasuresResult> {
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+  const pool = new pg.Pool({
+    connectionString: databaseUrl,
+    ...(opts.applicationName === undefined ? {} : { application_name: opts.applicationName }),
+  });
   try {
     await migrate(pool, {
       appRolePassword: opts.appRolePassword,
@@ -527,7 +540,10 @@ export async function replayErasuresAfterMigrate(
   } finally {
     await pool.end();
   }
-  return replayErasures(databaseUrl, log, opts.log ? { log: opts.log } : {});
+  return replayErasures(databaseUrl, log, {
+    ...(opts.log ? { log: opts.log } : {}),
+    ...(opts.applicationName === undefined ? {} : { applicationName: opts.applicationName }),
+  });
 }
 
 /**
@@ -554,7 +570,7 @@ export async function replayErasures(
   if (!log.erasures.length && !log.tombstones.length && !log.keys?.length && !log.exclusionKeys?.length && !log.generations?.length)
     return result;
 
-  return withClient(databaseUrl, async (client) => {
+  return withClient({ databaseUrl, applicationName: opts.applicationName }, async (client) => {
     // A restore run as the table owner must still see every workspace here; otherwise every captured
     // entry is "skipped" as if the snapshot no longer had its workspace (#1204 review).
     const workspaces = await listRestoredWorkspaceIds(client);

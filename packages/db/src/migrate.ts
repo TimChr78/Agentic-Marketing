@@ -350,11 +350,14 @@ export async function ensureAppRole(client: RoleClient, opts: { appRolePassword:
 /** Ensures the role in the database behind `databaseUrl`; a restore runs this before pg_restore. */
 export async function ensureAppRoleInDatabase(
   databaseUrl: string,
-  opts: { appRolePassword?: string; appRole?: string },
+  opts: { appRolePassword?: string; appRole?: string; applicationName?: string },
 ): Promise<{ role: string; created: boolean; exists: boolean }> {
   const role = opts.appRole ?? 'am_app';
   if (!roleName.test(role)) throw new Error(`Invalid app role name ${role}`);
-  const client = new pg.Client({ connectionString: databaseUrl });
+  const client = new pg.Client({
+    connectionString: databaseUrl,
+    ...(opts.applicationName === undefined ? {} : { application_name: opts.applicationName }),
+  });
   await client.connect();
   try {
     const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role]);

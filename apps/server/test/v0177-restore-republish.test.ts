@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { APP_DATABASE_APPLICATION_NAME, erasureLedgerChecker, RESTORE_ADVISORY_LOCK_KEY } from '@agentic-marketing/db';
+import {
+  APP_DATABASE_APPLICATION_NAME,
+  erasureLedgerChecker,
+  RESTORE_ADVISORY_LOCK_KEY,
+  RESTORE_APPLICATION_NAME,
+} from '@agentic-marketing/db';
 import { clickHouseStore } from '@agentic-marketing/events';
 import { runErasureCleanupOnce, subjectKeyHasher } from '@agentic-marketing/profiles';
 import pg from 'pg';
@@ -381,6 +386,25 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
       await legacy.end();
     }
   }, 60_000);
+
+  it('waits for a previous restore’s database work and refuses after its bound', async () => {
+    // The advisory lock lives on one session; a previous run may still be writing through other
+    // connections. A successor waits for those, and refuses rather than racing them (#1204 review).
+    const databaseUrl = testDatabaseUrl(t.dbName).toString();
+    const stale = new pg.Client({ connectionString: databaseUrl, application_name: RESTORE_APPLICATION_NAME });
+    await stale.connect();
+    try {
+      const started = Date.now();
+      await expect(restoreBackup({ dir: backupPath, env: restoreEnv(databaseUrl), log: () => {}, drainTimeoutMs: 300 })).rejects.toThrow(
+        /a previous restore's work is still running/,
+      );
+      expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+      // It refused before the destructive steps: no fence was raised for this attempt.
+      expect(await fenceRow(databaseUrl)).toBeNull();
+    } finally {
+      await stale.end();
+    }
+  }, 120_000);
 
   it('refuses to start while a restore holds the exclusive lock', async () => {
     const databaseUrl = testDatabaseUrl(t.dbName).toString();
