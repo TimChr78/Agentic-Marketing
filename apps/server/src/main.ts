@@ -53,9 +53,13 @@ try {
   restoreLock = await acquireRestoreStartupLock(config.adminDatabaseUrl, {
     onLost: (err) => {
       logger.error({ reason: err.message }, 'the restore lock connection was lost; exiting so no read is served without it');
-      // A pre-upgrade `pg_dump` started by this process must not outlive the interlock (#1204 review).
-      stopRestoreChildren();
-      process.exit(1);
+      // A pre-upgrade `pg_dump` started by this process must not outlive the interlock (#1204
+      // review). Wait for it to be gone (SIGTERM, then SIGKILL) before exiting: exiting first let an
+      // ignored SIGTERM keep the child alive.
+      void stopRestoreChildren().then(
+        () => process.exit(1),
+        () => process.exit(1),
+      );
     },
   });
 } catch (err) {

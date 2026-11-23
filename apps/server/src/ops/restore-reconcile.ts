@@ -3,6 +3,7 @@ import {
   clearRestoreFence,
   dropErasedProfileOutbox,
   erasureOutboxOutstanding,
+  type FenceClient,
   nextErasureGeneration,
   noteErasedSubjectsVisible,
   RESTORE_ADVISORY_LOCK_KEY,
@@ -67,6 +68,22 @@ export interface ReconcileRestoreOptions {
   events?: Pick<EventStore, 'publishErasedSubjects' | 'erasedSubjectsVisible' | 'erasedSubjectKeys'>;
   /** Keys per insert. Defaults to 1000. */
   batchSize?: number;
+  /**
+   * Aborted when the restore loses the exclusive lock (#1204 review). Nothing may be written after
+   * that point: another restore may already own the database, and a late write — the fence delete
+   * in particular — would land in its run.
+   */
+  signal?: AbortSignal;
+  /**
+   * The fence row this attempt raised. With it, `finishRestoreReconciliation` deletes only that row,
+   * so a stale attempt cannot clear a newer restore's fence (#1204 review).
+   */
+  fence?: RestoreFenceState;
+  /**
+   * The connection that holds the exclusive restore lock. The fence is cleared through it, so a lost
+   * session cannot delete a row at all (#1204 review).
+   */
+  fenceClient?: FenceClient;
 }
 
 interface LedgerRow {
@@ -84,6 +101,22 @@ interface JobRow {
 }
 
 const DEFAULT_BATCH_SIZE = 1_000;
+
+/** The error an aborted restore must fail with, whether the signal carried one or not. */
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('the restore was aborted because its exclusive lock connection was lost');
+}
+
+/**
+ * Stops a restore between steps once its lock connection is lost (#1204 review). Child processes
+ * are killed by the caller; this is the boundary that keeps the restore itself from publishing,
+ * cleaning outboxes or clearing the fence after another attempt may own the database.
+ */
+function assertRestoreNotAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortReason(signal);
+}
 
 /**
  * Refuses a restore while an application process is connected to the target database (#1194).
@@ -229,17 +262,22 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
         })
       : undefined;
   const events = opts.events ?? store!;
+  const signal = opts.signal;
   try {
-    // A snapshot from before 0.17.0 has no durable ledger: the marker was tolerated, and there is
-    // nothing in it that a protected read could exclude.
-    const table = await pool.query<{ present: boolean }>(
-      "SELECT to_regclass('public.erasure_keys') IS NOT NULL AND to_regclass('public.erasure_cleanup_jobs') IS NOT NULL AS present",
+    assertRestoreNotAborted(signal);
+    // The durable ledger arrived in 0.17.0 (#1204 review): a snapshot from before it has no
+    // `erasure_keys`, so there is nothing to publish. `erasure_cleanup_jobs` came earlier, and a
+    // completed job from such a snapshot still has an outbox pass to run — its rows name a person
+    // whose erasure is complete. Gate only the publication on the ledger.
+    const tables = await pool.query<{ keys: boolean; jobs: boolean }>(
+      "SELECT to_regclass('public.erasure_keys') IS NOT NULL AS keys, to_regclass('public.erasure_cleanup_jobs') IS NOT NULL AS jobs",
     );
-    if (!table.rows[0]?.present) return result;
+    const hasLedger = tables.rows[0]?.keys ?? false;
+    if (!tables.rows[0]?.jobs) return result;
 
     const workspaceIds = [
       ...new Set([
-        ...(await listRestoredWorkspaces(pool, 'erasure_keys', "coverage = 'full'")),
+        ...(hasLedger ? await listRestoredWorkspaces(pool, 'erasure_keys', "coverage = 'full'") : []),
         // A completed job with no publishable key at all (a generation-0 publication, or one from
         // before the durable ledger) still has to clean its erased profiles' outbox rows (#1204
         // review), so its workspace is visited even though there is nothing to publish.
@@ -247,18 +285,23 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
       ]),
     ].sort();
     for (const workspaceId of workspaceIds) {
+      assertRestoreNotAborted(signal);
       const { ledger, jobs } = await inWorkspace(pool, workspaceId, async (client) => {
         // The workspace predicate is explicit: a restore commonly runs as a superuser or a
         // BYPASSRLS role, and `app.workspace_id` alone would then hand this workspace every other
         // workspace's keys (#1204 review).
-        const ledger = await client.query<LedgerRow>(
-          `SELECT workspace_id, erasure_id, kind, key_value, key_version
-             FROM erasure_keys
-            WHERE workspace_id = $1 AND coverage = 'full'
-            ORDER BY workspace_id, erasure_id, kind, key_value, key_version`,
-          [workspaceId],
-        );
-        const erasureIds = [...new Set(ledger.rows.map((row) => row.erasure_id))];
+        const ledger = hasLedger
+          ? (
+              await client.query<LedgerRow>(
+                `SELECT workspace_id, erasure_id, kind, key_value, key_version
+                   FROM erasure_keys
+                  WHERE workspace_id = $1 AND coverage = 'full'
+                  ORDER BY workspace_id, erasure_id, kind, key_value, key_version`,
+                [workspaceId],
+              )
+            ).rows
+          : [];
+        const erasureIds = [...new Set(ledger.map((row) => row.erasure_id))];
         // Every completed job needs its final outbox pass, whether or not it has a key to publish;
         // an unfinished one needs it only to record its publication.
         const jobs = await client.query<JobRow>(
@@ -267,7 +310,7 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
             ORDER BY erasure_id`,
           [workspaceId, erasureIds],
         );
-        return { ledger: ledger.rows, jobs: jobs.rows };
+        return { ledger, jobs: jobs.rows };
       });
 
       const keys = [...new Set(ledger.map((row) => row.key_value))];
@@ -275,15 +318,19 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
       let missing: LedgerRow[] = [];
       let generation: number | null = null;
       if (keys.length) {
+        // Every publication is a write; after a lost lock another restore may own the database.
+        assertRestoreNotAborted(signal);
         const existing = await events.erasedSubjectKeys(workspaceId);
         missing = ledger.filter((row) => !existing.has(row.key_value));
         // A new generation for the whole restored publication: a retry or a later restore can never
         // make the confirmed state regress. Inserting only the missing keys keeps the work bounded by
         // what the ClickHouse point actually lost.
+        assertRestoreNotAborted(signal);
         const publishGeneration = await inWorkspace(pool, workspaceId, (client) => nextErasureGeneration({ admin: client }, workspaceId));
         generation = publishGeneration;
         const recordedAt = new Date().toISOString();
         for (let offset = 0; offset < missing.length; offset += batchSize) {
+          assertRestoreNotAborted(signal);
           const batch = missing.slice(offset, offset + batchSize);
           await events.publishErasedSubjects(
             batch.map((row) => ({
@@ -317,6 +364,7 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
       }
 
       const confirmed = await inWorkspace(pool, workspaceId, async (client) => {
+        assertRestoreNotAborted(signal);
         // A completed job is not reopened for another sweep, so its final worker pass never runs
         // after a restore. Do the outbox half of that pass here: failed and delivered rows can
         // still name the person (a DOI token, a click URL), and a requeue could deliver one after
@@ -341,11 +389,13 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
 
         if (generation === null) return { jobs: 0, outboxRows, outboxDeferred };
 
+        assertRestoreNotAborted(signal);
         // The cache epoch moves only after the FINAL read; the restored process has no warm cache,
         // but a publication that moved the epoch before its rows were visible is exactly what this
         // rule exists to prevent.
         await noteErasedSubjectsVisible({ admin: client }, workspaceId);
 
+        assertRestoreNotAborted(signal);
         // Only now may the jobs say they published. A finished job whose outbox is clean stays
         // complete and is not queued for another sweep; an unfinished one, or a finished one the
         // outbox still blocks, is made due so its remaining sweep runs. The marker and the
@@ -411,12 +461,22 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
  * Runs the whole final step: reconcile the restored ledger, then clear the fence the caller raised
  * before the Postgres replacement. A reconciliation failure leaves the fence in place, so a server
  * started in between still refuses to serve.
+ *
+ * The fence is cleared through the connection that holds the exclusive lock, and only when it still
+ * carries this attempt's row (#1204 review): if that connection was lost, another restore may have
+ * raised its own fence, and this attempt must not clear it.
  */
 export async function finishRestoreReconciliation(opts: ReconcileRestoreOptions): Promise<ReconcileRestoreResult> {
   const result = await reconcileRestoredErasureExclusions(opts);
+  assertRestoreNotAborted(opts.signal);
+  if (opts.fenceClient) {
+    await clearRestoreFence(opts.fenceClient, opts.fence);
+    return result;
+  }
   const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: 1 });
   try {
-    await clearRestoreFence(pool);
+    assertRestoreNotAborted(opts.signal);
+    await clearRestoreFence(pool, opts.fence);
   } finally {
     await pool.end().catch(() => {});
   }
@@ -428,18 +488,28 @@ export async function finishRestoreReconciliation(opts: ReconcileRestoreOptions)
  * a `pg_restore` that commits and then fails leaves it behind; a retry overwrites it and a server
  * started in between refuses to serve reads. It is deliberately not cleared on failure: only
  * reconciliation (or the explicit `am restore --clear-fence`) may remove it.
+ *
+ * `client` is the session that holds the exclusive restore lock, so a lost session cannot write a
+ * fence for a restore that no longer holds the interlock. Returns the row this attempt raised, which
+ * reconciliation then has to match before clearing it (#1204 review).
  */
-export async function markRestoreStarted(databaseUrl: string, backup: string): Promise<void> {
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
-  try {
-    await raiseRestoreFence(pool, { backup, startedAt: new Date().toISOString() });
-  } finally {
-    await pool.end().catch(() => {});
-  }
+export async function markRestoreStarted(
+  client: FenceClient,
+  backup: string,
+  startedAt = new Date().toISOString(),
+): Promise<RestoreFenceState> {
+  const state: RestoreFenceState = { backup, startedAt };
+  await raiseRestoreFence(client, state);
+  return state;
 }
 
 /** The advisory lock a restore holds on one dedicated session for its whole run. */
 export interface RestoreSessionLock {
+  /**
+   * The locked connection itself. Fence writes go through it so they cannot outlive the lock
+   * (#1204 review); it must not be used after `release()`.
+   */
+  readonly client: Pick<pg.Client, 'query'>;
   release(): Promise<void>;
 }
 
@@ -486,6 +556,7 @@ export async function acquireRestoreSessionLock(databaseUrl: string, opts: Resto
   client.on('error', lost);
   client.on('end', () => lost(new Error('the restore lock connection ended unexpectedly')));
   return {
+    client,
     async release() {
       released = true;
       await client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
@@ -596,15 +667,12 @@ export async function acquireRestoreStartupLock(databaseUrl: string, opts: Resto
 export async function clearRestoreFenceForUrl(databaseUrl: string): Promise<boolean> {
   const session = await acquireRestoreSessionLock(databaseUrl);
   try {
-    const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
-    try {
-      const before = await restoreFenceState(pool);
-      if (!before) return false;
-      await clearRestoreFence(pool);
-      return true;
-    } finally {
-      await pool.end().catch(() => {});
-    }
+    // Both the read and the delete go through the locked session, so the escape hatch cannot clear
+    // a fence after losing the interlock it was granted under (#1204 review).
+    const before = await restoreFenceState(session.client);
+    if (!before) return false;
+    await clearRestoreFence(session.client);
+    return true;
   } finally {
     await session.release();
   }

@@ -196,6 +196,9 @@ const restoreChildren = new Set<ChildProcess>();
 /** How long a child gets to exit after SIGTERM before it is killed outright. */
 const RESTORE_CHILD_KILL_GRACE_MS = 2_000;
 
+/** Hard upper bound on waiting for a child after SIGKILL, so an exit is never blocked forever. */
+const RESTORE_CHILD_STOP_TIMEOUT_MS = 5_000;
+
 /** How many children this process still has running. Exported for the lock-loss test. */
 export function runningRestoreChildren(): number {
   return restoreChildren.size;
@@ -205,16 +208,38 @@ export function runningRestoreChildren(): number {
  * Stops every child a backup or restore started (#1204 review). A restore holds the exclusive
  * restore lock for its whole run; when that connection is lost, the process can no longer prove the
  * interlock, so it must not leave a `pg_restore` running. SIGTERM first — `pg_restore` rolls its
- * open transaction back — and SIGKILL for a child that ignores it.
+ * open transaction back — then SIGKILL for a child that ignores it.
+ *
+ * The promise resolves only when every child is actually gone: the caller (`process.exit`) used to
+ * win the race against the scheduled SIGKILL, so a child that ignored SIGTERM outlived the lock
+ * (#1204 review). It is bounded: after the grace period a SIGKILL gets another `STOP_TIMEOUT_MS`.
  */
-export function stopRestoreChildren(): void {
-  if (!restoreChildren.size) return;
-  for (const child of restoreChildren) child.kill('SIGTERM');
-  const escalate = setTimeout(() => {
-    for (const child of restoreChildren) child.kill('SIGKILL');
-  }, RESTORE_CHILD_KILL_GRACE_MS);
-  escalate.unref();
+export async function stopRestoreChildren(): Promise<void> {
+  const children = [...restoreChildren];
+  if (!children.length) return;
+  const gone = Promise.all(children.map(childExited));
+  for (const child of children) child.kill('SIGTERM');
+  if (await Promise.race([gone.then(() => true), delay(RESTORE_CHILD_KILL_GRACE_MS).then(() => false)])) return;
+  for (const child of children) child.kill('SIGKILL');
+  // A hard upper bound: an unkillable child must not keep the exiting process alive forever.
+  await Promise.race([gone, delay(RESTORE_CHILD_STOP_TIMEOUT_MS)]);
 }
+
+/** Resolves when a tracked child has exited, immediately when it already had. */
+function childExited(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((done) => {
+    const finish = () => {
+      child.off('close', finish);
+      child.off('exit', finish);
+      done();
+    };
+    child.once('close', finish);
+    child.once('exit', finish);
+  });
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** Runs one child process for a backup or restore, and keeps it in `restoreChildren` while it runs. */
 export function runRestoreChild(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<void> {
@@ -1387,14 +1412,22 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
   // and held until the fence is cleared. It is server state, not data, so `pg_restore` cannot drop
   // it, and a second restore is refused even when it uses another backup directory. The drain check
   // runs *after* it, so a server that starts after the check is caught by the fence/startup check.
-  // Losing the connection loses the lock: every child the restore started is stopped at once, and
-  // the restore fails with that reason instead of finishing on a lock it no longer holds (#1204
-  // review). The fence stays raised, so nothing serves reads from a half-restored database.
+  // Losing the connection loses the lock: every child the restore started is stopped at once, the
+  // restore is aborted between steps and before every write, and it fails with that reason instead
+  // of finishing on a lock it no longer holds (#1204 review). The fence stays raised, so nothing
+  // serves reads from a half-restored database.
   let lockLost: Error | null = null;
+  const lockLoss = new AbortController();
+  const assertLock = () => {
+    if (lockLost) throw lockLost;
+    if (lockLoss.signal.aborted)
+      throw lockLoss.signal.reason instanceof Error ? lockLoss.signal.reason : new Error('the restore lock was lost');
+  };
   const session = await acquireRestoreSessionLock(databaseUrl, {
     onLost: (err) => {
       lockLost = err;
-      stopRestoreChildren();
+      lockLoss.abort(err);
+      void stopRestoreChildren();
     },
   });
   let releaseFileLock: (() => Promise<void>) | undefined;
@@ -1403,6 +1436,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     // erasure between the replay and the ClickHouse load, and the load then replaces the published
     // exclusions with an older point. Refuse before anything is written.
     await assertDatabaseDrained(databaseUrl);
+    assertLock();
 
     // migrate() recreates the role on every start, but it does not re-run the GRANTs from applied
     // migrations. The dump keeps ACLs, so the grants come back with pg_restore; the role must exist
@@ -1412,6 +1446,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       appRolePassword: env.APP_DB_PASSWORD,
     });
     if (!role.exists) throw new Error(`Postgres role ${role.role} does not exist; set APP_DB_PASSWORD so the restore can create it`);
+    assertLock();
 
     // Read the erasure log from the live database before it is replaced. A snapshot taken before an
     // erasure still contains that person and their key; replaying the log afterwards removes them
@@ -1449,6 +1484,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       (erasureLog.exclusionKeys?.length ?? 0) > 0 ||
       (erasureLog.generations?.length ?? 0) > 0;
     if (needsReplay) {
+      assertLock();
       await writeRestoreCapture(capturePath, binding, erasureLog);
       log(`saved the erasure log for this restore (${capturePath})`);
     }
@@ -1462,17 +1498,24 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     // The fence is raised *before* the replacement (#1194 review): `pg_restore --clean` can commit
     // changes and then fail, and a marker written afterwards would miss exactly that case. The row
     // lives in a table no dump contains, so it survives the restore and only reconciliation clears
-    // it. A server started between this point and reconciliation refuses to serve reads.
-    await markRestoreStarted(databaseUrl, dir);
+    // it. A server started between this point and reconciliation refuses to serve reads. It is
+    // written through the locked session, so a restore that has already lost the lock cannot raise it
+    // (#1204 review).
+    assertLock();
+    const fenceState = await markRestoreStarted(session.client, dir);
     log('restore fence raised; Postgres replacement starts now');
 
+    assertLock();
     log('restoring Postgres (this replaces the current database)');
     await (opts.pgRestore ?? restorePostgres)(databaseUrl, manifestPath(dir, manifest.postgres.file));
+    // Nothing after a lost lock: the next step would write into a database another restore owns.
+    assertLock();
 
     // The pre-restore check used the sealed value in the manifest; this proves the key also opens a
     // real data key in the restored data, still before the app is started. `--skip-key-check`
     // deliberately overrides both. A backup written without a key reference has nothing to compare.
     if (!opts.skipKeyCheck && manifest.format === 2 && manifest.key) await assertRestoredDataKey(databaseUrl, env, log);
+    assertLock();
 
     if (needsReplay) {
       // Migrate before replay: a snapshot older than 0.15.0 has no erasure_cleanup_jobs, and the
@@ -1485,6 +1528,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
         appRolePassword: env.APP_DB_PASSWORD ?? '',
         log,
       });
+      assertLock();
       log(
         `erasures replayed: ${replayed.profiles} profile(s) removed from the restored snapshot, ` +
           `${replayed.tombstones} tombstone(s) restored` +
@@ -1500,6 +1544,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       if (!(await retireRestoreCapture(capturePath, binding)))
         log(`warning: the erasure log at ${capturePath} was not written by this restore; it was left in place`);
     } else {
+      assertLock();
       // A matching log with nothing to replay (an earlier empty capture) must not linger.
       if (capture && !(await retireRestoreCapture(capturePath, binding)))
         log(`warning: the erasure log at ${capturePath} was not written by this restore; it was left in place`);
@@ -1507,13 +1552,15 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     }
 
     if (opts.clickhouse && manifest.clickhouse) {
+      assertLock();
       log('restoring ClickHouse');
       await restoreClickHouse({ runDir: dir, tables: manifest.clickhouse.tables as ClickHouseTableEntry[], env, log });
+      assertLock();
     }
 
     if (opts.skipReconciliation) {
       // Test seam: the fence stays raised, exactly as a reconciliation that threw would leave it.
-      if (lockLost) throw lockLost;
+      assertLock();
       log('reconciliation skipped (test seam); the restore fence stays raised');
       return manifest;
     }
@@ -1521,12 +1568,17 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     // The last step, after every ClickHouse load (#1194). The restored Postgres ledger is the source:
     // a fresh target has no live log to replay, and an older ClickHouse point may lack exclusions for
     // a job the dump already carried as complete. Only after the keys are confirmed visible does this
-    // mark the jobs published and clear the fence.
+    // mark the jobs published and clear the fence. The abort signal stops it between steps if the
+    // lock is lost, and the fence delete matches this attempt's row on the locked session.
+    assertLock();
     log('reconciling restored erasure exclusions with ClickHouse');
     const reconciled = await finishRestoreReconciliation({
       databaseUrl,
       env,
       log,
+      signal: lockLoss.signal,
+      fence: fenceState,
+      fenceClient: session.client,
     });
     if (reconciled.keys)
       log(
@@ -1541,7 +1593,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       log(`restored erasure cleanup: no exclusion key needed publishing, ${reconciled.outboxRows} outbox row(s) removed`);
     else log('no restored erasure exclusions to reconcile');
 
-    if (lockLost) throw lockLost;
+    assertLock();
     log('restore complete; start the app again (it applies any migrations this version still needs)');
     return manifest;
   } catch (err) {

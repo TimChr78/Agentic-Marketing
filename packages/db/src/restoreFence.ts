@@ -35,6 +35,8 @@ export interface RestoreFenceState {
 
 type FenceClient = Pick<pg.Pool, 'query'> | Pick<pg.Client, 'query'>;
 
+export type { FenceClient };
+
 /** PostgreSQL's undefined_table; a database restored from before this release has no fence yet. */
 function isMissingFenceTable(err: unknown): boolean {
   return (err as { code?: string }).code === '42P01';
@@ -70,12 +72,23 @@ export async function raiseRestoreFence(client: FenceClient, state: RestoreFence
 /**
  * Clears the fence only after reconciliation succeeded. A missing table means there was no fence
  * to clear (a snapshot from before this release, or a target that never had one).
+ *
+ * With `match`, only that attempt's row is removed: a restore whose lock connection was lost can
+ * race a second restore that has already raised its own fence, and an unconditional delete would
+ * remove the newer attempt's marker (#1204 review). Returns the number of rows removed.
  */
-export async function clearRestoreFence(client: FenceClient): Promise<void> {
+export async function clearRestoreFence(client: FenceClient, match?: RestoreFenceState): Promise<number> {
   try {
-    await client.query(`DELETE FROM ${RESTORE_FENCE_TABLE}`);
+    const { rowCount } = match
+      ? await client.query(`DELETE FROM ${RESTORE_FENCE_TABLE} WHERE id = 1 AND started_at = $1::timestamptz AND backup = $2`, [
+          match.startedAt,
+          match.backup,
+        ])
+      : await client.query(`DELETE FROM ${RESTORE_FENCE_TABLE}`);
+    return rowCount ?? 0;
   } catch (err) {
     if (!isMissingFenceTable(err)) throw err;
+    return 0;
   }
 }
 

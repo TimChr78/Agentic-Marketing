@@ -38,7 +38,14 @@ issues: [1194]
   that starts next.
 - Losing the restore lock now stops the children the restore started (`pg_dump`, `pg_restore`)
   before it fails: SIGTERM, then SIGKILL, instead of leaving a child writing into a database that
-  another restore may already own.
+  another restore may already own. The handler waits until every child is actually gone before the
+  process exits, so a `pg_restore` that ignores SIGTERM cannot outlive the interlock, and the restore
+  itself aborts between steps and before every write instead of finishing. The fence is written and
+  cleared through the session that holds the exclusive lock and only when the row is this attempt's,
+  so a restore that lost its lock can no longer delete the fence a newer attempt raised.
+- A restored snapshot from before the durable erasure ledger (no `erasure_keys`) still gets the
+  completed jobs' final outbox pass: only the ClickHouse publication is gated on the ledger, so a
+  pending outbox row naming an erased profile is removed from the restored database.
 - The restore tests now write a real pre-erasure ClickHouse row for the erased identity in the
   Postgres-only and fresh-target shapes, and prove that shape fails (the row is readable) when the
   reconciliation is bypassed. The interlock has tests for a running server with idle pools, a

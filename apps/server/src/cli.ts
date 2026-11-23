@@ -175,8 +175,11 @@ async function admin(command: string, rest: string[]) {
     restoreLock = await acquireRestoreStartupLock(config.adminDatabaseUrl, {
       onLost: (err) => {
         console.error(`the restore lock connection was lost (${err.message}); exiting`);
-        stopRestoreChildren();
-        process.exit(1);
+        // Wait until every child is really gone (SIGTERM, then SIGKILL) before exiting (#1204 review).
+        void stopRestoreChildren().then(
+          () => process.exit(1),
+          () => process.exit(1),
+        );
       },
     });
     await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: console.log });

@@ -1,10 +1,20 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { RESTORE_ADVISORY_LOCK_KEY } from '@agentic-marketing/db';
+import { existsSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  clearRestoreFence,
+  RESTORE_ADVISORY_LOCK_KEY,
+  type RestoreFenceState,
+  raiseRestoreFence,
+  restoreFenceState,
+} from '@agentic-marketing/db';
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../../packages/db/test/disposable';
 import { runningRestoreChildren, runRestoreChild, stopRestoreChildren } from '../src/ops/backup-lib';
-import { acquireRestoreSessionLock, reconcileRestoredErasureExclusions } from '../src/ops/restore-reconcile';
+import { acquireRestoreSessionLock, finishRestoreReconciliation, reconcileRestoredErasureExclusions } from '../src/ops/restore-reconcile';
 
 // The restore's final step (#1194). It must publish only what the ClickHouse point lost, record the
 // confirmation on the jobs, and leave a completed job complete instead of reopening every
@@ -430,7 +440,7 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     const session = await acquireRestoreSessionLock(databaseUrl, {
       onLost: (err) => {
         lost = err.message;
-        stopRestoreChildren();
+        void stopRestoreChildren();
       },
     });
     try {
@@ -459,8 +469,199 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
       expect(lost).toMatch(/terminat|connection/i);
       expect(runningRestoreChildren()).toBe(0);
     } finally {
-      stopRestoreChildren();
+      await stopRestoreChildren();
       await session.release();
     }
+  }, 120_000);
+
+  it('stops a child that ignores SIGTERM before reporting the restore stopped (#1204 review)', async () => {
+    // A `pg_restore` that ignores SIGTERM must still be gone before the process exits: the old
+    // handler returned immediately after scheduling SIGKILL, so `process.exit` won the race and the
+    // child outlived the interlock.
+    const ready = join(tmpdir(), `am-restore-child-${randomUUID()}`);
+    const child = runRestoreChild(
+      process.execPath,
+      [
+        '-e',
+        `require('node:fs').writeFileSync(${JSON.stringify(ready)}, 'ready');` +
+          "process.on('SIGTERM', () => {}); setTimeout(() => {}, 30_000);",
+      ],
+      {},
+    ).then(
+      () => 'exited' as const,
+      () => 'killed' as const,
+    );
+    // The handler is installed only once Node has evaluated the script; SIGTERM before that uses the
+    // default disposition and would not test the escalation.
+    const installed = Date.now() + 5_000;
+    while (!existsSync(ready) && Date.now() < installed) await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(existsSync(ready)).toBe(true);
+    expect(runningRestoreChildren()).toBe(1);
+    const started = Date.now();
+    await stopRestoreChildren();
+    // It had to be escalated, and the promise only resolved once the child was actually gone.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_500);
+    expect(runningRestoreChildren()).toBe(0);
+    await expect(child).resolves.toBe('killed');
+    await rm(ready, { force: true });
+  }, 120_000);
+
+  it('clears a fence only when it belongs to the attempt clearing it (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_fence_owner');
+    open.push(d);
+    const attemptOne = { backup: '/backups/attempt-one', startedAt: '2026-11-01T00:00:00.000Z' };
+    const attemptTwo = { backup: '/backups/attempt-two', startedAt: '2026-11-02T00:00:00.000Z' };
+    await raiseRestoreFence(d.db.admin, attemptTwo);
+
+    // A late write from an attempt that no longer holds the lock must not remove the current fence.
+    await clearRestoreFence(d.db.admin, attemptOne);
+    expect(await restoreFenceState(d.db.admin)).toEqual(attemptTwo);
+
+    // Its own row is still cleared.
+    await clearRestoreFence(d.db.admin, attemptTwo);
+    expect(await restoreFenceState(d.db.admin)).toBeNull();
+  }, 120_000);
+
+  it('leaves another attempt’s fence and does no further work after the lock is lost (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_fence_lost');
+    open.push(d);
+    const erasedProfile = 'prf_00000000000000000000000000000007';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, 'era_00000000000000000000000000000d77', ARRAY[$2]::text[], 'user_test', 'lost lock test', '{"profiles":1}')`,
+      [d.workspace, erasedProfile],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, coverage_cleared_at, completed_at)
+       VALUES ($1, 'era_00000000000000000000000000000d77', ARRAY[$2]::text[], 'complete', 1, true, true, 2, now(), now(), now())`,
+      [d.workspace, erasedProfile],
+    );
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts)
+       VALUES ($1, 'ob_lost_lock', 'message_event',
+               jsonb_build_object('events', jsonb_build_array(jsonb_build_object('profileId', $2::text))),
+               'ob_lost_lock', 'pending', 0)`,
+      [d.workspace, erasedProfile],
+    );
+    // The reviewer's scenario: attempt #1 holds the lock and raised its fence, its backend is
+    // terminated, attempt #2 takes the lock and raises its own fence, and #1 then reaches the end of
+    // its run. Before the fix, #1's reconciliation cleared #2's fence through a separate connection.
+    const databaseUrl = d.url.toString();
+    const attemptOne: RestoreFenceState = { backup: '/backups/attempt-one', startedAt: '2026-11-01T00:00:00.000Z' };
+    let lost: Error | null = null;
+    const abort = new AbortController();
+    const sessionOne = await acquireRestoreSessionLock(databaseUrl, {
+      onLost: (err) => {
+        lost = err;
+        abort.abort(err);
+      },
+    });
+    await raiseRestoreFence(sessionOne.client, attemptOne);
+    const finder = new pg.Client({ connectionString: databaseUrl });
+    await finder.connect();
+    try {
+      const { rows } = await finder.query<{ pid: number }>(
+        `SELECT pid FROM pg_locks
+          WHERE locktype = 'advisory' AND objid = $1 AND objsubid = 1 AND granted AND pid <> pg_backend_pid()
+            AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+        [RESTORE_ADVISORY_LOCK_KEY],
+      );
+      expect(rows).toHaveLength(1);
+      await finder.query('SELECT pg_terminate_backend($1)', [rows[0]!.pid]);
+    } finally {
+      await finder.end();
+    }
+    const lostBy = Date.now() + 15_000;
+    while (!lost && Date.now() < lostBy) await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(lost).toBeInstanceOf(Error);
+
+    // Attempt #2 may need a moment to see the ended backend's session lock released.
+    let sessionTwo: Awaited<ReturnType<typeof acquireRestoreSessionLock>> | undefined;
+    const freeBy = Date.now() + 15_000;
+    while (!sessionTwo && Date.now() < freeBy) {
+      sessionTwo = await acquireRestoreSessionLock(databaseUrl).catch(() => undefined);
+      if (!sessionTwo) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(sessionTwo).toBeDefined();
+    const attemptTwo: RestoreFenceState = { backup: '/backups/attempt-two', startedAt: new Date().toISOString() };
+    await raiseRestoreFence(sessionTwo!.client, attemptTwo);
+
+    try {
+      await expect(
+        finishRestoreReconciliation({
+          databaseUrl,
+          events: {
+            async erasedSubjectKeys() {
+              throw new Error('ClickHouse must not be read after the restore lock was lost');
+            },
+            async publishErasedSubjects() {
+              throw new Error('ClickHouse must not be written after the restore lock was lost');
+            },
+            async erasedSubjectsVisible() {
+              throw new Error('ClickHouse must not be read after the restore lock was lost');
+            },
+          },
+          log: () => {},
+          signal: abort.signal,
+          fence: attemptOne,
+          fenceClient: sessionOne.client,
+        }),
+      ).rejects.toThrow(/terminat|connection|lost/i);
+      expect(await restoreFenceState(d.db.admin)).toEqual(attemptTwo);
+      // The completed job's outbox pass is a write too: it did not run after the loss.
+      const outbox = await d.db.admin.query('SELECT id FROM outbox WHERE workspace_id = $1', [d.workspace]);
+      expect(outbox.rows.map((row) => row.id)).toEqual(['ob_lost_lock']);
+    } finally {
+      await sessionTwo!.release();
+      await sessionOne.release();
+    }
+  }, 120_000);
+
+  it('cleans a completed job’s outbox when the restored snapshot predates the erasure ledger (#1204 review)', async () => {
+    const d = await createDisposableDb('restore_outbox_no_ledger');
+    open.push(d);
+    const erasedProfile = 'prf_00000000000000000000000000000008';
+    // A snapshot at the 0110 schema: the cleanup job table exists, the durable ledger does not.
+    await d.db.admin.query('DROP TABLE erasure_keys');
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, 'era_00000000000000000000000000000e88', ARRAY[$2]::text[], 'user_test', 'pre-ledger restore', '{"profiles":1}')`,
+      [d.workspace, erasedProfile],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, coverage_cleared_at, completed_at)
+       VALUES ($1, 'era_00000000000000000000000000000e88', ARRAY[$2]::text[], 'complete', 1, true, true, 2, now(), now(), now())`,
+      [d.workspace, erasedProfile],
+    );
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, state, attempts)
+       VALUES ($1, 'ob_pre_ledger', 'message_event',
+               jsonb_build_object('events', jsonb_build_array(jsonb_build_object('profileId', $2::text))),
+               'ob_pre_ledger', 'pending', 0)`,
+      [d.workspace, erasedProfile],
+    );
+
+    const result = await reconcileRestoredErasureExclusions({
+      databaseUrl: d.url.toString(),
+      events: {
+        async erasedSubjectKeys() {
+          throw new Error('a snapshot without erasure_keys has nothing to publish');
+        },
+        async publishErasedSubjects() {
+          throw new Error('a snapshot without erasure_keys has nothing to publish');
+        },
+        async erasedSubjectsVisible() {
+          throw new Error('a snapshot without erasure_keys has nothing to publish');
+        },
+      },
+      log: () => {},
+    });
+    expect(result).toMatchObject({ workspaces: 0, keys: 0, inserted: 0, jobs: 0, outboxRows: 1 });
+    const left = await d.db.admin.query('SELECT id FROM outbox WHERE workspace_id = $1', [d.workspace]);
+    expect(left.rows).toEqual([]);
   }, 120_000);
 });
