@@ -358,6 +358,8 @@ contents but does not create them.
   `a previous restore's work is still running` if either is still there. The advisory lock cannot
   fence work on other connections: the role setup, migration, erasure replay and reconciliation
   pools, the `pg_restore` child and ClickHouse `TRUNCATE`/`INSERT` requests all carry the marker.
+  The ClickHouse load inserts synchronously (`async_insert=0`), so an insert stays visible until it
+  has landed rather than flushing from the server's async buffer after the successor's `TRUNCATE`.
   A `DATABASE_URL` whose query string names another `application_name` does not change this: every
   connection a restore opens sets `am-restore` in the connection string, where the driver gives it
   precedence. The ClickHouse probe resolves the same endpoint the load and reconciliation use

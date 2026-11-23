@@ -903,6 +903,37 @@ describe('a restore tags and stops its own work (#1204 review)', () => {
     }
   }, 60_000);
 
+  it('loads ClickHouse with synchronous inserts so a successor can see them (#1204 review)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'am-restore-ch-sync-'));
+    const files = ['one.native', 'two.native'];
+    for (const file of files) await writeFile(join(dir, file), 'x');
+    const requests: URL[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      requests.push(new URL(String(input)));
+      return new Response('', { status: 200 });
+    }) as typeof fetch;
+    try {
+      await restoreClickHouse({
+        runDir: dir,
+        tables: [{ name: 'events', totalRowsBefore: 0, files: files.map((file) => ({ file, bytes: 1, sha256: 'x', rows: 0 })) }],
+        url: 'http://clickhouse.test:8123',
+        database: 'am',
+      });
+      // An async insert returns once it is buffered and then leaves system.processes, so the next
+      // restore's drain could not see it land after its own TRUNCATE.
+      const inserts = requests.filter((url) => /^INSERT/.test(url.searchParams.get('query') ?? ''));
+      expect(inserts).toHaveLength(2);
+      for (const url of inserts) {
+        expect(url.searchParams.get('async_insert')).toBe('0');
+        expect(url.searchParams.get('wait_for_async_insert')).toBe('1');
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it('runs pg_restore with PGAPPNAME=am-restore', async () => {
     const bin = await mkdtemp(join(tmpdir(), 'am-restore-pgappname-'));
     const out = join(bin, 'pgappname.txt');

@@ -866,7 +866,10 @@ export async function restoreClickHouse(opts: {
           duplex: 'half',
           signal: opts.signal,
         } as RequestInit,
-        {},
+        // Synchronous, so the insert stays in system.processes until it has landed: an async insert
+        // returns once buffered, and a successor's drain could not see it flush after its own
+        // TRUNCATE (#1204 review). The shared server may default to async_insert=1.
+        { async_insert: '0', wait_for_async_insert: '1' },
         restoreClickHouseQueryId(),
       );
     }
