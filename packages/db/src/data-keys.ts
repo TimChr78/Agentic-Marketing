@@ -1,10 +1,15 @@
 import pg from 'pg';
+import { withApplicationName } from './pool';
 
 // Read-only helpers for `am backup`/`am restore`, which deliberately run without the server
 // configuration and only need DATABASE_URL (plus a key provider when they can have one).
 
-async function withClient<T>(databaseUrl: string, fn: (client: pg.Client) => Promise<T>): Promise<T> {
-  const client = new pg.Client({ connectionString: databaseUrl });
+async function withClient<T>(scope: { databaseUrl: string; applicationName?: string }, fn: (client: pg.Client) => Promise<T>): Promise<T> {
+  const client = new pg.Client({
+    // The URL wins over the option in node-postgres, so the name has to be set there too (#1204 review).
+    connectionString:
+      scope.applicationName === undefined ? scope.databaseUrl : withApplicationName(scope.databaseUrl, scope.applicationName),
+  });
   await client.connect();
   try {
     return await fn(client);
@@ -25,8 +30,8 @@ export interface StoredDataKeySample {
  * The first data key in the database, or null when there is none (a fresh install). Connections
  * use the admin DATABASE_URL, which bypasses row-level security, so this sees every workspace.
  */
-export function readDataKeySample(databaseUrl: string): Promise<StoredDataKeySample | null> {
-  return withClient(databaseUrl, async (client) => {
+export function readDataKeySample(databaseUrl: string, opts: { applicationName?: string } = {}): Promise<StoredDataKeySample | null> {
+  return withClient({ databaseUrl, applicationName: opts.applicationName }, async (client) => {
     const present = await client.query<{ present: boolean }>("SELECT to_regclass('public.data_keys') IS NOT NULL AS present");
     if (!present.rows[0]?.present) return null;
     const { rows } = await client.query<{ id: string; workspace_id: string; kek_id: string; wrapped_key: Buffer }>(

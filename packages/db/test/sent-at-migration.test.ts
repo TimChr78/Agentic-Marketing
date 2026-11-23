@@ -223,6 +223,7 @@ describe.skipIf(!hasTestDatabase())('0.10.1 migrations on a populated install', 
         'segment_memberships',
         'segment_list_members',
         'profile_scores',
+        'restore_fence',
       ])
         await d.db.admin.query(`ALTER TABLE IF EXISTS ${table} OWNER TO ${role}`);
       await d.db.admin.query(`GRANT SELECT, INSERT ON schema_migrations TO ${role}`);

@@ -504,6 +504,9 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
     DATABASE_URL: dbUrl.toString(),
     APP_DB_ROLE: role,
     APP_DB_PASSWORD: password,
+    // A restore checks ClickHouse for an earlier run's work even when it restores Postgres only
+    // (#1204 review), so it needs the test stack's endpoint rather than the localhost default.
+    CLICKHOUSE_URL: chUrl,
   };
 
   beforeAll(async () => {
@@ -608,7 +611,7 @@ describe.skipIf(!pgToolsReady)('restore replays erasures (#144)', () => {
     await pool.query('INSERT INTO restore_probe (id) VALUES (1) ON CONFLICT DO NOTHING');
     const err = await restoreBackup({
       dir: backupPath,
-      env: { DATABASE_URL: env.DATABASE_URL, APP_DB_ROLE: env.APP_DB_ROLE },
+      env: { DATABASE_URL: env.DATABASE_URL, APP_DB_ROLE: env.APP_DB_ROLE, CLICKHOUSE_URL: chUrl },
       log: () => {},
     }).catch((error: Error) => error);
     expect(err).toBeInstanceOf(Error);

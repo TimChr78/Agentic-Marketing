@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { sha256 } from '@agentic-marketing/core';
 import pg from 'pg';
+import { withApplicationName } from './pool';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../migrations', import.meta.url));
 const LOCK_KEY = 7_340_001; // arbitrary constant: one migrator at a time across pods
@@ -147,6 +148,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0117_stranded_segment_memberships.sql': '0.17.2',
   '0118_ad_conversion_idempotency_keys.sql': '0.17.6',
   '0119_stranded_profile_scores.sql': '0.17.6',
+  '0120_restore_fence.sql': '0.17.7',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {
@@ -349,11 +351,15 @@ export async function ensureAppRole(client: RoleClient, opts: { appRolePassword:
 /** Ensures the role in the database behind `databaseUrl`; a restore runs this before pg_restore. */
 export async function ensureAppRoleInDatabase(
   databaseUrl: string,
-  opts: { appRolePassword?: string; appRole?: string },
+  opts: { appRolePassword?: string; appRole?: string; applicationName?: string },
 ): Promise<{ role: string; created: boolean; exists: boolean }> {
   const role = opts.appRole ?? 'am_app';
   if (!roleName.test(role)) throw new Error(`Invalid app role name ${role}`);
-  const client = new pg.Client({ connectionString: databaseUrl });
+  const client = new pg.Client({
+    // The connection string's `application_name` takes precedence over the option in
+    // node-postgres, so a restore's role setup must set it in the URL (#1204 review).
+    connectionString: opts.applicationName === undefined ? databaseUrl : withApplicationName(databaseUrl, opts.applicationName),
+  });
   await client.connect();
   try {
     const { rowCount } = await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [role]);

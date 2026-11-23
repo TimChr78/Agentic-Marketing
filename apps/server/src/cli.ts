@@ -10,6 +10,8 @@ import { createServer } from './app';
 import { resolvePassword } from './cli-password';
 import { ConfigError, loadConfig } from './config';
 import { runLoadTest } from './loadtest';
+import { stopRestoreChildren } from './ops/backup-lib';
+import { acquireRestoreStartupLock } from './ops/restore-reconcile';
 import { resetPasswordForEmail } from './passwordReset';
 import { COMMIT, VERSION } from './version';
 
@@ -165,7 +167,21 @@ async function admin(command: string, rest: string[]) {
   const config = loadConfig();
   const { db, auth, keyProvider, events } = createServer(config);
 
+  // Before the first migration (#1194 review), and held until the process is done: the same
+  // interlock a server takes. `am migrate` must not replace the schema while a restore runs, and a
+  // restore must not start while this command is still writing.
+  let restoreLock: Awaited<ReturnType<typeof acquireRestoreStartupLock>> | undefined;
   try {
+    restoreLock = await acquireRestoreStartupLock(config.adminDatabaseUrl, {
+      onLost: (err) => {
+        console.error(`the restore lock connection was lost (${err.message}); exiting`);
+        // Wait until every child is really gone (SIGTERM, then SIGKILL) before exiting (#1204 review).
+        void stopRestoreChildren().then(
+          () => process.exit(1),
+          () => process.exit(1),
+        );
+      },
+    });
     await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: console.log });
     await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
     await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, console.log, config.clickhouse);
@@ -230,6 +246,7 @@ async function admin(command: string, rest: string[]) {
     }
   } finally {
     await db.close();
+    await restoreLock?.release();
   }
 }
 

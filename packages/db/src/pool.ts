@@ -17,6 +17,39 @@ const ADVISORY_LOCK_BACKOFF_MAX_MS = 250;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
+ * The application name every pool connection announces (#1194). `am restore` refuses to run while
+ * a connection with this name is open on the target database, so a scheduler cannot republish an
+ * erasure between the Postgres load and the final ClickHouse load that replaces the keys.
+ */
+export const APP_DATABASE_APPLICATION_NAME = 'agentic-marketing';
+
+/**
+ * The `application_name` every PostgreSQL connection a restore opens announces (#1204 review).
+ * The advisory lock only fences the session that holds it; a restore writes through pools, helper
+ * clients and `pg_restore`'s own backend, so a successor finds that leftover work by this name
+ * before it writes anything.
+ */
+export const RESTORE_APPLICATION_NAME = 'am-restore';
+
+/**
+ * A connection string that announces `applicationName`, replacing whatever the URL's query string
+ * named (#1204 review). node-postgres gives `?application_name=` in the connection string
+ * precedence over the client option, so setting only the option on a `DATABASE_URL` that already
+ * carries one silently announces the other name — and a restore's leftover work would then escape
+ * the successor's drain.
+ */
+export function withApplicationName(databaseUrl: string, applicationName: string): string {
+  const url = new URL(databaseUrl);
+  url.searchParams.set('application_name', applicationName);
+  return url.toString();
+}
+
+/** The connection string every restore connection uses: it announces {@link RESTORE_APPLICATION_NAME}. */
+export function withRestoreAppName(databaseUrl: string): string {
+  return withApplicationName(databaseUrl, RESTORE_APPLICATION_NAME);
+}
+
+/**
  * These are **session** advisory locks: the lock belongs to the PostgreSQL backend that ran the
  * statement. They are incompatible with PgBouncer (or another pooler) in **transaction** pooling
  * mode, where that backend can be handed to a different client between statements; use session
@@ -42,6 +75,12 @@ export interface DbConfig {
   queryTimeoutMillis?: number;
   /** How long an idempotency waiter retries the advisory lock before `conflict`. Default 10 s. */
   advisoryLockTimeoutMillis?: number;
+  /**
+   * Announced as `application_name` on every pooled connection (#1194). The server sets
+   * `APP_DATABASE_APPLICATION_NAME` so `am restore` can refuse a live app; operator commands and
+   * test pools leave it unset and never look like an app process.
+   */
+  applicationName?: string;
 }
 
 export interface Db {
@@ -88,8 +127,9 @@ export function createDb(config: DbConfig): Db {
     ...(config.connectionTimeoutMillis === undefined ? {} : { connectionTimeoutMillis: config.connectionTimeoutMillis }),
     ...(config.queryTimeoutMillis === undefined ? {} : { query_timeout: config.queryTimeoutMillis }),
   };
-  const admin = new pg.Pool({ connectionString: config.adminUrl, max: 5, ...timeouts });
-  const app = new pg.Pool({ connectionString: config.appUrl, max: config.poolSize ?? 20, ...timeouts });
+  const announced = config.applicationName === undefined ? {} : { application_name: config.applicationName };
+  const admin = new pg.Pool({ connectionString: config.adminUrl, max: 5, ...announced, ...timeouts });
+  const app = new pg.Pool({ connectionString: config.appUrl, max: config.poolSize ?? 20, ...announced, ...timeouts });
   const onIdleError =
     config.onIdleError ??
     ((err: Error, pool: 'admin' | 'app') => {

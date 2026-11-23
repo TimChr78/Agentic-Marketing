@@ -5,6 +5,7 @@ import { erasedEventFilter, runErasureCleanupOnce, runErasurePurgeOnce, subjectK
 import { readDataset } from '@agentic-marketing/warehouse';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { finishRestoreReconciliation } from '../src/ops/restore-reconcile';
 import { startTestServer, testDatabaseUrl, testPort, type User } from './harness';
 
 // #1037 part 3, end to end. Once an erasure reports complete, every read started afterwards
@@ -122,7 +123,13 @@ async function completeErasure(erasureId: string, opts: { finalSweepMs?: number 
       coverageWaitSeconds: 0,
       maxAttempts: Number.MAX_SAFE_INTEGER,
     });
-    if (result.completed) return;
+    // A round completes whichever jobs it claimed; a restore reopens every erasure's job in the
+    // workspace, so `result.completed` alone does not say this one is done.
+    const { rows } = await t.srv.db.admin.query<{ state: string; published_at: Date | null }>(
+      'SELECT state, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
+      [ws, erasureId],
+    );
+    if (rows[0]?.state === 'complete' && rows[0].published_at !== null) return;
     rounds.push(JSON.stringify(result));
     await new Promise((resolve) => setTimeout(resolve, 100));
     await makeDue(erasureId);
@@ -440,10 +447,18 @@ describe('erasure completion contract races (#1037 part 3)', () => {
     await ch(`DELETE FROM erased_subjects WHERE workspace_id = '${ws}'`);
     await replayErasures(databaseUrl, log);
 
+    // The live log said the job was complete, so the replay recreates it as complete rather than
+    // queueing another sweep (#1194). It has no publication record yet, which the status reports
+    // as pending; reconciliation — the restore's final step — publishes the ledger and confirms it.
     const pending = await status(erased.erasureId);
     expect(pending.status).not.toBe('complete');
     expect(pending.reason).toBe('publication');
-    await completeErasure(erased.erasureId);
+    const reconciled = await finishRestoreReconciliation({
+      databaseUrl,
+      env: { CLICKHOUSE_URL: CH_URL, CLICKHOUSE_DATABASE: t.dbName },
+      log: () => {},
+    });
+    expect(reconciled.jobs).toBeGreaterThanOrEqual(1);
     const complete = await status(erased.erasureId);
     expect(complete).toMatchObject({ status: 'complete', exclusion: 'full' });
     expect(await t.srv.events.eventsOf(ws, { anonymousIds: [person.anonymousId], userIds: [] })).toEqual([]);

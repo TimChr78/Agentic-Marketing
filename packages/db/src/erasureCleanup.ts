@@ -1,5 +1,6 @@
 import { sleep } from '@agentic-marketing/core';
 import { and, eq } from 'drizzle-orm';
+import type pg from 'pg';
 import type { Db, Tx } from './pool';
 import * as schema from './schema';
 
@@ -7,6 +8,13 @@ import * as schema from './schema';
 // transaction as the deletion; the scheduler claims it with a lease, cleans ClickHouse and hot
 // state outside any transaction, checkpoints each store and then completes. See
 // packages/db/migrations/0108_erasure_cleanup_jobs.sql.
+
+/**
+ * The part of a pool these helpers use. A `Db`'s admin pool, a checked-out client inside a
+ * workspace transaction, and a test double all satisfy it (#1194 review: the restore runs them in
+ * the `app.workspace_id` transaction).
+ */
+export type Queryable = Pick<pg.Pool, 'query'>;
 
 /** Attempts before a job stops retrying and stays `failed` for an operator. */
 export const ERASURE_CLEANUP_MAX_ATTEMPTS = 36;
@@ -404,7 +412,7 @@ const NAMES_ERASED_PROFILE = `(
  * do not block completion; `dropErasedProfileOutbox` removes them instead, so a later requeue
  * cannot resurrect the person.
  */
-export async function erasureOutboxOutstanding(db: Db, workspaceId: string, profileIds: string[]): Promise<number> {
+export async function erasureOutboxOutstanding(db: { admin: Queryable }, workspaceId: string, profileIds: string[]): Promise<number> {
   if (!profileIds.length) return 0;
   const { rows } = await db.admin.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM outbox o
@@ -414,6 +422,20 @@ export async function erasureOutboxOutstanding(db: Db, workspaceId: string, prof
     [workspaceId, profileIds],
   );
   return rows[0]?.n ?? 0;
+}
+
+/**
+ * Options for {@link dropErasedProfileOutbox}.
+ */
+export interface DropErasedProfileOutboxOptions {
+  /**
+   * Also remove `pending` and `delivering` rows. The cleanup worker never does this: an in-flight
+   * dispatcher may be mid-delivery, so it waits for those rows to drain first. A restore holds the
+   * exclusive restore lock, which proves no app, worker or scheduler is running, so a row cannot be
+   * mid-delivery; it removes them rather than letting the started app publish data about someone
+   * whose erasure is already complete (#1194 review).
+   */
+  includeUndelivered?: boolean;
 }
 
 /**
@@ -429,15 +451,23 @@ export async function erasureOutboxOutstanding(db: Db, workspaceId: string, prof
  * Both mutations are single SQL statements. A row that another process moves to `pending` or
  * `delivering` between sweeps is excluded by the state predicate at the moment of the mutation,
  * and the mixed batch is filtered from the payload the statement reads (under the row lock), so
- * two erasures cleaning the same batch cannot restore each other's entries.
+ * two erasures cleaning the same batch cannot restore each other's entries. `includeUndelivered`
+ * widens the state predicate for the restore, where the exclusive lock proves no dispatcher runs.
  */
-export async function dropErasedProfileOutbox(db: Db, workspaceId: string, profileIds: string[]): Promise<number> {
+export async function dropErasedProfileOutbox(
+  db: { admin: Queryable },
+  workspaceId: string,
+  profileIds: string[],
+  opts: DropErasedProfileOutboxOptions = {},
+): Promise<number> {
   if (!profileIds.length) return 0;
+  // `IN` over a fixed list, never caller text: the two states are literals of this module.
+  const removable = opts.includeUndelivered ? `('pending', 'delivering', 'failed', 'delivered')` : `('failed', 'delivered')`;
   // A row wholly about the erased family: no event in its batch belongs to anyone else.
   const deleted = await db.admin.query(
     `DELETE FROM outbox o
      WHERE o.workspace_id = $1
-       AND o.state IN ('failed', 'delivered')
+       AND o.state IN ${removable}
        AND (
          (coalesce(jsonb_typeof(o.payload->'events'), 'none') <> 'array'
           AND ${OUTBOX_PROFILE('o.payload')} = ANY($2::text[]))
@@ -463,7 +493,7 @@ export async function dropErasedProfileOutbox(db: Db, workspaceId: string, profi
          )),
          updated_at = now()
      WHERE o.workspace_id = $1
-       AND o.state IN ('failed', 'delivered')
+       AND o.state IN ${removable}
        AND jsonb_typeof(o.payload->'events') = 'array'
        AND EXISTS (
          SELECT 1 FROM jsonb_array_elements(o.payload->'events') AS e(event)
@@ -646,7 +676,7 @@ export async function runErasurePublicationBacklog(
  * successful publication, after the FINAL read, so concurrent publishers each move it exactly once
  * and a read can never observe a new epoch before the rows behind it are visible.
  */
-export async function noteErasedSubjectsVisible(db: Db, workspaceId: string): Promise<void> {
+export async function noteErasedSubjectsVisible(db: { admin: Queryable }, workspaceId: string): Promise<void> {
   await db.admin.query(
     `INSERT INTO erasure_generations (workspace_id, visible_publications, visible_at) VALUES ($1, 1, now())
      ON CONFLICT (workspace_id) DO UPDATE
@@ -726,7 +756,7 @@ export async function erasureWorkspaceKeys(db: Db, workspaceId: string): Promise
  * statement, so two workers publishing for the same workspace can never take the same value and a
  * generation never moves backwards.
  */
-export async function nextErasureGeneration(db: Db, workspaceId: string): Promise<number> {
+export async function nextErasureGeneration(db: { admin: Queryable }, workspaceId: string): Promise<number> {
   const { rows } = await db.admin.query<{ generation: number | string }>(
     `INSERT INTO erasure_generations (workspace_id, generation) VALUES ($1, 1)
      ON CONFLICT (workspace_id) DO UPDATE

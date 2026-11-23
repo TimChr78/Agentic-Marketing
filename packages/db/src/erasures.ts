@@ -1,13 +1,17 @@
 import pg from 'pg';
 import { migrate } from './migrate';
+import { withApplicationName } from './pool';
 
 // Erasures live in the database they protect, so a restore from a snapshot taken before an
 // erasure would bring the erased person back (#144). `am restore` reads this log from the live
 // database before replacing it and replays it afterwards: profiles and identifiers named by an
 // erasure are deleted again, their suppression hashes are restored, the keyed tombstones go back,
 // and the durable erasure-key ledger (#1037) is re-inserted, so read-time exclusion still knows the
-// erased keys. Only pseudonymous ids and hashes are involved; no plaintext personal data is copied
-// by the replay.
+// erased keys. The replay only queues work that was unfinished; a job the snapshot carries as
+// complete is left alone. Publishing the restored ledger to ClickHouse's `erased_subjects` is a
+// separate, final step of `am restore`: that table is not part of the Postgres snapshot, so it is
+// reconciled from the restored ledger after the last ClickHouse load (#1194). Only pseudonymous ids
+// and hashes are involved; no plaintext personal data is copied by the replay.
 
 export interface ErasureRecord {
   workspaceId: string;
@@ -118,8 +122,10 @@ export interface ReplayErasuresResult {
   profiles: number;
   /** Tombstones re-inserted (or refreshed). */
   tombstones: number;
-  /** Pending cleanup jobs recreated for the replayed erasures. */
+  /** Cleanup jobs recreated or reopened for the replayed erasures that were not complete yet. */
   cleanupJobs: number;
+  /** Completed jobs recreated as complete because the live log had one the snapshot predates. */
+  completedJobs: number;
   /** Erasure-key ledger rows re-inserted into the restored database. */
   keys: number;
   /** Wrapped exclusion data keys re-inserted into the restored database. */
@@ -132,10 +138,51 @@ export interface ReplayErasuresResult {
 
 export interface ReplayErasuresOptions {
   log?: (message: string) => void;
+  /** Announce `application_name` on the connection, so a restore can identify its own work. */
+  applicationName?: string;
+  /**
+   * Aborted when the restore loses its exclusive lock (#1204 review). Checked before the replay
+   * opens its connection and before every statement: another restore may already own the database,
+   * and a late write would land in its run.
+   */
+  signal?: AbortSignal;
 }
 
-async function withClient<T>(databaseUrl: string, fn: (client: pg.Client) => Promise<T>): Promise<T> {
-  const client = new pg.Client({ connectionString: databaseUrl });
+interface ClientScope {
+  databaseUrl: string;
+  applicationName?: string;
+  signal?: AbortSignal;
+}
+
+/** The error an aborted restore must fail with, whether the signal carried one or not. */
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('the restore was aborted because its exclusive lock connection was lost');
+}
+
+function assertNotAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortReason(signal);
+}
+
+async function withClient<T>(scope: ClientScope, fn: (client: pg.Client) => Promise<T>): Promise<T> {
+  assertNotAborted(scope.signal);
+  const client = new pg.Client({
+    // The URL's `application_name` takes precedence over the option in node-postgres, so a restore's
+    // own name has to be set in the connection string too (#1204 review).
+    connectionString:
+      scope.applicationName === undefined ? scope.databaseUrl : withApplicationName(scope.databaseUrl, scope.applicationName),
+  });
+  if (scope.signal) {
+    // Every statement the replay issues goes through `client.query`; guarding it there covers the
+    // erasure writes, the tombstone and ledger inserts and the helper functions they call.
+    const signal = scope.signal;
+    const run = client.query.bind(client) as unknown as (...args: unknown[]) => Promise<unknown>;
+    client.query = ((...args: unknown[]) => {
+      assertNotAborted(signal);
+      return run(...args);
+    }) as unknown as typeof client.query;
+  }
   await client.connect();
   try {
     return await fn(client);
@@ -164,172 +211,283 @@ async function hasColumn(client: pg.Client, table: string, column: string): Prom
 const iso = (value: Date | string) => new Date(value).toISOString();
 
 /**
+ * Every live table a restore reads. The tenant ones are under `FORCE ROW LEVEL SECURITY`, so their
+ * owner is subject to the policy exactly like the application role: without an `app.workspace_id`
+ * the owner reads zero rows, and the restore would replay nothing (#1204 review). A restore must
+ * read *every* workspace, so its owner lifts FORCE for one transaction instead of naming one
+ * workspace at a time. `warehouse_erasure_key_tracking` is a singleton with no tenant column; it
+ * is listed so the catalog check sees the whole set.
+ */
+const RESTORE_LOG_TABLES = [
+  'data_keys',
+  'erasure_cleanup_jobs',
+  'erasure_generations',
+  'erasure_keys',
+  'erasure_tombstones',
+  'erasures',
+  'warehouse_erasure_key_tracking',
+  'warehouse_erasure_keys',
+] as const;
+
+interface TableRls {
+  name: string;
+  rls: boolean;
+  forced: boolean;
+  is_owner: boolean;
+  bypass: boolean;
+  role: string;
+}
+
+/** The row-level-security state of `tables` as it applies to this connection's role. */
+async function tableRls(client: pg.Client, tables: readonly string[]): Promise<TableRls[]> {
+  const { rows } = await client.query<TableRls>(
+    `SELECT c.relname AS name,
+            c.relrowsecurity AS rls,
+            c.relforcerowsecurity AS forced,
+            current_user = pg_get_userbyid(c.relowner) AS is_owner,
+            (r.rolsuper OR r.rolbypassrls) AS bypass,
+            current_user::text AS role
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid = c.relnamespace
+       JOIN pg_roles r ON r.rolname = current_user
+      WHERE n.nspname = 'public' AND c.relname = ANY($1::text[])`,
+    [tables],
+  );
+  return rows;
+}
+
+/**
+ * Refuses a role that is neither a table's owner nor able to bypass RLS.
+ *
+ * The tenant policy filters that role's reads, so it would read the table as empty and the restore
+ * would skip the erasures it must replay — quietly resurrecting everyone erased since the snapshot.
+ * Nothing has been replaced at this point.
+ */
+function assertReadsEveryRow(tables: TableRls[], what: string): void {
+  const hidden = tables.find((row) => row.rls && !row.bypass && !row.is_owner);
+  if (hidden)
+    throw new Error(
+      `${what} is hidden by row-level security from role ${hidden.role}: it is not the owner of ${hidden.name} and ` +
+        'does not have BYPASSRLS, so erasures could be skipped instead of replayed. ' +
+        'Run the restore as the table owner or a role with BYPASSRLS.',
+    );
+}
+
+/** The tables whose FORCE RLS the owner must lift to read every row (none for a role that bypasses it). */
+function forcedLiftTargets(tables: TableRls[]): string[] {
+  return tables.filter((row) => row.forced && row.is_owner && !row.bypass).map((row) => row.name);
+}
+
+/** Runs `read` with FORCE lifted on `tables` for one transaction, so a rollback restores it. */
+async function withForcedLift<T>(client: pg.Client, tables: readonly string[], read: () => Promise<T>): Promise<T> {
+  await client.query('BEGIN');
+  try {
+    for (const table of tables) await client.query(`ALTER TABLE public.${table} NO FORCE ROW LEVEL SECURITY`);
+    const value = await read();
+    for (const table of tables) await client.query(`ALTER TABLE public.${table} FORCE ROW LEVEL SECURITY`);
+    await client.query('COMMIT');
+    return value;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  }
+}
+
+/**
+ * The ids of every workspace in a database. `workspaces` is under FORCE RLS too, and the replay
+ * decides from this list whether a captured entry belongs to a workspace the snapshot still has: a
+ * forced owner that reads zero rows would skip every erasure as if its workspace were gone (#1204
+ * review).
+ */
+async function listRestoredWorkspaceIds(client: pg.Client): Promise<Set<string>> {
+  const read = async () => (await client.query<{ id: string }>('SELECT id FROM workspaces')).rows.map((row) => row.id);
+  const plain = await read();
+  if (plain.length) return new Set(plain);
+  const tables = await tableRls(client, ['workspaces']);
+  // A database older than 0.3.0 has no workspaces table, and then there is nothing to replay into.
+  if (!tables.length) return new Set();
+  assertReadsEveryRow(tables, 'the restored workspace list');
+  const lift = forcedLiftTargets(tables);
+  return new Set(lift.length ? await withForcedLift(client, lift, read) : await read());
+}
+
+/**
  * Reads every erasure and tombstone from a live database. A database older than 0.3.0 has
  * neither table; it then has no erasures to replay. Throws when the log cannot be read, because
  * restoring without it could resurrect people.
  */
-export async function readErasureLog(databaseUrl: string): Promise<ErasureLog> {
-  return withClient(databaseUrl, async (client) => {
-    const erasuresTable = await hasTable(client, 'erasures');
-    const erasuresHaveKeyCount = erasuresTable && (await hasColumn(client, 'erasures', 'warehouse_key_count'));
-    const keysPresent = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
-    // A pre-0068 erasure was given the column's default of zero by the migration, not by a real
-    // capture. Reading the tracking start lets the log tell that unknown legacy coverage apart from
-    // a known zero, so replay does not turn "we cannot know" into "there was nothing" (#421).
-    let trackingSince: string | undefined;
-    if (erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_key_tracking'))) {
-      const { rows } = await client.query<{ since: Date | string }>('SELECT since FROM warehouse_erasure_key_tracking LIMIT 1');
-      if (rows[0]) trackingSince = iso(rows[0].since);
-    }
-    const erasures = erasuresTable
+export async function readErasureLog(databaseUrl: string, opts: { applicationName?: string } = {}): Promise<ErasureLog> {
+  return withClient({ databaseUrl, applicationName: opts.applicationName }, async (client) => {
+    // The whole log is read in one transaction when FORCE has to be lifted, so a failure anywhere
+    // rolls the lift back and no reader ever sees a half-read log.
+    const tables = await tableRls(client, RESTORE_LOG_TABLES);
+    assertReadsEveryRow(tables, 'the live erasure log');
+    const lift = forcedLiftTargets(tables);
+    if (!lift.length) return readLog(client);
+    return withForcedLift(client, lift, () => readLog(client));
+  });
+}
+
+async function readLog(client: pg.Client): Promise<ErasureLog> {
+  const erasuresTable = await hasTable(client, 'erasures');
+  const erasuresHaveKeyCount = erasuresTable && (await hasColumn(client, 'erasures', 'warehouse_key_count'));
+  const keysPresent = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
+  // A pre-0068 erasure was given the column's default of zero by the migration, not by a real
+  // capture. Reading the tracking start lets the log tell that unknown legacy coverage apart from
+  // a known zero, so replay does not turn "we cannot know" into "there was nothing" (#421).
+  let trackingSince: string | undefined;
+  if (erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_key_tracking'))) {
+    const { rows } = await client.query<{ since: Date | string }>('SELECT since FROM warehouse_erasure_key_tracking LIMIT 1');
+    if (rows[0]) trackingSince = iso(rows[0].since);
+  }
+  const erasures = erasuresTable
+    ? (
+        await client.query<{
+          workspace_id: string;
+          id: string;
+          profile_ids: string[];
+          requested_by: string;
+          reason: string;
+          counts: Record<string, number>;
+          at: Date | string;
+          warehouse_key_count?: number | string | null;
+        }>(
+          `SELECT workspace_id, id, profile_ids, requested_by, reason, counts, at${
+            erasuresHaveKeyCount
+              ? keysPresent
+                ? `, CASE WHEN warehouse_key_count = 0 THEN GREATEST(warehouse_key_count,
+                (SELECT count(*)::integer FROM warehouse_erasure_keys k WHERE k.workspace_id = e.workspace_id
+                 AND k.profile_id = ANY(e.profile_ids))) ELSE warehouse_key_count END AS warehouse_key_count`
+                : ', warehouse_key_count'
+              : ''
+          } FROM erasures e`,
+        )
+      ).rows.map((row) => {
+        const at = iso(row.at);
+        const known =
+          erasuresHaveKeyCount &&
+          row.warehouse_key_count !== undefined &&
+          row.warehouse_key_count !== null &&
+          Number(row.warehouse_key_count) >= 0 &&
+          trackingSince !== undefined &&
+          Date.parse(at) >= Date.parse(trackingSince)
+            ? Number(row.warehouse_key_count)
+            : undefined;
+        return {
+          workspaceId: row.workspace_id,
+          id: row.id,
+          profileIds: row.profile_ids,
+          requestedBy: row.requested_by,
+          reason: row.reason,
+          counts: row.counts,
+          at,
+          ...(known === undefined ? {} : { warehouseKeyCount: known }),
+        };
+      })
+    : [];
+  const tombstones = (await hasTable(client, 'erasure_tombstones'))
+    ? (
+        await client.query<{ workspace_id: string; ident_hash: string; erased_at: Date | string; erasure_id: string }>(
+          'SELECT workspace_id, ident_hash, erased_at, erasure_id FROM erasure_tombstones',
+        )
+      ).rows.map((row) => ({
+        workspaceId: row.workspace_id,
+        identHash: row.ident_hash,
+        erasedAt: iso(row.erased_at),
+        erasureId: row.erasure_id,
+      }))
+    : [];
+  const cleanupJobs = (await hasTable(client, 'erasure_cleanup_jobs'))
+    ? (
+        await client.query<{
+          workspace_id: string;
+          erasure_id: string;
+          profile_ids: string[];
+          state: string;
+          clickhouse_done: boolean;
+          hotstate_done: boolean;
+          selectors: Buffer | null;
+          selector_key: Buffer | null;
+          selector_kek: string | null;
+        }>(
+          `SELECT workspace_id, erasure_id, profile_ids, state, clickhouse_done, hotstate_done,
+                  selectors, selector_key, selector_kek
+           FROM erasure_cleanup_jobs`,
+        )
+      ).rows.map((row) => ({
+        workspaceId: row.workspace_id,
+        erasureId: row.erasure_id,
+        profileIds: row.profile_ids,
+        state: row.state,
+        clickhouseDone: row.clickhouse_done,
+        hotstateDone: row.hotstate_done,
+        selectors: row.selectors,
+        selectorKey: row.selector_key,
+        selectorKek: row.selector_kek,
+      }))
+    : [];
+  // The durable erasure-key ledger (#1037). A database older than 0.17.0 has no table and
+  // therefore no ledger rows to carry; an empty list here is that version's honest answer.
+  const keys = (await hasTable(client, 'erasure_keys'))
+    ? (
+        await client.query<{
+          workspace_id: string;
+          erasure_id: string;
+          kind: string;
+          key_value: string;
+          key_version: string;
+          coverage: string;
+          recorded_at: Date | string;
+        }>('SELECT workspace_id, erasure_id, kind, key_value, key_version, coverage, recorded_at FROM erasure_keys')
+      ).rows.map((row) => ({
+        workspaceId: row.workspace_id,
+        erasureId: row.erasure_id,
+        kind: row.kind,
+        keyValue: row.key_value,
+        keyVersion: row.key_version,
+        coverage: row.coverage,
+        recordedAt: iso(row.recorded_at),
+      }))
+    : [];
+  // The wrapped exclusion data keys (#1037): the ledger's hashes cannot be matched without them.
+  const exclusionKeys =
+    (await hasTable(client, 'data_keys')) && (await hasColumn(client, 'data_keys', 'purpose'))
       ? (
           await client.query<{
             workspace_id: string;
             id: string;
-            profile_ids: string[];
-            requested_by: string;
-            reason: string;
-            counts: Record<string, number>;
-            at: Date | string;
-            warehouse_key_count?: number | string | null;
+            kek_id: string;
+            wrapped_key: Buffer;
+            active: boolean;
+            created_at: Date | string;
           }>(
-            `SELECT workspace_id, id, profile_ids, requested_by, reason, counts, at${
-              erasuresHaveKeyCount
-                ? keysPresent
-                  ? `, CASE WHEN warehouse_key_count = 0 THEN GREATEST(warehouse_key_count,
-                (SELECT count(*)::integer FROM warehouse_erasure_keys k WHERE k.workspace_id = e.workspace_id
-                 AND k.profile_id = ANY(e.profile_ids))) ELSE warehouse_key_count END AS warehouse_key_count`
-                  : ', warehouse_key_count'
-                : ''
-            } FROM erasures e`,
-          )
-        ).rows.map((row) => {
-          const at = iso(row.at);
-          const known =
-            erasuresHaveKeyCount &&
-            row.warehouse_key_count !== undefined &&
-            row.warehouse_key_count !== null &&
-            Number(row.warehouse_key_count) >= 0 &&
-            trackingSince !== undefined &&
-            Date.parse(at) >= Date.parse(trackingSince)
-              ? Number(row.warehouse_key_count)
-              : undefined;
-          return {
-            workspaceId: row.workspace_id,
-            id: row.id,
-            profileIds: row.profile_ids,
-            requestedBy: row.requested_by,
-            reason: row.reason,
-            counts: row.counts,
-            at,
-            ...(known === undefined ? {} : { warehouseKeyCount: known }),
-          };
-        })
-      : [];
-    const tombstones = (await hasTable(client, 'erasure_tombstones'))
-      ? (
-          await client.query<{ workspace_id: string; ident_hash: string; erased_at: Date | string; erasure_id: string }>(
-            'SELECT workspace_id, ident_hash, erased_at, erasure_id FROM erasure_tombstones',
+            `SELECT workspace_id, id, kek_id, wrapped_key, active, created_at
+               FROM data_keys WHERE purpose = 'exclusion' ORDER BY workspace_id, created_at`,
           )
         ).rows.map((row) => ({
           workspaceId: row.workspace_id,
-          identHash: row.ident_hash,
-          erasedAt: iso(row.erased_at),
-          erasureId: row.erasure_id,
+          id: row.id,
+          kekId: row.kek_id,
+          wrappedKey: row.wrapped_key,
+          active: row.active,
+          createdAt: iso(row.created_at),
         }))
       : [];
-    const cleanupJobs = (await hasTable(client, 'erasure_cleanup_jobs'))
-      ? (
-          await client.query<{
-            workspace_id: string;
-            erasure_id: string;
-            profile_ids: string[];
-            state: string;
-            clickhouse_done: boolean;
-            hotstate_done: boolean;
-            selectors: Buffer | null;
-            selector_key: Buffer | null;
-            selector_kek: string | null;
-          }>(
-            `SELECT workspace_id, erasure_id, profile_ids, state, clickhouse_done, hotstate_done,
-                    selectors, selector_key, selector_kek
-             FROM erasure_cleanup_jobs`,
-          )
-        ).rows.map((row) => ({
-          workspaceId: row.workspace_id,
-          erasureId: row.erasure_id,
-          profileIds: row.profile_ids,
-          state: row.state,
-          clickhouseDone: row.clickhouse_done,
-          hotstateDone: row.hotstate_done,
-          selectors: row.selectors,
-          selectorKey: row.selector_key,
-          selectorKek: row.selector_kek,
-        }))
-      : [];
-    // The durable erasure-key ledger (#1037). A database older than 0.17.0 has no table and
-    // therefore no ledger rows to carry; an empty list here is that version's honest answer.
-    const keys = (await hasTable(client, 'erasure_keys'))
-      ? (
-          await client.query<{
-            workspace_id: string;
-            erasure_id: string;
-            kind: string;
-            key_value: string;
-            key_version: string;
-            coverage: string;
-            recorded_at: Date | string;
-          }>('SELECT workspace_id, erasure_id, kind, key_value, key_version, coverage, recorded_at FROM erasure_keys')
-        ).rows.map((row) => ({
-          workspaceId: row.workspace_id,
-          erasureId: row.erasure_id,
-          kind: row.kind,
-          keyValue: row.key_value,
-          keyVersion: row.key_version,
-          coverage: row.coverage,
-          recordedAt: iso(row.recorded_at),
-        }))
-      : [];
-    // The wrapped exclusion data keys (#1037): the ledger's hashes cannot be matched without them.
-    const exclusionKeys =
-      (await hasTable(client, 'data_keys')) && (await hasColumn(client, 'data_keys', 'purpose'))
-        ? (
-            await client.query<{
-              workspace_id: string;
-              id: string;
-              kek_id: string;
-              wrapped_key: Buffer;
-              active: boolean;
-              created_at: Date | string;
-            }>(
-              `SELECT workspace_id, id, kek_id, wrapped_key, active, created_at
-                 FROM data_keys WHERE purpose = 'exclusion' ORDER BY workspace_id, created_at`,
-            )
-          ).rows.map((row) => ({
-            workspaceId: row.workspace_id,
-            id: row.id,
-            kekId: row.kek_id,
-            wrappedKey: row.wrapped_key,
-            active: row.active,
-            createdAt: iso(row.created_at),
-          }))
-        : [];
-    // The publication generations (#1037 part 2): the ClickHouse exclusion state is not in the
-    // Postgres snapshot, so the counter must come from the live log or the next publication could
-    // reuse a generation that is already visible.
-    const generations = (await hasTable(client, 'erasure_generations'))
-      ? (
-          await client.query<{ workspace_id: string; generation: number | string; visible_publications: number | string }>(
-            'SELECT workspace_id, generation, visible_publications FROM erasure_generations',
-          )
-        ).rows.map((row) => ({
-          workspaceId: row.workspace_id,
-          generation: Number(row.generation),
-          publications: Number(row.visible_publications),
-        }))
-      : [];
-    return { erasures, tombstones, cleanupJobs, keys, exclusionKeys, generations };
-  });
+  // The publication generations (#1037 part 2): the ClickHouse exclusion state is not in the
+  // Postgres snapshot, so the counter must come from the live log or the next publication could
+  // reuse a generation that is already visible.
+  const generations = (await hasTable(client, 'erasure_generations'))
+    ? (
+        await client.query<{ workspace_id: string; generation: number | string; visible_publications: number | string }>(
+          'SELECT workspace_id, generation, visible_publications FROM erasure_generations',
+        )
+      ).rows.map((row) => ({
+        workspaceId: row.workspace_id,
+        generation: Number(row.generation),
+        publications: Number(row.visible_publications),
+      }))
+    : [];
+  return { erasures, tombstones, cleanupJobs, keys, exclusionKeys, generations };
 }
 
 async function eraseFamily(client: pg.Client, workspaceId: string, profileIds: string[]): Promise<number> {
@@ -401,7 +559,11 @@ export async function replayErasuresAfterMigrate(
   log: ErasureLog,
   opts: ReplayErasuresAfterMigrateOptions,
 ): Promise<ReplayErasuresResult> {
-  const pool = new pg.Pool({ connectionString: databaseUrl });
+  // Migrating is a write. A restore that has already lost its lock must not even start (#1204).
+  assertNotAborted(opts.signal);
+  const pool = new pg.Pool({
+    connectionString: opts.applicationName === undefined ? databaseUrl : withApplicationName(databaseUrl, opts.applicationName),
+  });
   try {
     await migrate(pool, {
       appRolePassword: opts.appRolePassword,
@@ -411,7 +573,13 @@ export async function replayErasuresAfterMigrate(
   } finally {
     await pool.end();
   }
-  return replayErasures(databaseUrl, log, opts.log ? { log: opts.log } : {});
+  // Checked again before the replay connection opens: the migrations can take a while.
+  assertNotAborted(opts.signal);
+  return replayErasures(databaseUrl, log, {
+    ...(opts.log ? { log: opts.log } : {}),
+    ...(opts.applicationName === undefined ? {} : { applicationName: opts.applicationName }),
+    ...(opts.signal === undefined ? {} : { signal: opts.signal }),
+  });
 }
 
 /**
@@ -429,6 +597,7 @@ export async function replayErasures(
     profiles: 0,
     tombstones: 0,
     cleanupJobs: 0,
+    completedJobs: 0,
     keys: 0,
     exclusionKeys: 0,
     generations: 0,
@@ -437,8 +606,11 @@ export async function replayErasures(
   if (!log.erasures.length && !log.tombstones.length && !log.keys?.length && !log.exclusionKeys?.length && !log.generations?.length)
     return result;
 
-  return withClient(databaseUrl, async (client) => {
-    const workspaces = new Set((await client.query<{ id: string }>('SELECT id FROM workspaces')).rows.map((row) => row.id));
+  const scope = { databaseUrl, applicationName: opts.applicationName, ...(opts.signal ? { signal: opts.signal } : {}) };
+  return withClient(scope, async (client) => {
+    // A restore run as the table owner must still see every workspace here; otherwise every captured
+    // entry is "skipped" as if the snapshot no longer had its workspace (#1204 review).
+    const workspaces = await listRestoredWorkspaceIds(client);
     const erasuresTable = await hasTable(client, 'erasures');
     const erasuresHaveKeyCount = erasuresTable && (await hasColumn(client, 'erasures', 'warehouse_key_count'));
     const erasureKeysTable = erasuresHaveKeyCount && (await hasTable(client, 'warehouse_erasure_keys'));
@@ -549,14 +721,57 @@ export async function replayErasures(
             // Only this erasure's own ledger rows justify a job: another erasure's keys in the same
             // workspace must not re-open work for this one.
             if (job || entries.keys.some((key) => key.erasureId === erasure.id)) {
+              // Only a job the snapshot did not finish is reopened (~#1194). A job the live log says
+              // was complete is inserted as complete, even on a snapshot old enough that the dump
+              // predates the job row: the restore's final reconciliation publishes and verifies its
+              // ledger keys in bulk instead of making the scheduler sweep every historical erasure
+              // again. A job that was still pending, running or failed is queued for its remaining
+              // sweep. The upsert is idempotent: a second replay rewrites the same queued state.
+              const wasComplete = job?.state === 'complete';
               const inserted = await client.query(
                 `INSERT INTO erasure_cleanup_jobs
-                   (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek)
-                 VALUES ($1, $2, $3, $4, $5, $6)
-                 ON CONFLICT (workspace_id, erasure_id) DO NOTHING`,
-                [workspaceId, erasure.id, erasure.profileIds, job?.selectors ?? null, job?.selectorKey ?? null, job?.selectorKek ?? null],
+                   (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek,
+                    state, clickhouse_done, hotstate_done, completed_at)
+                 VALUES ($1, $2, $3, $4, $5, $6,
+                         CASE WHEN $7 THEN 'complete' ELSE 'pending_external' END,
+                         $7, $7, CASE WHEN $7 THEN now() ELSE NULL END)
+                 ON CONFLICT (workspace_id, erasure_id) DO UPDATE
+                   SET profile_ids = EXCLUDED.profile_ids,
+                       state = 'pending_external',
+                       attempts = 0,
+                       next_attempt_at = now(),
+                       lease_until = NULL,
+                       claim_token = NULL,
+                       clickhouse_done = false,
+                       hotstate_done = false,
+                       final_sweep_at = NULL,
+                       first_sweep_done_at = NULL,
+                       published_generation = NULL,
+                       published_at = NULL,
+                       coverage_cleared_at = NULL,
+                       completion_reason = NULL,
+                       completed_at = NULL,
+                       last_error = NULL,
+                       selectors = CASE WHEN erasure_cleanup_jobs.selectors IS NOT NULL THEN erasure_cleanup_jobs.selectors
+                                        ELSE EXCLUDED.selectors END,
+                       selector_key = CASE WHEN erasure_cleanup_jobs.selectors IS NOT NULL THEN erasure_cleanup_jobs.selector_key
+                                           ELSE EXCLUDED.selector_key END,
+                       selector_kek = CASE WHEN erasure_cleanup_jobs.selectors IS NOT NULL THEN erasure_cleanup_jobs.selector_kek
+                                           ELSE EXCLUDED.selector_kek END,
+                       updated_at = now()
+                 WHERE erasure_cleanup_jobs.state <> 'complete'`,
+                [
+                  workspaceId,
+                  erasure.id,
+                  erasure.profileIds,
+                  job?.selectors ?? null,
+                  job?.selectorKey ?? null,
+                  job?.selectorKek ?? null,
+                  wasComplete,
+                ],
               );
-              result.cleanupJobs += inserted.rowCount ?? 0;
+              if (wasComplete) result.completedJobs += inserted.rowCount ?? 0;
+              else result.cleanupJobs += inserted.rowCount ?? 0;
             }
           }
           result.erasures += 1;
@@ -678,3 +893,7 @@ export async function replayErasures(
     return result;
   });
 }
+
+// The restore interlock that replaced the settings marker lives in `restoreFence.ts` (#1194). It is
+// written before Postgres is replaced, not after, so a `pg_restore` that commits and then fails also
+// leaves a fence behind.
