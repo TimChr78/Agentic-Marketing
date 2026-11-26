@@ -8,6 +8,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { redactCredentials } from '@agentic-marketing/core';
 import {
+  BACKUP_APPLICATION_NAME,
   type ErasureLog,
   ensureAppRoleInDatabase,
   lastServerVersion,
@@ -187,7 +188,7 @@ export function readVersion(): string {
 }
 
 /** Postgres client environment from a URL, so a password never appears in argv or a log line. */
-export function postgresClientEnv(databaseUrl: string): NodeJS.ProcessEnv {
+export function postgresClientEnv(databaseUrl: string, applicationName = RESTORE_APPLICATION_NAME): NodeJS.ProcessEnv {
   const url = new URL(databaseUrl);
   if (url.protocol !== 'postgres:' && url.protocol !== 'postgresql:') throw new Error('DATABASE_URL must be a postgres:// URL');
   const env: NodeJS.ProcessEnv = {
@@ -198,8 +199,9 @@ export function postgresClientEnv(databaseUrl: string): NodeJS.ProcessEnv {
     PGDATABASE: decodeURIComponent(url.pathname.replace(/^\//, '')),
     // The backup/restore children are not covered by the parent's session advisory lock: their
     // own backend keeps writing (pg_restore) until they exit. A successor restore finds them by
-    // this application name (#1204 review).
-    PGAPPNAME: RESTORE_APPLICATION_NAME,
+    // this application name (#1204 review). A backup's pg_dump announces its own name, so it is
+    // not mistaken for a previous restore (#1214).
+    PGAPPNAME: applicationName,
   };
   const sslmode = url.searchParams.get('sslmode');
   if (sslmode) env.PGSSLMODE = sslmode;
@@ -477,7 +479,7 @@ export async function dumpPostgres(databaseUrl: string, outFile: string): Promis
   await runRestoreChild(
     'pg_dump',
     ['-Fc', '--no-owner', '--exclude-table=public.restore_fence', '--file', outFile],
-    postgresClientEnv(databaseUrl),
+    postgresClientEnv(databaseUrl, BACKUP_APPLICATION_NAME),
   );
 }
 

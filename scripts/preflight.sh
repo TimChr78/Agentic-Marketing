@@ -33,7 +33,18 @@ fail() {
 note() { printf '      %s\n' "$*"; }
 
 MIN_FREE_GB=${AM_TEST_MIN_FREE_GB:-10}
-PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.65.1-noble
+# The image tag must follow the pinned @playwright/test version, as e2e-docker.sh and CI derive
+# it: a hard-coded tag drifts from the image the run pulls (#1163, #1268).
+if [ -n "${E2E_IMAGE:-}" ]; then
+  PLAYWRIGHT_IMAGE="$E2E_IMAGE"
+else
+  PLAYWRIGHT_VERSION="$(node -p "require('@playwright/test/package.json').version" 2>/dev/null || true)"
+  if [ -z "$PLAYWRIGHT_VERSION" ]; then
+    fail "cannot read the pinned @playwright/test version (install dependencies first: pnpm install)"
+    PLAYWRIGHT_VERSION=unknown
+  fi
+  PLAYWRIGHT_IMAGE="mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble"
+fi
 IMAGES=(
   postgres:18-alpine
   clickhouse/clickhouse-server:26.8.41.14@sha256:4fcc05a5642c52250ab57a184bc0523a00ba5dcd4e8b43a918e7477b844f1048

@@ -14,7 +14,10 @@ let adaId = '';
 let boId = '';
 
 beforeAll(async () => {
-  t = await startTestServer('test_v0148_segments', testPort(3498));
+  // Every test here drives refreshes itself and compares exact change sets. The 500 ms scheduler
+  // also refreshes a newly published segment right away, which consumed the change set these
+  // tests expect to see from their own run (#1207).
+  t = await startTestServer('test_v0148_segments', testPort(3498), {}, { segmentTickMs: 86_400_000 });
   owner = await t.signUp(`owner-${Date.now()}@example.com`);
   ws = await t.workspaceWith([[owner, 'owner']]);
   const key = (await t.api(owner).call('sources.create', { name: 'Backend', kind: 'server' })).key;

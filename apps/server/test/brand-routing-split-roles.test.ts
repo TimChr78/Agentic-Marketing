@@ -9,6 +9,7 @@ import { startTestServer, testPort, type User } from './harness';
 const API_PORT = testPort(3460);
 const INGEST_PORT = testPort(3462);
 const PREFIXED = 'prefixed-split.example';
+const PENDING = 'pending-split.example';
 const SITE = 'https://prefixed-split.example';
 
 type Reply = { status: number; body: string; headers: http.IncomingHttpHeaders };
@@ -165,6 +166,55 @@ describe('path-prefixed brand routes on an api-only role (#1157)', () => {
     expect(call.id).toBe(workspaceId);
     expect((await request(API_PORT, '/openapi.json')).status).toBe(200);
   });
+
+  it('serves only the public surface on a registered, not-yet-verified host (#1231)', async () => {
+    const client = api.api(owner, workspaceId);
+    const added = await client.call('workspace.domains.add', { host: PENDING });
+    expect(added.domain.status).toBe('pending');
+    // The challenge still reaches the app, and the host is now registered.
+    expect((await request(API_PORT, `/.well-known/am-domain/${added.domain.verificationToken}`, { host: PENDING })).status).toBe(200);
+
+    // A public path works, as on the verified host.
+    const batch = await request(API_PORT, '/v1/batch', {
+      method: 'POST',
+      host: PENDING,
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(batch.status).toBe(401);
+    expect(JSON.parse(batch.body)).toMatchObject({ error: 'invalid_write_key' });
+
+    // Nothing of the admin surface does: not the UI's OpenAPI document, REST, auth, pages, MCP,
+    // SCIM or OAuth discovery.
+    for (const path of [
+      '/openapi.json',
+      '/api/auth/get-session',
+      '/login',
+      '/mcp',
+      '/scim/v2/Users',
+      '/.well-known/oauth-authorization-server',
+    ]) {
+      const res = await request(API_PORT, path, {
+        host: PENDING,
+        ...(path === '/mcp'
+          ? {
+              method: 'POST',
+              body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+              headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+            }
+          : {}),
+      });
+      expect(res.status, path).toBe(404);
+      expect(JSON.parse(res.body), path).toMatchObject({ error: 'not_found' });
+    }
+    const rest = await request(API_PORT, '/v1/workspace.get', {
+      method: 'POST',
+      host: PENDING,
+      body: '{}',
+      headers: { 'content-type': 'application/json', cookie: owner.cookie, origin: api.base, 'x-workspace-id': workspaceId },
+    });
+    expect(rest.status).toBe(404);
+  });
 });
 
 describe('admin REST is api-only (#1157)', () => {
@@ -176,6 +226,27 @@ describe('admin REST is api-only (#1157)', () => {
     });
     expect(rest.status).toBe(404);
     expect((await request(INGEST_PORT, '/openapi.json')).status).toBe(404);
+  });
+
+  it('does not mount MCP, auth or the server-rendered pages on an ingest pod (#1230)', async () => {
+    const mcp = await request(INGEST_PORT, '/mcp', {
+      method: 'POST',
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    });
+    // A mounted MCP endpoint answers 401 without credentials; an unmounted one answers 404.
+    expect(mcp.status).toBe(404);
+    for (const path of [
+      '/api/auth/get-session',
+      '/api/auth/sign-up/email',
+      '/login',
+      '/consent',
+      '/invite',
+      '/.well-known/oauth-authorization-server',
+      '/.well-known/openid-configuration',
+    ]) {
+      expect((await request(INGEST_PORT, path)).status, path).toBe(404);
+    }
   });
 
   it('still serves the public paths on an ingest pod', async () => {

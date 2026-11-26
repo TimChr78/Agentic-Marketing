@@ -22,6 +22,7 @@ import {
   offlineChecks,
   postgresVersionCheck,
 } from '../src/ops/checks';
+import { mergeEnvFile } from '../src/ops/doctor';
 import { VERSION } from '../src/version';
 
 const good: Env = {
@@ -227,6 +228,40 @@ describe('am doctor offline checks', () => {
     const checks = envFileChecks('AUTH_SECRET=x\nAPP_DB_PASSWORD=y\n', example, '0.0.0');
     const message = checks.find((item) => item.id === 'env-file.missing')?.message ?? '';
     for (const key of ['DATABASE_URL', 'WEB_DIST', 'TRUSTED_ORIGINS', 'PORT']) expect(message, key).not.toContain(`${key} (`);
+  });
+
+  it('does not let a piped .env replace the values Compose sets (#1267)', () => {
+    // `am init` writes the template's development DATABASE_URL (localhost:5432, placeholder
+    // password). Compose replaces it in the container; the file must not undo that.
+    const merged = mergeEnvFile(
+      {
+        DATABASE_URL: 'postgres://am:real@postgres:5432/am',
+        CLICKHOUSE_URL: 'http://clickhouse:8123',
+        ROLE: 'all',
+        PORT: '3000',
+      },
+      [
+        'DATABASE_URL=postgres://am:<POSTGRES_PASSWORD>@localhost:5432/am',
+        'CLICKHOUSE_URL=http://localhost:8123',
+        'ROLE=ingest',
+        'PORT=3001',
+        'AM_VERSION=0.17.7',
+        'PUBLIC_BIND=127.0.0.1:3201',
+      ].join('\n'),
+    );
+    expect(merged.DATABASE_URL).toBe('postgres://am:real@postgres:5432/am');
+    expect(merged.CLICKHOUSE_URL).toBe('http://clickhouse:8123');
+    expect(merged.ROLE).toBe('all');
+    expect(merged.PORT).toBe('3000');
+    // Everything else still comes from the file: that is what `--env-file` is for.
+    expect(merged.AM_VERSION).toBe('0.17.7');
+    expect(merged.PUBLIC_BIND).toBe('127.0.0.1:3201');
+  });
+
+  it('uses a Compose-supplied key from the file when the process does not set it', () => {
+    const merged = mergeEnvFile({}, 'DATABASE_URL=postgres://am:p@localhost:5432/am\nCLICKHOUSE_URL=http://localhost:8123\n');
+    expect(merged.DATABASE_URL).toBe('postgres://am:p@localhost:5432/am');
+    expect(merged.CLICKHOUSE_URL).toBe('http://localhost:8123');
   });
 
   it('does not require providers for DNS and egress', async () => {

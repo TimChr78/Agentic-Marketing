@@ -32,6 +32,13 @@ export const APP_DATABASE_APPLICATION_NAME = 'agentic-marketing';
 export const RESTORE_APPLICATION_NAME = 'am-restore';
 
 /**
+ * The `application_name` a backup's PostgreSQL children announce (`pg_dump`). A restore waits for
+ * restore-tagged work, not for a read-only dump: tagging the two alike made a running backup look
+ * like a previous restore and blocked every restore for the drain bound (#1214).
+ */
+export const BACKUP_APPLICATION_NAME = 'am-backup';
+
+/**
  * A connection string that announces `applicationName`, replacing whatever the URL's query string
  * named (#1204 review). node-postgres gives `?application_name=` in the connection string
  * precedence over the client option, so setting only the option on a `DATABASE_URL` that already

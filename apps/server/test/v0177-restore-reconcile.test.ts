@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  BACKUP_APPLICATION_NAME,
   clearRestoreFence,
   RESTORE_ADVISORY_LOCK_KEY,
   RESTORE_APPLICATION_NAME,
@@ -15,7 +16,14 @@ import {
 import pg from 'pg';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../../packages/db/test/disposable';
-import { restoreClickHouse, restorePostgres, runningRestoreChildren, runRestoreChild, stopRestoreChildren } from '../src/ops/backup-lib';
+import {
+  dumpPostgres,
+  restoreClickHouse,
+  restorePostgres,
+  runningRestoreChildren,
+  runRestoreChild,
+  stopRestoreChildren,
+} from '../src/ops/backup-lib';
 import {
   acquireRestoreSessionLock,
   assertRestoreWorkDrained,
@@ -744,6 +752,23 @@ describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work 
     await assertRestoreWorkDrained(databaseUrl, { timeoutMs: 1_000, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } });
   }, 60_000);
 
+  it('waits for a running backup and names it instead of saying a restore is running (#1214)', async () => {
+    const d = await createDisposableDb('restore_drain_backup');
+    open.push(d);
+    const databaseUrl = d.url.toString();
+    const backup = new pg.Client({ connectionString: databaseUrl, application_name: BACKUP_APPLICATION_NAME });
+    await backup.connect();
+    try {
+      await expect(assertRestoreWorkDrained(databaseUrl, { timeoutMs: 800, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } })).rejects.toThrow(
+        /a backup is still running.*am-backup/,
+      );
+    } finally {
+      await backup.end();
+    }
+    // The read-only dump is gone: the same drain passes.
+    await assertRestoreWorkDrained(databaseUrl, { timeoutMs: 1_000, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } });
+  }, 60_000);
+
   it('waits for a running ClickHouse request that carries the restore marker', async () => {
     const d = await createDisposableDb('restore_drain_ch');
     open.push(d);
@@ -946,6 +971,22 @@ describe('a restore tags and stops its own work (#1204 review)', () => {
     try {
       await restorePostgres('postgres://am:am@127.0.0.1:5432/am_test', join(bin, 'unused.dump'));
       expect(await readFile(out, 'utf8')).toBe(RESTORE_APPLICATION_NAME);
+    } finally {
+      process.env.PATH = oldPath;
+      await rm(bin, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('runs pg_dump with PGAPPNAME=am-backup, so a backup never blocks a restore (#1214)', async () => {
+    const bin = await mkdtemp(join(tmpdir(), 'am-backup-pgappname-'));
+    const out = join(bin, 'pgappname.txt');
+    await writeFile(join(bin, 'pg_dump'), `#!/bin/sh\nprintf '%s' "$PGAPPNAME" > "${out}"\n`, { mode: 0o755 });
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${bin}:${oldPath ?? ''}`;
+    try {
+      await dumpPostgres('postgres://am:am@127.0.0.1:5432/am_test', join(bin, 'unused.dump'));
+      expect(await readFile(out, 'utf8')).toBe(BACKUP_APPLICATION_NAME);
+      expect(BACKUP_APPLICATION_NAME).not.toBe(RESTORE_APPLICATION_NAME);
     } finally {
       process.env.PATH = oldPath;
       await rm(bin, { recursive: true, force: true });

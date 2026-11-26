@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   APP_DATABASE_APPLICATION_NAME,
+  BACKUP_APPLICATION_NAME,
   clearRestoreFence,
   dropErasedProfileOutbox,
   erasureOutboxOutstanding,
@@ -256,12 +257,14 @@ async function countRunningRestoreClickHouseQueries(endpoint: ClickHouseEndpoint
  * successor can take the lock while the predecessor is still writing. So the successor waits — right
  * after taking the lock, before any write — for both of these:
  *
- * - no other backend on this database announces {@link RESTORE_APPLICATION_NAME}, and
+ * - no other backend on this database announces {@link RESTORE_APPLICATION_NAME} or
+ *   {@link BACKUP_APPLICATION_NAME}, and
  * - no ClickHouse request carries the {@link RESTORE_CLICKHOUSE_QUERY_PREFIX} marker.
  *
  * A predecessor that notices its own lock loss stops issuing work (the abort signal threaded
  * through its steps), so this normally clears quickly. If it stays busy past the bound, the restore
- * refuses instead of racing it. Residual limit: a run cut off by a network partition it has not yet
+ * refuses instead of racing it. A running backup is waited for too, with its own message: it would
+ * read the database while the restore replaces it, so its snapshot would be incomplete (#1214). Residual limit: a run cut off by a network partition it has not yet
  * noticed can still issue one request after this check; make sure the old `am restore` process has
  * exited before retrying after a lock-loss failure.
  */
@@ -287,28 +290,43 @@ export async function assertRestoreWorkDrained(databaseUrl: string, opts: Restor
   try {
     for (;;) {
       const remaining = Math.max(1, deadline - Date.now());
-      const { rows } = await client.query<{ n: number | string }>({
-        text: `SELECT count(*)::int AS n FROM pg_stat_activity
+      const { rows } = await client.query<{ name: string; n: number | string }>({
+        text: `SELECT application_name AS name, count(*)::int AS n FROM pg_stat_activity
           WHERE datname = current_database()
-            AND application_name = $1
+            AND application_name = ANY($1::text[])
             AND pid <> pg_backend_pid()
-            AND NOT (pid = ANY($2::int[]))`,
-        values: [RESTORE_APPLICATION_NAME, exclude],
+            AND NOT (pid = ANY($2::int[]))
+          GROUP BY application_name`,
+        values: [[RESTORE_APPLICATION_NAME, BACKUP_APPLICATION_NAME], exclude],
         // node-postgres reads a per-query `query_timeout` at runtime; its types only declare the
         // client option, hence the cast. A hung poll still ends at the drain's bound.
         query_timeout: Math.max(RESTORE_WORK_PROBE_MIN_MS, remaining),
       } as QueryConfig & { query_timeout: number });
-      const backends = Number(rows[0]?.n ?? 0);
+      const countOf = (name: string) => Number(rows.find((row) => row.name === name)?.n ?? 0);
+      const backends = countOf(RESTORE_APPLICATION_NAME);
+      const backups = countOf(BACKUP_APPLICATION_NAME);
       const queries = await countRunningRestoreClickHouseQueries(endpoint, clickhouseDatabase, Math.max(1, deadline - Date.now()));
-      if (backends === 0 && queries === 0) return;
-      if (Date.now() >= deadline)
+      if (backends === 0 && backups === 0 && queries === 0) return;
+      if (Date.now() >= deadline) {
+        // A running backup reads the database this restore replaces; its snapshot would be
+        // incomplete. Say so instead of calling it a previous restore (#1214).
+        if (backends === 0 && queries === 0)
+          throw new Error(
+            `a backup is still running (${backups} PostgreSQL connection(s) still tagged ${BACKUP_APPLICATION_NAME}): ` +
+              'a restore would replace the database while it reads, so the backup would be incomplete. Wait for it to finish and retry.',
+          );
         throw new Error(
           `a previous restore's work is still running (${backends} PostgreSQL connection(s)` +
-            `${queries ? `, ${queries} ClickHouse request(s)` : ''} still tagged ${RESTORE_APPLICATION_NAME}): ` +
+            `${queries ? `, ${queries} ClickHouse request(s)` : ''} still tagged ${RESTORE_APPLICATION_NAME}` +
+            `${backups ? `, ${backups} backup connection(s) still tagged ${BACKUP_APPLICATION_NAME}` : ''}): ` +
             'it could still write into the database this restore is about to replace, so this restore refuses to start. ' +
             'Wait until that run has stopped and retry.',
         );
-      opts.log?.(`waiting for a previous restore's work to stop (${backends} PostgreSQL connection(s), ${queries} ClickHouse request(s))`);
+      }
+      opts.log?.(
+        `waiting for a previous restore's work to stop (${backends} PostgreSQL connection(s)` +
+          `${backups ? `, ${backups} backup connection(s)` : ''}, ${queries} ClickHouse request(s))`,
+      );
       await sleep(pollMs);
     }
   } finally {

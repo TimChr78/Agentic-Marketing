@@ -820,6 +820,24 @@ describe('image pinning (#870)', () => {
     expect(refsOf(compose, 'clickhouse/clickhouse-server')[0]).toMatch(/^clickhouse\/clickhouse-server:26\.8\.\d+\.\d+@/);
   });
 
+  it('derives the Playwright image from the pinned @playwright/test version (#1268)', async () => {
+    // #1163 fixed the hard-coded tag in e2e-docker.sh; preflight.sh kept its own literal and
+    // already drifted once (1.65.0 → 1.65.1). Both must read the pin at run time, with E2E_IMAGE
+    // as the deliberate override, so a Dependabot bump cannot leave a diagnostic checking the
+    // previous multi-GB image.
+    const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+      devDependencies: Record<string, string>;
+    };
+    const pinned = packageJson.devDependencies['@playwright/test'];
+    expect(pinned, 'package.json pins @playwright/test').toMatch(/^\d+\.\d+\.\d+$/);
+    for (const name of ['scripts/preflight.sh', 'scripts/e2e-docker.sh']) {
+      const text = readFileSync(join(root, name), 'utf8');
+      expect(text, `${name} hard-codes the Playwright image tag`).not.toMatch(/mcr\.microsoft\.com\/playwright:v\d/);
+      expect(text, `${name} does not derive the tag from @playwright/test`).toContain("require('@playwright/test/package.json').version");
+      expect(text, `${name} has no E2E_IMAGE override`).toContain('E2E_IMAGE');
+    }
+  });
+
   it('keeps the released image tag readable beside its version variable', () => {
     expect(compose).toMatch(/image:\s*ghcr\.io\/timchr78\/agentic-marketing:\$\{AM_VERSION:-\d+\.\d+\.\d+\}/);
   });

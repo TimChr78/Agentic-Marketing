@@ -428,6 +428,8 @@ export async function startTestServer(
     warehouseTickMs?: number;
     edgeTickMs?: number;
     holdTickMs?: number;
+    /** A test that drives segment refreshes itself keeps the scheduler from racing it (#1207). */
+    segmentTickMs?: number;
     erasureFinalSweepMs?: number;
     erasureCleanup?: boolean;
     erasurePurge?: boolean;
@@ -488,7 +490,7 @@ export async function startTestServer(
       passwordResetTickMs: 86_400_000,
     }),
     ...startScheduler(srv, stop.signal, {
-      segmentTickMs: 500,
+      segmentTickMs: testOptions.segmentTickMs ?? 500,
       broadcastTickMs: 300,
       warehouseTickMs: testOptions.warehouseTickMs ?? 300,
       warehouseLagMs: 0,

@@ -355,6 +355,13 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     }
 
     const brandPath = isBrandPath(path);
+    // A registered hostname whose verification has not succeeded yet still reaches the app (its
+    // challenge is answered there) and may sit in an Ingress for days. It serves only its public
+    // surface and never the admin UI, auth, MCP, SCIM or REST (#1157, #1231).
+    if (await domains.isPendingHost(host)) {
+      if (isBrandSurfacePath(path) || exactProbe(path) || DOMAIN_CHALLENGE.test(path)) return next();
+      return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+    }
     const resolved = await domains.resolvePublicRequest(host, path);
     if (!resolved) {
       if (brandPath || (await domains.isBrandHost(host))) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
@@ -447,140 +454,145 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   // The public-only listener never forwards it (see http/public-only.ts).
   app.get('/metrics', metricsHandler({ token: config.metricsToken, registry: metrics, db, events, hot, natsUrl: config.nats.url }));
 
-  // Better Auth's own origin check for `/api/auth/*` compiles each trusted entry into a RegExp and
-  // runs it against the Origin (or Referer) header, so bound that header before it gets there
-  // (#947). This runs for every auth route below, including the password-reset and SAML ones.
-  app.use('/api/auth/*', async (c, next) => {
-    const refusal = originLengthRefusal(c.req.raw);
-    if (refusal) return refusal;
-    await next();
-  });
+  // The command surface — MCP, Better Auth's routes, the server-rendered sign-in pages and the
+  // OAuth discovery documents — belongs to the api role (#1157, #1230). An ingest-only pod serves
+  // the public paths; only the chart's Ingress rules keep these off it otherwise.
+  if (config.roles.has('api')) {
+    // Better Auth's own origin check for `/api/auth/*` compiles each trusted entry into a RegExp and
+    // runs it against the Origin (or Referer) header, so bound that header before it gets there
+    // (#947). This runs for every auth route below, including the password-reset and SAML ones.
+    app.use('/api/auth/*', async (c, next) => {
+      const refusal = originLengthRefusal(c.req.raw);
+      if (refusal) return refusal;
+      await next();
+    });
 
-  // Self-service password reset (#191): rate limited and audited before Better Auth sees it.
-  passwordResetRoutes(app, {
-    auth,
-    db,
-    hot,
-    publicUrl: config.publicUrl,
-    authSecret: config.authSecret,
-    clientIpHeaders: config.clientIpHeaders,
-    trustedProxyCidrs: config.trustedProxyCidrs,
-  });
-  // The OAuth consent flow binds a brand choice to one authorization request (#456). The provider
-  // hook that issues the grant only receives the session, so the request's stable parameters are
-  // carried in an async context: /authorize from its URL query, /oauth2/consent from the
-  // oauth_query it was posted with. The body is replayed unchanged for Better Auth to read.
-  const authorize = (c: Context) =>
-    withConsentRequest({ query: new URL(c.req.url).search, mode: 'authorize' }, () => auth.handler(withClientIp(c)));
-  app.get('/api/auth/oauth2/authorize', authorize);
-  app.get('/api/auth/oauth2/authorize/*', authorize);
-  app.post(
-    '/api/auth/oauth2/consent',
-    bodyLimit(CONSENT_MAX_BODY, (c) =>
-      c.json({ error: 'payload_too_large', message: `Requests are limited to ${CONSENT_MAX_BODY / 1024} KB.` }, 413),
-    ),
-    async (c) => {
-      const raw = await c.req.text();
-      let query: string | undefined;
-      try {
-        const body = JSON.parse(raw) as { oauth_query?: unknown };
-        if (typeof body.oauth_query === 'string') query = body.oauth_query;
-      } catch {
-        // Not JSON: Better Auth answers with its own validation error for the replayed request.
-      }
-      const request = new Request(c.req.raw.url, { method: 'POST', headers: c.req.raw.headers, body: raw });
-      return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
-    },
-  );
-  // The SAML ACS and SLO endpoints accept a `SAMLResponse`/`SAMLRequest` field up to
-  // SSO_SAML_MAX_RESPONSE_BYTES. Its worst-case form encoding is larger than the catch-all's
-  // ceiling, so these two routes get their own limit before it (#932 review A1).
-  const samlCallbackLimit = bodyLimit(SSO_SAML_CALLBACK_MAX_BODY, (c) =>
-    c.json({ error: 'payload_too_large', message: `SAML requests are limited to ${SSO_SAML_CALLBACK_MAX_BODY / 1024} KB.` }, 413),
-  );
-  app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/acs/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
-  app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/slo/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
-  app.on(
-    ['GET', 'POST'],
-    '/api/auth/*',
-    bodyLimit(AUTH_CATCHALL_MAX_BODY, (c) =>
-      c.json({ error: 'payload_too_large', message: `Requests are limited to ${AUTH_CATCHALL_MAX_BODY / 1024} KB.` }, 413),
-    ),
-    (c) => auth.handler(withClientIp(c)),
-  );
+    // Self-service password reset (#191): rate limited and audited before Better Auth sees it.
+    passwordResetRoutes(app, {
+      auth,
+      db,
+      hot,
+      publicUrl: config.publicUrl,
+      authSecret: config.authSecret,
+      clientIpHeaders: config.clientIpHeaders,
+      trustedProxyCidrs: config.trustedProxyCidrs,
+    });
+    // The OAuth consent flow binds a brand choice to one authorization request (#456). The provider
+    // hook that issues the grant only receives the session, so the request's stable parameters are
+    // carried in an async context: /authorize from its URL query, /oauth2/consent from the
+    // oauth_query it was posted with. The body is replayed unchanged for Better Auth to read.
+    const authorize = (c: Context) =>
+      withConsentRequest({ query: new URL(c.req.url).search, mode: 'authorize' }, () => auth.handler(withClientIp(c)));
+    app.get('/api/auth/oauth2/authorize', authorize);
+    app.get('/api/auth/oauth2/authorize/*', authorize);
+    app.post(
+      '/api/auth/oauth2/consent',
+      bodyLimit(CONSENT_MAX_BODY, (c) =>
+        c.json({ error: 'payload_too_large', message: `Requests are limited to ${CONSENT_MAX_BODY / 1024} KB.` }, 413),
+      ),
+      async (c) => {
+        const raw = await c.req.text();
+        let query: string | undefined;
+        try {
+          const body = JSON.parse(raw) as { oauth_query?: unknown };
+          if (typeof body.oauth_query === 'string') query = body.oauth_query;
+        } catch {
+          // Not JSON: Better Auth answers with its own validation error for the replayed request.
+        }
+        const request = new Request(c.req.raw.url, { method: 'POST', headers: c.req.raw.headers, body: raw });
+        return withConsentRequest({ query, mode: 'consent' }, () => auth.handler(withClientIp({ req: { raw: request }, env: c.env })));
+      },
+    );
+    // The SAML ACS and SLO endpoints accept a `SAMLResponse`/`SAMLRequest` field up to
+    // SSO_SAML_MAX_RESPONSE_BYTES. Its worst-case form encoding is larger than the catch-all's
+    // ceiling, so these two routes get their own limit before it (#932 review A1).
+    const samlCallbackLimit = bodyLimit(SSO_SAML_CALLBACK_MAX_BODY, (c) =>
+      c.json({ error: 'payload_too_large', message: `SAML requests are limited to ${SSO_SAML_CALLBACK_MAX_BODY / 1024} KB.` }, 413),
+    );
+    app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/acs/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
+    app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/slo/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
+    app.on(
+      ['GET', 'POST'],
+      '/api/auth/*',
+      bodyLimit(AUTH_CATCHALL_MAX_BODY, (c) =>
+        c.json({ error: 'payload_too_large', message: `Requests are limited to ${AUTH_CATCHALL_MAX_BODY / 1024} KB.` }, 413),
+      ),
+      (c) => auth.handler(withClientIp(c)),
+    );
 
-  // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
-  // plugin answers RFC 9728 protected-resource metadata itself when the root path reaches it.
-  const asMeta = oauthProviderAuthServerMetadata(auth);
-  const oidcMeta = oauthProviderOpenIdConfigMetadata(auth);
-  app.get('/.well-known/oauth-authorization-server', (c) => asMeta(c.req.raw));
-  app.get('/.well-known/oauth-authorization-server/*', (c) => asMeta(c.req.raw));
-  app.get('/.well-known/openid-configuration', (c) => oidcMeta(c.req.raw));
-  app.get('/.well-known/openid-configuration/*', (c) => oidcMeta(c.req.raw));
-  if (mcpEnabled) {
-    app.get('/.well-known/oauth-protected-resource', (c) => auth.handler(withClientIp(c)));
-    app.get('/.well-known/oauth-protected-resource/*', (c) => auth.handler(withClientIp(c)));
+    // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
+    // plugin answers RFC 9728 protected-resource metadata itself when the root path reaches it.
+    const asMeta = oauthProviderAuthServerMetadata(auth);
+    const oidcMeta = oauthProviderOpenIdConfigMetadata(auth);
+    app.get('/.well-known/oauth-authorization-server', (c) => asMeta(c.req.raw));
+    app.get('/.well-known/oauth-authorization-server/*', (c) => asMeta(c.req.raw));
+    app.get('/.well-known/openid-configuration', (c) => oidcMeta(c.req.raw));
+    app.get('/.well-known/openid-configuration/*', (c) => oidcMeta(c.req.raw));
+    if (mcpEnabled) {
+      app.get('/.well-known/oauth-protected-resource', (c) => auth.handler(withClientIp(c)));
+      app.get('/.well-known/oauth-protected-resource/*', (c) => auth.handler(withClientIp(c)));
+    }
+
+    // The server-rendered pages carry one inline script and one inline style each: a per-response
+    // nonce lets exactly those run and blocks an injected handler or a later inline script (#478).
+    const inlinePage = (c: Context, render: (nonce: string) => string) => {
+      const nonce = pageNonce();
+      c.header('Content-Security-Policy', pagesCsp(nonce));
+      return c.html(render(nonce));
+    };
+    app.get('/login', (c) => inlinePage(c, loginPage));
+    app.get('/consent', (c) => inlinePage(c, consentPage));
+    app.get('/invite', (c) => inlinePage(c, invitePage));
+
+    // The consent page chooses the brand an OAuth client acts in (#187). The choice is checked
+    // against the person's memberships and role here, then stored for this exact authorization
+    // request (#456); the OAuth provider reads it as the grant's reference id.
+    app.post(
+      '/api/oauth/workspace',
+      bodyLimit(INVITATION_MAX_BODY, (c) =>
+        c.json({ error: 'payload_too_large', message: `Requests are limited to ${INVITATION_MAX_BODY / 1024} KB.` }, 413),
+      ),
+      async (c) => {
+        const session = await auth.api.getSession({ headers: c.req.raw.headers });
+        if (!session) throw new AppError('unauthorized', 'Sign in first, then choose the brand this connection acts in.');
+        const refused = formCsrfRefusal(c, origin);
+        if (refused) return refused;
+        const body = (await browserBody(c)) as { workspaceId?: unknown; scope?: unknown; oauthQuery?: unknown };
+        if (typeof body.workspaceId !== 'string')
+          throw new AppError('invalid_input', 'Choose the brand (workspaceId) this connection acts in.');
+        const choice = await chooseOAuthWorkspace(db, {
+          sessionId: session.session.id,
+          userId: session.user.id,
+          workspaceId: body.workspaceId,
+          scope: typeof body.scope === 'string' ? body.scope : undefined,
+          oauthQuery: typeof body.oauthQuery === 'string' ? body.oauthQuery : undefined,
+        });
+        return c.json({ workspaceId: choice.id, name: choice.name });
+      },
+    );
+
+    // Accepting an invitation: the person is signed in but not yet a member, so the workspace comes
+    // from the token rather than from their memberships.
+    app.post(
+      '/api/invitations/accept',
+      bodyLimit(INVITATION_MAX_BODY, (c) =>
+        c.json({ error: 'payload_too_large', message: `Requests are limited to ${INVITATION_MAX_BODY / 1024} KB.` }, 413),
+      ),
+      async (c) => {
+        const session = await auth.api.getSession({ headers: c.req.raw.headers });
+        if (!session) throw new AppError('unauthorized', 'Sign in (or create an account) with the invited e-mail address first.');
+        const refused = formCsrfRefusal(c, origin);
+        if (refused) return refused;
+        const { token } = (await browserBody(c)) as { token?: unknown };
+        const inv = typeof token === 'string' ? await invitationWorkspace(db, token) : null;
+        if (!inv) throw new AppError('not_found', 'This invitation link is not valid any more. Ask for a new one.');
+        // Accepting needs no permission; the principal carries none until the membership exists.
+        const invitee = { ...userPrincipal(session.user.id, inv.workspaceId, inv.role), permissions: new Set<never>() };
+        const out = await executor.execute(acceptInvitation, { token, email: session.user.email }, invitee, { surface: 'rest' });
+        return c.json(out);
+      },
+    );
   }
-
-  // The server-rendered pages carry one inline script and one inline style each: a per-response
-  // nonce lets exactly those run and blocks an injected handler or a later inline script (#478).
-  const inlinePage = (c: Context, render: (nonce: string) => string) => {
-    const nonce = pageNonce();
-    c.header('Content-Security-Policy', pagesCsp(nonce));
-    return c.html(render(nonce));
-  };
-  app.get('/login', (c) => inlinePage(c, loginPage));
-  app.get('/consent', (c) => inlinePage(c, consentPage));
-  app.get('/invite', (c) => inlinePage(c, invitePage));
-
-  // The consent page chooses the brand an OAuth client acts in (#187). The choice is checked
-  // against the person's memberships and role here, then stored for this exact authorization
-  // request (#456); the OAuth provider reads it as the grant's reference id.
-  app.post(
-    '/api/oauth/workspace',
-    bodyLimit(INVITATION_MAX_BODY, (c) =>
-      c.json({ error: 'payload_too_large', message: `Requests are limited to ${INVITATION_MAX_BODY / 1024} KB.` }, 413),
-    ),
-    async (c) => {
-      const session = await auth.api.getSession({ headers: c.req.raw.headers });
-      if (!session) throw new AppError('unauthorized', 'Sign in first, then choose the brand this connection acts in.');
-      const refused = formCsrfRefusal(c, origin);
-      if (refused) return refused;
-      const body = (await browserBody(c)) as { workspaceId?: unknown; scope?: unknown; oauthQuery?: unknown };
-      if (typeof body.workspaceId !== 'string')
-        throw new AppError('invalid_input', 'Choose the brand (workspaceId) this connection acts in.');
-      const choice = await chooseOAuthWorkspace(db, {
-        sessionId: session.session.id,
-        userId: session.user.id,
-        workspaceId: body.workspaceId,
-        scope: typeof body.scope === 'string' ? body.scope : undefined,
-        oauthQuery: typeof body.oauthQuery === 'string' ? body.oauthQuery : undefined,
-      });
-      return c.json({ workspaceId: choice.id, name: choice.name });
-    },
-  );
-
-  // Accepting an invitation: the person is signed in but not yet a member, so the workspace comes
-  // from the token rather than from their memberships.
-  app.post(
-    '/api/invitations/accept',
-    bodyLimit(INVITATION_MAX_BODY, (c) =>
-      c.json({ error: 'payload_too_large', message: `Requests are limited to ${INVITATION_MAX_BODY / 1024} KB.` }, 413),
-    ),
-    async (c) => {
-      const session = await auth.api.getSession({ headers: c.req.raw.headers });
-      if (!session) throw new AppError('unauthorized', 'Sign in (or create an account) with the invited e-mail address first.');
-      const refused = formCsrfRefusal(c, origin);
-      if (refused) return refused;
-      const { token } = (await browserBody(c)) as { token?: unknown };
-      const inv = typeof token === 'string' ? await invitationWorkspace(db, token) : null;
-      if (!inv) throw new AppError('not_found', 'This invitation link is not valid any more. Ask for a new one.');
-      // Accepting needs no permission; the principal carries none until the membership exists.
-      const invitee = { ...userPrincipal(session.user.id, inv.workspaceId, inv.role), permissions: new Set<never>() };
-      const out = await executor.execute(acceptInvitation, { token, email: session.user.email }, invitee, { surface: 'rest' });
-      return c.json(out);
-    },
-  );
 
   // The public edge runs on api as well as ingest (#1157): a brand domain's path prefix reaches
   // the api role through the Ingress, and the app strips the prefix here before routing. The
@@ -625,7 +637,9 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       }),
     );
 
-  if (mcpEnabled) {
+  // Every command a token or OAuth client can run goes through the executor, so /mcp is part of
+  // the api role like REST and SCIM (#1157, #1230).
+  if (config.roles.has('api') && mcpEnabled) {
     const mcp = mcpEndpoint({
       auth,
       db,
