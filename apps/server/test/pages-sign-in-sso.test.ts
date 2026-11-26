@@ -20,7 +20,7 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
-async function renderLogin(query: string) {
+async function renderLogin(query: string, ssoAnswer: () => Response = () => json({})) {
   const page = loginPage('test-nonce');
   const window = new Window({ url: `https://am.example.com/login${query}` });
   window.document.write(page);
@@ -28,7 +28,7 @@ async function renderLogin(query: string) {
   Object.assign(window, {
     fetch: async (url: string, init: RequestInit) => {
       calls.push({ url: String(url), body: String(init?.body ?? '') });
-      return json({});
+      return url === '/api/auth/sign-in/sso' ? ssoAnswer() : json({});
     },
   });
   const bridge = `const f = document.getElementById('f'), email = document.getElementById('email'),
@@ -110,6 +110,32 @@ describe('server sign-in pages offer single sign-on (#1248)', () => {
     await vi.waitFor(() => expect(calls.some((c) => c.url === '/api/auth/sign-in/sso')).toBe(true));
     const call = calls.find((c) => c.url === '/api/auth/sign-in/sso')!;
     expect(JSON.parse(call.body)).toEqual({ email: 'jo@acme.com', callbackURL: '/api/auth/oauth2/authorize?client_id=abc&sig=s' });
+  });
+
+  it('shows plain language instead of a raw provider error (#1277 re-review)', async () => {
+    const { document } = await renderLogin('?client_id=abc&sig=s', () => json({ message: 'No provider found for the issuer' }, 404));
+    (document.getElementById('email') as unknown as HTMLInputElement).value = 'jo@acme.com';
+    (document.getElementById('sso') as unknown as HTMLButtonElement).click();
+    const err = document.getElementById('err')!;
+    await vi.waitFor(() => expect(err.textContent).toContain('No single sign-on is set up for that address'));
+    expect(err.textContent).not.toContain('issuer');
+  });
+
+  it('keeps the enforced-domain refusal verbatim (#1277 re-review)', async () => {
+    const refusal = 'acme.com signs in with single sign-on. Use “Sign in with SSO”.';
+    const { document } = await renderLogin('', () => json({ message: refusal }, 403));
+    (document.getElementById('email') as unknown as HTMLInputElement).value = 'jo@acme.com';
+    (document.getElementById('sso') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(document.getElementById('err')!.textContent).toBe(refusal));
+  });
+
+  it('starts SSO when the forwarded query holds a malformed escape (#1277 re-review)', async () => {
+    const { document, calls } = await renderLogin('?client_id=abc&x%=1&prompt=login&sig=s');
+    (document.getElementById('email') as unknown as HTMLInputElement).value = 'jo@acme.com';
+    (document.getElementById('sso') as unknown as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(calls.some((c) => c.url === '/api/auth/sign-in/sso')).toBe(true));
+    const call = calls.find((c) => c.url === '/api/auth/sign-in/sso')!;
+    expect(JSON.parse(call.body).callbackURL).toBe('/api/auth/oauth2/authorize?client_id=abc&x%=1&sig=s');
   });
 
   it('the invitation page keeps the token in the tab and returns with a single-use marker', async () => {

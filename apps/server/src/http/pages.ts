@@ -75,6 +75,14 @@ f.onsubmit = async (e) => {
   const j = await r.json().catch(() => ({}));
   if (j.url) location.href = j.url; else err.textContent = j.message || 'Sign-in failed. Check your e-mail and password.';
 };
+// Keep the enforced-domain refusal, which names the method that works; other provider errors
+// ("No provider found for the issuer") are not actionable verbatim (#1277 re-review).
+const ssoError = (status, message) =>
+  typeof message === 'string' && /signs in with single sign-on/i.test(message) ? message
+  : status === 404 ? 'No single sign-on is set up for that address. Use your password, or ask your workspace admin to connect your company’s identity provider.'
+  : 'Couldn’t start single sign-on. Check the address and try again, or ask your workspace admin to set it up.';
+// A malformed escape in the forwarded query is kept as it was rather than breaking the click.
+const decodePart = (v) => { try { return decodeURIComponent(v.split('+').join(' ')); } catch { return v; } };
 // An enforced domain refuses the password; start SSO instead. With an OAuth request in the query,
 // return to the authorize endpoint so the client's flow resumes after the identity provider.
 // The login prompt was just satisfied, so drop only it: replaying prompt=login would send the
@@ -85,9 +93,9 @@ const resumeUrl = () => {
   const parts = [];
   for (const part of raw.split('&')) {
     const at = part.indexOf('=');
-    const name = decodeURIComponent((at < 0 ? part : part.slice(0, at)).split('+').join(' '));
+    const name = decodePart(at < 0 ? part : part.slice(0, at));
     if (name !== 'prompt') { parts.push(part); continue; }
-    const value = decodeURIComponent((at < 0 ? '' : part.slice(at + 1)).split('+').join(' '));
+    const value = decodePart(at < 0 ? '' : part.slice(at + 1));
     const kept = value.split(' ').filter((p) => p && p !== 'login');
     if (kept.length) parts.push('prompt=' + encodeURIComponent(kept.join(' ')));
   }
@@ -102,7 +110,7 @@ sso.onclick = async () => {
     const r = await fetch('/api/auth/sign-in/sso', { method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: email.value.trim(), callbackURL: resumeUrl() }) });
     const j = await r.json().catch(() => ({}));
-    if (j.url) location.href = j.url; else err.textContent = j.message || 'Could not start single sign-on.';
+    if (j.url) location.href = j.url; else err.textContent = ssoError(r.status, j.message);
   } catch { err.textContent = 'The server did not answer. Check that it is running and try again.'; }
   finally { sso.disabled = false; }
 };
@@ -218,7 +226,7 @@ mode.onclick = () => {
   password.autocomplete = signUp ? 'new-password' : 'current-password';
 };
 const post = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-  .then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => ({})) }));
+  .then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) }));
 const accept = async () => {
   const r = await post('/api/invitations/accept', { token });
   if (!r.ok) { err.textContent = r.body.message || 'Could not accept the invitation.'; return false; }
@@ -234,6 +242,12 @@ f.onsubmit = async (e) => {
   if (!r.ok) { err.textContent = r.body.message || 'Sign-in failed. Check your e-mail and password.'; return; }
   await accept();
 };
+// Keep the enforced-domain refusal, which names the method that works; other provider errors
+// ("No provider found for the issuer") are not actionable verbatim (#1277 re-review).
+const ssoError = (status, message) =>
+  typeof message === 'string' && /signs in with single sign-on/i.test(message) ? message
+  : status === 404 ? 'No single sign-on is set up for that address. Use your password, or ask your workspace admin to connect your company’s identity provider.'
+  : 'Couldn’t start single sign-on. Check the address and try again, or ask your workspace admin to set it up.';
 // An enforced SSO domain has no password to use here; keep the token and let the provider sign
 // the person in, then re-open this page to join.
 sso.onclick = async () => {
@@ -245,7 +259,7 @@ sso.onclick = async () => {
   sso.disabled = true;
   try {
     const r = await post('/api/auth/sign-in/sso', { email: email.value.trim(), callbackURL: '/invite?return=' + encodeURIComponent(marker) });
-    if (r.body.url) location.href = r.body.url; else err.textContent = r.body.message || 'Could not start single sign-on.';
+    if (r.body.url) location.href = r.body.url; else err.textContent = ssoError(r.status, r.body.message);
   } catch { err.textContent = 'The server did not answer. Check that it is running and try again.'; }
   finally { sso.disabled = false; }
 };
