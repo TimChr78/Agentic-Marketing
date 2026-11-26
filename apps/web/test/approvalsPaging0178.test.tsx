@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -39,7 +39,18 @@ vi.mock('../src/features/approvals/ApprovalDrawer', () => ({ ApprovalDrawer: () 
 import ApprovalsPage from '../src/pages/approvals/ApprovalsPage';
 import { ToastProvider } from '../src/ui';
 
-const approval = (n: number) => ({
+const bundle = (memberNumbers: number[]) => ({
+  id: 'apb_1',
+  members: memberNumbers.map((n) => ({
+    approvalId: `apr_${n}`,
+    artifactId: `bct_${String(n).padStart(32, '0')}`,
+    artifactName: `Change ${n}`,
+    artifactType: 'broadcast',
+    version: 1,
+  })),
+});
+
+const approval = (n: number, bundleValue: ReturnType<typeof bundle> | null = null) => ({
   id: `apr_${n}`,
   artifactId: `bct_${String(n).padStart(32, '0')}`,
   artifactName: `Change ${n}`,
@@ -57,7 +68,7 @@ const approval = (n: number) => ({
   artifactPublishedVersion: null,
   archived: false,
   reviewUrl: null,
-  bundle: null,
+  bundle: bundleValue,
 });
 
 const renderPage = () =>
@@ -78,8 +89,13 @@ describe('Approvals paging (#1254)', () => {
     h.impl = async (name, input) => {
       if (name === 'approvals.list') {
         if (input.cursor === 'page-2')
-          return { approvals: Array.from({ length: 40 }, (_, i) => approval(201 + i)), total: 240, nextCursor: null };
-        return { approvals: Array.from({ length: 200 }, (_, i) => approval(i + 1)), total: 240, nextCursor: 'page-2' };
+          return { approvals: Array.from({ length: 40 }, (_, i) => approval(201 + i)), total: 240, decisionTotal: 240, nextCursor: null };
+        return {
+          approvals: Array.from({ length: 200 }, (_, i) => approval(i + 1)),
+          total: 240,
+          decisionTotal: 240,
+          nextCursor: 'page-2',
+        };
       }
       if (name === 'workspace.proposals') return { proposals: [] };
       throw new Error(`unexpected ${name}`);
@@ -101,13 +117,74 @@ describe('Approvals paging (#1254)', () => {
     expect(screen.getByRole('tab', { name: /Pending/ }).textContent).toContain('240');
     await waitFor(() => expect(screen.queryByRole('button', { name: /load more/i })).toBeNull());
   });
+
+  it('drops a Load more result that lands after a tab switch and a fresh first page', async () => {
+    let resolvePage2: ((value: unknown) => void) | undefined;
+    h.impl = async (name, input) => {
+      if (name === 'workspace.proposals') return { proposals: [] };
+      if (name !== 'approvals.list') throw new Error(`unexpected ${name}`);
+      if (input.cursor === 'page-2')
+        return new Promise((resolve) => {
+          resolvePage2 = resolve;
+        });
+      if (input.status === 'approved') return { approvals: [], total: 0, decisionTotal: 0, nextCursor: null };
+      return { approvals: [approval(1)], total: 2, decisionTotal: 2, nextCursor: 'page-2' };
+    };
+
+    renderPage();
+    await screen.findAllByText('Change 1');
+    await userEvent.click(screen.getByRole('button', { name: /load more/i }));
+
+    await userEvent.click(screen.getByRole('tab', { name: /Approved/ }));
+    await screen.findByText('No approved changes');
+    await act(async () => {
+      resolvePage2?.({ approvals: [approval(2)], total: 2, decisionTotal: 2, nextCursor: null });
+      await Promise.resolve();
+    });
+
+    await userEvent.click(screen.getByRole('tab', { name: /Pending/ }));
+    await screen.findAllByText('Change 1');
+    expect(screen.queryByText('Change 2')).toBeNull();
+  });
+
+  it('counts a bundle once even when its members straddle two pages', async () => {
+    const pair = bundle([1, 3]);
+    h.impl = async (name, input) => {
+      if (name === 'approvals.list') {
+        if (input.cursor === 'page-2') return { approvals: [approval(3, pair), approval(4)], total: 4, decisionTotal: 3, nextCursor: null };
+        return { approvals: [approval(1, pair), approval(2)], total: 4, decisionTotal: 3, nextCursor: 'page-2' };
+      }
+      if (name === 'workspace.proposals') return { proposals: [] };
+      throw new Error(`unexpected ${name}`);
+    };
+
+    renderPage();
+    await screen.findAllByText('Change 1');
+
+    // Three decisions: the bundle (members 1 and 3) and the standalone requests 2 and 4.
+    expect(screen.getByRole('tab', { name: /Pending/ }).textContent).toContain('3');
+    expect(screen.getByRole('tab', { name: /Pending/ }).textContent).not.toContain('4');
+
+    await userEvent.click(screen.getByRole('button', { name: /load more/i }));
+    await screen.findAllByText('Change 3');
+    // The bundle collapses into its later member once both pages are loaded.
+    expect(screen.queryAllByText('Change 1')).toHaveLength(0);
+    expect(screen.getByRole('tab', { name: /Pending/ }).textContent).toContain('3');
+  });
 });
 
 describe('Approvals workspace settings read (#1258)', () => {
-  it('shows an error with Retry when workspace.proposals fails instead of nothing', async () => {
+  it('shows an error with Retry, then recovers with exactly one new read', async () => {
+    let proposalsFail = true;
     h.impl = async (name) => {
-      if (name === 'approvals.list') return { approvals: [approval(1)], total: 1, nextCursor: null };
-      if (name === 'workspace.proposals') throw new Error('the proposals read failed');
+      if (name === 'approvals.list') return { approvals: [approval(1)], total: 1, decisionTotal: 1, nextCursor: null };
+      if (name === 'workspace.proposals') {
+        if (proposalsFail) {
+          proposalsFail = false;
+          throw new Error('the proposals read failed');
+        }
+        return { proposals: [] };
+      }
       throw new Error(`unexpected ${name}`);
     };
 
@@ -116,6 +193,10 @@ describe('Approvals workspace settings read (#1258)', () => {
 
     expect(await screen.findByText(/Couldn't load workspace settings proposals/)).toBeTruthy();
     expect(screen.getByText('the proposals read failed')).toBeTruthy();
-    expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy();
+    const before = h.calls.filter((c) => c.name === 'workspace.proposals').length;
+    await userEvent.click(screen.getByRole('button', { name: /retry/i }));
+
+    await waitFor(() => expect(screen.queryByText(/Couldn't load workspace settings proposals/)).toBeNull());
+    expect(h.calls.filter((c) => c.name === 'workspace.proposals')).toHaveLength(before + 1);
   });
 });

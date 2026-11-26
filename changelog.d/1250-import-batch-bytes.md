@@ -2,4 +2,4 @@
 section: Fixed
 issues: [1250]
 ---
-- The Imports page sends a large CSV in batches sized by both row count and encoded bytes, so a Kit export of 5,000 rows no longer fails with the 1 MB request limit.
+- The Imports page sends a large CSV in batches sized by both row count and encoded bytes, refuses a single oversized row up front with its CSV line number, and keeps the people already imported when a later batch fails.

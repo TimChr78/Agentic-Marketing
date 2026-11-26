@@ -1,7 +1,7 @@
 import { type CommandContext, defineCommand } from '@agentic-marketing/commands';
-import { AppError, newId } from '@agentic-marketing/core';
+import { AppError, decodeTimestampCursor, encodeTimestampCursor, newId } from '@agentic-marketing/core';
 import { type ContentTopicSignal, type ContentTopicStatus, schema } from '@agentic-marketing/db';
-import { and, desc, eq, gte, inArray, lte, ne, or, sql } from 'drizzle-orm';
+import { and, count, desc, eq, gte, inArray, lt, lte, ne, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { createArtifact, publishHooks } from './commands';
 import { artifactTypes, publishValidators, referenceExtractors } from './types';
@@ -145,11 +145,34 @@ function checkStatusForAgent(ctx: CommandContext, status: ContentTopicStatus | u
     );
 }
 
+/**
+ * Keyset cursor for `content.topics.list`: the score, then the full-precision update time and the
+ * id. A keyset page never skips or repeats a row when topics are archived between pages (#1262).
+ */
+interface TopicCursor {
+  score: number;
+  updatedAt: string;
+  id: string;
+}
+
+function encodeTopicCursor(row: TopicCursor): string {
+  return `${row.score}~${encodeTimestampCursor({ at: row.updatedAt, id: row.id })}`;
+}
+
+function decodeTopicCursor(cursor: string): TopicCursor | null {
+  const separator = cursor.indexOf('~');
+  if (separator <= 0) return null;
+  const score = Number(cursor.slice(0, separator));
+  const rest = decodeTimestampCursor(cursor.slice(separator + 1));
+  if (!Number.isInteger(score) || score < 0 || score > 100 || !rest) return null;
+  return { score, updatedAt: rest.at, id: rest.id };
+}
+
 export const listContentTopics = defineCommand({
   name: 'content.topics.list',
   title: 'List the editorial backlog',
   description:
-    'The workspace’s topics with status, score, signals, owner, target date, brief and published URL. Filter by status, owner, tag and score range; archived topics are left out unless asked for. This is a queue, not a calendar.',
+    'The workspace’s topics with status, score, signals, owner, target date, brief and published URL. Filter by status, owner, tag and score range; archived topics are left out unless asked for. `total` counts every matching topic and `nextCursor` continues the same stable order; `count` is the number of topics on this page. This is a queue, not a calendar.',
   input: z.object({
     status: Status.optional().describe('Only this status; omit for every status except archived'),
     includeArchived: z.boolean().default(false).describe('Also show archived topics when no status filter is set'),
@@ -160,13 +183,27 @@ export const listContentTopics = defineCommand({
     targetBefore: TargetDate.optional().describe('Topics with a target date on or before this day'),
     targetAfter: TargetDate.optional().describe('Topics with a target date on or after this day'),
     limit: z.number().int().min(1).max(500).default(200),
-    offset: z.number().int().min(0).default(0),
+    cursor: z
+      .string()
+      .max(256)
+      .optional()
+      .describe('Opaque `nextCursor` from the previous page; a keyset page that stays stable while topics change'),
+    offset: z.number().int().min(0).default(0).describe('Rows to skip; prefer `cursor`, which does not skip when topics change'),
   }),
-  output: z.object({ topics: z.array(Topic), count: z.number().int() }),
+  output: z.object({
+    topics: z.array(Topic),
+    count: z.number().int().describe('Topics on this page, not the whole backlog'),
+    total: z.number().int().describe('Every topic matching the filter, independent of the cursor'),
+    nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null on the last page'),
+  }),
   permission: 'artifacts:read',
   effect: 'read',
   actionClass: 'read',
   handler: async (input, ctx) => {
+    const cursor = input.cursor ? decodeTopicCursor(input.cursor) : undefined;
+    if (input.cursor && !cursor) {
+      throw new AppError('invalid_input', 'The cursor is not valid. Omit it to start from the first page.');
+    }
     const conditions = [
       input.status
         ? eq(schema.contentTopics.status, input.status)
@@ -180,14 +217,44 @@ export const listContentTopics = defineCommand({
       input.targetBefore ? lte(schema.contentTopics.targetDate, input.targetBefore) : undefined,
       input.targetAfter ? gte(schema.contentTopics.targetDate, input.targetAfter) : undefined,
     ];
+    const filter = and(...conditions);
+    // The score and id tie-breaks keep the order unique, so a keyset page is exact (#1262).
+    const pageFilter = cursor
+      ? and(
+          filter,
+          or(
+            lt(schema.contentTopics.score, cursor.score),
+            and(eq(schema.contentTopics.score, cursor.score), lt(schema.contentTopics.updatedAt, sql`${cursor.updatedAt}::timestamptz`)),
+            and(
+              eq(schema.contentTopics.score, cursor.score),
+              eq(schema.contentTopics.updatedAt, sql`${cursor.updatedAt}::timestamptz`),
+              lt(schema.contentTopics.id, cursor.id),
+            ),
+          ),
+        )
+      : filter;
     const rows = await ctx.tx
-      .select()
+      .select({
+        topic: schema.contentTopics,
+        cursorAt: sql<string>`to_char(${schema.contentTopics.updatedAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      })
       .from(schema.contentTopics)
-      .where(and(...conditions))
-      .orderBy(desc(schema.contentTopics.score), desc(schema.contentTopics.updatedAt))
-      .limit(input.limit)
-      .offset(input.offset);
-    return { topics: rows.map(toTopic), count: rows.length };
+      .where(pageFilter)
+      .orderBy(desc(schema.contentTopics.score), desc(schema.contentTopics.updatedAt), desc(schema.contentTopics.id))
+      .limit(input.limit + 1)
+      .offset(cursor ? 0 : input.offset);
+    const [{ n }] = await ctx.tx.select({ n: count() }).from(schema.contentTopics).where(filter);
+    const page = rows.slice(0, input.limit);
+    const last = page[page.length - 1];
+    return {
+      topics: page.map(({ topic }) => toTopic(topic)),
+      count: page.length,
+      total: Number(n),
+      nextCursor:
+        rows.length > input.limit && last
+          ? encodeTopicCursor({ score: last.topic.score, updatedAt: last.cursorAt, id: last.topic.id })
+          : null,
+    };
   },
 });
 

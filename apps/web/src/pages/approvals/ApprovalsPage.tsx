@@ -6,7 +6,7 @@ import { useCrumbs } from '../../app/page';
 import { Link, navigate, routerPath, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi, useKeyedApi } from '../../app/useApi';
-import { approvalDecisions } from '../../features/approvals/decisions';
+import { approvalDecisions, pendingDecisionCount } from '../../features/approvals/decisions';
 import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
 import { useNow } from '../../features/approvals/holds';
 import { RequesterView } from '../../features/approvals/requester';
@@ -53,6 +53,16 @@ let lastApprovalInvokerId: string | null = null;
 let returnFocusPending = false;
 let returnFocusApprovalId: string | null = null;
 let approvalsPageSeq = 0;
+
+// The route table remounts this page when a drawer opens (`/approvals/:id`). The pages loaded past
+// the first one therefore live outside the component instance, so closing the drawer keeps them
+// and the invoking row is still there for focus (#1254 review).
+const approvalsQueueCache = new Map<string, { rows: Approval[]; cursor: string | null }>();
+
+/** Drop every remembered page; tests use this between cases. */
+export function resetApprovalsQueueCache() {
+  approvalsQueueCache.clear();
+}
 
 const FOCUS_RETURN_LIMIT_MS = 10_000;
 const FOCUS_RETURN_POLL_MS = 50;
@@ -190,20 +200,41 @@ const ApprovalDrawer = lazy(() => import('../../features/approvals/ApprovalDrawe
 /** Approvals (#41): the queue of changes waiting for a person, each opened in a review drawer. */
 export default function ApprovalsPage({ params }: { params: Record<string, string> }) {
   useCrumbs([{ label: 'Approvals', to: '/approvals' }, ...(params.id ? [{ label: 'Review' }] : [])]);
-  const { can, user, refresh, refreshPending } = useSession();
+  const { can, user, refresh, refreshPending, workspace } = useSession();
   const { search } = useLocation();
   const status = (search.get('status') as Status) || 'pending';
   const list = useKeyedApi(status, () => api.call('approvals.list', { status, limit: 200 }));
   const proposals = useApi(() => api.call('workspace.proposals', { status: 'pending', limit: 50 }), []);
+  const cacheKey = `${workspace?.id ?? ''}|${status}`;
+  // One generation owns the extra pages, the cursor, the loading flag and the error. A reload, a
+  // tab switch or a second Load more makes every late result from the old generation stale (#1254).
+  const generation = useRef(0);
+  const lastStatus = useRef(status);
+  if (lastStatus.current !== status) {
+    lastStatus.current = status;
+    generation.current += 1;
+  }
   // Extra pages carry the status they were requested for, so switching tabs never mixes them (#1254).
-  const [more, setMore] = useState<{ key: string; rows: Approval[]; cursor: string | null; loaded: boolean }>({
-    key: '',
-    rows: [],
-    cursor: null,
-    loaded: false,
+  const [more, setMore] = useState<{
+    key: string;
+    generation: number;
+    rows: Approval[];
+    cursor: string | null;
+    loaded: boolean;
+  }>(() => {
+    const cached = approvalsQueueCache.get(cacheKey);
+    return { key: status, generation: generation.current, rows: cached?.rows ?? [], cursor: cached?.cursor ?? null, loaded: !!cached };
   });
-  const [loadingMore, setLoadingMore] = useState<{ key: string; value: boolean }>({ key: '', value: false });
-  const [moreError, setMoreError] = useState<{ key: string; message: string | null }>({ key: '', message: null });
+  const [loadingMore, setLoadingMore] = useState<{ key: string; generation: number; value: boolean }>({
+    key: '',
+    generation: 0,
+    value: false,
+  });
+  const [moreError, setMoreError] = useState<{ key: string; generation: number; message: string | null }>({
+    key: '',
+    generation: 0,
+    message: null,
+  });
   const highlightedProposal = search.get('proposal');
   // Highlighted proposals are brought into view immediately; motion.md forbids smooth auto-scroll
   // (the CSS reduced-motion override cannot reach JS `behavior: 'smooth'`, #555 review).
@@ -236,7 +267,12 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
       }
       cancelApprovalFocusReturn();
       if (routerPath(window.location.pathname).replace(/\/+$/, '').startsWith('/approvals')) expireReturnFocusIntent();
-      else clearReturnFocusIntent();
+      else {
+        clearReturnFocusIntent();
+        // Leaving Approvals altogether is not a drawer remount; do not carry its pages into a
+        // later visit or into another workspace.
+        approvalsQueueCache.clear();
+      }
     },
     [],
   );
@@ -265,13 +301,17 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const now = useNow();
   useViewedTick();
 
-  const currentMore = more.key === status ? more : { key: status, rows: [], cursor: null, loaded: false };
-  const loadingMoreNow = loadingMore.key === status && loadingMore.value;
-  const moreErrorNow = moreError.key === status ? moreError.message : null;
+  const currentMore =
+    more.key === status && more.generation === generation.current
+      ? more
+      : { key: status, generation: generation.current, rows: [], cursor: null, loaded: false };
+  const loadingMoreNow = loadingMore.key === status && loadingMore.generation === generation.current && loadingMore.value;
+  const moreErrorNow = moreError.key === status && moreError.generation === generation.current ? moreError.message : null;
   const cursor = currentMore.loaded ? currentMore.cursor : (list.data?.nextCursor ?? null);
   const all = [...(list.data?.approvals ?? []), ...currentMore.rows];
-  // The server's total counts every matching request, not just the pages loaded so far (#1254).
-  const total = list.data?.total ?? all.length;
+  // `decisionTotal` counts a bundle once, like the queue groups it; `total` counts request rows
+  // (#1254 review). Older servers only send `total`, so fall back to the loaded grouping.
+  const total = list.data?.decisionTotal ?? (list.data ? pendingDecisionCount(all) : all.length);
   // A bundle (#107) is one decision, so it is one row: the member the others exist for (the
   // broadcast, the form) stands for it, and counts as viewed once every member's preview was opened.
   // The nav badge uses the same grouping (#483).
@@ -283,8 +323,12 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const notViewed = items.filter((a) => a.status === 'pending' && !viewed(a)).length;
 
   const reload = () => {
-    setMore({ key: '', rows: [], cursor: null, loaded: false });
-    setMoreError({ key: '', message: null });
+    // A decision changes the queue itself, so the remembered pages no longer describe it.
+    generation.current += 1;
+    approvalsQueueCache.delete(cacheKey);
+    setMore({ key: status, generation: generation.current, rows: [], cursor: null, loaded: false });
+    setLoadingMore({ key: status, generation: generation.current, value: false });
+    setMoreError({ key: status, generation: generation.current, message: null });
     void list.reload();
     void proposals.reload();
     refreshPending();
@@ -292,19 +336,26 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const loadMore = async () => {
     if (!cursor || loadingMoreNow) return;
     const requestKey = status;
-    setLoadingMore({ key: requestKey, value: true });
-    setMoreError({ key: requestKey, message: null });
+    const requestGeneration = generation.current;
+    setLoadingMore({ key: requestKey, generation: requestGeneration, value: true });
+    setMoreError({ key: requestKey, generation: requestGeneration, message: null });
     try {
       const r = await api.call('approvals.list', { status: requestKey, limit: 200, cursor });
-      setMore((current) =>
-        current.key === requestKey
-          ? { key: requestKey, rows: [...current.rows, ...r.approvals], cursor: r.nextCursor, loaded: true }
-          : { key: requestKey, rows: r.approvals, cursor: r.nextCursor, loaded: true },
-      );
+      // A reload or tab switch while this page was in flight owns a newer generation; drop it.
+      if (generation.current !== requestGeneration) return;
+      const rows = [...currentMore.rows, ...r.approvals];
+      setMore({ key: requestKey, generation: requestGeneration, rows, cursor: r.nextCursor, loaded: true });
+      approvalsQueueCache.set(cacheKey, { rows, cursor: r.nextCursor });
     } catch (e) {
-      setMoreError({ key: requestKey, message: errText(e) });
+      if (generation.current !== requestGeneration) return;
+      setMoreError({ key: requestKey, generation: requestGeneration, message: errText(e) });
     } finally {
-      setLoadingMore((current) => (current.key === requestKey ? { key: requestKey, value: false } : current));
+      if (generation.current === requestGeneration)
+        setLoadingMore((current) =>
+          current.key === requestKey && current.generation === requestGeneration
+            ? { key: requestKey, generation: requestGeneration, value: false }
+            : current,
+        );
     }
   };
   const batchApprove = async () => {

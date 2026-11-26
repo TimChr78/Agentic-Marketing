@@ -192,6 +192,12 @@ const humanise = (key: string) =>
     .replace(/\b\w/g, (c) => c.toUpperCase())
     .replace(/\bSms\b/g, 'SMS');
 
+/** A sentence-case fallback for event labels: "provider_accepted" reads as "Provider accepted". */
+const humaniseSentence = (key: string) => {
+  const text = key.replace(/[._]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  return (text.charAt(0).toUpperCase() + text.slice(1)).replace(/\bsms\b/g, 'SMS').replace(/\bapi\b/g, 'API');
+};
+
 /** Only a fallback for a key added to the API before this registry; the coverage test blocks that. */
 export function measureLabel(id: string): string {
   return ANALYTICS_MEASURES[id]?.label ?? humanise(id);
@@ -261,7 +267,33 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
 };
 
 export function eventTypeLabel(type: string): string {
-  return EVENT_TYPE_LABEL[type] ?? humanise(type);
+  return EVENT_TYPE_LABEL[type] ?? humaniseSentence(type);
+}
+
+/**
+ * Known message reason codes, kept before their `: guidance` so the recovery text survives
+ * (#1260 review). An unknown code is returned unchanged rather than being silently rewritten.
+ */
+export const MESSAGE_REASON_LABEL: Record<string, string> = {
+  unknown_outcome: 'Outcome unknown',
+  delivery_error: 'Delivery failed',
+  provider_error: 'Provider error',
+  no_template: 'Template unavailable',
+  not_published: 'Template not published',
+  no_profile: 'Person not found',
+  no_address: 'No e-mail address',
+  unknown_purpose: 'Purpose not configured',
+  no_lawful_basis: 'No lawful basis',
+  suppressed: 'Suppressed',
+};
+
+export function messageReasonLabel(reason: string): string {
+  const separator = reason.indexOf(':');
+  const code = separator < 0 ? reason : reason.slice(0, separator);
+  const label = MESSAGE_REASON_LABEL[code];
+  if (!label) return reason;
+  const guidance = separator < 0 ? '' : reason.slice(separator + 1).trim();
+  return guidance ? `${label}: ${guidance}` : label;
 }
 
 /**

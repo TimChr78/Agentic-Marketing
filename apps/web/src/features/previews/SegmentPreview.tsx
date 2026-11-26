@@ -94,8 +94,9 @@ export function SegmentPreview({
             <p className="text-[13px] text-fg-2">
               {mode === 'snapshot' ? (
                 <>
-                  A frozen snapshot of {content.sourceSegment ? <RefName id={content.sourceSegment} /> : 'another segment'}
-                  {content.snapshotVersion ? ` at v${content.snapshotVersion}` : ''}. Its members stay fixed until it is refreshed.
+                  A frozen snapshot of {content.sourceSegment ? <RefName id={content.sourceSegment} nameOnly /> : 'another segment'}
+                  {content.snapshotVersion ? `, captured at v${content.snapshotVersion}` : ''}. Its members stay fixed until it is
+                  refreshed.
                 </>
               ) : (
                 'A static list: an explicit set of people, changed by hand, CSV or API. A refresh never changes it.'

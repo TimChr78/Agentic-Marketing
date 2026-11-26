@@ -68,7 +68,14 @@ describe('approvals.list completeness metadata (B7)', () => {
       expect(page.total, status).toBe(total);
       expect(page.approvals.length).toBeLessThanOrEqual(2);
     }
-    expect((await list({ status: 'pending', limit: 200 })).approvals).toHaveLength(7);
+    const pending = await list({ status: 'pending', limit: 200 });
+    expect(pending.approvals).toHaveLength(7);
+    // The bundle contributes two request rows but one decision (#1254 review).
+    expect(pending.decisionTotal).toBe(6);
+    for (const [status, total] of Object.entries(counts)) {
+      const page = await list({ status, limit: 2 });
+      expect(page.decisionTotal, status).toBe(total === 7 ? 6 : total);
+    }
   });
 
   it('pages all pending rows once with a stable total and no gaps', async () => {
@@ -102,6 +109,7 @@ describe('approvals.list completeness metadata (B7)', () => {
 
     const filtered = await list({ status: 'pending', artifactId: bundleArtifacts[0], limit: 200 });
     expect(filtered.total).toBe(1);
+    expect(filtered.decisionTotal).toBe(1);
     expect(filtered.approvals.map((a) => a.bundle?.id)).toEqual([bundleId]);
   });
 

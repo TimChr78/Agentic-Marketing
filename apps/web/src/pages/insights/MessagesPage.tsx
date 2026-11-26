@@ -8,7 +8,7 @@ import { useSession } from '../../app/session';
 import { useKeyedApi } from '../../app/useApi';
 import { usePurposes } from '../../features/audience/phase26/usePurposes';
 import { StatCard, StatGrid, StatGridSkeleton } from '../../features/insights/Stats';
-import { eventTypeLabel, messageChannelLabel, messageStatusLabel, purposeLabel } from '../../lib/labels';
+import { eventTypeLabel, messageChannelLabel, messageReasonLabel, messageStatusLabel, purposeLabel } from '../../lib/labels';
 import {
   Alert,
   Button,
@@ -268,7 +268,7 @@ export default function MessagesPage() {
                       {m.lastError ? ` · ${m.lastError}` : ''}
                     </span>
                   ) : m.reason ? (
-                    <span className="line-clamp-2">{m.reason}</span>
+                    <span className="line-clamp-2">{messageReasonLabel(m.reason)}</span>
                   ) : m.events.length ? (
                     <span className="line-clamp-2">
                       {m.events

@@ -47,29 +47,34 @@ export default function TopicsPage() {
     minScore: minScore ? Number(minScore) : undefined,
   };
   const list = useKeyedApi(filterKey, () => api.call('content.topics.list', query));
-  // Further pages carry the filter they were requested for (#1262).
-  const [more, setMore] = useState<{ key: string; rows: TopicRow[]; loaded: boolean }>({ key: '', rows: [], loaded: false });
+  // Further pages carry the filter and cursor they were requested for (#1262).
+  const [more, setMore] = useState<{ key: string; rows: TopicRow[]; cursor: string | null; loaded: boolean }>({
+    key: '',
+    rows: [],
+    cursor: null,
+    loaded: false,
+  });
   const [loadingMore, setLoadingMore] = useState<{ key: string; value: boolean }>({ key: '', value: false });
   const [moreError, setMoreError] = useState<{ key: string; message: string | null }>({ key: '', message: null });
-  const currentMore = more.key === filterKey ? more : { key: filterKey, rows: [], loaded: false };
+  const currentMore = more.key === filterKey ? more : { key: filterKey, rows: [], cursor: null, loaded: false };
   const topics = [...(list.data?.topics ?? []), ...currentMore.rows];
-  // `count` is every matching topic, not the rows of the first page (#1262).
-  const count = list.data?.count ?? topics.length;
+  // `total` is every matching topic; `count` is only the rows on one page (#1262).
+  const total = list.data?.total ?? topics.length;
+  const cursor = currentMore.loaded ? currentMore.cursor : (list.data?.nextCursor ?? null);
   const loadingMoreNow = loadingMore.key === filterKey && loadingMore.value;
   const moreErrorNow = moreError.key === filterKey ? moreError.message : null;
 
   const loadMore = async () => {
-    if (loadingMoreNow || topics.length >= count) return;
+    if (loadingMoreNow || !cursor) return;
     const requestKey = filterKey;
-    const offset = topics.length;
     setLoadingMore({ key: requestKey, value: true });
     setMoreError({ key: requestKey, message: null });
     try {
-      const r = await api.call('content.topics.list', { ...query, offset });
+      const r = await api.call('content.topics.list', { ...query, cursor });
       setMore((current) =>
         current.key === requestKey
-          ? { key: requestKey, rows: [...current.rows, ...r.topics], loaded: true }
-          : { key: requestKey, rows: r.topics, loaded: true },
+          ? { key: requestKey, rows: [...current.rows, ...r.topics], cursor: r.nextCursor, loaded: true }
+          : { key: requestKey, rows: r.topics, cursor: r.nextCursor, loaded: true },
       );
     } catch (e) {
       setMoreError({ key: requestKey, message: errText(e) });
@@ -104,7 +109,7 @@ export default function TopicsPage() {
       else toast.success(`Added “${result.topic.title}” to the backlog.`);
       setCreating(false);
       setDraft(EMPTY);
-      setMore({ key: '', rows: [], loaded: false });
+      setMore({ key: '', rows: [], cursor: null, loaded: false });
       void list.reload();
     } catch (e) {
       toast.error(errText(e));
@@ -127,7 +132,7 @@ export default function TopicsPage() {
     try {
       await api.call('content.topics.archive', { topicId: topic.id });
       toast.success(`Archived “${topic.title}”. Its brief and published URL stay.`);
-      setMore({ key: '', rows: [], loaded: false });
+      setMore({ key: '', rows: [], cursor: null, loaded: false });
       void list.reload();
     } catch (e) {
       toast.error(errText(e));
@@ -196,7 +201,7 @@ export default function TopicsPage() {
               ))}
             </Select>
             <span className="ml-auto text-[12px] text-muted">
-              {count.toLocaleString()} topic{count === 1 ? '' : 's'}
+              {total.toLocaleString()} topic{total === 1 ? '' : 's'}
             </span>
           </>
         }
@@ -209,7 +214,7 @@ export default function TopicsPage() {
           {moreErrorNow}
         </Alert>
       )}
-      {topics.length < count && (
+      {cursor && (
         <div className="mt-3 flex justify-center">
           <Button onClick={() => void loadMore()} loading={loadingMoreNow}>
             Load more

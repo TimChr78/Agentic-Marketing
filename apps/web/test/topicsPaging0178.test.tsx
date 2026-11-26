@@ -2,8 +2,8 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// #1262: the heading counted the rows of one page and the rest were unreachable, although the
-// command returns `count` and accepts `offset`.
+// #1262: the heading counted the rows of one page and the rest were unreachable. The command now
+// returns the real `total` and a keyset `nextCursor`; `count` stays the page length.
 
 const h = vi.hoisted(() => ({
   impl: null as null | ((name: string, input: Record<string, unknown>) => Promise<unknown>),
@@ -66,11 +66,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('Topics backlog paging (#1262)', () => {
-  it('shows the server total and loads the rest with offset', async () => {
+  it('shows the server total and loads the rest with the continuation cursor', async () => {
     h.impl = async (name, input) => {
       if (name !== 'content.topics.list') throw new Error(`unexpected ${name}`);
-      if (input.offset === 200) return { count: 240, topics: Array.from({ length: 40 }, (_, i) => topic(201 + i)) };
-      return { count: 240, topics: Array.from({ length: 200 }, (_, i) => topic(i + 1)) };
+      if (input.cursor === 'topic-page-2')
+        return { count: 40, total: 240, nextCursor: null, topics: Array.from({ length: 40 }, (_, i) => topic(201 + i)) };
+      return { count: 200, total: 240, nextCursor: 'topic-page-2', topics: Array.from({ length: 200 }, (_, i) => topic(i + 1)) };
     };
 
     render(
@@ -87,8 +88,38 @@ describe('Topics backlog paging (#1262)', () => {
     await screen.findAllByText('Topic 240');
 
     const second = h.calls.filter((c) => c.name === 'content.topics.list')[1]!;
-    expect(second.input).toMatchObject({ offset: 200 });
+    expect(second.input).toMatchObject({ cursor: 'topic-page-2' });
     expect(screen.getByText('240 topics')).toBeTruthy();
     await waitFor(() => expect(screen.queryByRole('button', { name: /load more/i })).toBeNull());
+  });
+
+  it('restarts paging from the first page after archiving a topic', async () => {
+    h.impl = async (name, input) => {
+      if (name === 'content.topics.archive') return { topic: topic(2) };
+      if (name !== 'content.topics.list') throw new Error(`unexpected ${name}`);
+      if (input.cursor === 'topic-page-2') return { count: 2, total: 4, nextCursor: null, topics: [topic(3), topic(4)] };
+      // The archive invalidates the loaded second page, so the reload is a fresh first page.
+      return { count: 2, total: 3, nextCursor: 'topic-page-2', topics: [topic(1), topic(2)] };
+    };
+
+    render(
+      <ToastProvider>
+        <TopicsPage />
+      </ToastProvider>,
+    );
+
+    await screen.findAllByText('Topic 1');
+    await userEvent.click(screen.getByRole('button', { name: /load more/i }));
+    await screen.findAllByText('Topic 4');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Archive Topic 2' }));
+
+    await waitFor(() => expect(screen.queryByText('Topic 4')).toBeNull());
+    expect(screen.queryByText('Topic 3')).toBeNull();
+    expect(screen.getByText('Topic 1')).toBeTruthy();
+    const calls = h.calls.filter((c) => c.name === 'content.topics.list');
+    const reload = calls[calls.length - 1]!;
+    expect(reload.input).not.toHaveProperty('cursor');
+    expect(reload.input).not.toHaveProperty('offset');
   });
 });

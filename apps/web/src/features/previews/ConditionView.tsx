@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react';
+import { api, getWorkspaceId } from '../../app/api';
 import { Mono } from '../../ui';
 import { RefName } from './FormPreview';
 
@@ -43,6 +45,50 @@ function messageText(event: string): string {
     unsubscribed: 'Unsubscribed from a message',
   };
   return text[event] ?? `Had message event ${event}`;
+}
+
+// Topic keys live in the purposes artifact; read them once per workspace for the whole preview
+// tree (#1263 review). A workspace switch in this tab must not reuse another workspace's names.
+let topicNames: { workspaceId: string | null; names: Map<string, string> } | null = null;
+let topicNamesRead: { workspaceId: string | null; read: Promise<Map<string, string>> } | null = null;
+
+function readTopicNames(): Promise<Map<string, string>> {
+  const workspaceId = getWorkspaceId();
+  if (topicNames?.workspaceId === workspaceId) return Promise.resolve(topicNames.names);
+  if (topicNamesRead?.workspaceId === workspaceId) return topicNamesRead.read;
+  const read = api
+    .call('purposes.list', {})
+    .then((r) => {
+      const names = new Map(r.purposes.flatMap((purpose) => (purpose.topics ?? []).map((topic) => [topic.key, topic.name] as const)));
+      topicNames = { workspaceId, names };
+      return names;
+    })
+    .catch((error) => {
+      if (topicNamesRead?.read === read) topicNamesRead = null;
+      throw error;
+    });
+  topicNamesRead = { workspaceId, read };
+  return read;
+}
+
+/** A topic a person subscribed to, by its name; a failed lookup never prints the raw key. */
+function TopicName({ topic }: { topic: string }) {
+  const [state, setState] = useState<{ name?: string; status: 'loading' | 'ready' | 'error' }>(() =>
+    topicNames?.workspaceId === getWorkspaceId() ? { name: topicNames.names.get(topic), status: 'ready' } : { status: 'loading' },
+  );
+  useEffect(() => {
+    let live = true;
+    setState((current) => (current.status === 'ready' && current.name ? current : { status: 'loading' }));
+    readTopicNames()
+      .then((names) => live && setState({ name: names.get(topic), status: 'ready' }))
+      .catch(() => live && setState({ status: 'error' }));
+    return () => {
+      live = false;
+    };
+  }, [topic]);
+  if (state.status === 'loading') return <span className="text-muted">Loading topic…</span>;
+  if (!state.name) return <span className="text-muted">Unavailable topic</span>;
+  return <strong className="font-medium">{state.name}</strong>;
 }
 
 export function ConditionView({ condition, depth = 0 }: { condition: unknown; depth?: number }) {
@@ -139,7 +185,7 @@ export function ConditionView({ condition, depth = 0 }: { condition: unknown; de
   if (typeof c.topic === 'string')
     return (
       <p className="text-[13px]">
-        Subscribed to topic <Mono>{c.topic}</Mono>
+        Subscribed to topic <TopicName topic={c.topic} />
       </p>
     );
   if (c.score && typeof c.score === 'object') {

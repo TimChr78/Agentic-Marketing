@@ -83,6 +83,24 @@ export const ACTIVE = ['active', 'confirmed', 'subscribed', 'subscriber'];
 export const IMPORT_BATCH_ROWS = 5000;
 /** Headroom below the route's 1 MB body limit for the label and the JSON wrapper. */
 export const IMPORT_BATCH_BYTES = 900_000;
+/** The REST route's body limit; a single row must leave room for the label and wrapper within it. */
+export const IMPORT_BODY_LIMIT_BYTES = 1024 * 1024;
+
+/** The encoded size of a `profiles.import` request body, before a batch is sent. */
+export function importRequestBytes(label: string, rows: readonly unknown[]): number {
+  return new TextEncoder().encode(JSON.stringify({ label, rows })).length;
+}
+
+/**
+ * The first row that is too large to send even alone, as an index into `rows` (#1250 review). The
+ * caller refuses before the first request, so no earlier batch is lost to a later 413.
+ */
+export function oversizedImportRow(rows: readonly unknown[], label: string): { index: number } | null {
+  for (let index = 0; index < rows.length; index++) {
+    if (importRequestBytes(label, [rows[index]]) > IMPORT_BODY_LIMIT_BYTES) return { index };
+  }
+  return null;
+}
 
 export function batchImportRows<T>(rows: readonly T[], maxRows = IMPORT_BATCH_ROWS, maxBytes = IMPORT_BATCH_BYTES): T[][] {
   const encoder = new TextEncoder();
@@ -114,12 +132,14 @@ export function toImportRows(
   rows: string[][],
   m: Mapping,
   opts: { purpose: string; system: string; activeOnly: boolean },
-): { rows: ImportRow[]; skipped: { row: number; reason: string }[] } {
+): { rows: ImportRow[]; rowNumbers: number[]; skipped: { row: number; reason: string }[] } {
   const out: ImportRow[] = [];
+  const rowNumbers: number[] = [];
   const skipped: { row: number; reason: string }[] = [];
   const seen = new Set<string>();
   rows.slice(1).forEach((r, i) => {
-    const row = i + 1;
+    // The CSV line in the file, counting the header: data row i is file row i + 2.
+    const row = i + 2;
     const email = (r[m.email] ?? '').trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       skipped.push({ row, reason: 'no valid e-mail' });
@@ -135,6 +155,7 @@ export function toImportRows(
       return;
     }
     seen.add(email);
+    rowNumbers.push(row);
     const when = m.subscribedAt >= 0 ? new Date((r[m.subscribedAt] ?? '').trim()) : null;
     const firstName = m.firstName >= 0 ? (r[m.firstName] ?? '').trim() : '';
     out.push({
@@ -154,5 +175,5 @@ export function toImportRows(
       ],
     });
   });
-  return { rows: out, skipped };
+  return { rows: out, rowNumbers, skipped };
 }

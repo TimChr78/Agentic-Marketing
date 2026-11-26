@@ -2,4 +2,4 @@
 section: Fixed
 issues: [1254]
 ---
-- The Approvals queue follows the server's cursor with Load more and shows the total on the Pending tab, so requests beyond the oldest 200 are reachable and the count is honest.
+- The Approvals queue follows the server's cursor with Load more, shows a bundle once in the Pending decision count, keeps its loaded pages across the review drawer, and discards pages that arrive after a reload or tab switch.

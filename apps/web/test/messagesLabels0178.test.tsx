@@ -31,6 +31,24 @@ vi.mock('../src/app/api', async (importOriginal) => {
                 createdAt: '2026-11-10T09:00:00Z',
                 events: [{ type: 'provider_accepted', at: '2026-11-10T09:01:00Z', reason: '' }],
               },
+              {
+                id: 'msg_2',
+                channel: 'email',
+                profileId: null,
+                templateId: null,
+                templateVersion: null,
+                purpose: 'marketing_email',
+                status: 'failed',
+                reason: 'unknown_outcome: the worker stopped while sending; check the provider before resending',
+                attempts: 1,
+                nextAttemptAt: null,
+                lastError: null,
+                notBefore: null,
+                segments: null,
+                test: false,
+                createdAt: '2026-11-10T09:00:00Z',
+                events: [],
+              },
             ],
             nextCursor: null,
           };
@@ -60,8 +78,11 @@ describe('messages page labels (#1260)', () => {
 
     await waitFor(() => expect(within(table).getByText('Delivered')).toBeTruthy());
     expect(within(table).getByText('SMS')).toBeTruthy();
-    expect(within(table).getByText(/Provider Accepted/)).toBeTruthy();
+    expect(within(table).getByText(/Provider accepted/)).toBeTruthy();
 
+    // A known reason code is translated and keeps its recovery guidance (#1260 review).
+    expect(within(table).getByText(/Outcome unknown: the worker stopped while sending/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('unknown_outcome');
     expect(document.body.textContent).not.toContain('provider_accepted');
     expect(document.body.textContent).not.toContain('delivered');
     expect(document.body.textContent).not.toContain('sms');
