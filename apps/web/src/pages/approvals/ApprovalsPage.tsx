@@ -9,6 +9,14 @@ import { useApi, useKeyedApi } from '../../app/useApi';
 import { approvalDecisions, pendingDecisionCount } from '../../features/approvals/decisions';
 import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
 import { useNow } from '../../features/approvals/holds';
+import {
+  approvalsQueueKey,
+  clearApprovalsQueueCache,
+  dropApprovalsQueueScope,
+  readApprovalsQueuePage,
+  resetApprovalsQueueCache,
+  writeApprovalsQueuePage,
+} from '../../features/approvals/queueCache';
 import { RequesterView } from '../../features/approvals/requester';
 import { decisionWasViewed, useViewedTick } from '../../features/approvals/viewed';
 import { invalidateArtifact } from '../../features/artifactCache';
@@ -46,6 +54,19 @@ type Status = 'pending' | 'approved' | 'rejected';
 const changesWorkspaceBrand = (a: Approval) =>
   a.artifactType === 'brand' || (a.bundle?.members ?? []).some((m) => m.artifactType === 'brand');
 
+/**
+ * One row per approval. The fresh first page comes first, so it wins over a cached extra page that
+ * still holds a request which has since moved into the list (#1273 review).
+ */
+function uniqueApprovals(approvals: Approval[]) {
+  const seen = new Set<string>();
+  return approvals.filter((a) => {
+    if (seen.has(a.id)) return false;
+    seen.add(a.id);
+    return true;
+  });
+}
+
 // The route table keys each page by path (routes.tsx), so opening /approvals/:id remounts this
 // page. The invoking row therefore has to be remembered outside the component instance; a deep
 // link has never set it and falls back to the queue heading.
@@ -55,14 +76,11 @@ let returnFocusApprovalId: string | null = null;
 let approvalsPageSeq = 0;
 
 // The route table remounts this page when a drawer opens (`/approvals/:id`). The pages loaded past
-// the first one therefore live outside the component instance, so closing the drawer keeps them
-// and the invoking row is still there for focus (#1254 review).
-const approvalsQueueCache = new Map<string, { rows: Approval[]; cursor: string | null }>();
+// the first one live in a module cache scoped to the person and workspace, so closing the drawer
+// keeps them and the invoking row is still there for focus (#1254 review).
 
 /** Drop every remembered page; tests use this between cases. */
-export function resetApprovalsQueueCache() {
-  approvalsQueueCache.clear();
-}
+export { resetApprovalsQueueCache };
 
 const FOCUS_RETURN_LIMIT_MS = 10_000;
 const FOCUS_RETURN_POLL_MS = 50;
@@ -205,7 +223,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const status = (search.get('status') as Status) || 'pending';
   const list = useKeyedApi(status, () => api.call('approvals.list', { status, limit: 200 }));
   const proposals = useApi(() => api.call('workspace.proposals', { status: 'pending', limit: 50 }), []);
-  const cacheKey = `${workspace?.id ?? ''}|${status}`;
+  const cacheKey = approvalsQueueKey(user?.id, workspace?.id, status);
   // One generation owns the extra pages, the cursor, the loading flag and the error. A reload, a
   // tab switch or a second Load more makes every late result from the old generation stale (#1254).
   const generation = useRef(0);
@@ -222,7 +240,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
     cursor: string | null;
     loaded: boolean;
   }>(() => {
-    const cached = approvalsQueueCache.get(cacheKey);
+    const cached = readApprovalsQueuePage(cacheKey);
     return { key: status, generation: generation.current, rows: cached?.rows ?? [], cursor: cached?.cursor ?? null, loaded: !!cached };
   });
   const [loadingMore, setLoadingMore] = useState<{ key: string; generation: number; value: boolean }>({
@@ -271,7 +289,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
         clearReturnFocusIntent();
         // Leaving Approvals altogether is not a drawer remount; do not carry its pages into a
         // later visit or into another workspace.
-        approvalsQueueCache.clear();
+        clearApprovalsQueueCache();
       }
     },
     [],
@@ -308,7 +326,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const loadingMoreNow = loadingMore.key === status && loadingMore.generation === generation.current && loadingMore.value;
   const moreErrorNow = moreError.key === status && moreError.generation === generation.current ? moreError.message : null;
   const cursor = currentMore.loaded ? currentMore.cursor : (list.data?.nextCursor ?? null);
-  const all = [...(list.data?.approvals ?? []), ...currentMore.rows];
+  const all = uniqueApprovals([...(list.data?.approvals ?? []), ...currentMore.rows]);
   // `decisionTotal` counts a bundle once, like the queue groups it; `total` counts request rows
   // (#1254 review). Older servers only send `total`, so fall back to the loaded grouping.
   const total = list.data?.decisionTotal ?? (list.data ? pendingDecisionCount(all) : all.length);
@@ -323,9 +341,10 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const notViewed = items.filter((a) => a.status === 'pending' && !viewed(a)).length;
 
   const reload = () => {
-    // A decision changes the queue itself, so the remembered pages no longer describe it.
+    // A decision changes the queue itself, so none of the workspace's remembered pages describe it:
+    // the same request moves out of Pending into the decided tab (#1273 review).
     generation.current += 1;
-    approvalsQueueCache.delete(cacheKey);
+    dropApprovalsQueueScope(user?.id, workspace?.id);
     setMore({ key: status, generation: generation.current, rows: [], cursor: null, loaded: false });
     setLoadingMore({ key: status, generation: generation.current, value: false });
     setMoreError({ key: status, generation: generation.current, message: null });
@@ -343,9 +362,9 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
       const r = await api.call('approvals.list', { status: requestKey, limit: 200, cursor });
       // A reload or tab switch while this page was in flight owns a newer generation; drop it.
       if (generation.current !== requestGeneration) return;
-      const rows = [...currentMore.rows, ...r.approvals];
+      const rows = uniqueApprovals([...currentMore.rows, ...r.approvals]);
       setMore({ key: requestKey, generation: requestGeneration, rows, cursor: r.nextCursor, loaded: true });
-      approvalsQueueCache.set(cacheKey, { rows, cursor: r.nextCursor });
+      writeApprovalsQueuePage(cacheKey, { rows, cursor: r.nextCursor });
     } catch (e) {
       if (generation.current !== requestGeneration) return;
       setMoreError({ key: requestKey, generation: requestGeneration, message: errText(e) });

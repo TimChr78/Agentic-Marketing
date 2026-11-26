@@ -1,5 +1,5 @@
 import { FileText, Plus, Search } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { navigate } from '../../app/router';
 import { useSession } from '../../app/session';
@@ -56,6 +56,9 @@ export default function TopicsPage() {
   });
   const [loadingMore, setLoadingMore] = useState<{ key: string; value: boolean }>({ key: '', value: false });
   const [moreError, setMoreError] = useState<{ key: string; message: string | null }>({ key: '', message: null });
+  // A create or archive resets the pages and reloads the first one; a Load more still in flight
+  // belongs to the old list and must not append itself afterwards (#1262 review).
+  const generation = useRef(0);
   const currentMore = more.key === filterKey ? more : { key: filterKey, rows: [], cursor: null, loaded: false };
   const topics = [...(list.data?.topics ?? []), ...currentMore.rows];
   // `total` is every matching topic; `count` is only the rows on one page (#1262).
@@ -67,19 +70,24 @@ export default function TopicsPage() {
   const loadMore = async () => {
     if (loadingMoreNow || !cursor) return;
     const requestKey = filterKey;
+    const requestGeneration = generation.current;
     setLoadingMore({ key: requestKey, value: true });
     setMoreError({ key: requestKey, message: null });
     try {
       const r = await api.call('content.topics.list', { ...query, cursor });
+      // A create or archive while this page was in flight owns a newer generation; drop it.
+      if (generation.current !== requestGeneration) return;
       setMore((current) =>
         current.key === requestKey
           ? { key: requestKey, rows: [...current.rows, ...r.topics], cursor: r.nextCursor, loaded: true }
           : { key: requestKey, rows: r.topics, cursor: r.nextCursor, loaded: true },
       );
     } catch (e) {
+      if (generation.current !== requestGeneration) return;
       setMoreError({ key: requestKey, message: errText(e) });
     } finally {
-      setLoadingMore((current) => (current.key === requestKey ? { key: requestKey, value: false } : current));
+      if (generation.current === requestGeneration)
+        setLoadingMore((current) => (current.key === requestKey ? { key: requestKey, value: false } : current));
     }
   };
 
@@ -109,7 +117,10 @@ export default function TopicsPage() {
       else toast.success(`Added “${result.topic.title}” to the backlog.`);
       setCreating(false);
       setDraft(EMPTY);
-      setMore({ key: '', rows: [], cursor: null, loaded: false });
+      generation.current += 1;
+      setMore({ key: filterKey, rows: [], cursor: null, loaded: false });
+      setLoadingMore({ key: filterKey, value: false });
+      setMoreError({ key: filterKey, message: null });
       void list.reload();
     } catch (e) {
       toast.error(errText(e));
@@ -132,7 +143,10 @@ export default function TopicsPage() {
     try {
       await api.call('content.topics.archive', { topicId: topic.id });
       toast.success(`Archived “${topic.title}”. Its brief and published URL stay.`);
-      setMore({ key: '', rows: [], cursor: null, loaded: false });
+      generation.current += 1;
+      setMore({ key: filterKey, rows: [], cursor: null, loaded: false });
+      setLoadingMore({ key: filterKey, value: false });
+      setMoreError({ key: filterKey, message: null });
       void list.reload();
     } catch (e) {
       toast.error(errText(e));

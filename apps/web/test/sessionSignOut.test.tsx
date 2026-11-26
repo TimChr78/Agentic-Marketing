@@ -37,6 +37,7 @@ vi.mock('../src/app/api', async (importOriginal) => {
 });
 
 import { Root } from '../src/app/Root';
+import { readApprovalsQueuePage, resetApprovalsQueueCache, writeApprovalsQueuePage } from '../src/features/approvals/queueCache';
 
 const response = (status: number) => ({
   ok: status >= 200 && status < 300,
@@ -68,11 +69,13 @@ const signedIn = () =>
 beforeEach(() => {
   h.signOut = { ok: true, status: 200 };
   h.thrown = null;
+  resetApprovalsQueueCache();
   signedIn();
 });
 
 afterEach(() => {
   cleanup();
+  resetApprovalsQueueCache();
   vi.unstubAllGlobals();
 });
 
@@ -110,6 +113,17 @@ describe('sign-out waits for the server (#614)', () => {
 
     expect(await screen.findByRole('heading', { name: 'Sign in' })).toBeTruthy();
     expect(screen.queryByText(/not in a workspace yet/i)).toBeNull();
+  });
+
+  it('forgets remembered Approvals pages after a confirmed sign-out', async () => {
+    // An empty page is enough: the key existing is what a later session must not read.
+    writeApprovalsQueuePage('usr_1|ws_1|approved', { rows: [], cursor: 'page-2' });
+    render(<Root />);
+    expect(await screen.findByText(/not in a workspace yet/i)).toBeTruthy();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    await screen.findByRole('heading', { name: 'Sign in' });
+    expect(readApprovalsQueuePage('usr_1|ws_1|approved')).toBeUndefined();
   });
 
   it('treats a 401 as already signed out', async () => {

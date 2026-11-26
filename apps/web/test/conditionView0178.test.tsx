@@ -1,4 +1,5 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // #1263: the read-only condition view printed the topic and score leaves as raw JSON to the
@@ -12,13 +13,22 @@ vi.mock('../src/app/api', async (importOriginal) => {
     api: {
       call: vi.fn(async (name: string) => {
         if (name !== 'purposes.list') throw new Error(`unexpected ${name}`);
+        const workspaceId = actual.getWorkspaceId();
         return {
           source: 'published',
           purposes: [
             {
               key: 'marketing_email',
               name: 'Marketing e-mail',
-              topics: [{ key: 'weekly_readers', name: 'Weekly readers', description: '', default: 'subscribed' }],
+              topics: [
+                { key: 'weekly_readers', name: 'Weekly readers', description: '', default: 'subscribed' },
+                {
+                  key: 'workspace_topic',
+                  name: workspaceId === 'ws_two' ? 'Second workspace name' : 'First workspace name',
+                  description: '',
+                  default: 'subscribed',
+                },
+              ],
             },
           ],
         };
@@ -27,9 +37,13 @@ vi.mock('../src/app/api', async (importOriginal) => {
   };
 });
 
+import { setWorkspaceId } from '../src/app/api';
 import { ConditionView } from '../src/features/previews/ConditionView';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  setWorkspaceId(null, { persist: false });
+});
 
 describe('read-only condition view (#1263)', () => {
   it('renders a topic leaf as a sentence with the topic name, not its key', async () => {
@@ -64,4 +78,32 @@ describe('read-only condition view (#1263)', () => {
     expect(document.body.textContent).toContain('is at least 0.5');
     await waitFor(() => expect(screen.getByText('Weekly readers')).toBeTruthy());
   });
+
+  it('rereads topic names after a workspace switch without remounting the preview', async () => {
+    setWorkspaceId('ws_one', { persist: false });
+    render(<WorkspaceSwitch />);
+    await waitFor(() => expect(screen.getByText('First workspace name')).toBeTruthy());
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch workspace' }));
+    await waitFor(() => expect(screen.getByText('Second workspace name')).toBeTruthy());
+  });
 });
+
+/** A preview that stays mounted while the chosen workspace changes, as the shell does. */
+function WorkspaceSwitch() {
+  const [, rerender] = useState(0);
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => {
+          setWorkspaceId('ws_two', { persist: false });
+          rerender((n) => n + 1);
+        }}
+      >
+        Switch workspace
+      </button>
+      <ConditionView condition={{ topic: 'workspace_topic' }} />
+    </>
+  );
+}

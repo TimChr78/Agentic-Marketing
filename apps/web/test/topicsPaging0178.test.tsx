@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -121,5 +121,38 @@ describe('Topics backlog paging (#1262)', () => {
     const reload = calls[calls.length - 1]!;
     expect(reload.input).not.toHaveProperty('cursor');
     expect(reload.input).not.toHaveProperty('offset');
+  });
+
+  it('drops a Load more page that lands after an archive reset the list', async () => {
+    let resolvePage2: ((value: unknown) => void) | undefined;
+    h.impl = async (name, input) => {
+      if (name === 'content.topics.archive') return { topic: topic(2) };
+      if (name !== 'content.topics.list') throw new Error(`unexpected ${name}`);
+      if (input.cursor === 'topic-page-2')
+        return new Promise((resolve) => {
+          resolvePage2 = resolve;
+        });
+      return { count: 2, total: 3, nextCursor: 'topic-page-2', topics: [topic(1), topic(2)] };
+    };
+
+    render(
+      <ToastProvider>
+        <TopicsPage />
+      </ToastProvider>,
+    );
+
+    await screen.findAllByText('Topic 1');
+    await userEvent.click(screen.getByRole('button', { name: /load more/i }));
+    // Archiving while the second page is in flight resets the list and starts a fresh first page.
+    await userEvent.click(screen.getByRole('button', { name: 'Archive Topic 2' }));
+
+    await act(async () => {
+      resolvePage2?.({ count: 1, total: 3, nextCursor: null, topics: [topic(3)] });
+      await Promise.resolve();
+    });
+
+    // The late page belonged to the list before the archive; it must not reappear.
+    expect(screen.queryByText('Topic 3')).toBeNull();
+    expect(screen.getByText('Topic 1')).toBeTruthy();
   });
 });

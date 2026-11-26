@@ -52,8 +52,7 @@ function messageText(event: string): string {
 let topicNames: { workspaceId: string | null; names: Map<string, string> } | null = null;
 let topicNamesRead: { workspaceId: string | null; read: Promise<Map<string, string>> } | null = null;
 
-function readTopicNames(): Promise<Map<string, string>> {
-  const workspaceId = getWorkspaceId();
+function readTopicNames(workspaceId: string | null): Promise<Map<string, string>> {
   if (topicNames?.workspaceId === workspaceId) return Promise.resolve(topicNames.names);
   if (topicNamesRead?.workspaceId === workspaceId) return topicNamesRead.read;
   const read = api
@@ -73,19 +72,20 @@ function readTopicNames(): Promise<Map<string, string>> {
 
 /** A topic a person subscribed to, by its name; a failed lookup never prints the raw key. */
 function TopicName({ topic }: { topic: string }) {
+  const workspaceId = getWorkspaceId();
   const [state, setState] = useState<{ name?: string; status: 'loading' | 'ready' | 'error' }>(() =>
-    topicNames?.workspaceId === getWorkspaceId() ? { name: topicNames.names.get(topic), status: 'ready' } : { status: 'loading' },
+    topicNames?.workspaceId === workspaceId ? { name: topicNames.names.get(topic), status: 'ready' } : { status: 'loading' },
   );
   useEffect(() => {
     let live = true;
     setState((current) => (current.status === 'ready' && current.name ? current : { status: 'loading' }));
-    readTopicNames()
+    readTopicNames(workspaceId)
       .then((names) => live && setState({ name: names.get(topic), status: 'ready' }))
       .catch(() => live && setState({ status: 'error' }));
     return () => {
       live = false;
     };
-  }, [topic]);
+  }, [topic, workspaceId]);
   if (state.status === 'loading') return <span className="text-muted">Loading topic…</span>;
   if (!state.name) return <span className="text-muted">Unavailable topic</span>;
   return <strong className="font-medium">{state.name}</strong>;
