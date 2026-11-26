@@ -382,12 +382,21 @@ export const acceptInvitation = defineCommand({
       .values({ workspaceId: inv.workspaceId, userId: ctx.principal.userId, role: inv.role })
       .onConflictDoNothing()
       .returning();
-    if (!added.length) throw new AppError('conflict', 'You are already a member of this workspace.');
+    // An existing membership may come from single sign-on or a directory sync. Accepting an
+    // invitation never lowers or otherwise changes a role the person already holds (#1277 review).
+    let role = inv.role;
+    if (!added.length) {
+      const [existing] = await ctx.tx
+        .select({ role: schema.workspaceMembers.role })
+        .from(schema.workspaceMembers)
+        .where(and(eq(schema.workspaceMembers.workspaceId, inv.workspaceId), eq(schema.workspaceMembers.userId, ctx.principal.userId)));
+      role = existing?.role ?? inv.role;
+    }
     await ctx.tx
       .update(schema.invitations)
       .set({ status: 'accepted', acceptedBy: ctx.principal.userId, decidedAt: new Date() })
       .where(eq(schema.invitations.id, inv.id));
-    return { workspaceId: inv.workspaceId, role: inv.role };
+    return { workspaceId: inv.workspaceId, role };
   },
 });
 

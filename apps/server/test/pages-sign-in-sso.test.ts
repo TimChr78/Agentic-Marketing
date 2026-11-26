@@ -38,10 +38,11 @@ async function renderLogin(query: string) {
   return { window, document: window.document, calls };
 }
 
-async function renderInvite(hash: string, signedIn: boolean) {
+async function renderInvite(path: string, signedIn: boolean, storage: Record<string, string> = {}) {
   const page = invitePage('test-nonce');
-  const window = new Window({ url: `https://am.example.com/invite${hash}` });
+  const window = new Window({ url: `https://am.example.com${path}` });
   window.document.write(page);
+  for (const [key, value] of Object.entries(storage)) window.sessionStorage.setItem(key, value);
   const calls: Call[] = [];
   Object.assign(window, {
     fetch: async (url: string, init: RequestInit) => {
@@ -85,8 +86,34 @@ describe('server sign-in pages offer single sign-on (#1248)', () => {
     expect(JSON.parse(call.body)).toEqual({ email: 'jo@acme.com', callbackURL: '/' });
   });
 
-  it('the invitation page keeps the token across SSO and joins on return', async () => {
-    const { window, document, calls } = await renderInvite('#tok-123', false);
+  it('resumes the verified authorize request without the satisfied login prompt', async () => {
+    const query = '?client_id=abc&prompt=login%20consent&state=st-1&code_challenge=ch-1&code_challenge_method=S256&sig=s';
+    const { document, calls } = await renderLogin(query);
+    (document.getElementById('email') as unknown as HTMLInputElement).value = 'jo@acme.com';
+    (document.getElementById('sso') as unknown as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(calls.some((c) => c.url === '/api/auth/sign-in/sso')).toBe(true));
+    const call = calls.find((c) => c.url === '/api/auth/sign-in/sso')!;
+    // state and PKCE survive, the other prompt survives, and login is gone.
+    expect(JSON.parse(call.body)).toEqual({
+      email: 'jo@acme.com',
+      callbackURL:
+        '/api/auth/oauth2/authorize?client_id=abc&prompt=consent&state=st-1&code_challenge=ch-1&code_challenge_method=S256&sig=s',
+    });
+  });
+
+  it('drops a prompt that only asks for login', async () => {
+    const { document, calls } = await renderLogin('?client_id=abc&prompt=login&sig=s');
+    (document.getElementById('email') as unknown as HTMLInputElement).value = 'jo@acme.com';
+    (document.getElementById('sso') as unknown as HTMLButtonElement).click();
+
+    await vi.waitFor(() => expect(calls.some((c) => c.url === '/api/auth/sign-in/sso')).toBe(true));
+    const call = calls.find((c) => c.url === '/api/auth/sign-in/sso')!;
+    expect(JSON.parse(call.body)).toEqual({ email: 'jo@acme.com', callbackURL: '/api/auth/oauth2/authorize?client_id=abc&sig=s' });
+  });
+
+  it('the invitation page keeps the token in the tab and returns with a single-use marker', async () => {
+    const { window, document, calls } = await renderInvite('/invite#tok-123', false);
     const button = document.getElementById('sso') as unknown as HTMLButtonElement;
     expect(button).toBeTruthy();
     (document.getElementById('email') as unknown as HTMLInputElement).value = 'jo@acme.com';
@@ -94,12 +121,19 @@ describe('server sign-in pages offer single sign-on (#1248)', () => {
 
     await vi.waitFor(() => expect(calls.some((c) => c.url === '/api/auth/sign-in/sso')).toBe(true));
     const call = calls.find((c) => c.url === '/api/auth/sign-in/sso')!;
-    expect(JSON.parse(call.body)).toEqual({ email: 'jo@acme.com', callbackURL: '/invite#tok-123' });
+    const body = JSON.parse(call.body) as { email: string; callbackURL: string };
+    expect(body.email).toBe('jo@acme.com');
+    // The token is not in the callback URL Better Auth stores; only a marker is.
+    expect(body.callbackURL.startsWith('/invite?return=')).toBe(true);
+    expect(body.callbackURL).not.toContain('tok-123');
     expect(window.sessionStorage.getItem('am-invite')).toBe('tok-123');
+    const marker = new URL(body.callbackURL, 'https://am.example.com').searchParams.get('return');
+    expect(marker).toBeTruthy();
+    expect(window.sessionStorage.getItem('am-invite-return')).toBe(marker);
   });
 
   it('the invitation page joins with the saved token once SSO has signed the person in', async () => {
-    const { window, document, calls } = await renderInvite('#tok-123', true);
+    const { window, document, calls } = await renderInvite('/invite#tok-123', true);
 
     await vi.waitFor(() => expect(calls.some((c) => c.url === '/api/invitations/accept')).toBe(true));
     const call = calls.find((c) => c.url === '/api/invitations/accept')!;
@@ -107,5 +141,19 @@ describe('server sign-in pages offer single sign-on (#1248)', () => {
     expect((document.getElementById('done') as unknown as HTMLElement).hidden).toBe(false);
     expect((document.getElementById('done') as unknown as HTMLElement).textContent).toContain('marketer');
     expect(window.sessionStorage.getItem('am-invite')).toBeNull();
+  });
+
+  it('joins on a return that carries only the stored invite token', async () => {
+    const { window, document, calls } = await renderInvite('/invite?return=m1', true, {
+      'am-invite': 'tok-123',
+      'am-invite-return': 'm1',
+    });
+
+    await vi.waitFor(() => expect(calls.some((c) => c.url === '/api/invitations/accept')).toBe(true));
+    const call = calls.find((c) => c.url === '/api/invitations/accept')!;
+    expect(JSON.parse(call.body)).toEqual({ token: 'tok-123' });
+    expect((document.getElementById('done') as unknown as HTMLElement).hidden).toBe(false);
+    expect(window.sessionStorage.getItem('am-invite')).toBeNull();
+    expect(window.sessionStorage.getItem('am-invite-return')).toBeNull();
   });
 });

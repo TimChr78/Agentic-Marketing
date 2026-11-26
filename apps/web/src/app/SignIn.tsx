@@ -40,7 +40,15 @@ export function SignIn({ onDone }: { onDone: () => void }) {
         window.location.href = body.url;
         return;
       }
-      setErr(typeof body?.message === 'string' && body.message ? body.message : 'Couldn’t start single sign-on. Try again.');
+      // Keep the enforced-domain refusal, which names the method that works. Other provider
+      // errors ("No provider found for the issuer") are not actionable verbatim (#1277 review).
+      const message = typeof body?.message === 'string' ? body.message : undefined;
+      if (message && /signs in with single sign-on/i.test(message)) setErr(message);
+      else if (r.status === 404)
+        setErr(
+          'No single sign-on is set up for that address. Use your password, or ask your workspace admin to connect your company’s identity provider.',
+        );
+      else setErr('Couldn’t start single sign-on. Check the address and try again, or ask your workspace admin to set it up.');
     } catch {
       setErr('The server did not answer. Check that it is running and try again.');
     } finally {

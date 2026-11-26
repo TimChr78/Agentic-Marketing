@@ -136,9 +136,8 @@ describe('Workspace settings (#527)', () => {
     await userEvent.type(name, 'Northstar Daily');
     await userEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() =>
-      expect(h.calls.find((c) => c.name === 'workspace.update')?.input).toMatchObject({
+      expect(h.calls.find((c) => c.name === 'workspace.update')?.input).toEqual({
         name: 'Northstar Daily',
-        timeZone: 'Europe/Copenhagen',
       }),
     );
 

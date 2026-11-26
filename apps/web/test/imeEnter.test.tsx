@@ -70,6 +70,8 @@ beforeEach(() => {
 
 /** The keydown a browser delivers for the Enter that confirms a composition (Chrome). */
 const confirmComposition = (el: HTMLElement) => fireEvent.keyDown(el, { key: 'Enter', code: 'Enter', keyCode: 229, isComposing: true });
+/** Safari may fire compositionend first: isComposing is false, but the legacy keyCode stays 229. */
+const safariComposition = (el: HTMLElement) => fireEvent.keyDown(el, { key: 'Enter', code: 'Enter', keyCode: 229, isComposing: false });
 
 describe('the Enter that confirms an IME composition (#1253)', () => {
   it('does not send the half-composed text to the Copilot', async () => {
@@ -84,6 +86,18 @@ describe('the Enter that confirms an IME composition (#1253)', () => {
 
     // A real Enter afterwards still sends the confirmed text.
     fireEvent.keyDown(box, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(streamFetch).toHaveBeenCalledTimes(1));
+  });
+
+  it('does not send when CompositionEvent fired first and only keyCode 229 remains', async () => {
+    render(<CopilotDrawer open onClose={() => {}} />);
+    const box = screen.getByRole('textbox', { name: 'Message to the copilot' });
+    fireEvent.change(box, { target: { value: 'かってに' } });
+    safariComposition(box);
+    expect(streamFetch).not.toHaveBeenCalled();
+
+    // A real Enter afterwards still sends.
+    fireEvent.keyDown(box, { key: 'Enter', code: 'Enter', isComposing: false });
     await waitFor(() => expect(streamFetch).toHaveBeenCalledTimes(1));
   });
 

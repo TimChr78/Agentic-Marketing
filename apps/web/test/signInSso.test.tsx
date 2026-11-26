@@ -66,4 +66,19 @@ describe('sign in with single sign-on (#1248)', () => {
     expect(await screen.findByText(message)).toBeTruthy();
     expect(screen.queryByText('Couldn’t sign in. Check your e-mail and password, then try again.')).toBeNull();
   });
+
+  it('turns a provider error into plain language with a recovery step', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/auth/sign-in/sso') return json({ code: 'NOT_FOUND', message: 'No provider found for the issuer' }, 404);
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<SignIn onDone={() => {}} />);
+
+    await userEvent.type(screen.getByLabelText('E-mail'), 'jo@acme.com');
+    await userEvent.click(screen.getByRole('button', { name: 'Sign in with SSO' }));
+
+    expect(await screen.findByText(/Use your password/)).toBeTruthy();
+    expect(screen.queryByText('No provider found for the issuer')).toBeNull();
+  });
 });

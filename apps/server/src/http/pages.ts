@@ -77,13 +77,30 @@ f.onsubmit = async (e) => {
 };
 // An enforced domain refuses the password; start SSO instead. With an OAuth request in the query,
 // return to the authorize endpoint so the client's flow resumes after the identity provider.
+// The login prompt was just satisfied, so drop only it: replaying prompt=login would send the
+// client straight back here. Every other parameter (state, PKCE, other prompts) stays as it was.
+const resumeUrl = () => {
+  const raw = location.search.slice(1);
+  if (!raw) return '/';
+  const parts = [];
+  for (const part of raw.split('&')) {
+    const at = part.indexOf('=');
+    const name = decodeURIComponent((at < 0 ? part : part.slice(0, at)).split('+').join(' '));
+    if (name !== 'prompt') { parts.push(part); continue; }
+    const value = decodeURIComponent((at < 0 ? '' : part.slice(at + 1)).split('+').join(' '));
+    const kept = value.split(' ').filter((p) => p && p !== 'login');
+    if (kept.length) parts.push('prompt=' + encodeURIComponent(kept.join(' ')));
+  }
+  const query = parts.join('&');
+  return '/api/auth/oauth2/authorize' + (query ? '?' + query : '');
+};
 sso.onclick = async () => {
   err.textContent = '';
   if (!email.value.trim()) { err.textContent = 'Enter your e-mail address first.'; return; }
   sso.disabled = true;
   try {
     const r = await fetch('/api/auth/sign-in/sso', { method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: email.value.trim(), callbackURL: location.search ? '/api/auth/oauth2/authorize' + location.search : '/' }) });
+      body: JSON.stringify({ email: email.value.trim(), callbackURL: resumeUrl() }) });
     const j = await r.json().catch(() => ({}));
     if (j.url) location.href = j.url; else err.textContent = j.message || 'Could not start single sign-on.';
   } catch { err.textContent = 'The server did not answer. Check that it is running and try again.'; }
@@ -184,9 +201,15 @@ export const invitePage = (nonce: string) =>
 <p id="done" hidden></p>
 <script nonce="${nonce}">
 // The token is in the fragment, which never reaches the server. Keep it across an SSO redirect,
-// where the identity provider only returns to /invite.
-const storedInviteToken = () => { try { return sessionStorage.getItem('am-invite') || ''; } catch { return ''; } };
-const token = location.hash.slice(1) || storedInviteToken();
+// where the identity provider only returns to /invite. The callback URL carries a single-use
+// marker instead of the token, because Better Auth stores that URL in its verification table.
+const INVITE_KEY = 'am-invite';
+const RETURN_KEY = 'am-invite-return';
+const stored = (key) => { try { return sessionStorage.getItem(key) || ''; } catch { return ''; } };
+const store = (key, value) => { try { sessionStorage.setItem(key, value); } catch {} };
+const clearAttempt = () => { try { sessionStorage.removeItem(INVITE_KEY); sessionStorage.removeItem(RETURN_KEY); } catch {} };
+const returnMarker = new URLSearchParams(location.search).get('return') || '';
+const token = location.hash.slice(1) || stored(INVITE_KEY);
 let signUp = false;
 mode.onclick = () => {
   signUp = !signUp; nameRow.hidden = !signUp;
@@ -217,22 +240,30 @@ sso.onclick = async () => {
   err.textContent = '';
   if (!token) { err.textContent = 'This link has no invitation token. Copy the whole link.'; return; }
   if (!email.value.trim()) { err.textContent = 'Enter your e-mail address first.'; return; }
-  try { sessionStorage.setItem('am-invite', token); } catch {}
+  const marker = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
+  store(INVITE_KEY, token); store(RETURN_KEY, marker);
   sso.disabled = true;
   try {
-    const r = await post('/api/auth/sign-in/sso', { email: email.value.trim(), callbackURL: '/invite#' + token });
+    const r = await post('/api/auth/sign-in/sso', { email: email.value.trim(), callbackURL: '/invite?return=' + encodeURIComponent(marker) });
     if (r.body.url) location.href = r.body.url; else err.textContent = r.body.message || 'Could not start single sign-on.';
   } catch { err.textContent = 'The server did not answer. Check that it is running and try again.'; }
   finally { sso.disabled = false; }
 };
 if (!token) { err.textContent = 'This link has no invitation token. Copy the whole link.'; go.disabled = true; }
 else (async () => {
+  // A return from SSO must carry the marker stored with the token; it is single-use.
+  if (returnMarker && returnMarker !== stored(RETURN_KEY)) {
+    err.textContent = 'This sign-in link expired. Open the invitation link again to join.';
+    return;
+  }
+  if (returnMarker) { try { history.replaceState(null, '', location.pathname + location.hash); } catch {} }
   // Returning from SSO: the session exists but there is no password to type, so join directly.
   const session = await fetch('/api/auth/get-session', { credentials: 'include' })
     .then((r) => (r.ok ? r.json() : null)).catch(() => null);
   if (session && session.user) {
     const joined = await accept();
-    if (joined) { try { sessionStorage.removeItem('am-invite'); } catch {} }
+    // The marker is used up whether the invitation was accepted or refused.
+    if (joined || returnMarker) clearAttempt();
   }
 })();
 </script>`,

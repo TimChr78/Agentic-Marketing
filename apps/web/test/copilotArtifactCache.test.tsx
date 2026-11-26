@@ -12,6 +12,8 @@ import { resetPickerIndexes } from '../src/features/artifacts/pickerIndex';
 const h = vi.hoisted(() => ({
   calls: [] as string[],
   rows: [] as unknown[],
+  reads: 0,
+  artifact: null as Record<string, unknown> | null,
 }));
 
 vi.mock('../src/app/api', async (importOriginal) => {
@@ -22,6 +24,11 @@ vi.mock('../src/app/api', async (importOriginal) => {
       call: vi.fn(async (name: string) => {
         h.calls.push(name);
         if (name === 'artifacts.list') return { artifacts: h.rows, total: h.rows.length, nextCursor: null };
+        if (name === 'artifacts.get') {
+          h.reads += 1;
+          if (!h.artifact) throw new Error('This item does not exist.');
+          return h.artifact;
+        }
         if (name === 'copilot.conversations') return { conversations: [] };
         if (name === 'agents.list') return { agents: [] };
         throw new Error(`unexpected command ${name}`);
@@ -41,6 +48,7 @@ vi.mock('../src/app/capabilities', () => ({
 }));
 
 import { streamFetch } from '../src/app/api';
+import { getArtifact } from '../src/features/artifactCache';
 import { CopilotDrawer } from '../src/features/copilot/CopilotDrawer';
 
 const conversation = `cop_${'b'.repeat(32)}`;
@@ -60,6 +68,8 @@ beforeEach(() => {
   resetPickerIndexes();
   h.calls.length = 0;
   h.rows = [row(1)];
+  h.reads = 0;
+  h.artifact = null;
   setWorkspaceId('11111111-1111-4111-8111-111111111111', { persist: false });
   Element.prototype.scrollIntoView = vi.fn();
 });
@@ -107,5 +117,106 @@ describe('a Copilot turn that creates an artifact (#1251)', () => {
     picker.unmount();
     render(<ArtifactSelect type="segment" value={undefined} onChange={() => {}} />);
     await waitFor(() => expect(screen.getByRole('option', { name: 'segment 2 · not live yet' })).toBeTruthy());
+  });
+});
+
+const artifact = (id: string, name: string) => ({
+  id,
+  type: 'segment',
+  name,
+  latestVersion: 1,
+  publishedVersion: null,
+  layout: null,
+  references: [],
+  version: {
+    number: 1,
+    state: 'draft',
+    content: {},
+    contentHash: 'hash',
+    author: { type: 'user', id: 'u1' },
+    by: { kind: 'person', displayName: 'Sam Rivera', personName: 'Sam Rivera', tokenName: null, tokenId: null, clientName: null },
+    note: null,
+    basedOn: null,
+    createdAt: '2026-11-02T09:00:00.000Z',
+  },
+});
+
+const streamTurn = (events: unknown[]) =>
+  vi.mocked(streamFetch).mockResolvedValue(
+    new Response([...events.map((e) => JSON.stringify(e)), ''].join('\n'), {
+      status: 200,
+      headers: { 'content-type': 'application/x-ndjson' },
+    }),
+  );
+
+async function runTurn() {
+  render(<CopilotDrawer open onClose={() => {}} />);
+  await userEvent.click(await screen.findByRole('button', { name: 'What is in this workspace?' }));
+}
+
+describe('a Copilot write invalidates cached artifact reads (#1277 review)', () => {
+  it('drops a cached reference after a successful write whose result omits the id', async () => {
+    const id = `seg_${'c'.repeat(32)}`;
+    h.artifact = artifact(id, 'Before the write');
+    expect((await getArtifact(id)).name).toBe('Before the write');
+    expect(h.reads).toBe(1);
+
+    h.artifact = artifact(id, 'After the write');
+    streamTurn([
+      { type: 'conversation', id: conversation, title: 'Edit a segment' },
+      { type: 'user', text: 'What is in this workspace?' },
+      // requestPublish returns no artifactId; the input still names the artifact it changed.
+      { type: 'tool', id: 't1', name: 'artifacts.requestPublish', input: { artifactId: id, note: 'Ship it' } },
+      { type: 'toolResult', id: 't1', name: 'artifacts.requestPublish', ok: true, output: { status: 'published', version: 2 } },
+      { type: 'text', text: 'Published it.' },
+      { type: 'done', conversationId: conversation, usage: { inputTokens: 2, outputTokens: 1 } },
+    ]);
+    await runTurn();
+    expect(await screen.findByText('Published it.')).toBeTruthy();
+
+    expect((await getArtifact(id)).name).toBe('After the write');
+    expect(h.reads).toBe(2);
+  });
+
+  it('keeps the cached reference after a failed write', async () => {
+    const id = `seg_${'d'.repeat(32)}`;
+    h.artifact = artifact(id, 'Unchanged');
+    expect((await getArtifact(id)).name).toBe('Unchanged');
+    expect(h.reads).toBe(1);
+
+    streamTurn([
+      { type: 'conversation', id: conversation, title: 'Edit a segment' },
+      { type: 'user', text: 'What is in this workspace?' },
+      { type: 'tool', id: 't1', name: 'artifacts.updateDraft', input: { artifactId: id, content: {} } },
+      { type: 'toolResult', id: 't1', name: 'artifacts.updateDraft', ok: false, output: { message: 'Nope' } },
+      { type: 'text', text: 'That did not work.' },
+      { type: 'done', conversationId: conversation, usage: { inputTokens: 2, outputTokens: 1 } },
+    ]);
+    await runTurn();
+    expect(await screen.findByText('That did not work.')).toBeTruthy();
+
+    expect((await getArtifact(id)).name).toBe('Unchanged');
+    expect(h.reads).toBe(1);
+  });
+
+  it('keeps the cached reference after a read-only call', async () => {
+    const id = `seg_${'e'.repeat(32)}`;
+    h.artifact = artifact(id, 'Still cached');
+    expect((await getArtifact(id)).name).toBe('Still cached');
+    expect(h.reads).toBe(1);
+
+    streamTurn([
+      { type: 'conversation', id: conversation, title: 'Look around' },
+      { type: 'user', text: 'What is in this workspace?' },
+      { type: 'tool', id: 't1', name: 'artifacts.list', input: { type: 'segment' } },
+      { type: 'toolResult', id: 't1', name: 'artifacts.list', ok: true, output: { artifacts: [{ artifactId: id }] } },
+      { type: 'text', text: 'Here is the list.' },
+      { type: 'done', conversationId: conversation, usage: { inputTokens: 2, outputTokens: 1 } },
+    ]);
+    await runTurn();
+    expect(await screen.findByText('Here is the list.')).toBeTruthy();
+
+    expect((await getArtifact(id)).name).toBe('Still cached');
+    expect(h.reads).toBe(1);
   });
 });
