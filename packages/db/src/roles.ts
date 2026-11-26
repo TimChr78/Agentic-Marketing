@@ -92,18 +92,20 @@ export async function withForcedLift<T>(client: RoleQuery, tables: readonly stri
  * Every workspace id, sorted. `workspaces` is under FORCE RLS, so a table owner that does not
  * bypass RLS reads zero rows with a plain SELECT: lift FORCE for the read, or refuse the role that
  * can see neither (#1220).
+ *
+ * The catalog is checked before the read, never after: with `app.workspace_id` set, a plain SELECT
+ * on an owner connection returns one workspace's rows and looks like a complete answer. Reading
+ * inside the lift — when there is one — is the only way to see every workspace.
  */
 export async function readAllWorkspaceIds(client: RoleQuery): Promise<string[]> {
   const read = async () =>
     (await client.query<{ id: string }>('SELECT id::text AS id FROM workspaces ORDER BY id')).rows.map((row) => row.id);
-  const plain = await read();
-  if (plain.length) return plain;
   const tables = await tableRls(client, ['workspaces']);
   // A database older than 0.3.0 has no workspaces table, and then there is nothing to read.
   if (!tables.length) return [];
   assertReadsEveryRow(tables, 'the workspace list', 'workspace data would be skipped');
   const lift = forcedLiftTargets(tables);
-  return lift.length ? withForcedLift(client, lift, read) : plain;
+  return lift.length ? withForcedLift(client, lift, read) : read();
 }
 
 /** The current role's attributes and the FORCE-RLS tables it owns. */
@@ -162,11 +164,41 @@ export function adminRoleProblem(status: AdminRoleStatus, what = 'The server'): 
 }
 
 /**
+ * Why the admin role lacks the attributes, regardless of what tables exist yet (#1218 review).
+ *
+ * Startup enforces this even on an empty database: `SKIP_MIGRATIONS=true` used to exempt a role
+ * that owns no FORCE-RLS table, so the process started and only failed later, once the schema
+ * existed, with the misleading symptoms the strict check exists to prevent.
+ */
+export function adminRoleBypassProblem(status: AdminRoleStatus, what = 'The server'): string | undefined {
+  if (status.superuser || status.bypassrls) return undefined;
+  return (
+    `The database role "${status.role}" that DATABASE_URL names is not SUPERUSER and does not have BYPASSRLS. ` +
+    `${what} reads tenant rows on the admin pool without app.workspace_id, so it would see none. ` +
+    `As a superuser run "ALTER ROLE ${status.role} BYPASSRLS" (or point DATABASE_URL at a role that is SUPERUSER or has BYPASSRLS).`
+  );
+}
+
+/**
+ * Refuses a role that is not SUPERUSER and does not have BYPASSRLS, whatever it owns.
+ *
+ * `pg_dump` reads with `row_security = off` and PostgreSQL refuses that for a FORCE-RLS table even
+ * when the role owns it, so a backup needs the attribute, not merely ownership (#1218 review).
+ * `am migrate` and `am restore` still work as the owner: they lift FORCE for the rows they read.
+ */
+export async function assertBypassesRls(client: RoleQuery, what = 'This command'): Promise<void> {
+  const problem = adminRoleBypassProblem(await adminRoleStatus(client), what);
+  if (problem) throw new Error(problem);
+}
+
+/**
  * Refuses a role that cannot see every tenant row. The server checks this at startup and
  * `am doctor` reports it as `postgres.admin-role`; commands that write or rotate rows across
  * workspaces call it before they do anything, so they never report success over invisible data.
+ *
+ * The attribute check runs first and does not depend on the schema: a role that cannot bypass may
+ * own nothing yet, and would still fail once the migrations create the FORCE-RLS tables.
  */
 export async function assertAdminRoleReadsEveryRow(client: RoleQuery, what = 'The server'): Promise<void> {
-  const problem = adminRoleProblem(await adminRoleStatus(client), what);
-  if (problem) throw new Error(problem);
+  await assertBypassesRls(client, what);
 }

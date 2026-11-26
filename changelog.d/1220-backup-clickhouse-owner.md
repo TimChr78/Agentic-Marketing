@@ -2,7 +2,8 @@
 section: Fixed
 issues: [1220]
 ---
-- `am backup --clickhouse` works as the table owner without `BYPASSRLS`: the per-workspace export
-  reads the workspace ids with `FORCE ROW LEVEL SECURITY` lifted for that read instead of finding no
-  workspace and failing with "the export wrote none". A role that is neither the owner nor able to
-  bypass is refused with a message naming the fix.
+- `am backup` refuses a `DATABASE_URL` role that is not `SUPERUSER` and does not have `BYPASSRLS`
+  before it starts the dump, naming the role and the `ALTER ROLE … BYPASSRLS` fix. `pg_dump` reads
+  with `row_security = off`, which PostgreSQL refuses on every `FORCE ROW LEVEL SECURITY` table even
+  for its owner. The per-workspace ClickHouse export still lifts FORCE for its own workspace-id and
+  key reads; `am migrate` and `am restore` still run as the table owner.

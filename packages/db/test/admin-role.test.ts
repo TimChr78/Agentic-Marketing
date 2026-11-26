@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { readDataKeySample } from '../src/data-keys';
@@ -77,6 +77,46 @@ describe.skipIf(!hasTestDatabase())('a non-BYPASSRLS table owner and the admin r
     }
 
     expect(await listWorkspaceIds(owner.url)).toEqual([d.workspace]);
+  }, 60_000);
+
+  it('#1220/#1221 reads every workspace and key with app.workspace_id set on the owner connection', async () => {
+    const d = await createDisposableDb('admin_role_scoped');
+    open.push(d);
+    const other = randomUUID();
+    await d.db.admin.query('INSERT INTO workspaces (id, name) VALUES ($1, $2)', [other, 'Other']);
+    await d.db.admin.query(
+      `INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key, created_at) VALUES
+         ($1, 'dk_own', 'local-owner-test', $3, now()),
+         ($2, 'dk_other', 'local-owner-test', $3, now() - interval '1 day')`,
+      [d.workspace, other, Buffer.alloc(8, 3)],
+    );
+    const owner = await ownerOf(d, ['workspaces', 'data_keys']);
+    // A tenant-scoped session: a plain SELECT on the owner connection would return one workspace
+    // and the newest key, which used to look like the complete answer.
+    const scoped = new URL(owner.url);
+    scoped.searchParams.set('options', `-c app.workspace_id=${d.workspace}`);
+
+    expect(await listWorkspaceIds(scoped.toString())).toEqual([d.workspace, other].sort());
+    expect((await readDataKeySample(scoped.toString()))?.id).toBe('dk_other');
+  }, 60_000);
+
+  it('#1220/#1221 lifts FORCE before the read when the connection sets row_security=off', async () => {
+    const d = await createDisposableDb('admin_role_off');
+    open.push(d);
+    const other = randomUUID();
+    await d.db.admin.query('INSERT INTO workspaces (id, name) VALUES ($1, $2)', [other, 'Other']);
+    await d.db.admin.query(
+      `INSERT INTO data_keys (workspace_id, id, kek_id, wrapped_key, created_at) VALUES
+         ($1, 'dk_off', 'local-owner-test', $2, now())`,
+      [d.workspace, Buffer.alloc(8, 4)],
+    );
+    const owner = await ownerOf(d, ['workspaces', 'data_keys']);
+    // `pg_dump` and a cautious caller set this; a plain read would fail with 42501 before the lift.
+    const off = new URL(owner.url);
+    off.searchParams.set('options', '-c row_security=off');
+
+    expect(await listWorkspaceIds(off.toString())).toEqual([d.workspace, other].sort());
+    expect((await readDataKeySample(off.toString()))?.id).toBe('dk_off');
   }, 60_000);
 
   it('#1221 readDataKeySample sees the sealed key as the owner', async () => {

@@ -20,6 +20,7 @@ const strandedList = newId('prf');
 const strandedScore = newId('prf');
 const list = newId('seg');
 const delivery = newId('dlv');
+const deliveryColon = newId('dlv');
 
 beforeAll(async () => {
   if (!hasTestDatabase()) return;
@@ -55,13 +56,18 @@ beforeAll(async () => {
      VALUES ($1, $2, 'churn', 0.8, 'test-model', 'v1', now(), '2030-01-01T00:00:00Z')`,
     [ws, strandedScore],
   );
-  // #1155: an ad-conversion delivery queued under the pre-0.17.6 idempotency key.
+  // #1155: ad-conversion deliveries queued under the pre-0.17.6 idempotency key. The second row's
+  // old key (`adc:meta:conn_0121:purchase:msg_0121`) is exactly the first row's new key, so a
+  // rewrite that only compares keys deletes the `msg_0121` delivery as a duplicate.
   await d.db.admin.query(
     `INSERT INTO deliveries (workspace_id, id, kind, target_id, action, payload, status, idempotency_key)
      VALUES ($1, $2, 'ad_conversion', 'conn_0121', 'meta',
              '{"eventId":"msg_0121","destination":{"conversionAction":"purchase"}}'::jsonb,
-             'pending', 'adc:meta:conn_0121:msg_0121')`,
-    [ws, delivery],
+             'pending', 'adc:meta:conn_0121:msg_0121'),
+            ($1, $3, 'ad_conversion', 'conn_0121', 'meta',
+             '{"eventId":"purchase:msg_0121","destination":{"conversionAction":"purchase"}}'::jsonb,
+             'pending', 'adc:meta:conn_0121:purchase:msg_0121')`,
+    [ws, delivery, deliveryColon],
   );
 }, 120_000);
 
@@ -132,9 +138,14 @@ describe.skipIf(!hasTestDatabase())('the 0117–0119 repairs under a non-BYPASSR
     ]);
     expect(scores.rows.map((row) => row.profile_id)).toEqual([survivor]);
 
-    const keys = await d.db.admin.query<{ idempotency_key: string }>('SELECT idempotency_key FROM deliveries WHERE workspace_id = $1', [
-      d.workspace,
+    const keys = await d.db.admin.query<{ idempotency_key: string }>(
+      'SELECT idempotency_key FROM deliveries WHERE workspace_id = $1 ORDER BY idempotency_key',
+      [d.workspace],
+    );
+    expect(keys.rows.map((row) => row.idempotency_key)).toEqual([
+      'adc:meta:conn_0121:purchase:msg_0121',
+      'adc:meta:conn_0121:purchase:purchase:msg_0121',
     ]);
-    expect(keys.rows.map((row) => row.idempotency_key)).toEqual(['adc:meta:conn_0121:purchase:msg_0121']);
+    expect(keys.rowCount).toBe(2);
   }, 180_000);
 });

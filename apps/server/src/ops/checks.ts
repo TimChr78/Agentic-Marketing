@@ -41,6 +41,10 @@ export type Env = Record<string, string | undefined>;
 
 const TIMEOUT_MS = 3000;
 const SECONDS = TIMEOUT_MS / 1000;
+// The server-side budget is a little shorter than the check's own race, so a locked `data_keys`
+// aborts and closes its client before `am doctor` gives up: the CLI must not stay alive behind a
+// statement that is still waiting for a lock (#1221 review).
+const KEY_SAMPLE_TIMEOUT_MS = TIMEOUT_MS - 500;
 /** New installs run PostgreSQL 18; 16 is the oldest major the migrations and `am doctor` support. */
 const MIN_POSTGRES_MAJOR = 16;
 const RECOMMENDED_POSTGRES_MAJOR = 18;
@@ -694,7 +698,11 @@ export async function checkDataKeyProvider(config: Config, db: Db): Promise<Chec
     // bypass and refuses a role that can see neither, so a null sample really means "no keys"
     // (#1221). A plain admin-pool SELECT used to report a populated database as an empty one.
     const sample = await withTimeout(
-      readDataKeySample(config.adminDatabaseUrl, { connectionTimeoutMillis: TIMEOUT_MS }),
+      readDataKeySample(config.adminDatabaseUrl, {
+        connectionTimeoutMillis: TIMEOUT_MS,
+        statementTimeoutMillis: KEY_SAMPLE_TIMEOUT_MS,
+        lockTimeoutMillis: KEY_SAMPLE_TIMEOUT_MS,
+      }),
       'reading a data key',
     );
     if (!sample) return { id, status: 'info', message: 'no data keys yet; the key is checked when the first secret is stored' };
@@ -715,6 +723,16 @@ export async function checkDataKeyProvider(config: Config, db: Db): Promise<Chec
         status: 'fail',
         message: err.message,
         hint: 'Fix the DATABASE_URL role (see the postgres.admin-role check), then run `am doctor` again.',
+      };
+    // The bounded statement or lock wait fired. The client has already been closed by then, so the
+    // check returns instead of leaving `am doctor` alive behind a waiting query (#1221 review).
+    const code = (err as { code?: string }).code;
+    if (code === '55P03' || code === '57014')
+      return {
+        id,
+        status: 'fail',
+        message: `reading a data key did not finish within the ${SECONDS}s check window (${messageOf(err)})`,
+        hint: 'Another session is holding a lock on data_keys. Let it finish, then run `am doctor` again.',
       };
     return {
       id,

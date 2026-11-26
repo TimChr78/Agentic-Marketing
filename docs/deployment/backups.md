@@ -277,10 +277,11 @@ the loop after the current run. The container needs only `DATABASE_URL`, `CLICKH
 `CLICKHOUSE_DATABASE`; it does not read `AUTH_SECRET` or `MASTER_KEY`. Pass the same
 `CLICKHOUSE_DATABASE` value the app uses (the `compose.override.example.yaml` block reads it from
 `.env` with `${CLICKHOUSE_DATABASE:-am}`), or the dump targets the wrong database on an install that
-renamed it. `DATABASE_URL` must be the table owner (the default for a small install) or a role with
-`BYPASSRLS`: the per-workspace ClickHouse export reads the workspace ids and the backup's key trial
-unseal reads `data_keys`, both under `FORCE ROW LEVEL SECURITY`. A table owner without the bypass
-lifts FORCE for that read; a role that is neither the owner nor able to bypass is refused.
+renamed it. `DATABASE_URL` must be a `SUPERUSER` or have `BYPASSRLS`, also for a table owner: `pg_dump`
+reads with `row_security = off`, and PostgreSQL refuses that on every `FORCE ROW LEVEL SECURITY`
+table even for its owner. A backup therefore refuses a non-bypassing role before it starts the
+dump, naming the role and the `ALTER ROLE … BYPASSRLS` fix. (`am migrate` and `am restore` still
+work as the table owner: they lift FORCE for the rows they read.)
 
 The scheduler writes `<BACKUP_DIR>/.schedule-status.json` (`0600`) at start and after every
 minute tick: `{ lastRunAt, lastOk, lastError?, nextRunAt }`. Check it from a healthcheck with:
