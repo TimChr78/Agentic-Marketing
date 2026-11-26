@@ -64,7 +64,9 @@ export const loginPage = (nonce: string) =>
   <label>Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
   <p id="err" role="alert"></p>
   <button class="primary">Sign in</button>
+  <button type="button" id="sso">Sign in with SSO</button>
 </form>
+<p class="hint">Use your company e-mail address; an enforced domain signs in through its identity provider.</p>
 <script nonce="${nonce}">
 f.onsubmit = async (e) => {
   e.preventDefault(); err.textContent = '';
@@ -72,6 +74,20 @@ f.onsubmit = async (e) => {
     body: JSON.stringify({ email: email.value, password: password.value, oauth_query: location.search.slice(1) }) });
   const j = await r.json().catch(() => ({}));
   if (j.url) location.href = j.url; else err.textContent = j.message || 'Sign-in failed. Check your e-mail and password.';
+};
+// An enforced domain refuses the password; start SSO instead. With an OAuth request in the query,
+// return to the authorize endpoint so the client's flow resumes after the identity provider.
+sso.onclick = async () => {
+  err.textContent = '';
+  if (!email.value.trim()) { err.textContent = 'Enter your e-mail address first.'; return; }
+  sso.disabled = true;
+  try {
+    const r = await fetch('/api/auth/sign-in/sso', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: email.value.trim(), callbackURL: location.search ? '/api/auth/oauth2/authorize' + location.search : '/' }) });
+    const j = await r.json().catch(() => ({}));
+    if (j.url) location.href = j.url; else err.textContent = j.message || 'Could not start single sign-on.';
+  } catch { err.textContent = 'The server did not answer. Check that it is running and try again.'; }
+  finally { sso.disabled = false; }
 };
 </script>`,
     nonce,
@@ -163,10 +179,14 @@ export const invitePage = (nonce: string) =>
   <label>Password<input id="password" name="password" type="password" autocomplete="current-password" minlength="10" required></label>
   <p id="err" role="alert"></p>
   <button class="primary" id="go">Sign in and join</button> <button type="button" id="mode">I don't have an account</button>
+  <button type="button" id="sso">Sign in with SSO</button>
 </form>
 <p id="done" hidden></p>
 <script nonce="${nonce}">
-const token = location.hash.slice(1);
+// The token is in the fragment, which never reaches the server. Keep it across an SSO redirect,
+// where the identity provider only returns to /invite.
+const storedInviteToken = () => { try { return sessionStorage.getItem('am-invite') || ''; } catch { return ''; } };
+const token = location.hash.slice(1) || storedInviteToken();
 let signUp = false;
 mode.onclick = () => {
   signUp = !signUp; nameRow.hidden = !signUp;
@@ -191,7 +211,30 @@ f.onsubmit = async (e) => {
   if (!r.ok) { err.textContent = r.body.message || 'Sign-in failed. Check your e-mail and password.'; return; }
   await accept();
 };
+// An enforced SSO domain has no password to use here; keep the token and let the provider sign
+// the person in, then re-open this page to join.
+sso.onclick = async () => {
+  err.textContent = '';
+  if (!token) { err.textContent = 'This link has no invitation token. Copy the whole link.'; return; }
+  if (!email.value.trim()) { err.textContent = 'Enter your e-mail address first.'; return; }
+  try { sessionStorage.setItem('am-invite', token); } catch {}
+  sso.disabled = true;
+  try {
+    const r = await post('/api/auth/sign-in/sso', { email: email.value.trim(), callbackURL: '/invite#' + token });
+    if (r.body.url) location.href = r.body.url; else err.textContent = r.body.message || 'Could not start single sign-on.';
+  } catch { err.textContent = 'The server did not answer. Check that it is running and try again.'; }
+  finally { sso.disabled = false; }
+};
 if (!token) { err.textContent = 'This link has no invitation token. Copy the whole link.'; go.disabled = true; }
+else (async () => {
+  // Returning from SSO: the session exists but there is no password to type, so join directly.
+  const session = await fetch('/api/auth/get-session', { credentials: 'include' })
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (session && session.user) {
+    const joined = await accept();
+    if (joined) { try { sessionStorage.removeItem('am-invite'); } catch {} }
+  }
+})();
 </script>`,
     nonce,
   );

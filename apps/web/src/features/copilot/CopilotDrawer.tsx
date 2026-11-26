@@ -2,9 +2,11 @@ import { ChevronRight, Loader2, Send, Trash2, Wrench } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { api, errText, streamFetch } from '../../app/api';
 import { useCopilotAvailable } from '../../app/capabilities';
+import { isConfirmingComposition } from '../../app/ime';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Drawer, EmptyState, IconButton, JsonView, Select, StatusPill, Tag, Textarea, timeAgo, useConfirm } from '../../ui';
+import { notifyArtifactsChanged } from '../artifactCache';
 
 // The copilot talks to the real API: the server runs the conversation with the workspace's
 // copilot provider, as an MCP client with an agent principal. Text streams in as the model
@@ -119,11 +121,24 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
     setError(null);
     setItems((xs) => [...xs, { id: nid(), role: 'user', text }]);
     const streaming = { id: null as string | null };
+    // The copilot's tools create and edit artifacts, but a turn is just another in-tab writer of
+    // them: its changes must reach the picker index and the name cache like every other create,
+    // save or publish (#1251), or a draft it made stays invisible until a reload.
+    let artifactChange: string | undefined;
+    let artifactsChanged = false;
     const on = (e: Event) => {
+      if (e.type === 'toolResult' && e.ok && e.name.startsWith('artifacts.')) {
+        artifactsChanged = true;
+        const id = (e.output as { artifactId?: unknown } | null)?.artifactId;
+        artifactChange = typeof id === 'string' ? id : undefined;
+        notifyArtifactsChanged(artifactChange);
+      }
       if (e.type === 'conversation') {
         setConversationId(e.id);
         if (!conversationId) setConversationAgent(asAgent || null);
       } else if (e.type === 'done') {
+        // End-of-turn catch-all, in case a tool's result did not carry a usable id.
+        if (artifactsChanged) notifyArtifactsChanged(artifactChange);
         setTokens((t) => t + e.usage.inputTokens + e.usage.outputTokens);
         loadPast();
       } else setItems((xs) => apply(xs, e, streaming));
@@ -343,6 +358,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             disabled={!can('artifacts:read') || !copilotAvailable}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
+              if (isConfirmingComposition(e)) return;
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 void ask(input);

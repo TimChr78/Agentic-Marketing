@@ -7,6 +7,7 @@ import { useFocusTrap } from '../ui/focus';
 import { api, type Out } from './api';
 import { artifactPath, typeLabel } from './artifactRoutes';
 import { CREATE_ACTIONS, STARTER_ACTION } from './createIntent';
+import { isConfirmingComposition } from './ime';
 import { visibleNav } from './nav';
 import { clearRecents, getRecents, type Recent } from './recents';
 import { navigate } from './router';
@@ -252,6 +253,8 @@ export function SearchPalette({ onClose }: { onClose: () => void }) {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {
+              // Arrow keys and Enter belong to the input method while a composition is open.
+              if (isConfirmingComposition(e)) return;
               if (e.key === 'ArrowDown') {
                 e.preventDefault();
                 setActive((a) => Math.min(a + 1, flat.length - 1));

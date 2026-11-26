@@ -66,7 +66,7 @@ export function ApprovalDrawer({
   onClose: () => void;
   onDecided: () => void;
 }) {
-  const { can, user, workspace } = useWorkspace();
+  const { can, user, workspace, refresh } = useWorkspace();
   const toast = useToast();
   // The drawer is reused when the URL id advances, so the read must be keyed by that id (#612).
   const d = useKeyedApi(id, () => api.call('approvals.get', { approvalId: id }));
@@ -140,6 +140,10 @@ export function ApprovalDrawer({
         }
       } else await api.call('approvals.reject', { approvalId: a.id, note: reason.trim() });
       for (const m of bundle?.members ?? [a]) invalidateArtifact(m.artifactId);
+      // Publishing a brand changes the shell's site name, logo and domain; re-read the session
+      // after the decision, as a Workspace save does after its own write (#1266).
+      if (kind === 'approve' && (a.artifactType === 'brand' || (bundle?.members ?? []).some((m) => m.artifactType === 'brand')))
+        await refresh().catch(() => {});
       const what = bundle
         ? `${bundle.members.length} changes (${bundle.members.map((m) => `“${m.artifactName}”`).join(', ')})`
         : `“${a.artifactName}”`;

@@ -1,6 +1,7 @@
 import { Plus, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../../app/api';
+import { isConfirmingComposition } from '../../app/ime';
 import { TextLink } from '../../app/links';
 import { useApi, useKeyedApi } from '../../app/useApi';
 import { Alert, Button, Checkbox, Field, IconButton, Input, LoadingBlock, Switch, Textarea } from '../../ui';
@@ -342,6 +343,7 @@ function TraitsEditor({
                 setLocal('Use a letter, then letters, digits or underscores (up to 64 characters).');
             }}
             onKeyDown={(e) => {
+              if (isConfirmingComposition(e)) return;
               if (e.key === 'Enter') {
                 e.preventDefault();
                 add();

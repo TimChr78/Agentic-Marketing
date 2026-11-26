@@ -11,6 +11,42 @@ export function SignIn({ onDone }: { onDone: () => void }) {
   const [password, setPassword] = useState('');
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  const [ssoBusy, setSsoBusy] = useState(false);
+
+  // The password endpoint refuses an enforced domain with the server's own message; show that
+  // explanation instead of claiming the password was wrong (#1248).
+  const serverReason = async (r: Response, fallback: string) => {
+    const body = await r.json().catch(() => null);
+    return typeof body?.message === 'string' && body.message ? body.message : fallback;
+  };
+
+  const startSso = async () => {
+    setErr('');
+    const address = email.trim();
+    if (!address) {
+      setErr('Enter your e-mail address, then choose “Sign in with SSO”.');
+      return;
+    }
+    setSsoBusy(true);
+    try {
+      const r = await fetch('/api/auth/sign-in/sso', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email: address, callbackURL: '/' }),
+      });
+      const body = await r.json().catch(() => null);
+      if (r.ok && typeof body?.url === 'string') {
+        window.location.href = body.url;
+        return;
+      }
+      setErr(typeof body?.message === 'string' && body.message ? body.message : 'Couldn’t start single sign-on. Try again.');
+    } catch {
+      setErr('The server did not answer. Check that it is running and try again.');
+    } finally {
+      setSsoBusy(false);
+    }
+  };
   return (
     <AuthShell
       title="Sign in"
@@ -39,7 +75,7 @@ export function SignIn({ onDone }: { onDone: () => void }) {
               body: JSON.stringify({ email, password }),
             });
             if (r.ok) onDone();
-            else setErr('Couldn’t sign in. Check your e-mail and password, then try again.');
+            else setErr(await serverReason(r, 'Couldn’t sign in. Check your e-mail and password, then try again.'));
           } catch {
             setErr('The server did not answer. Check that it is running and try again.');
           } finally {
@@ -70,6 +106,15 @@ export function SignIn({ onDone }: { onDone: () => void }) {
         <Button type="submit" variant="primary" className="w-full" loading={busy}>
           Sign in
         </Button>
+        <div className="flex items-center gap-3" aria-hidden>
+          <span className="h-px flex-1 bg-line" />
+          <span className="text-[12px] text-muted">or</span>
+          <span className="h-px flex-1 bg-line" />
+        </div>
+        <Button type="button" variant="secondary" className="w-full" loading={ssoBusy} onClick={() => void startSso()}>
+          Sign in with SSO
+        </Button>
+        <p className="text-center text-[12px] text-muted">Use your company e-mail address; your identity provider asks for the password.</p>
       </form>
     </AuthShell>
   );
