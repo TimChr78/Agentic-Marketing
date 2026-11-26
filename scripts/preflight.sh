@@ -37,7 +37,7 @@ PLAYWRIGHT_IMAGE=mcr.microsoft.com/playwright:v1.65.1-noble
 IMAGES=(
   postgres:18-alpine
   clickhouse/clickhouse-server:26.8.41.14@sha256:4fcc05a5642c52250ab57a184bc0523a00ba5dcd4e8b43a918e7477b844f1048
-  valkey/valkey:9.1.3@sha256:3add1a336a920ea54770a001ab6feb3da5fceea96a40373a3a2cd469b815f0b7
+  valkey/valkey:9.2.0@sha256:1c2b25b09f354c66fe994733acdf12fcfd4bdf6f3bd92b88a93a70378d884056
   nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
   openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f
   "$PLAYWRIGHT_IMAGE"
