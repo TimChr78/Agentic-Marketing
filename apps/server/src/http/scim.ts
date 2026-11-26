@@ -54,6 +54,23 @@ function eqFilter(filter: string | undefined): { attr: string; value: string } |
   return { attr: m[1].toLowerCase(), value: m[2].replace(/\\(.)/g, '$1') };
 }
 
+/**
+ * PostgreSQL 23505 on the `user.email` unique index, directly or wrapped by the auth adapter. Two
+ * concurrent replaces can both pass the "is this address free?" lookup; the index then decides at
+ * the write (#1272 review).
+ */
+function emailUniqueViolation(err: unknown): boolean {
+  for (
+    let e = err as { code?: unknown; constraint?: unknown; detail?: unknown; cause?: unknown } | undefined, depth = 0;
+    e && depth < 5;
+    e = e.cause as typeof e, depth++
+  ) {
+    if (e.code !== '23505') continue;
+    if (String(e.constraint ?? '').includes('email') || String(e.detail ?? '').includes('(email)')) return true;
+  }
+  return false;
+}
+
 export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUrl: string }) {
   const app = new Hono<{ Variables: { ws: string } }>();
   const base = `${deps.publicUrl}/scim/v2`;
@@ -178,6 +195,22 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
     return (rowCount ?? 0) > 0;
   }
 
+  /**
+   * The 409 for an address another account already holds. Create answers it before writing, and a
+   * replace answers the same way — through this helper both when its lookup sees the account and
+   * when two concurrent replaces reach the unique index (#1129, #1233, #1272 review).
+   */
+  async function addressConflict(ws: string, email: string, ownerId: string | undefined) {
+    const known = ownerId ? (await users(ws, 'AND u.id = $2', [ownerId]))[0] : undefined;
+    return known
+      ? new ScimError(409, `${email} is already provisioned.`, 'uniqueness')
+      : new ScimError(
+          409,
+          'This user name cannot be provisioned automatically. The person must sign in through a verified single sign-on domain of this workspace, or be invited.',
+          'uniqueness',
+        );
+  }
+
   /** Applies SCIM user attributes: the account (name, e-mail) and the workspace side (active, external id). */
   async function saveUser(ws: string, id: string | null, body: Json) {
     const ctx = await deps.auth.$context;
@@ -229,17 +262,18 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
         const taken = await ctx.internalAdapter.findUserByEmail(email);
         if (taken && taken.user.id !== userId) {
           await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
-          const known = (await users(ws, 'AND u.id = $2', [taken.user.id]))[0];
-          throw known
-            ? new ScimError(409, `${email} is already provisioned.`, 'uniqueness')
-            : new ScimError(
-                409,
-                'This user name cannot be provisioned automatically. The person must sign in through a verified single sign-on domain of this workspace, or be invited.',
-                'uniqueness',
-              );
+          throw await addressConflict(ws, email, taken.user.id);
         }
       }
-      await ctx.internalAdapter.updateUser(userId, { name, email });
+      try {
+        await ctx.internalAdapter.updateUser(userId, { name, email });
+      } catch (err) {
+        // Two concurrent replaces can both find the address free; the write then meets the unique
+        // index. The loser answers what its lookup would have answered, never a 500 (#1272 review).
+        if (!emailUniqueViolation(err)) throw err;
+        await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
+        throw await addressConflict(ws, email, (await ctx.internalAdapter.findUserByEmail(email))?.user.id);
+      }
     }
     await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
     return userResource(ws, await userById(ws, userId));

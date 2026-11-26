@@ -1,6 +1,7 @@
 import { outbox } from '@agentic-marketing/email';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { runAgentNotificationsOnce } from '../src/agents/notifications';
+import { digestWindowsQuery, runAgentNotificationsOnce } from '../src/agents/notifications';
 import { startTestServer, testPort, type User } from './harness';
 
 // Wave 4, Phase 18 (#226): the sponsor and a mandate's escalation targets hear about holds,
@@ -237,8 +238,9 @@ describe('agent notifications (#226)', () => {
 
   it('the daily digest goes out once a day per sponsor', async () => {
     const s = await setup({ level: 3 });
-    // A fixed clock at midday keeps this test away from UTC midnight (#1184).
-    const t0 = new Date('2026-03-10T12:00:00.000Z');
+    // A clock just after the activity: a digest window ends at the pass's own time, so the actions
+    // published above are inside it. A fixed date in the past would leave them in the future.
+    const t0 = new Date(Date.now() + 1000);
     for (const title of ['Autonomous one', 'Autonomous two']) {
       const published = await publishNote(s, title);
       expect(published.body.status).toBe('published');
@@ -360,7 +362,8 @@ describe('agent notifications (#226)', () => {
     const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
     const outsiderDigests = () => outbox.filter((m) => m.to === outsider.email && m.subject.startsWith('Daily agent digest'));
 
-    const t0 = new Date('2026-03-10T12:00:00.000Z');
+    // A clock after the two actions: the window ends at the pass's own time.
+    const t0 = new Date(Date.now() + 1000);
     await primeDigestDue(s.ws, t0);
     expect((await run(t0)).digests).toBe(1);
     expect(ownerDigests()).toHaveLength(1);
@@ -443,7 +446,8 @@ describe('agent notifications (#226)', () => {
     const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
     const outsiderDigests = () => outbox.filter((m) => m.to === outsider.email && m.subject.startsWith('Daily agent digest'));
 
-    const t0 = new Date('2026-03-10T12:00:00.000Z');
+    // A clock after the two actions: the window ends at the pass's own time.
+    const t0 = new Date(Date.now() + 1000);
     await primeDigestDue(s.ws, t0);
     const first = await run(t0);
     expect(first.digests).toBe(1); // only the owner's digest went out
@@ -471,11 +475,11 @@ describe('agent notifications (#226)', () => {
     expect(outsiderDigests()).toHaveLength(1);
   }, 40_000);
 
-  it('a digest retried after UTC midnight sends only to the sponsor whose mail failed (#1184)', async () => {
+  it('a digest retried a few minutes later sends only to the sponsor whose mail failed (#1184)', async () => {
     // A partial failure keeps the digest window open. The retry belongs to the same window even
-    // when it runs on the next UTC day, so it must not re-send the digest to the sponsor who got it.
+    // when it runs later, so it must not re-send the digest to the sponsor who got it.
     const s = await setup({ level: 3 });
-    const second = await addAgent(s, { name: 'Midnight digest agent', level: 3 });
+    const second = await addAgent(s, { name: 'Retried digest agent', level: 3 });
     // The second agent's sponsor is not a member yet: the send fails while the first sponsor's works.
     const outsider = await t.signUp(`outsider-digest-midnight-${Date.now()}@example.com`);
     await t.srv.db.admin.query('UPDATE agents SET sponsor_user_id = $2 WHERE workspace_id = $1 AND id = $3', [
@@ -483,11 +487,12 @@ describe('agent notifications (#226)', () => {
       outsider.id,
       second.agentId,
     ]);
-    expect((await publishNote(s, 'Digest before midnight')).body.status).toBe('published');
+    expect((await publishNote(s, 'Digest before the retry')).body.status).toBe('published');
     expect((await publishNoteWith(second.token, 'Digest for the outsider')).body.status).toBe('published');
 
-    const lateNight = new Date('2026-03-10T23:58:00.000Z');
-    const afterMidnight = new Date('2026-03-11T00:03:00.000Z');
+    // Both clocks are after the two actions: a window ends at the pass's own time.
+    const lateNight = new Date(Date.now() + 1000);
+    const afterMidnight = new Date(lateNight.getTime() + 5 * 60_000);
     await primeDigestDue(s.ws, lateNight);
 
     const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
@@ -498,7 +503,7 @@ describe('agent notifications (#226)', () => {
     expect(ownerDigests()).toHaveLength(1);
     expect(outsiderDigests()).toHaveLength(0);
 
-    // 00:03 UTC: the retry of the same window reaches only the sponsor whose mail failed.
+    // The retry of the same window, a few minutes later, reaches only the sponsor whose mail failed.
     await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3)', [
       s.ws,
       outsider.id,
@@ -512,18 +517,18 @@ describe('agent notifications (#226)', () => {
     const rows = await emailRows(s.ws, 'agent-digest:');
     expect(rows.filter((r) => r.status === 'sent')).toHaveLength(2);
 
-    // The window completed with the retry, so the next day's digest still goes out normally.
+    // The window completed with the retry, so the next day's digest still goes out normally, for
+    // both sponsors. Each action is stamped inside that window, so the test controls the clock.
+    const beforeNextDay = await latestActionId(s.ws);
     expect((await publishNote(s, 'Next day activity')).body.status).toBe('published');
+    expect((await publishNoteWith(second.token, 'Next day for the outsider')).body.status).toBe('published');
     const nextDay = new Date(lateNight.getTime() + DAY + 5 * 60_000);
-    const { rows: latest } = await t.srv.db.admin.query<{ id: number }>(
-      'SELECT max(id) AS id FROM agent_actions WHERE workspace_id = $1 AND agent_id = $2',
-      [s.ws, s.agentId],
-    );
-    await t.srv.db.admin.query('UPDATE agent_actions SET at = $2 WHERE workspace_id = $1 AND id = $3', [s.ws, nextDay, latest[0].id]);
+    await t.srv.db.admin.query('UPDATE agent_actions SET at = $2 WHERE workspace_id = $1 AND id > $3', [s.ws, nextDay, beforeNextDay]);
     const next = await run(new Date(nextDay.getTime() + 60_000));
     expect(next.digests).toBeGreaterThanOrEqual(1);
     expect(ownerDigests()).toHaveLength(2);
     expect(outsiderDigests()).toHaveLength(2);
+    expect(outsiderDigests()[1].text).toContain('Next day for the outsider');
     expect(await emailRows(s.ws, 'agent-digest:')).toHaveLength(4);
   }, 40_000);
 
@@ -552,21 +557,33 @@ describe('agent notifications (#226)', () => {
         )
       ).rows[0]?.last_digest_at;
 
-    const t0 = new Date('2026-03-10T12:00:00.000Z');
+    // A clock after Day 1's two actions: the window ends at the pass's own time.
+    const t0 = new Date(Date.now() + 1000);
     await primeDigestDue(s.ws, t0);
     expect((await run(t0)).digests).toBe(1); // the owner's digest went out; the departed sponsor has no mailbox here
     expect(ownerDigests()).toHaveLength(1);
     expect(departedDigests()).toHaveLength(0);
 
     // A day later the owner's agent acted again: the owner is due a digest for the new activity.
+    // The action is stamped inside the second window, so the test controls the clock.
     expect((await publishNote(s, 'Day 2 for the owner')).body.status).toBe('published');
     const t1 = new Date(t0.getTime() + DAY);
+    await t.srv.db.admin.query('UPDATE agent_actions SET at = $2 WHERE workspace_id = $1 AND id = $3', [
+      s.ws,
+      new Date(t0.getTime() + 60_000),
+      await latestActionId(s.ws),
+    ]);
     expect((await run(t1)).digests).toBeGreaterThanOrEqual(1);
     expect(ownerDigests()).toHaveLength(2);
     expect((await lastDigestAt())?.toISOString()).toBe(t1.toISOString());
 
     // ... and three days later still, with more activity.
     expect((await publishNote(s, 'Day 5 for the owner')).body.status).toBe('published');
+    await t.srv.db.admin.query('UPDATE agent_actions SET at = $2 WHERE workspace_id = $1 AND id = $3', [
+      s.ws,
+      new Date(t0.getTime() + 2 * DAY),
+      await latestActionId(s.ws),
+    ]);
     await run(new Date(t0.getTime() + 4 * DAY));
     expect(ownerDigests()).toHaveLength(3);
   }, 60_000);
@@ -604,5 +621,191 @@ describe('agent notifications (#226)', () => {
     expect(second.events).toBeGreaterThanOrEqual(1);
     expect(heldMails()).toHaveLength(2);
     expect(heldMails().some((m) => m.text.includes('Held two'))).toBe(true);
+  }, 60_000);
+});
+
+// PR 1272 review: the digest window must survive an upgrade from the previous release, a provider
+// that is not set up yet, and a retry; the event sweep must read the decisions it announces past
+// denied drafts; and the newest-row lookup must not scan the workspace's digest history.
+describe('PR 1272 review regressions', () => {
+  const digestMessages = (user: User) => outbox.filter((m) => m.to === user.email && m.subject.startsWith('Daily agent digest'));
+  const markAt = (ws: string, actionId: number, at: Date) =>
+    t.srv.db.admin.query('UPDATE agent_actions SET at = $1 WHERE workspace_id = $2 AND id = $3', [at, ws, actionId]);
+
+  /** A digest row in the previous release's shape: the key is the window start, no window metadata. */
+  const legacyDigest = async (s: Setup, started: Date, status: 'sent' | 'failed', completed: Date) => {
+    const key = `agent-digest:${s.ws}:${s.owner.id}:${started.toISOString()}`;
+    await t.srv.db.admin.query(
+      `INSERT INTO messages (workspace_id, id, idempotency_key, purpose, status, created_at, updated_at)
+       VALUES ($1, 'msg_review_legacy', $2, 'onboarding', $3, $4, $4)`,
+      [s.ws, key, status, completed],
+    );
+    return key;
+  };
+
+  it('retries a first digest after a transactional provider becomes available', async () => {
+    const s = await setup({ level: 3, provider: false });
+    expect((await publishNote(s, 'Activity during outage')).body.status).toBe('published');
+    const t0 = new Date(Date.now() + 1000);
+    await primeDigestDue(s.ws, t0);
+    await run(t0);
+    expect(digestMessages(s.owner)).toHaveLength(0);
+    await s.api.call('emailProviders.create', {
+      name: 'Restored outbox',
+      adapter: 'log',
+      fromEmail: 'agents@example.com',
+      useFor: ['transactional'],
+    });
+    await run(new Date(t0.getTime() + 300_000));
+    expect(digestMessages(s.owner)).toHaveLength(1);
+    expect(digestMessages(s.owner)[0].text).toContain('Activity during outage');
+  }, 40_000);
+
+  it('closes a retried digest at the end of the window it actually sent', async () => {
+    // The first attempt fails (the sponsor is not a member yet). The retry succeeds an hour later
+    // and covers activity up to that moment. If the row kept the failed attempt's window end, the
+    // next window would start before the activity the retry already reported.
+    const s = await setup({ level: 3 });
+    const outsider = await t.signUp(`retry-window-${Date.now()}@example.com`);
+    await t.srv.db.admin.query('UPDATE agents SET sponsor_user_id = $1 WHERE workspace_id = $2 AND id = $3', [
+      outsider.id,
+      s.ws,
+      s.agentId,
+    ]);
+    expect((await publishNote(s, 'Before first failed attempt')).body.status).toBe('published');
+    const t0 = new Date(Date.now() + 1000);
+    await primeDigestDue(s.ws, t0);
+    await run(t0);
+    expect(await emailRows(s.ws, 'agent-digest:')).toMatchObject([{ status: 'failed' }]);
+    await t.srv.db.admin.query('INSERT INTO workspace_members (workspace_id,user_id,role) VALUES ($1,$2,$3)', [
+      s.ws,
+      outsider.id,
+      'viewer',
+    ]);
+    expect((await publishNote(s, 'Already included on retry')).body.status).toBe('published');
+    await markAt(s.ws, await latestActionId(s.ws), new Date(t0.getTime() + 300_000));
+    await run(new Date(t0.getTime() + 600_000));
+    expect(digestMessages(outsider)).toHaveLength(1);
+    expect(digestMessages(outsider)[0].text).toContain('Already included on retry');
+    // The next day's digest must not repeat it: the window closed where the successful retry ended.
+    await run(new Date(t0.getTime() + DAY + 600_000));
+    expect(digestMessages(outsider)).toHaveLength(1);
+  }, 40_000);
+
+  it('does not send an action past the recorded sweep cutoff', async () => {
+    // An action committed after the sweep began (its `at` is later than the pass's clock) must stay
+    // outside this window; the window ends at the sweep's own time, so including it here would
+    // report it twice.
+    const s = await setup({ level: 3 });
+    expect((await publishNote(s, 'Committed after cutoff')).body.status).toBe('published');
+    const t0 = new Date();
+    await markAt(s.ws, await latestActionId(s.ws), new Date(t0.getTime() + 1000));
+    await primeDigestDue(s.ws, t0);
+    await run(t0);
+    expect(digestMessages(s.owner)).toHaveLength(0);
+  }, 40_000);
+
+  it('does not replay a digest sent by the previous release', async () => {
+    const s = await setup({ level: 3 });
+    expect((await publishNote(s, 'Included by previous release')).body.status).toBe('published');
+    const t0 = new Date(Date.now() + 1000);
+    const started = new Date(t0.getTime() - DAY);
+    await t.srv.db.admin.query('UPDATE agent_notification_cursor SET last_digest_at = $1 WHERE workspace_id = $2', [t0, s.ws]);
+    await legacyDigest(s, started, 'sent', t0);
+    await run(new Date(t0.getTime() + 300_000));
+    expect(digestMessages(s.owner)).toHaveLength(0);
+  }, 40_000);
+
+  it('sends the next digest after an existing ISO-keyed legacy digest', async () => {
+    // The previous release wrote the window start into the key and no window metadata. The sent row
+    // is the end of that window, not its start; otherwise the next sweep rebuilds the same key and
+    // the sponsor never gets another digest.
+    const s = await setup({ level: 3 });
+    expect((await publishNote(s, 'Activity after the upgrade')).body.status).toBe('published');
+    const t0 = new Date(Date.now() - 300_000);
+    const started = new Date(t0.getTime() - DAY);
+    await t.srv.db.admin.query('UPDATE agent_notification_cursor SET last_digest_at = $1 WHERE workspace_id = $2', [t0, s.ws]);
+    await legacyDigest(s, started, 'sent', t0);
+    await run(new Date(t0.getTime() + DAY + 300_000));
+    expect(digestMessages(s.owner)).toHaveLength(1);
+  }, 40_000);
+
+  it('retries a failed legacy digest under its original key', async () => {
+    // A failed legacy digest has no window metadata either. Its key is the window that must be
+    // retried, so the retry reuses that key and records where it ended.
+    const s = await setup({ level: 3 });
+    expect((await publishNote(s, 'Legacy retry activity')).body.status).toBe('published');
+    const t0 = new Date(Date.now() + 1000);
+    const started = new Date(t0.getTime() - DAY);
+    await t.srv.db.admin.query('UPDATE agent_notification_cursor SET last_digest_at = $1 WHERE workspace_id = $2', [started, s.ws]);
+    const key = await legacyDigest(s, started, 'failed', started);
+    const retriedAt = new Date(t0.getTime() + 300_000);
+    await run(retriedAt);
+    const rows = await emailRows(s.ws, 'agent-digest:');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'sent', idempotency_key: key });
+    expect(digestMessages(s.owner)).toHaveLength(1);
+    const { rows: stored } = await t.srv.db.admin.query<{ start: string; end: string }>(
+      `SELECT data->'digestWindow'->>'start' AS start, data->'digestWindow'->>'end' AS end
+       FROM messages WHERE workspace_id = $1 AND idempotency_key = $2`,
+      [s.ws, key],
+    );
+    expect(stored[0]).toMatchObject({ start: started.toISOString(), end: retriedAt.toISOString() });
+    // The window is closed where the retry ended: the next sweep has nothing to report.
+    expect((await run(new Date(retriedAt.getTime() + 300_000))).digests).toBe(0);
+  }, 40_000);
+
+  it('reads a hold behind denied drafts in one sweep', async () => {
+    // Draft commands can be denied too. They are dropped from the digest and from these e-mails, so
+    // they must not fill the sweep's limit before a hold is read (#1272 review).
+    const s = await setup({ level: 2 });
+    await t.srv.db.admin.query(
+      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface)
+       SELECT $1, $2, 'artifacts.create', 'draft', 'deny', false, 'rest' FROM generate_series(1, 500)`,
+      [s.ws, s.agentId],
+    );
+    expect((await publishNote(s, 'Hold behind denied drafts')).body.status).toBe('on_hold');
+    await run();
+    expect(
+      outbox.some((m) => m.to === s.owner.email && m.subject.startsWith('Held:') && m.text.includes('Hold behind denied drafts')),
+    ).toBe(true);
+  }, 40_000);
+});
+
+interface PlanNode {
+  'Node Type': string;
+  'Relation Name'?: string;
+  'Index Name'?: string;
+  Plans?: PlanNode[];
+}
+
+const planNodes = (node: PlanNode): PlanNode[] => [node, ...(node.Plans ?? []).flatMap(planNodes)];
+
+describe('the digest window lookup (#1227 review)', () => {
+  it('reads each sponsor’s newest digest through the message key index, not the whole history', async () => {
+    // A sponsor accumulates one digest row per day. The sweep runs every five minutes, so a
+    // DISTINCT ON over every historical row would grow with the workspace's age. The newest row
+    // per current sponsor must come from an index range, never a scan of the message log.
+    const s = await setup({ level: 3 });
+    const prefix = `agent-digest:${s.ws}:${s.owner.id}:`;
+    await t.srv.db.admin.query(
+      `INSERT INTO messages (workspace_id, id, idempotency_key, purpose, status, created_at, updated_at)
+       SELECT $1, 'msg_plan_' || g,
+              $2 || to_char(timestamptz '2020-01-01 00:00:00+00' + g * interval '1 minute', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+              'onboarding', 'sent', now(), now()
+       FROM generate_series(1, 20000) AS g`,
+      [s.ws, prefix],
+    );
+    await t.srv.db.admin.query('ANALYZE messages');
+
+    const plan = await t.srv.db.withWorkspace(s.ws, async (tx) => {
+      const res = await tx.execute(sql`EXPLAIN (FORMAT JSON) ${digestWindowsQuery(s.ws)}`);
+      const row = res.rows[0]!;
+      return (Object.values(row)[0] as [{ Plan: PlanNode }])[0]!.Plan;
+    });
+
+    const nodes = planNodes(plan);
+    expect(nodes.filter((node) => node['Relation Name'] === 'messages' && node['Node Type'] === 'Seq Scan')).toEqual([]);
+    expect(nodes.some((node) => (node['Index Name'] ?? '').includes('idempotency'))).toBe(true);
   }, 60_000);
 });

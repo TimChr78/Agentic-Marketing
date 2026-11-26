@@ -158,3 +158,46 @@ describe.skipIf(!hasTestDatabase())('the delivery worker’s workspace scan (#12
     expect(await left()).toBe(0);
   }, 120_000);
 });
+
+describe.skipIf(!hasTestDatabase())('the per-row claim (#1237 review)', () => {
+  it('processes the next due row while another connection holds the oldest queued row', async () => {
+    // A worker's claim must not wait behind a row someone else locked: the UPDATE without
+    // SKIP LOCKED serialised every worker behind the oldest row, so the next due message stalled
+    // for as long as that lock lasted.
+    const locked = await queuedMessage(d.workspace, new Date(Date.now() - 120_000).toISOString());
+    const other = await queuedMessage(d.workspace, new Date(Date.now() - 60_000).toISOString());
+    await d.db.admin.query(`DELETE FROM messages WHERE workspace_id = $1 AND status = 'queued' AND id NOT IN ($2, $3)`, [
+      d.workspace,
+      locked,
+      other,
+    ]);
+    const locker = await d.db.admin.connect();
+    await locker.query('BEGIN');
+    let round: Promise<number> | undefined;
+    try {
+      await locker.query('SELECT id FROM messages WHERE workspace_id = $1 AND id = $2 FOR UPDATE', [d.workspace, locked]);
+      round = deliverRound(app, { kp, events: {} as EventStore, email: email() });
+      const processed = await Promise.race([
+        round,
+        new Promise<string>((resolve) => setTimeout(() => resolve('blocked on the old row'), 2000)),
+      ]);
+      expect(processed).toBe(1);
+      const { rows } = await locker.query<{ status: string; reason: string | null }>(
+        'SELECT status, reason FROM messages WHERE workspace_id = $1 AND id = $2',
+        [d.workspace, other],
+      );
+      // It reached its own attempt (no template here, so it fails on purpose) rather than waiting.
+      expect(rows[0]).toMatchObject({ status: 'failed' });
+      expect(rows[0]!.reason).toMatch(/^no_template: /);
+      const { rows: held } = await locker.query<{ status: string }>('SELECT status FROM messages WHERE workspace_id = $1 AND id = $2', [
+        d.workspace,
+        locked,
+      ]);
+      expect(held[0]!.status).toBe('queued');
+    } finally {
+      await locker.query('ROLLBACK');
+      locker.release();
+      await round;
+    }
+  }, 30_000);
+});

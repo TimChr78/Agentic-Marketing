@@ -398,24 +398,16 @@ export async function deliverRound(
         stale.map((message) => decisionEvent(message, 'failed', reason)),
       );
     });
-    // The ids this round would like to send, oldest first. Nothing is leased here: a row's lease
-    // starts when the worker begins it, one at a time below (#1237).
-    const candidates = await db.withWorkspace(ws, async (tx) => {
-      const res = await tx.execute<{ id: string; channel: string }>(sql`
-        SELECT m.id, m.channel FROM messages m
-        WHERE m.workspace_id = ${ws} AND ${sql.raw(claimable('m'))}
-        ORDER BY m.created_at
-        LIMIT ${batch}`);
-      // An earlier worker may have taken one between this scan and its claim; the claim below is
-      // conditional, and a taken row is simply not ours to send.
-      return res.rows;
-    });
-    for (const { id, channel } of candidates) {
-      // The lease begins here, immediately before the attempt, so a row still waiting behind
-      // slower rows of the same batch never looks like a send that may have reached a provider: the
-      // stale sweep must not turn it into `unknown_outcome` (packages/email/src/attempt.ts, #1237).
-      const claimed = await claimMessage(db, ws, id);
-      if (!claimed) continue;
+    // The next due row, oldest first, claimed only when the worker is ready to attempt it. Nothing
+    // is leased in advance: a row's lease starts immediately before its own attempt, so a row still
+    // waiting behind slower rows never looks like a send that may have reached a provider, and the
+    // stale sweep must not turn it into `unknown_outcome` (#1237).
+    for (let taken = 0; taken < batch; taken++) {
+      // `SKIP LOCKED` keeps one worker out of another's way: a row another connection has locked
+      // (say, a slow attempt of the same message) no longer stalls every due row behind it.
+      const claimed = await claimNextMessage(db, ws);
+      if (!claimed) break;
+      const { id, channel } = claimed;
       // One message's unexpected failure must not abandon the rest of the batch (#1054). The claim
       // above moved the row to `sending`; a message whose handler threw is recovered on its own,
       // before the loop moves on.
@@ -440,14 +432,27 @@ export async function deliverRound(
   return handled;
 }
 
-/** Leases one row for this attempt. False when another worker took it first or it is no longer due. */
-async function claimMessage(db: Db, ws: string, id: string): Promise<boolean> {
+/**
+ * Leases the next due row for one attempt, skipping rows another connection has locked. Returns
+ * null when the workspace has no claimable row left. The select and the lease run in one
+ * transaction, so the row cannot be taken between them; the lease itself still re-checks the due
+ * predicate so a committed attempt elsewhere is not overwritten.
+ */
+async function claimNextMessage(db: Db, ws: string): Promise<{ id: string; channel: string } | null> {
   return db.withWorkspace(ws, async (tx) => {
+    const next = await tx.execute<{ id: string; channel: string }>(sql`
+      SELECT m.id, m.channel FROM messages m
+      WHERE m.workspace_id = ${ws} AND ${sql.raw(claimable('m'))}
+      ORDER BY m.created_at
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED`);
+    const row = next.rows[0];
+    if (!row) return null;
     const res = await tx.execute<{ id: string }>(sql`
       UPDATE messages m SET status = 'sending', attempts = attempts + 1, updated_at = now(), next_attempt_at = NULL
-      WHERE m.workspace_id = ${ws} AND m.id = ${id} AND ${sql.raw(claimable('m'))}
+      WHERE m.workspace_id = ${ws} AND m.id = ${row.id} AND ${sql.raw(claimable('m'))}
       RETURNING m.id`);
-    return res.rows.length > 0;
+    return res.rows.length ? row : null;
   });
 }
 

@@ -146,14 +146,13 @@ async function reconcile(ctx: CommandContext, userIds: string[]) {
   ).rows;
   const groups = (await ctx.tx.execute<{ display_name: string; members: string[] }>(sql`SELECT display_name, members FROM scim_groups`))
     .rows;
+  // The ids come as one array parameter: a group the command schema accepts holds 50,000 members,
+  // and one bind parameter per id is over PostgreSQL's 65,535 limit (#1272 review).
   const users = (
     await ctx.tx.execute<{ user_id: string; active: boolean; role: Role | null }>(sql`
       SELECT u.user_id, u.active, m.role FROM scim_users u
       LEFT JOIN workspace_members m ON m.workspace_id = u.workspace_id AND m.user_id = u.user_id
-      WHERE u.user_id IN (${sql.join(
-        userIds.map((id) => sql`${id}`),
-        sql`, `,
-      )})`)
+      WHERE u.user_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(userIds)}::jsonb))`)
   ).rows;
   const ws = ctx.principal.workspaceId;
   for (const u of users) {

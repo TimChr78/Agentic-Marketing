@@ -3,7 +3,7 @@ import { activeMandate, artifactTypes } from '@agentic-marketing/artifacts';
 import { sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, asc, desc, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, lte, ne, sql } from 'drizzle-orm';
 
 // Sponsor notifications and agent digests (#226, ADR-0016). The scheduler reads the agent action
 // ledger from a stored cursor: a hold, a guardrail/limit escalation or a refusal is e-mailed to the
@@ -350,15 +350,13 @@ interface DigestWindow {
 /** The window record of every sponsor who has had a digest in this workspace. */
 async function digestWindows(tx: Tx, workspaceId: string): Promise<Map<string, DigestWindow>> {
   const prefix = `agent-digest:${workspaceId}:`;
-  // The newest row per sponsor, from the message log's (workspace, key) unique index. A sponsor
-  // accumulates one row per digest day, so reading only the newest keeps the sweep's cost flat.
-  const { rows } = await tx.execute<{ key: string; status: string; data: Record<string, unknown> | null }>(sql`
-    SELECT DISTINCT ON (split_part(idempotency_key, ':', 3)) idempotency_key AS key, status, data
-    FROM messages
-    WHERE workspace_id = ${workspaceId}
-      AND idempotency_key >= ${prefix}
-      AND idempotency_key < ${`${prefix}\uffff`}
-    ORDER BY split_part(idempotency_key, ':', 3), created_at DESC`);
+  const { rows } = await tx.execute<{
+    key: string;
+    status: string;
+    data: Record<string, unknown> | null;
+    sent_at: Date | null;
+    created_at: Date;
+  }>(digestWindowsQuery(workspaceId));
   const windows = new Map<string, DigestWindow>();
   for (const row of rows) {
     // `agent-digest:<workspace>:<sponsor>:<window start>`; the ids never contain a colon, the
@@ -373,7 +371,11 @@ async function digestWindows(tx: Tx, workspaceId: string): Promise<Map<string, D
     // The row records the window it covered, so the next one begins where this ended rather than
     // at the wall clock of the send: a pass with a test clock, or a late one, stays consistent.
     const window = row.data?.digestWindow as { start?: string; end?: string } | undefined;
-    const marked = new Date((open ? window?.start : window?.end) ?? '');
+    // A row from before the window metadata existed has only the key, which is the window's
+    // *start*. A sent row is the end of that window: using its start would rebuild the same key
+    // and the sponsor would never get another digest. A failed row keeps its key for the retry.
+    const recorded = open ? window?.start : (window?.end ?? row.sent_at ?? row.created_at);
+    const marked = new Date(recorded instanceof Date ? recorded.toISOString() : (recorded ?? ''));
     windows.set(rest.slice(0, at), {
       start: Number.isNaN(marked.getTime()) ? keyStart : marked,
       open,
@@ -381,6 +383,28 @@ async function digestWindows(tx: Tx, workspaceId: string): Promise<Map<string, D
     });
   }
   return windows;
+}
+
+/**
+ * The newest digest row per current sponsor. The range on `idempotency_key` is the message log's
+ * (workspace, key) unique index walked backwards, so each sponsor costs one index lookup; the old
+ * `DISTINCT ON` built a row for every digest ever sent and sorted them, on every five-minute sweep
+ * (#1227, #1272 review).
+ */
+export function digestWindowsQuery(workspaceId: string) {
+  const prefix = `agent-digest:${workspaceId}:`;
+  return sql`
+    SELECT m.idempotency_key AS key, m.status, m.data, m.sent_at, m.created_at
+    FROM (SELECT DISTINCT sponsor_user_id AS sponsor FROM agents WHERE workspace_id = ${workspaceId}) s
+    CROSS JOIN LATERAL (
+      SELECT idempotency_key, status, data, sent_at, created_at
+      FROM messages
+      WHERE workspace_id = ${workspaceId}
+        AND idempotency_key >= ${prefix} || s.sponsor || ':'
+        AND idempotency_key < ${prefix} || s.sponsor || ${'\uffff'}
+      ORDER BY idempotency_key DESC
+      LIMIT 1
+    ) m`;
 }
 
 async function notifyDigest(
@@ -408,7 +432,16 @@ async function notifyDigest(
     await tx
       .select()
       .from(schema.agentActions)
-      .where(and(eq(schema.agentActions.workspaceId, workspaceId), gt(schema.agentActions.at, since)))
+      .where(
+        and(
+          eq(schema.agentActions.workspaceId, workspaceId),
+          gt(schema.agentActions.at, since),
+          // The window ends at this pass's own clock. An action committed while the sweep ran is
+          // newer than the recorded cutoff and belongs to the next digest; including it here would
+          // report it twice (#1272 review).
+          lte(schema.agentActions.at, now),
+        ),
+      )
       .orderBy(asc(schema.agentActions.id))
   ).filter((a) => a.actionClass !== 'draft');
   if (!recent.length) return { sent: 0, at: null };
@@ -443,6 +476,7 @@ async function notifyDigest(
 
   let sent = 0;
   let attempted = false;
+  let durable = true;
   for (const [sponsor, own] of bySponsor) {
     const window = windowOf(sponsor);
     if (!due(window.start)) continue;
@@ -459,16 +493,30 @@ async function notifyDigest(
         data: {
           digest: own.map((d) => ({ agentId: d.agent.id, counts: d.counts })),
           // Where this digest's window began and ended, so the next one starts here even when the
-          // pass runs on a clock of its own (a test) or late (#1184, #1227).
+          // pass runs on a clock of its own (a test) or late (#1184, #1227). A retry overwrites
+          // the end with its own, so the successful send closes the window where it ended.
           digestWindow: { start: window.start.toISOString(), end: now.toISOString() },
         },
       },
     ]);
-    if (results.every((r) => r.status === 'sent')) sent++;
+    if (results.every((r) => r.status === 'sent')) {
+      sent++;
+      continue;
+    }
+    // A failed attempt only leaves a window to retry when it left a row behind (a recipient who is
+    // not a member). Without a transactional provider the helper returns before writing one, so the
+    // baseline must not move: the activity would otherwise be skipped once a provider appears
+    // (#1272 review).
+    const [record] = await tx
+      .select({ id: schema.messages.id })
+      .from(schema.messages)
+      .where(and(eq(schema.messages.workspaceId, workspaceId), eq(schema.messages.idempotencyKey, key)));
+    if (!record) durable = false;
   }
   // The baseline moves on even when a sponsor's mail failed: their own row keeps that window open
-  // for a retry, and the others must not wait a day for it (#1227).
-  return { sent, at: attempted ? now : null };
+  // for a retry, and the others must not wait a day for it (#1227). It stays put only when an
+  // attempt left no record at all.
+  return { sent, at: attempted && durable ? now : null };
 }
 
 async function notifyExpiry(
@@ -568,7 +616,8 @@ async function notifyWorkspace(deps: AgentNotificationDeps, workspaceId: string,
     if (!cursor) return null;
 
     // Only the decisions this path announces are read, so a burst of drafts or allows cannot fill
-    // the window and hide a hold behind it (#1234). The digest reads the ledger by time on its own.
+    // the window and hide a hold behind it (#1234). A draft command can be denied too, and drafts
+    // are dropped from these e-mails, so they are excluded here before the limit (#1272 review).
     const actions = await tx
       .select()
       .from(schema.agentActions)
@@ -577,6 +626,7 @@ async function notifyWorkspace(deps: AgentNotificationDeps, workspaceId: string,
           eq(schema.agentActions.workspaceId, workspaceId),
           gt(schema.agentActions.id, cursor.lastActionId),
           inArray(schema.agentActions.decision, ['hold', 'ask', 'deny']),
+          ne(schema.agentActions.actionClass, 'draft'),
         ),
       )
       .orderBy(asc(schema.agentActions.id))
