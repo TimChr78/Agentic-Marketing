@@ -25,7 +25,7 @@ import { matchesCondition } from './conditions';
 import { duplicateEntryKey, noteEntrySkip, resolveEntryKey } from './entry';
 import { compile, type Graph } from './graph';
 import { assignHoldout, holdoutDetail } from './holdout';
-import { type AiOutcome, advance, type Effect, type ParticipantState, type Step } from './interpreter';
+import { type AiOutcome, advance, type Effect, type ParticipantState } from './interpreter';
 import { noteJourneyEventTooOld } from './metrics';
 
 // The journey runtime (ADR-0004): trigger matching and wake-ups run as a post-commit hook of the
@@ -764,59 +764,63 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
   let moved = 0;
   for (const { workspace_id: ws } of rows) {
     const journeyEvents: JourneyEvent[] = [];
-    moved += await db.withWorkspace(ws, async (tx) => {
-      // Profile rows first: the people due now, resolved to the profile they belong to today (a
-      // participant can sit on an id a merge folded away). Locking them before any participant row
-      // is the order every writer uses (#1011); SKIP LOCKED means this transaction never waits for a
-      // row a batch or a merge holds, so it cannot be the second half of a lock cycle.
-      //
-      // Candidates are read in due order, oldest first, and the scan goes on past someone whose
-      // profile is locked until the batch is filled or no candidates are left: a locked person must
-      // not spend the batch, and due time — not the profile id — decides who moves first (#1011
-      // review).
-      const claimable: string[] = [];
-      const scanLimit = Math.max(1, batch * SCAN_LIMIT_FACTOR);
-      let after = scanCursors.get(ws);
-      let scanned = 0;
-      let reachedEnd = false;
-      while (claimable.length < batch && scanned < scanLimit) {
-        const want = Math.min(batch - claimable.length, scanLimit - scanned);
-        const page = await tx.execute<{ id: string; profile_id: string; due_at: Date }>(sql`
+    // One workspace whose claim or commit fails (a dead connection, a lock timeout) must not stop
+    // the round before the others: each workspace is its own transaction, and the next sweep gets
+    // another chance at this one.
+    try {
+      moved += await db.withWorkspace(ws, async (tx) => {
+        // Profile rows first: the people due now, resolved to the profile they belong to today (a
+        // participant can sit on an id a merge folded away). Locking them before any participant row
+        // is the order every writer uses (#1011); SKIP LOCKED means this transaction never waits for a
+        // row a batch or a merge holds, so it cannot be the second half of a lock cycle.
+        //
+        // Candidates are read in due order, oldest first, and the scan goes on past someone whose
+        // profile is locked until the batch is filled or no candidates are left: a locked person must
+        // not spend the batch, and due time — not the profile id — decides who moves first (#1011
+        // review).
+        const claimable: string[] = [];
+        const scanLimit = Math.max(1, batch * SCAN_LIMIT_FACTOR);
+        let after = scanCursors.get(ws);
+        let scanned = 0;
+        let reachedEnd = false;
+        while (claimable.length < batch && scanned < scanLimit) {
+          const want = Math.min(batch - claimable.length, scanLimit - scanned);
+          const page = await tx.execute<{ id: string; profile_id: string; due_at: Date }>(sql`
           SELECT id, profile_id, due_at FROM journey_participants
           WHERE status IN ('ready', 'waiting') AND due_at <= ${now()}
             ${after ? sql`AND (due_at, id) > (${after.dueAt}::timestamptz, ${after.id}::bigint)` : sql``}
           ORDER BY due_at, id LIMIT ${want}`);
-        if (!page.rows.length) {
-          reachedEnd = true;
-          break;
+          if (!page.rows.length) {
+            reachedEnd = true;
+            break;
+          }
+          const last = page.rows[page.rows.length - 1]!;
+          after = { dueAt: last.due_at, id: last.id };
+          scanned += page.rows.length;
+          const canonical = await canonicalPeople(
+            tx,
+            ws,
+            page.rows.map((r) => r.profile_id),
+          );
+          const roots = [...new Set(page.rows.map((r) => canonical.get(r.profile_id) ?? r.profile_id))];
+          // The lock carries `merged_into IS NULL`, so a merge that committed after the lookup above
+          // leaves nothing locked for that person: the candidate is deferred to the next sweep instead
+          // of claiming a participant row whose survivor this transaction does not hold.
+          const locked = new Set(await lockProfileRows(tx, ws, roots, { skipLocked: true }));
+          for (const row of page.rows) {
+            const root = canonical.get(row.profile_id) ?? row.profile_id;
+            if (locked.has(root)) claimable.push(row.id);
+          }
+          if (page.rows.length < want) {
+            reachedEnd = true;
+            break;
+          }
         }
-        const last = page.rows[page.rows.length - 1]!;
-        after = { dueAt: last.due_at, id: last.id };
-        scanned += page.rows.length;
-        const canonical = await canonicalPeople(
-          tx,
-          ws,
-          page.rows.map((r) => r.profile_id),
-        );
-        const roots = [...new Set(page.rows.map((r) => canonical.get(r.profile_id) ?? r.profile_id))];
-        // The lock carries `merged_into IS NULL`, so a merge that committed after the lookup above
-        // leaves nothing locked for that person: the candidate is deferred to the next sweep instead
-        // of claiming a participant row whose survivor this transaction does not hold.
-        const locked = new Set(await lockProfileRows(tx, ws, roots, { skipLocked: true }));
-        for (const row of page.rows) {
-          const root = canonical.get(row.profile_id) ?? row.profile_id;
-          if (locked.has(root)) claimable.push(row.id);
-        }
-        if (page.rows.length < want) {
-          reachedEnd = true;
-          break;
-        }
-      }
-      if (reachedEnd || claimable.length >= batch) scanCursors.delete(ws);
-      else if (after) scanCursors.set(ws, after);
-      if (scanCursors.size > 10_000) scanCursors.clear();
-      if (!claimable.length) return 0;
-      const due = await tx.execute<{ id: string }>(sql`
+        if (reachedEnd || claimable.length >= batch) scanCursors.delete(ws);
+        else if (after) scanCursors.set(ws, after);
+        if (scanCursors.size > 10_000) scanCursors.clear();
+        if (!claimable.length) return 0;
+        const due = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants
         WHERE status IN ('ready', 'waiting') AND due_at <= ${now()}
           AND id IN (${sql.join(
@@ -824,96 +828,33 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
             sql`, `,
           )})
         ORDER BY due_at, id LIMIT ${batch} FOR UPDATE SKIP LOCKED`);
-      if (!due.rows.length) return 0;
-      const list = await tx
-        .select()
-        .from(schema.journeyParticipants)
-        .where(
-          inArray(
-            schema.journeyParticipants.id,
-            due.rows.map((r) => Number(r.id)),
-          ),
-        );
-      const segments = await publishedSegments(tx);
-      const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
-      for (const p of list) {
-        // The row can sit on an id a merge folded away (a participant the hook inserted before
-        // #1011). The trait step follows the `merged_into` chain itself; the other reads stay on the
-        // stored id, which a merge moves along with the person.
-        const t = now();
-        // Someone who refused the journey's purpose leaves before the next step (#108). Consent
-        // changes exit them at once (exitRefusedJourneys); this catches whatever got past that.
-        const purpose = await graphOf(tx, p.journeyId, p.version)
-          .then((g) => g.purpose)
-          .catch(() => null);
-        if (purpose && refusedPurposes(await consentStateOf(tx, ws, p.profileId), purposes).includes(purpose)) {
-          const detail = `consent_withdrawn: ${purpose}`;
-          await tx
-            .update(schema.journeyParticipants)
-            .set({ status: 'exited', error: detail, dueAt: null, waitingEvent: null, waitingUntil: null, updatedAt: t })
-            .where(eq(schema.journeyParticipants.id, p.id));
-          journeyEvents.push({
-            workspaceId: ws,
-            journeyId: p.journeyId,
-            version: p.version,
-            participantId: p.id,
-            profileId: p.profileId,
-            node: p.node,
-            type: 'exited',
-            seq: p.seq + 1,
-            at: t.toISOString(),
-            detail,
-          });
-          continue;
-        }
-        const state: ParticipantState = {
-          node: p.node,
-          status: p.status,
-          seq: p.seq,
-          dueAt: p.dueAt,
-          waitingEvent: p.waitingEvent,
-          waitingUntil: p.waitingUntil,
-          matched: p.matched,
-          converted: p.converted,
-        };
-        let result: { state: ParticipantState; effects: Effect[]; steps: Step[] };
-        try {
-          const graph = await graphOf(tx, p.journeyId, p.version);
-          result = await advance(graph, state, t, {
-            key: String(p.id),
-            result: (node) => {
-              const r = (p.context.results as Record<string, { seq: number; ok: boolean; error?: string }> | undefined)?.[node];
-              return r && r.seq === p.seq ? r : undefined;
-            },
-            ai: (node) => {
-              const r = (p.context.ai as Record<string, AiOutcome & { seq: number }> | undefined)?.[node];
-              return r && r.seq === p.seq ? r : undefined;
-            },
-            branch: async (n) => {
-              if (n.segment) {
-                const [m] = await tx
-                  .select()
-                  .from(schema.segmentMemberships)
-                  .where(and(eq(schema.segmentMemberships.segmentId, n.segment), eq(schema.segmentMemberships.profileId, p.profileId)));
-                return !!m;
-              }
-              const ids = await evaluate(n.condition!, contextFor(tx, ws, deps.events, segments, { scope: [p.profileId] }));
-              return ids.has(p.profileId);
-            },
-            condition: async (n) => matchesCondition(tx, ws, deps.events, segments, p.profileId, n.condition),
-          });
-        } catch (err) {
-          const error = journeyErrorText(err);
-          // A broken condition (an AppError('invalid_input'): an unknown purpose, a personal-data
-          // trait, a segment loop) is permanent. Anything else is a transient store or database
-          // failure: leave the participant where it is, due after a backoff, and fail it only when
-          // the retry budget is spent (#1240, docs/architecture/journeys-and-editors.md:63).
-          const attempts = p.attempts + 1;
-          const broken = err instanceof AppError && err.code === 'invalid_input';
-          if (broken || attempts >= MAX_ADVANCE_ATTEMPTS) {
+        if (!due.rows.length) return 0;
+        const list = await tx
+          .select()
+          .from(schema.journeyParticipants)
+          .where(
+            inArray(
+              schema.journeyParticipants.id,
+              due.rows.map((r) => Number(r.id)),
+            ),
+          );
+        const segments = await publishedSegments(tx);
+        const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
+        for (const p of list) {
+          // The row can sit on an id a merge folded away (a participant the hook inserted before
+          // #1011). The trait step follows the `merged_into` chain itself; the other reads stay on the
+          // stored id, which a merge moves along with the person.
+          const t = now();
+          // Someone who refused the journey's purpose leaves before the next step (#108). Consent
+          // changes exit them at once (exitRefusedJourneys); this catches whatever got past that.
+          const purpose = await graphOf(tx, p.journeyId, p.version)
+            .then((g) => g.purpose)
+            .catch(() => null);
+          if (purpose && refusedPurposes(await consentStateOf(tx, ws, p.profileId), purposes).includes(purpose)) {
+            const detail = `consent_withdrawn: ${purpose}`;
             await tx
               .update(schema.journeyParticipants)
-              .set({ status: 'failed', error, attempts, dueAt: null, waitingUntil: null, updatedAt: t })
+              .set({ status: 'exited', error: detail, dueAt: null, waitingEvent: null, waitingUntil: null, updatedAt: t })
               .where(eq(schema.journeyParticipants.id, p.id));
             journeyEvents.push({
               workspaceId: ws,
@@ -922,63 +863,156 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
               participantId: p.id,
               profileId: p.profileId,
               node: p.node,
-              type: 'failed',
+              type: 'exited',
               seq: p.seq + 1,
               at: t.toISOString(),
-              detail: error,
+              detail,
             });
-          } else {
+            continue;
+          }
+          const state: ParticipantState = {
+            node: p.node,
+            status: p.status,
+            seq: p.seq,
+            dueAt: p.dueAt,
+            waitingEvent: p.waitingEvent,
+            waitingUntil: p.waitingUntil,
+            matched: p.matched,
+            converted: p.converted,
+          };
+          // One savepoint per participant: a PostgreSQL error inside a read, the advance or an effect
+          // aborts the transaction (25P02), and the retry state could not be written afterwards. The
+          // savepoint lets this participant's partial work be discarded while the round carries on.
+          const savepoint = `participant_${p.id}`;
+          const eventMark = journeyEvents.length;
+          await tx.execute(sql.raw(`SAVEPOINT ${savepoint}`));
+          let graph: Graph | undefined;
+          try {
+            graph = await graphOf(tx, p.journeyId, p.version);
+            const result = await advance(graph, state, t, {
+              key: String(p.id),
+              result: (node) => {
+                const r = (p.context.results as Record<string, { seq: number; ok: boolean; error?: string }> | undefined)?.[node];
+                return r && r.seq === p.seq ? r : undefined;
+              },
+              ai: (node) => {
+                const r = (p.context.ai as Record<string, AiOutcome & { seq: number }> | undefined)?.[node];
+                return r && r.seq === p.seq ? r : undefined;
+              },
+              branch: async (n) => {
+                if (n.segment) {
+                  const [m] = await tx
+                    .select()
+                    .from(schema.segmentMemberships)
+                    .where(and(eq(schema.segmentMemberships.segmentId, n.segment), eq(schema.segmentMemberships.profileId, p.profileId)));
+                  return !!m;
+                }
+                const ids = await evaluate(n.condition!, contextFor(tx, ws, deps.events, segments, { scope: [p.profileId] }));
+                return ids.has(p.profileId);
+              },
+              condition: async (n) => matchesCondition(tx, ws, deps.events, segments, p.profileId, n.condition),
+            });
+            const details = new Map<string, string>();
+            const held = (p.context as { holdout?: { arm?: string } }).holdout;
+            const flags = { wakeNow: false, control: held?.arm === 'control' };
+            for (const eff of result.effects) {
+              const d = await applyEffect(tx, ws, p, eff, deps, graph, flags);
+              if (d !== null) details.set(`${eff.node}:${eff.seq}`, d);
+            }
             await tx
               .update(schema.journeyParticipants)
-              .set({ attempts, error, dueAt: new Date(t.getTime() + advanceRetryDelayMs(attempts)), updatedAt: t })
+              .set({ ...result.state, attempts: 0, error: null, ...(flags.wakeNow ? { dueAt: t } : {}), updatedAt: t })
               .where(eq(schema.journeyParticipants.id, p.id));
+            if (p.seq === 0)
+              journeyEvents.push({
+                workspaceId: ws,
+                journeyId: p.journeyId,
+                version: p.version,
+                participantId: p.id,
+                profileId: p.profileId,
+                node: p.node,
+                type: 'entered',
+                seq: 0,
+                at: p.enteredAt.toISOString(),
+                detail: '',
+              });
+            for (const s of result.steps)
+              journeyEvents.push({
+                workspaceId: ws,
+                journeyId: p.journeyId,
+                version: p.version,
+                participantId: p.id,
+                profileId: p.profileId,
+                node: s.node,
+                type: s.type,
+                seq: s.seq,
+                at: t.toISOString(),
+                detail: details.get(`${s.node}:${s.seq}`) ?? s.detail,
+              });
+            await tx.execute(sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
+          } catch (err) {
+            // Discard everything this participant wrote before the failure, including an effect that
+            // may have run, and then record the retry in a healthy transaction.
+            await tx.execute(sql.raw(`ROLLBACK TO SAVEPOINT ${savepoint}`));
+            await tx.execute(sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
+            journeyEvents.length = eventMark;
+            const failedAt = now();
+            const error = journeyErrorText(err);
+            // The wait (goal/waitEvent) had already resolved when advance ran, but its outcome died
+            // with the savepoint. Persist which way it went before the retry: an event that arrives
+            // during the backoff must not turn a timed-out goal into a conversion. The deadline is
+            // in waitingUntil, which the backoff below does not overwrite.
+            const waitingNode = graph?.nodes.get(p.node);
+            const waitOutcome =
+              p.status === 'waiting' && (waitingNode?.kind === 'goal' || waitingNode?.kind === 'waitEvent')
+                ? { matched: p.matched, waitingEvent: null }
+                : {};
+            // A broken condition (an AppError('invalid_input'): an unknown purpose, a personal-data
+            // trait, a segment loop) is permanent. Anything else is a transient store or database
+            // failure: leave the participant where it is, due after a backoff, and fail it only when
+            // the retry budget is spent (#1240, docs/architecture/journeys-and-editors.md:63).
+            const attempts = p.attempts + 1;
+            const broken = err instanceof AppError && err.code === 'invalid_input';
+            if (broken || attempts >= MAX_ADVANCE_ATTEMPTS) {
+              await tx
+                .update(schema.journeyParticipants)
+                .set({ status: 'failed', error, attempts, dueAt: null, waitingUntil: null, updatedAt: failedAt })
+                .where(eq(schema.journeyParticipants.id, p.id));
+              journeyEvents.push({
+                workspaceId: ws,
+                journeyId: p.journeyId,
+                version: p.version,
+                participantId: p.id,
+                profileId: p.profileId,
+                node: p.node,
+                type: 'failed',
+                seq: p.seq + 1,
+                at: failedAt.toISOString(),
+                detail: error,
+              });
+            } else {
+              await tx
+                .update(schema.journeyParticipants)
+                .set({
+                  attempts,
+                  error,
+                  // The backoff runs from the failure, not from the timestamp taken before a slow read.
+                  dueAt: new Date(failedAt.getTime() + advanceRetryDelayMs(attempts)),
+                  updatedAt: failedAt,
+                  ...waitOutcome,
+                })
+                .where(eq(schema.journeyParticipants.id, p.id));
+            }
           }
-          continue;
         }
-        const details = new Map<string, string>();
-        const held = (p.context as { holdout?: { arm?: string } }).holdout;
-        const flags = { wakeNow: false, control: held?.arm === 'control' };
-        const graph = await graphOf(tx, p.journeyId, p.version);
-        for (const eff of result.effects) {
-          const d = await applyEffect(tx, ws, p, eff, deps, graph, flags);
-          if (d !== null) details.set(`${eff.node}:${eff.seq}`, d);
-        }
-        await tx
-          .update(schema.journeyParticipants)
-          .set({ ...result.state, attempts: 0, error: null, ...(flags.wakeNow ? { dueAt: t } : {}), updatedAt: t })
-          .where(eq(schema.journeyParticipants.id, p.id));
-        if (p.seq === 0)
-          journeyEvents.push({
-            workspaceId: ws,
-            journeyId: p.journeyId,
-            version: p.version,
-            participantId: p.id,
-            profileId: p.profileId,
-            node: p.node,
-            type: 'entered',
-            seq: 0,
-            at: p.enteredAt.toISOString(),
-            detail: '',
-          });
-        for (const s of result.steps)
-          journeyEvents.push({
-            workspaceId: ws,
-            journeyId: p.journeyId,
-            version: p.version,
-            participantId: p.id,
-            profileId: p.profileId,
-            node: s.node,
-            type: s.type,
-            seq: s.seq,
-            at: t.toISOString(),
-            detail: details.get(`${s.node}:${s.seq}`) ?? s.detail,
-          });
-      }
-      // Same transaction as the participant rows: a committed step and its events are one unit
-      // (#1244). Nothing here does network I/O; the dispatcher publishes afterwards.
-      await enqueueJourneyEvents(tx, ws, journeyEvents);
-      return list.length;
-    });
+        // Same transaction as the participant rows: a committed step and its events are one unit
+        // (#1244). Nothing here does network I/O; the dispatcher publishes afterwards.
+        await enqueueJourneyEvents(tx, ws, journeyEvents);
+        return list.length;
+      });
+    } catch (err) {
+      logger.error({ err, workspace: ws }, 'journey sweep workspace failed');
+    }
   }
   return moved;
 }

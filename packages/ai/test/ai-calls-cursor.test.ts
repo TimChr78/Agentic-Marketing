@@ -49,4 +49,32 @@ describe.skipIf(!hasTestDatabase())('ai.calls pages every row that shares a time
     // The legacy boundary stays a strict timestamp comparison; it must not throw or change shape.
     expect(Array.isArray(older.calls)).toBe(true);
   }, 60_000);
+
+  it('pages distinct microseconds inside one millisecond', async () => {
+    const us = await createDisposableDb('ai_calls_cursor_us');
+    try {
+      // Three rows in the same millisecond (.123), one microsecond apart. A cursor built from a
+      // millisecond Date would encode .123000 and the second page would skip .123456.
+      const microseconds = [newId('aic'), newId('aic'), newId('aic')].sort();
+      await us.db.admin.query(
+        `INSERT INTO ai_calls (workspace_id, id, kind, status, created_at)
+         VALUES ($1, $2, 'test', 'done', '2026-08-01T12:00:00.123456Z'),
+                ($1, $3, 'test', 'done', '2026-08-01T12:00:00.123457Z'),
+                ($1, $4, 'test', 'done', '2026-08-01T12:00:00.123458Z')`,
+        [us.workspace, microseconds[0], microseconds[1], microseconds[2]],
+      );
+      const pageOf = (input: { limit: number; cursor?: string }) =>
+        us.db.withWorkspace(us.workspace, (tx) =>
+          listAiCalls.handler(input as never, { tx, principal: { workspaceId: us.workspace } } as never),
+        );
+      const first = await pageOf({ limit: 2 });
+      expect(first.calls.map((c) => c.id)).toEqual([microseconds[2], microseconds[1]]);
+      expect(first.nextCursor).toBeTruthy();
+      const second = await pageOf({ limit: 2, cursor: first.nextCursor! });
+      expect(second.calls.map((c) => c.id)).toEqual([microseconds[0]]);
+      expect(second.nextCursor).toBeNull();
+    } finally {
+      await us.close();
+    }
+  }, 60_000);
 });

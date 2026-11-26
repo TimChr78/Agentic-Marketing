@@ -1110,6 +1110,10 @@ export const migrateJourney = defineCommand({
                   waitingEvent: null,
                   waitingUntil: null,
                   matched: false,
+                  // A restart runs a different step: the old step's retry budget and error do not
+                  // apply to it (#1240 review).
+                  attempts: 0,
+                  error: null,
                   updatedAt: new Date(),
                 },
           )

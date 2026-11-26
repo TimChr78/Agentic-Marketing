@@ -159,15 +159,18 @@ export async function advance(
       case 'waitEvent':
       case 'goal': {
         if (!resuming) {
+          // The deadline is kept in `waitingUntil` as well as `dueAt`: a retry overwrites `dueAt`
+          // with its backoff, and the goal's original window must survive that (#1240 review).
+          const deadline = new Date(now.getTime() + n.ms);
           steps.push({ node: n.id, seq, type: 'waiting', detail: `for ${n.event}` });
           return {
             state: {
               node,
               status: 'waiting',
               seq,
-              dueAt: new Date(now.getTime() + n.ms),
+              dueAt: deadline,
               waitingEvent: n.event,
-              waitingUntil: null,
+              waitingUntil: deadline,
               matched: false,
               converted,
             },

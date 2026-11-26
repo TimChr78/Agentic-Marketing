@@ -13,7 +13,7 @@ import {
   suppressHoldout,
 } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
-import { schema, type Tx } from '@agentic-marketing/db';
+import { outboxPublicationBarrier, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { and, eq, sql } from 'drizzle-orm';
 
@@ -128,6 +128,21 @@ export function unresolvedOutcomeNote(reason: PageUnresolved, limit: number): st
 }
 
 /**
+ * The note a report carries while its journey's `journey_event` outbox rows are still pending or
+ * failed. Publication is asynchronous (#1244), so a verdict computed now could rest on events that
+ * have not reached ClickHouse. `what` names what the report withholds.
+ */
+export function incompletePublicationNote(publication: { outstanding: number; failed: number }, what: string): string {
+  const reasons = [
+    publication.outstanding ? `${publication.outstanding} pending` : '',
+    publication.failed ? `${publication.failed} failed` : '',
+  ]
+    .filter(Boolean)
+    .join(' and ');
+  return `Publication of this journey's journey events is incomplete (${reasons}), so ${what} until they are published.`;
+}
+
+/**
  * The computation behind journeys.holdoutResult, exported so campaign evaluation can report a
  * journey member's uplift without reimplementing the statistics or the assignment query.
  */
@@ -165,6 +180,10 @@ export async function computeJourneyHoldout(
   const hashVersion = holdoutHashVersion(cg.percent);
   const from = range.from ? new Date(range.from) : undefined;
   const to = range.to ? new Date(range.to) : undefined;
+  // Snapshot the outbox before the ClickHouse reads: an event that is still queued at this point is
+  // not in what follows, and one published afterwards must not make this report look complete.
+  const publication = await outboxPublicationBarrier(deps.tx, deps.workspaceId, journeyId);
+  const publicationIncomplete = publication.outstanding > 0 || publication.failed > 0;
   // The same merge-family resolution and window the campaign report uses (#985, #1070): one
   // person, one arm, the earliest assignment decides, and the window applies to that winner rather
   // than to every row. A later copy an entry wrote onto the survivor must not count the person
@@ -231,8 +250,9 @@ export async function computeJourneyHoldout(
     after = page[page.length - 1]!.person;
   }
   const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
-  const verdictNote =
-    analysis.verdict === 'not_enough_data'
+  const verdictNote = publicationIncomplete
+    ? incompletePublicationNote(publication, 'no verdict is issued')
+    : analysis.verdict === 'not_enough_data'
       ? `Need at least ${cg.minSampleSize} people in each arm; ${counts.control.entered} control and ${counts.treatment.entered} treatment so far.`
       : analysis.verdict === 'no_clear_difference'
         ? 'The 95% interval for the difference includes zero, so the journey has not shown a clear effect yet.'
@@ -250,6 +270,9 @@ export async function computeJourneyHoldout(
     to: range.to ?? null,
     k: K,
     ...analysis,
+    // A pending or failed journey event can still change the outcome counts. Counts and rates are
+    // reported, but the actionable comparison is withheld until publication is complete.
+    ...(publicationIncomplete ? { absoluteLift: null, relativeLift: null, ci95: null, verdict: 'not_enough_data' as const } : {}),
     note,
     suppressed: false,
   };
