@@ -238,7 +238,9 @@ describe('consent banner', () => {
     ]);
 
     (root.querySelectorAll('button')[1] as HTMLButtonElement).click();
-    expect(choices).toEqual([{ analytics: false, ad_measurement: false }]);
+    // A non-consent purpose is recorded too: the gateway keeps its events unless the visitor
+    // objected, so the objection has to be in the choice (#1224).
+    expect(choices).toEqual([{ necessary: false, analytics: false, ad_measurement: false }]);
     expect(doc.querySelector('[data-am-consent]')).toBeNull();
     expect(gcm(win)[1][1]).toBe('update');
   });
@@ -254,8 +256,9 @@ describe('consent banner', () => {
     await new Promise((r) => setTimeout(r, 0));
     const root = doc.querySelector('[data-am-consent]')!;
     const boxes = [...root.querySelectorAll('input')] as HTMLInputElement[];
+    // A non-consent purpose is on by default but objectable, so its box is checked and enabled.
     expect(boxes.map((b) => [b.checked, b.disabled])).toEqual([
-      [true, true],
+      [true, false],
       [true, false],
       [false, false],
     ]);
@@ -264,7 +267,7 @@ describe('consent banner', () => {
     boxes[2].checked = true;
     boxes[1].checked = false;
     choose.click(); // saves
-    expect(choices.at(-1)).toEqual({ analytics: false, ad_measurement: true });
+    expect(choices.at(-1)).toEqual({ necessary: true, analytics: false, ad_measurement: true });
     expect(gcm(win).at(-1)).toEqual([
       'consent',
       'update',

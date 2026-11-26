@@ -81,8 +81,8 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     expect(check?.hint).toContain('periodic publication pass');
     expect(check?.hint).not.toContain('not re-opened automatically');
 
-    // A job that failed after it published is excluded from reads but is never re-opened: the
-    // hint must not promise a self-heal for it (#1095 review).
+    // A job that failed after it published is excluded from reads; a scheduler restart re-opens it
+    // once, with a fresh budget (#1219), so the hint prescribes that and promises the retry.
     await d.db.admin.query(
       `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids, state, attempts, created_at, last_error, published_at)
        VALUES ($1, 'era_ops_failed_published', '{prf_ops_failed_published}', 'failed', 36, now() - interval '2 hours', 'Valkey unavailable', now())`,
@@ -91,7 +91,8 @@ describe.skipIf(!hasTestDatabase())('outbox operations (#978 part 2 review)', ()
     const both = await erasureCheck();
     expect(both?.message).toContain('2 erasure cleanup job(s) failed after their retries (1 before their exclusion published, 1 after)');
     expect(both?.hint).toContain('already excluded from reads');
-    expect(both?.hint).toContain('not re-opened automatically');
+    expect(both?.hint).toContain('restart the scheduler role');
+    expect(both?.hint).toContain('re-opens it once at start');
 
     await d.db.admin.query("UPDATE erasure_cleanup_jobs SET state = 'complete' WHERE workspace_id = $1", [d.workspace]);
     expect((await erasureCheck())?.status).toBe('ok');

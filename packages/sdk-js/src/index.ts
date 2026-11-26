@@ -92,6 +92,21 @@ const uuid = () =>
   globalThis.crypto?.randomUUID?.() ??
   `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
 
+/**
+ * Whether the SDK may send data for its tracking purpose. Mirrors the gateway's `consentAllows`:
+ * a purpose on a non-consent basis (legitimate interest, contract) holds until the visitor objects,
+ * while a consent-basis purpose needs an explicit yes (#1224). Nothing is allowed before a choice.
+ */
+function consentAllowsTracking(consent: Consent | null, purpose: string, basis: Map<string, string>): boolean {
+  if (consent === null) return false;
+  const signal = consent[purpose];
+  if (signal !== undefined) return signal === true;
+  // The workspace lists this purpose on a non-consent basis: the gateway keeps the event unless
+  // the visitor refused, and the SDK must agree or the two disagree about the same visitor.
+  const known = basis.get(purpose);
+  return known !== undefined && known !== 'consent';
+}
+
 function safeStorage(s: AnalyticsOptions['storage']) {
   // Storage can be missing or throw (private mode, blocked cookies); the SDK must keep working.
   return {
@@ -151,7 +166,10 @@ export function createAnalytics(opts: AnalyticsOptions) {
       return null;
     }
   })();
-  const allowed = () => consent?.[purpose] === true;
+  // The purposes' bases, as the consent banner loaded them. Empty means unknown, and an unknown
+  // purpose needs an explicit yes. See `consentAllowsTracking`.
+  const basis = new Map<string, string>();
+  const allowed = () => consentAllowsTracking(consent, purpose, basis);
   let anonymousId = (allowed() && store.get(KEYS.anonymousId)) || uuid();
   let userId = (allowed() && store.get(KEYS.userId)) || undefined;
   // Click ids live in memory until ad_measurement is allowed, then (and only then) in storage.
@@ -168,6 +186,12 @@ export function createAnalytics(opts: AnalyticsOptions) {
     return { ...saved, ...captureClickIds(l.search, l.cookies) };
   })();
   let pending: QueuedEvent[] = [];
+  // Events for a purpose whose basis the consent banner is still looking up. A returning visitor's
+  // saved choice may not mention the tracking purpose at all, and the basis then decides whether it
+  // is allowed (#1224 review). Bounded like the undecided queue, so a lookup that never settles
+  // cannot grow memory without limit.
+  let waitingForBasis: QueuedEvent[] = [];
+  let basisLookupPending = false;
   const outbox: QueuedEvent[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
   let backoff = 0;
@@ -204,8 +228,36 @@ export function createAnalytics(opts: AnalyticsOptions) {
       if (pending.length < MAX_QUEUE) pending.push(ev);
       return;
     }
-    if (!allowed() && ev.event !== CONSENT_EVENT) return;
+    if (!allowed() && ev.event !== CONSENT_EVENT) {
+      // The banner may still be resolving this purpose's basis (legitimate interest or contract
+      // allows it), so hold the event instead of dropping it. `setPurposes` rechecks the held
+      // queue, and a failed lookup drops it (fail closed).
+      if (basisLookupPending && waitingForBasis.length < MAX_QUEUE) waitingForBasis.push(ev);
+      return;
+    }
     outbox.push({ ...ev, anonymousId, ...(userId ? { userId } : {}), context: { ...context(), ...(ev.context ?? {}) } });
+    if (outbox.length >= (opts.batchSize ?? 20)) void flush();
+    else schedule();
+  }
+
+  /**
+   * Rechecks the basis-pending queue. With `stillPending` an event that is not allowed stays held
+   * for the answer; otherwise it is dropped, because the lookup has settled and cannot allow it.
+   */
+  function releaseWaitingForBasis(stillPending: boolean) {
+    if (!waitingForBasis.length) return;
+    const keep: QueuedEvent[] = [];
+    let moved = 0;
+    for (const e of waitingForBasis) {
+      if (!allowed()) {
+        if (stillPending) keep.push(e);
+        continue;
+      }
+      outbox.push({ ...e, anonymousId, ...(userId ? { userId } : {}), context: { ...context(), ...(e.context ?? {}) } });
+      moved += 1;
+    }
+    waitingForBasis = keep;
+    if (!moved) return;
     if (outbox.length >= (opts.batchSize ?? 20)) void flush();
     else schedule();
   }
@@ -299,6 +351,30 @@ export function createAnalytics(opts: AnalyticsOptions) {
       return opts.writeKey;
     },
 
+    /**
+     * Tell the SDK the purpose bases the consent banner loaded. A purpose on a non-consent basis
+     * (legitimate interest, contract) is then allowed unless the visitor refused it, matching the
+     * gateway's `consentAllows` (#1224).
+     */
+    setPurposes(purposes: { key: string; basis: string }[]) {
+      basis.clear();
+      for (const p of purposes) basis.set(p.key, p.basis);
+      // The answer is in: send what the resolved bases (and any refusal) now allow, drop the rest.
+      basisLookupPending = false;
+      releaseWaitingForBasis(false);
+    },
+
+    /** A consent banner is starting its purpose lookup; hold events it may allow until it settles. */
+    beginPurposes() {
+      basisLookupPending = true;
+    },
+
+    /** The purpose lookup failed: drop what it held instead of sending on an unknown basis. */
+    failPurposes() {
+      basisLookupPending = false;
+      waitingForBasis = [];
+    },
+
     /** Record the visitor's choice (from your consent banner or CMP). Merges with earlier choices. */
     setConsent(choice: Consent) {
       const before = JSON.stringify(consent);
@@ -324,6 +400,9 @@ export function createAnalytics(opts: AnalyticsOptions) {
       if (allowed())
         for (const e of held)
           outbox.push({ ...e, anonymousId, ...(userId ? { userId } : {}), context: { ...context(), ...(e.context ?? {}) } });
+      // An explicit yes allows a held event even before the basis lookup answers; a refusal leaves
+      // it to the lookup's own recheck, which drops it once the lookup settles.
+      releaseWaitingForBasis(basisLookupPending);
       void flush();
     },
 

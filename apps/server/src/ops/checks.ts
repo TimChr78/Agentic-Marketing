@@ -1082,8 +1082,9 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
   const erasurePending = Number(row.erasure_cleanup_pending);
   const erasureOldest = Number(row.erasure_cleanup_oldest_seconds);
   const erasureFailed = Number(row.erasure_cleanup_failed);
-  // A job can fail before its exclusion published (the periodic pass re-opens it) or after (its
-  // reads are already excluded, and nothing re-opens it: a published job never runs again).
+  // A job can fail before its exclusion published or after (its reads are already excluded but the
+  // purge stopped). Both are re-opened by the scheduler: the publication backlog pass runs the
+  // after-publish case once per scheduler start, which is the recovery the hint below prescribes.
   const erasureFailedUnpublished = Number(row.erasure_cleanup_failed_unpublished);
   const erasureFailedPublished = erasureFailed - erasureFailedUnpublished;
   const erasureWaiting = erasurePending ? `${erasurePending} waiting, the oldest ${duration(erasureOldest)}` : 'none waiting';
@@ -1098,7 +1099,7 @@ export async function operationalHealthChecks(db: Db): Promise<Check[]> {
               ? 'A job that failed before its exclusion published means reads still return the person in ClickHouse and in queued events; the scheduler re-opens it on its periodic publication pass, so check ClickHouse and that role’s logs.'
               : '',
             erasureFailedPublished > 0
-              ? 'A job that failed after publishing is already excluded from reads, but its purge and Valkey hot-state cleanup stopped and it is not re-opened automatically: fix Valkey or ClickHouse, then restart the scheduler role.'
+              ? 'A job that failed after publishing is already excluded from reads, but its purge and Valkey hot-state cleanup stopped: fix Valkey or ClickHouse, then restart the scheduler role, which re-opens it once at start with a fresh retry budget.'
               : '',
           ]
             .filter(Boolean)
@@ -1615,7 +1616,15 @@ export interface SubjectKeyCoverageCheckDeps {
 
 export async function checkSubjectKeyCoverage(config: Config, db: Db, deps: SubjectKeyCoverageCheckDeps = {}): Promise<Check> {
   const ownsStore = !deps.store;
-  const store = deps.store ?? clickHouseStore({ url: config.clickhouse.url, database: config.clickhouse.database });
+  // The configured mode reaches this store too: with policies installed a server that no longer
+  // takes `SQL_workspace` hides every row, and a silent empty count would report full coverage.
+  const store =
+    deps.store ??
+    clickHouseStore({
+      url: config.clickhouse.url,
+      database: config.clickhouse.database,
+      rowPolicies: config.clickhouse.rowPolicies,
+    });
   try {
     const workspaces = await db.admin.query<{ id: string }>('SELECT id FROM workspaces');
     const coverage = await withTimeout(

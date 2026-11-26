@@ -395,8 +395,10 @@ contents but does not create them.
   that check while holding the shared restore lock, and it takes that lock **before** running
   Postgres or ClickHouse migrations, so a restore never overlaps a starting process. The process
   keeps the lock and its connection until shutdown (released after the workers drain and the pools
-  close). If that connection drops, the server logs the reason and exits; a supervisor restarts it,
-  which either re-acquires the lock or refuses on the fence. It is a dedicated connection, so it
+  close). That connection enables TCP keepalive and answers a lightweight liveness query every 30
+  seconds, so a connection whose peer vanished without sending a close is noticed within a bounded
+  time instead of never. If it drops, the server logs the reason and exits; a supervisor restarts
+  it, which either re-acquires the lock or refuses on the fence. It is a dedicated connection, so it
   does not consume an app-pool slot;
 - runs `pg_restore --clean --if-exists --no-owner`, then unwraps a real data key from the restored
   database before reporting success (a second proof that provider, connector and profile secrets

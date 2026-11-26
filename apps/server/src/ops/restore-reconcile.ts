@@ -106,6 +106,15 @@ interface JobRow {
 
 const DEFAULT_BATCH_SIZE = 1_000;
 
+/**
+ * The server's row-policy mode, read the way `config.ts` defaults it. With policies installed and a
+ * server that no longer takes `SQL_workspace`, a store built without this mode reads an empty
+ * workspace instead of refusing (#1225 review).
+ */
+function restoreRowPolicies(value: string | undefined): 'required' | 'auto' | 'off' {
+  return value === 'required' || value === 'off' ? value : 'auto';
+}
+
 /** The error an aborted restore must fail with, whether the signal carried one or not. */
 function abortReason(signal: AbortSignal): Error {
   return signal.reason instanceof Error
@@ -428,6 +437,7 @@ export async function reconcileRestoredErasureExclusions(opts: ReconcileRestoreO
           // The same resolved endpoint (`CLICKHOUSE_URL` or its default) the drain probes.
           url: clickhouseUrl(env.CLICKHOUSE_URL),
           database: env.CLICKHOUSE_DATABASE?.trim() || 'am',
+          rowPolicies: restoreRowPolicies(env.CLICKHOUSE_ROW_POLICIES),
           // Every exclusion read and publication this store issues is tagged, so a successor's
           // drain finds it in `system.processes` (#1204 review).
           queryIdPrefix: RESTORE_CLICKHOUSE_QUERY_PREFIX,
@@ -701,6 +711,119 @@ export interface RestoreSessionLockOptions {
    * included, and fail (#1204 review).
    */
   onLost?: (err: Error) => void;
+  /** TCP keepalive after this much idle time. Default 10 s; 0 keeps the platform default. */
+  keepAliveInitialDelayMs?: number;
+  /** How often the session proves it still answers with `SELECT 1`. Default 30 s; 0 disables it. */
+  livenessMs?: number;
+  /** How long one statement on the lock session may take before it counts as lost. Default 15 s. */
+  livenessTimeoutMs?: number;
+}
+
+/** TCP keepalive after this much idle time, so a peer that vanished without a FIN is probed. */
+const RESTORE_LOCK_KEEPALIVE_MS = 10_000;
+/** How often a lock session proves it still answers. */
+const RESTORE_LOCK_LIVENESS_MS = 30_000;
+/** How long a statement on the lock session may take; also bounds one liveness check. */
+const RESTORE_LOCK_LIVENESS_TIMEOUT_MS = 15_000;
+
+/**
+ * The dedicated connection a lock is held on (#1222). `keepAlive` makes the OS probe an idle peer:
+ * without it, a peer that drops the connection without a FIN is never noticed, and the holder keeps
+ * serving (or restoring) as if its lock were still there. The liveness query's timeout is applied
+ * per probe by `watchRestoreLock`, not as a client-wide `query_timeout`: pg arms that timeout when a
+ * statement is submitted, so it would also abort a legitimate slow fence statement and would start
+ * ticking for a probe that is still queued behind foreground work.
+ */
+function restoreLockClient(connectionString: string, opts: { keepAliveInitialDelayMs?: number }): pg.Client {
+  return new pg.Client({
+    connectionString,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: opts.keepAliveInitialDelayMs ?? RESTORE_LOCK_KEEPALIVE_MS,
+  });
+}
+
+/** The lock session's statements, serialised with the liveness probes. */
+interface WatchedRestoreLock {
+  /** A `query` that queues behind any statement already running or queued on the session. */
+  client: Pick<pg.Client, 'query'>;
+  /** Stops the heartbeat; idempotent. */
+  stop(): void;
+}
+
+/**
+ * Serialises every statement on the lock session and proves periodically that it still answers
+ * (#1222 review). The fence writes share this session, and pg arms a statement's timeout when it is
+ * submitted: a probe queued behind a slow fence query would therefore time out while the lock is
+ * still healthy and report a false loss. Probes now join the same queue, run only when the session
+ * is idle, and start their timeout only once the probe itself executes. A probe that does not
+ * answer within `livenessTimeoutMs` is a lost session and runs the existing lock-loss path.
+ */
+function watchRestoreLock(
+  client: pg.Client,
+  lost: (err: Error) => void,
+  livenessMs: number | undefined,
+  livenessTimeoutMs: number,
+): WatchedRestoreLock {
+  let tail: Promise<unknown> = Promise.resolve();
+  let inFlight = 0;
+  let stopped = false;
+
+  function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    inFlight += 1;
+    const result = tail.then(fn, fn);
+    tail = result.then(
+      () => {
+        inFlight -= 1;
+      },
+      () => {
+        inFlight -= 1;
+      },
+    );
+    return result;
+  }
+
+  const query = ((text: string, values?: unknown[]) => enqueue(() => client.query(text, values as never))) as unknown as Pick<
+    pg.Client,
+    'query'
+  >['query'];
+
+  async function probeOnce(): Promise<Error | undefined> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error('the restore lock session did not answer its liveness check')), livenessTimeoutMs);
+      timer.unref?.();
+    });
+    try {
+      await Promise.race([client.query('SELECT 1'), timeout]);
+      return undefined;
+    } catch (err) {
+      return err instanceof Error ? err : new Error(String(err));
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  const ms = livenessMs ?? RESTORE_LOCK_LIVENESS_MS;
+  const timer =
+    ms > 0
+      ? setInterval(() => {
+          // The idle check and the enqueue happen in one turn, so no foreground statement can slip
+          // between them and end up behind the probe.
+          if (stopped || inFlight > 0) return;
+          void enqueue(probeOnce).then((err) => {
+            if (err) lost(err);
+          });
+        }, ms)
+      : undefined;
+  // The probe must not keep a shutting-down process alive on its own.
+  timer?.unref?.();
+  return {
+    client: { query },
+    stop() {
+      stopped = true;
+      if (timer) clearInterval(timer);
+    },
+  };
 }
 
 /**
@@ -717,7 +840,7 @@ export interface RestoreSessionLockOptions {
 export async function acquireRestoreSessionLock(databaseUrl: string, opts: RestoreSessionLockOptions = {}): Promise<RestoreSessionLock> {
   // The lock session announces the restore name too: a successor's drain must see it, and excludes
   // it by PID while this attempt is the successor (#1204 review).
-  const client = new pg.Client({ connectionString: withRestoreAppName(databaseUrl) });
+  const client = restoreLockClient(withRestoreAppName(databaseUrl), opts);
   await client.connect();
   let pid = 0;
   try {
@@ -734,19 +857,26 @@ export async function acquireRestoreSessionLock(databaseUrl: string, opts: Resto
     throw err;
   }
   let released = false;
+  let lostReported = false;
   const lost = (err: Error) => {
-    if (!released) opts.onLost?.(err);
+    if (released || lostReported) return;
+    lostReported = true;
+    opts.onLost?.(err);
   };
   // Keep a listener on both events: pg emits 'error' when the backend is terminated, and without
   // one Node would treat it as an unhandled error and exit without the caller's cleanup.
   client.on('error', lost);
   client.on('end', () => lost(new Error('the restore lock connection ended unexpectedly')));
+  const watch = watchRestoreLock(client, lost, opts.livenessMs, opts.livenessTimeoutMs ?? RESTORE_LOCK_LIVENESS_TIMEOUT_MS);
   return {
-    client,
+    client: watch.client,
     pid,
     async release() {
       released = true;
-      await client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
+      watch.stop();
+      // A lost session cannot answer, and the server drops its lock with the connection; sending
+      // the unlock would only queue behind the unanswered liveness query.
+      if (!lostReported) await watch.client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
       await client.end().catch(() => {});
     },
   };
@@ -768,6 +898,12 @@ export interface RestoreStartupLockOptions {
   onLost?: (err: Error) => void;
   /** How long to wait for an active restore to finish before refusing. Default 3 s. */
   waitMs?: number;
+  /** TCP keepalive after this much idle time. Default 10 s. */
+  keepAliveInitialDelayMs?: number;
+  /** How often the held lock proves it still answers with `SELECT 1`. Default 30 s; 0 disables it. */
+  livenessMs?: number;
+  /** How long one statement on the lock session may take before it counts as lost. Default 15 s. */
+  livenessTimeoutMs?: number;
 }
 
 const RESTORE_STARTUP_WAIT_MS = 3_000;
@@ -794,7 +930,7 @@ const fenceBlockMessage = (fence: RestoreFenceState) =>
  * restore could start while this process is still serving.
  */
 export async function acquireRestoreStartupLock(databaseUrl: string, opts: RestoreStartupLockOptions = {}): Promise<RestoreStartupLock> {
-  const client = new pg.Client({ connectionString: databaseUrl });
+  const client = restoreLockClient(databaseUrl, opts);
   await client.connect();
   let lockPid = 0;
   try {
@@ -825,16 +961,21 @@ export async function acquireRestoreStartupLock(databaseUrl: string, opts: Resto
   }
 
   let released = false;
+  let lostReported = false;
   const lost = (err: Error) => {
-    if (!released) opts.onLost?.(err);
+    if (released || lostReported) return;
+    lostReported = true;
+    opts.onLost?.(err);
   };
   client.on('error', lost);
   client.on('end', () => lost(new Error('the restore lock connection ended unexpectedly')));
+  const watch = watchRestoreLock(client, lost, opts.livenessMs, opts.livenessTimeoutMs ?? RESTORE_LOCK_LIVENESS_TIMEOUT_MS);
   return {
     pid: lockPid,
     async release() {
       if (released) return;
       released = true;
+      watch.stop();
       // Keep the listeners: after this flag they are no-ops, and an error during `end()` must not
       // become an unhandled 'error' event on the client.
       await client.end().catch(() => {});

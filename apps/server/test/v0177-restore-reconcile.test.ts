@@ -1,6 +1,8 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -34,6 +36,33 @@ afterAll(async () => {
 });
 
 const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
+
+/**
+ * A ClickHouse HTTP endpoint that rejects the `SQL_workspace` setting as a server without the `SQL_`
+ * custom-settings prefix does, and answers every other request with zero rows. Built without the
+ * configured row-policy mode, the reconciliation read that empty answer as "nothing to publish".
+ */
+async function unknownSettingServer(): Promise<{ url: string; close: () => Promise<void> }> {
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    if (url.searchParams.has('SQL_workspace')) {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end("Code: 115. DB::Exception: Unknown setting 'SQL_workspace'. (UNKNOWN_SETTING)");
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+}
 
 describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusions (#1194)', () => {
   it('re-publishes only missing keys, then marks the jobs published without reopening complete ones', async () => {
@@ -148,6 +177,37 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     expect(published).toHaveLength(2);
     expect(visibilityCalls.map((chunk) => chunk.length)).toEqual([2, 1, 2, 1]);
   }, 120_000);
+
+  // #1225 review: the reconciliation built its own store without the configured row-policy mode. A
+  // restored workspace read that the policy hides returned zero rows, so the reconciliation
+  // believed there was nothing left to publish instead of refusing.
+  it('refuses a restored read when required policies meet a server that rejects SQL_workspace', async () => {
+    const d = await createDisposableDb('restore_reconcile_policies');
+    open.push(d);
+    const erasureId = 'era_00000000000000000000000000000c33';
+    await d.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY['prf_00000000000000000000000000000001']::text[], 'user_test', 'row policy test', '{"profiles":1}')`,
+      [d.workspace, erasureId],
+    );
+    await d.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_policies', $3, 'full')`,
+      [d.workspace, 'd'.repeat(64), erasureId],
+    );
+    const stub = await unknownSettingServer();
+    try {
+      await expect(
+        reconcileRestoredErasureExclusions({
+          databaseUrl: d.url.toString(),
+          env: { CLICKHOUSE_URL: stub.url, CLICKHOUSE_DATABASE: 'am', CLICKHOUSE_ROW_POLICIES: 'required' },
+          log: () => {},
+        }),
+      ).rejects.toThrow(/SQL_workspace|refusing to read/);
+    } finally {
+      await stub.close();
+    }
+  }, 60_000);
 
   it('cleans a completed job’s outbox rows before confirming it complete (#1194 review)', async () => {
     const d = await createDisposableDb('restore_outbox');
