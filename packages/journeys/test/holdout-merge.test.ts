@@ -277,6 +277,14 @@ describe.skipIf(!hasTestDatabase())('journeys.holdoutResult resolves merge famil
       expect(report.ci95).toBeNull();
       expect(report.note).toContain("Publication of this journey's journey events is incomplete");
       expect(report.note).toContain('1 pending');
+      expect(report.note).not.toContain('am outbox');
+
+      // A dead-lettered row keeps the verdict withheld, and the note says how to recover (#1269 re-review).
+      await d.db.admin.query(`UPDATE outbox SET state = 'failed' WHERE workspace_id = $1 AND id = $2`, [ws, outboxId]);
+      const failed = await result(journeyId);
+      expect(failed.verdict).toBe('not_enough_data');
+      expect(failed.note).toContain('1 failed');
+      expect(failed.note).toContain('am outbox --kind journey_event');
     } finally {
       await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND id = $2', [ws, outboxId]);
     }

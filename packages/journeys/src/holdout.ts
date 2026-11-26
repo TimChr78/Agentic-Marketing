@@ -139,7 +139,10 @@ export function incompletePublicationNote(publication: { outstanding: number; fa
   ]
     .filter(Boolean)
     .join(' and ');
-  return `Publication of this journey's journey events is incomplete (${reasons}), so ${what} until they are published.`;
+  // A failed row has used its retries and stays failed until an operator requeues it, so the note
+  // names the command rather than suggesting the report will recover on its own.
+  const requeue = publication.failed ? ' Requeue the failed rows with `am outbox --kind journey_event` once ClickHouse is reachable.' : '';
+  return `Publication of this journey's journey events is incomplete (${reasons}), so ${what} until they are published.${requeue}`;
 }
 
 /**
