@@ -861,6 +861,22 @@ describe('Person detail (#510)', () => {
     expect(screen.queryByRole('table', { name: 'Segments' })).toBeNull();
   });
 
+  it('asks for the profile id, not the “No email available” placeholder, when erasing a person without an e-mail (#1261)', async () => {
+    h.respond = (name, input) => (name === 'profiles.get' ? profile({ personal: { name: 'Ada Rivera' } }) : baseRespond(name, input));
+    renderPerson();
+    await screen.findByRole('heading', { level: 1, name: 'No email available' });
+
+    await userEvent.click(screen.getAllByRole('button', { name: 'Erase person' })[0]);
+    const dialog = await screen.findByRole('alertdialog');
+    expect(within(dialog).queryByText(/No email available/)).toBeNull();
+    expect(within(dialog).getAllByText(canonicalId).length).toBeGreaterThan(0);
+
+    // The type-to-confirm field asks for a real identifier of the person about to be erased.
+    const confirm = within(dialog).getByLabelText(new RegExp(`Type ${canonicalId} to confirm`));
+    await userEvent.type(confirm, canonicalId);
+    expect((within(dialog).getByRole('button', { name: 'Erase person' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it('does not let a stale profile response replace a newer selection', async () => {
     h.hold.add('profiles.get');
     const view = renderPerson();

@@ -136,6 +136,35 @@ export function ConditionView({ condition, depth = 0 }: { condition: unknown; de
       </p>
     );
   }
+  if (typeof c.topic === 'string')
+    return (
+      <p className="text-[13px]">
+        Subscribed to topic <Mono>{c.topic}</Mono>
+      </p>
+    );
+  if (c.score && typeof c.score === 'object') {
+    const score = c.score as { key?: unknown; gte?: unknown; lte?: unknown };
+    const gte = typeof score.gte === 'number' ? score.gte : undefined;
+    const lte = typeof score.lte === 'number' ? score.lte : undefined;
+    return (
+      <p className="text-[13px]">
+        Score <Mono>{String(score.key ?? '')}</Mono>
+        {gte !== undefined && (
+          <>
+            {' '}
+            is at least <strong className="font-medium">{gte}</strong>
+          </>
+        )}
+        {gte !== undefined && lte !== undefined && ' and'}
+        {lte !== undefined && (
+          <>
+            {' '}
+            is at most <strong className="font-medium">{lte}</strong>
+          </>
+        )}
+      </p>
+    );
+  }
   if (typeof c.consent === 'string')
     return (
       <p className="text-[13px]">

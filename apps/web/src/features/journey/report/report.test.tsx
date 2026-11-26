@@ -249,6 +249,12 @@ describe('journey report reads (#507)', () => {
     expect(calls('analytics.journeyFunnel')).toHaveLength(1);
   });
 
+  it('says the counts describe the published version alone (#1265)', async () => {
+    renderReport();
+    await screen.findByText('Published v1 · counts for this version');
+    expect(screen.queryByText(/counts across all versions/)).toBeNull();
+  });
+
   it('reads the pinned published topology once when the latest draft differs', async () => {
     const draft = linearNodes().map((node) => ({ ...node, label: `${node.label} draft` }));
     h.artifact = artifact({
@@ -259,7 +265,7 @@ describe('journey report reads (#507)', () => {
     h.pinned.set(1, artifact());
 
     renderReport();
-    await screen.findByText('Published v1 · counts across all versions');
+    await screen.findByText('Published v1 · counts for this version');
     await screen.findByText('Entered in period');
 
     expect(calls('artifacts.get')).toEqual([

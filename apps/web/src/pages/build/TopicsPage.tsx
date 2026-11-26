@@ -5,7 +5,7 @@ import { navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useKeyedApi } from '../../app/useApi';
 import { type TopicRow, TopicsTable, topicStatus } from '../../features/content/TopicsTable';
-import { Button, Field, Input, Modal, Select, TableFrame, Textarea, useToast } from '../../ui';
+import { Alert, Button, Field, Input, Modal, Select, TableFrame, Textarea, useToast } from '../../ui';
 
 // Build → Topics (#141): the editorial backlog. A queue, not a calendar: the target date is stored
 // so #78 can show it later, but this page groups by status and score. Briefs open in the normal
@@ -40,15 +40,43 @@ export default function TopicsPage() {
   const [saving, setSaving] = useState(false);
 
   const filterKey = `${status}|${owner.trim()}|${tag.trim()}|${minScore}`;
-  const list = useKeyedApi(filterKey, () =>
-    api.call('content.topics.list', {
-      status: status ? (status as TopicRow['status']) : undefined,
-      owner: owner.trim() || undefined,
-      tag: tag.trim() || undefined,
-      minScore: minScore ? Number(minScore) : undefined,
-    }),
-  );
-  const topics = list.data?.topics ?? [];
+  const query = {
+    status: status ? (status as TopicRow['status']) : undefined,
+    owner: owner.trim() || undefined,
+    tag: tag.trim() || undefined,
+    minScore: minScore ? Number(minScore) : undefined,
+  };
+  const list = useKeyedApi(filterKey, () => api.call('content.topics.list', query));
+  // Further pages carry the filter they were requested for (#1262).
+  const [more, setMore] = useState<{ key: string; rows: TopicRow[]; loaded: boolean }>({ key: '', rows: [], loaded: false });
+  const [loadingMore, setLoadingMore] = useState<{ key: string; value: boolean }>({ key: '', value: false });
+  const [moreError, setMoreError] = useState<{ key: string; message: string | null }>({ key: '', message: null });
+  const currentMore = more.key === filterKey ? more : { key: filterKey, rows: [], loaded: false };
+  const topics = [...(list.data?.topics ?? []), ...currentMore.rows];
+  // `count` is every matching topic, not the rows of the first page (#1262).
+  const count = list.data?.count ?? topics.length;
+  const loadingMoreNow = loadingMore.key === filterKey && loadingMore.value;
+  const moreErrorNow = moreError.key === filterKey ? moreError.message : null;
+
+  const loadMore = async () => {
+    if (loadingMoreNow || topics.length >= count) return;
+    const requestKey = filterKey;
+    const offset = topics.length;
+    setLoadingMore({ key: requestKey, value: true });
+    setMoreError({ key: requestKey, message: null });
+    try {
+      const r = await api.call('content.topics.list', { ...query, offset });
+      setMore((current) =>
+        current.key === requestKey
+          ? { key: requestKey, rows: [...current.rows, ...r.topics], loaded: true }
+          : { key: requestKey, rows: r.topics, loaded: true },
+      );
+    } catch (e) {
+      setMoreError({ key: requestKey, message: errText(e) });
+    } finally {
+      setLoadingMore((current) => (current.key === requestKey ? { key: requestKey, value: false } : current));
+    }
+  };
 
   const set = (key: keyof Draft) => (event: { target: { value: string } }) => setDraft((d) => ({ ...d, [key]: event.target.value }));
 
@@ -76,6 +104,7 @@ export default function TopicsPage() {
       else toast.success(`Added “${result.topic.title}” to the backlog.`);
       setCreating(false);
       setDraft(EMPTY);
+      setMore({ key: '', rows: [], loaded: false });
       void list.reload();
     } catch (e) {
       toast.error(errText(e));
@@ -98,6 +127,7 @@ export default function TopicsPage() {
     try {
       await api.call('content.topics.archive', { topicId: topic.id });
       toast.success(`Archived “${topic.title}”. Its brief and published URL stay.`);
+      setMore({ key: '', rows: [], loaded: false });
       void list.reload();
     } catch (e) {
       toast.error(errText(e));
@@ -166,13 +196,26 @@ export default function TopicsPage() {
               ))}
             </Select>
             <span className="ml-auto text-[12px] text-muted">
-              {topics.length} topic{topics.length === 1 ? '' : 's'}
+              {count.toLocaleString()} topic{count === 1 ? '' : 's'}
             </span>
           </>
         }
       >
         <TopicsTable topics={topics} onCreateBrief={brief} onArchive={archive} canWrite={canWrite} canArchive={canWrite} />
       </TableFrame>
+
+      {moreErrorNow && (
+        <Alert tone="bad" className="mt-3">
+          {moreErrorNow}
+        </Alert>
+      )}
+      {topics.length < count && (
+        <div className="mt-3 flex justify-center">
+          <Button onClick={() => void loadMore()} loading={loadingMoreNow}>
+            Load more
+          </Button>
+        </div>
+      )}
 
       <p className="mt-3 text-[12px] text-muted">
         <FileText size={12} className="mr-1 inline" aria-hidden />

@@ -5,7 +5,7 @@ import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { PurposeName } from '../../features/audience/consent';
-import { guessMapping, type Mapping, parseCsv, toImportRows } from '../../lib/csvImport';
+import { batchImportRows, guessMapping, type Mapping, parseCsv, toImportRows } from '../../lib/csvImport';
 import {
   Alert,
   Button,
@@ -29,7 +29,6 @@ import { pageWidth } from '../../ui/layout';
 type ConsentStatus = 'granted' | 'denied' | 'withdrawn' | 'objected';
 type Result = { accepted: number; rejected: { email: string; error: string }[] };
 
-const BATCH = 5000;
 const CONSENT_LABEL: Record<ConsentStatus, string> = {
   granted: 'Granted',
   denied: 'Denied',
@@ -114,10 +113,11 @@ export default function ImportsPage() {
     const rejected: Result['rejected'] = [];
     let accepted = 0;
     try {
-      for (let i = 0; i < payload.length; i += BATCH) {
-        const r = await api.call('profiles.import', { label: label.trim(), rows: payload.slice(i, i + BATCH) });
+      // The command caps rows at 5,000; the route caps the body at 1 MB. Cut on both (#1250).
+      for (const batch of batchImportRows(payload)) {
+        const r = await api.call('profiles.import', { label: label.trim(), rows: batch });
         accepted += r.accepted;
-        for (const x of r.rejected) rejected.push({ email: payload[i + x.index]?.email ?? 'row', error: x.error });
+        for (const x of r.rejected) rejected.push({ email: batch[x.index]?.email ?? 'row', error: x.error });
       }
       setResult({ accepted, rejected });
       if (accepted > 0)

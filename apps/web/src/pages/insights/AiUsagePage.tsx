@@ -6,8 +6,10 @@ import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi, useKeyedApi } from '../../app/useApi';
 import { StatCard, StatGrid, StatGridSkeleton } from '../../features/insights/Stats';
+import { AI_CALL_KIND_LABEL, aiCallKindLabel, aiCallStatusLabel } from '../../lib/labels';
 import {
   Alert,
+  Button,
   EmptyState,
   Field,
   formatDateTime,
@@ -31,7 +33,8 @@ import { pageWidth } from '../../ui/layout';
 type Call = Out<'ai.calls'>['calls'][number];
 type Kind = Call['kind'];
 
-const kinds: Kind[] = ['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted'];
+/** Every kind the command filters on, taken from the label registry so the picker cannot drift. */
+const kinds = Object.keys(AI_CALL_KIND_LABEL) as Kind[];
 const callTone = { pending: 'neutral', running: 'neutral', done: 'good', fallback: 'warn', failed: 'bad' } as const;
 
 function outcome(c: Call): string {
@@ -178,7 +181,7 @@ export default function AiUsagePage() {
                   {byKind.map(([k, r]) => (
                     <Tr key={k}>
                       <Td>
-                        <Tag>{k}</Tag>
+                        <Tag>{aiCallKindLabel(k)}</Tag>
                       </Td>
                       <Td className="max-w-[260px]">
                         <span className="line-clamp-2">
@@ -222,7 +225,7 @@ export default function AiUsagePage() {
             <option value="">All kinds</option>
             {kinds.map((k) => (
               <option key={k} value={k}>
-                {k}
+                {aiCallKindLabel(k)}
               </option>
             ))}
           </Select>
@@ -231,12 +234,12 @@ export default function AiUsagePage() {
           loading={calls.loading}
           error={calls.error}
           onRetry={calls.reload}
-          columns={6}
+          columns={7}
           isEmpty={callRows.length === 0}
           empty={
             <EmptyState
               icon={<Bot size={16} />}
-              title={kind ? `No “${kind}” calls yet` : 'No AI calls yet'}
+              title={kind ? `No “${aiCallKindLabel(kind)}” calls yet` : 'No AI calls yet'}
               action={can('artifacts:read') && <ButtonLink to="/work/agents?tab=library">Go to AI prompts</ButtonLink>}
             >
               Decisions from journey AI steps, prompt tests, copilot turns, independent checks and hosted agent runs appear here.
@@ -252,6 +255,9 @@ export default function AiUsagePage() {
                 <Th className="hidden lg:table-cell">What happened</Th>
                 <Th align="right">Latency</Th>
                 <Th>When</Th>
+                <Th>
+                  <span className="sr-only">Detail</span>
+                </Th>
               </tr>
             </THead>
             <tbody>
@@ -259,10 +265,10 @@ export default function AiUsagePage() {
                 <Fragment key={c.id}>
                   <Tr onClick={() => setOpen(open === c.id ? null : c.id)} selected={open === c.id}>
                     <Td>
-                      <StatusPill tone={callTone[c.status] ?? 'neutral'}>{c.status}</StatusPill>
+                      <StatusPill tone={callTone[c.status] ?? 'neutral'}>{aiCallStatusLabel(c.status)}</StatusPill>
                     </Td>
                     <Td className="hidden md:table-cell">
-                      <Tag>{c.kind}</Tag>
+                      <Tag>{aiCallKindLabel(c.kind)}</Tag>
                     </Td>
                     <Td>
                       {c.promptId ? (
@@ -285,10 +291,25 @@ export default function AiUsagePage() {
                     <Td className="whitespace-nowrap" title={formatDateTime(c.createdAt)}>
                       {timeAgo(c.createdAt)}
                     </Td>
+                    <Td>
+                      {/* The row click stays a shortcut; this button is the keyboard control (#1259). */}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="whitespace-nowrap"
+                        aria-expanded={open === c.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpen(open === c.id ? null : c.id);
+                        }}
+                      >
+                        {open === c.id ? 'Hide detail' : 'View detail'}
+                      </Button>
+                    </Td>
                   </Tr>
                   {open === c.id && (
                     <tr key={`${c.id}-detail`} className="border-t border-line bg-surface-2">
-                      <Td colSpan={6} className="p-3">
+                      <Td colSpan={7} className="p-3">
                         <JsonView
                           label="Call detail"
                           value={{
@@ -366,7 +387,7 @@ export default function AiUsagePage() {
                   {reviewRows.map((r) => (
                     <Tr key={r.callId}>
                       <Td>
-                        <Tag>{r.kind}</Tag>
+                        <Tag>{aiCallKindLabel(r.kind)}</Tag>
                       </Td>
                       <Td>{r.promptId ? `${r.promptId.slice(0, 14)}… v${r.promptVersion ?? '?'}` : '—'}</Td>
                       <Td className="whitespace-nowrap" title={formatDateTime(r.createdAt)}>

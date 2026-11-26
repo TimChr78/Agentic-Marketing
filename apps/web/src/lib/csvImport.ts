@@ -75,6 +75,35 @@ export function guessMapping(headers: string[]): Mapping {
 /** Statuses that mean "currently subscribed" in common tools. */
 export const ACTIVE = ['active', 'confirmed', 'subscribed', 'subscriber'];
 
+/**
+ * `profiles.import` accepts 5,000 rows, but the REST route refuses a body over 1 MB (#1250). A row
+ * with its consent proof is ~270 bytes, so row count alone overshoots the limit; a batch is cut
+ * when either limit would be crossed.
+ */
+export const IMPORT_BATCH_ROWS = 5000;
+/** Headroom below the route's 1 MB body limit for the label and the JSON wrapper. */
+export const IMPORT_BATCH_BYTES = 900_000;
+
+export function batchImportRows<T>(rows: readonly T[], maxRows = IMPORT_BATCH_ROWS, maxBytes = IMPORT_BATCH_BYTES): T[][] {
+  const encoder = new TextEncoder();
+  const batches: T[][] = [];
+  let batch: T[] = [];
+  let bytes = 0;
+  for (const row of rows) {
+    // The serialized row plus the comma that separates it from the next one.
+    const rowBytes = encoder.encode(JSON.stringify(row)).length + 1;
+    if (batch.length > 0 && (batch.length >= maxRows || bytes + rowBytes > maxBytes)) {
+      batches.push(batch);
+      batch = [];
+      bytes = 0;
+    }
+    batch.push(row);
+    bytes += rowBytes;
+  }
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+
 export interface ImportRow {
   email: string;
   traits: Record<string, string>;

@@ -264,6 +264,64 @@ export function eventTypeLabel(type: string): string {
   return EVENT_TYPE_LABEL[type] ?? humanise(type);
 }
 
+/**
+ * AI call kinds, in the order the "Filter by kind" picker offers them (#1255, #1260). The page
+ * derives its options from this map, so a new kind gains a picker entry only with its label.
+ */
+export const AI_CALL_KIND_LABEL: Record<string, string> = {
+  decide: 'Journey decision',
+  generate: 'Text generation',
+  copilot: 'Copilot',
+  test: 'Prompt test',
+  classify: 'Classification',
+  check: 'Independent check',
+  hosted: 'Hosted agent',
+  score: 'Scoring',
+};
+
+export function aiCallKindLabel(kind: string): string {
+  return AI_CALL_KIND_LABEL[kind] ?? humanise(kind);
+}
+
+/** AI call statuses in the decision log. */
+export const AI_CALL_STATUS_LABEL: Record<string, string> = {
+  pending: 'Pending',
+  running: 'Running',
+  done: 'Done',
+  fallback: 'Fallback',
+  failed: 'Failed',
+};
+
+export function aiCallStatusLabel(status: string): string {
+  return AI_CALL_STATUS_LABEL[status] ?? humanise(status);
+}
+
+/** Delivery channels, then message statuses, for the Messages page (#1260). */
+export const MESSAGE_CHANNEL_LABEL: Record<string, string> = {
+  email: 'E-mail',
+  sms: 'SMS',
+  push: 'Push',
+};
+
+export function messageChannelLabel(channel: string): string {
+  return MESSAGE_CHANNEL_LABEL[channel] ?? humanise(channel);
+}
+
+export const MESSAGE_STATUS_LABEL: Record<string, string> = {
+  queued: 'Queued',
+  sending: 'Sending',
+  sent: 'Sent',
+  suppressed: 'Suppressed',
+  failed: 'Failed',
+  delivered: 'Delivered',
+  bounced: 'Bounced',
+  complained: 'Complained',
+};
+
+export function messageStatusLabel(status: string): string {
+  return MESSAGE_STATUS_LABEL[status] ?? humanise(status);
+}
+
 /** Default purpose names; a workspace's published purposes replace these where they exist. */
 export const PURPOSE_LABEL: Record<string, string> = {
   necessary: 'Strictly necessary',

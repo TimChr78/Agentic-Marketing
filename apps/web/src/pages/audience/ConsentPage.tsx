@@ -152,6 +152,11 @@ export function ConsentLedger() {
           </Alert>
         ) : (
           <>
+            {summary.error && (
+              <Alert tone="bad" title="Couldn't load consent counts" onRetry={summary.reload} className="mb-3">
+                {summary.error}
+              </Alert>
+            )}
             <TableFrame>
               <Table label="Purposes">
                 <THead>
@@ -214,6 +219,9 @@ export function ConsentLedger() {
                                 </div>
                               )}
                             </div>
+                          ) : summary.error ? (
+                            // A failed count read is unknown, never "nobody chose anything" (#1257).
+                            <span className="text-muted">Unknown</span>
                           ) : (
                             <span className="text-muted">No recorded choices</span>
                           )}

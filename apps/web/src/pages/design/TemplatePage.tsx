@@ -22,7 +22,8 @@ function SendTest({ id, version }: { id: string; version: number }) {
   const { can } = useSession();
   const toast = useToast();
   const [busy, setBusy] = useState(false);
-  if (!can('artifacts:write')) return null;
+  // Approvers may send a test to their own address; a test to anyone else needs artifacts:write (#53, #1256).
+  if (!can('artifacts:write') && !can('artifacts:approve')) return null;
   return (
     <Button
       icon={<Send size={14} />}
