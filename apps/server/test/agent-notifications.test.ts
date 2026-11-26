@@ -633,8 +633,10 @@ describe('PR 1272 review regressions', () => {
     t.srv.db.admin.query('UPDATE agent_actions SET at = $1 WHERE workspace_id = $2 AND id = $3', [at, ws, actionId]);
 
   /** A digest row in the previous release's shape: the key is the window start, no window metadata. */
-  const legacyDigest = async (s: Setup, started: Date, status: 'sent' | 'failed', completed: Date) => {
-    const key = `agent-digest:${s.ws}:${s.owner.id}:${started.toISOString()}`;
+  const legacyDigest = async (s: Setup, started: Date, status: 'sent' | 'failed', completed: Date, keyShape: 'iso' | 'day' = 'iso') => {
+    // Releases before #1184 keyed the digest by UTC day; the previous release by the window start.
+    const suffix = keyShape === 'day' ? started.toISOString().slice(0, 10) : started.toISOString();
+    const key = `agent-digest:${s.ws}:${s.owner.id}:${suffix}`;
     await t.srv.db.admin.query(
       `INSERT INTO messages (workspace_id, id, idempotency_key, purpose, status, created_at, updated_at)
        VALUES ($1, 'msg_review_legacy', $2, 'onboarding', $3, $4, $4)`,
@@ -728,6 +730,18 @@ describe('PR 1272 review regressions', () => {
     await legacyDigest(s, started, 'sent', t0);
     await run(new Date(t0.getTime() + DAY + 300_000));
     expect(digestMessages(s.owner)).toHaveLength(1);
+  }, 40_000);
+
+  it('sends the next digest after an existing UTC-day-keyed legacy digest (#1272 re-review)', async () => {
+    const s = await setup({ level: 3 });
+    expect((await publishNote(s, 'Activity after a day-keyed digest')).body.status).toBe('published');
+    const t0 = new Date(Date.now() - 300_000);
+    const started = new Date(t0.getTime() - DAY);
+    await t.srv.db.admin.query('UPDATE agent_notification_cursor SET last_digest_at = $1 WHERE workspace_id = $2', [t0, s.ws]);
+    await legacyDigest(s, started, 'sent', t0, 'day');
+    await run(new Date(t0.getTime() + DAY + 300_000));
+    expect(digestMessages(s.owner)).toHaveLength(1);
+    expect(digestMessages(s.owner)[0].text).toContain('Activity after a day-keyed digest');
   }, 40_000);
 
   it('retries a failed legacy digest under its original key', async () => {
