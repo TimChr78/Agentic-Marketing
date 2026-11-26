@@ -20,9 +20,9 @@
     "@agentic-marketing/profiles": "workspace:*",
     "@agentic-marketing/secrets": "workspace:*",
     "@agentic-marketing/telemetry": "workspace:*",
-    "@ai-sdk/anthropic": "4.0.105",
-    "@ai-sdk/openai-compatible": "3.0.92",
-    "ai": "7.0.173",
+    "@ai-sdk/anthropic": "4.0.107",
+    "@ai-sdk/openai-compatible": "3.0.94",
+    "ai": "7.0.178",
     "drizzle-orm": "0.45.4",
     "zod": "4.6.7"
   }

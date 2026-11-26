@@ -38,11 +38,11 @@
     "@agentic-marketing/warehouse": "workspace:*",
     "@better-auth/mcp": "1.7.25",
     "@better-auth/oauth-provider": "1.7.25",
-    "@hono/node-server": "2.1.9",
+    "@hono/node-server": "2.1.11",
     "@hono/zod-openapi": "1.6.3",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/server": "2.4.0",
-    "ai": "7.0.173",
+    "ai": "7.0.178",
     "drizzle-orm": "0.45.4",
     "hono": "4.13.19",
     "tsx": "4.23.15",
@@ -55,8 +55,8 @@
     "@types/smtp-server": "3.5.13",
     "happy-dom": "21.0.4",
     "http_ece": "1.2.1",
-    "jose": "6.2.17",
+    "jose": "6.2.18",
     "pg": "8.23.1",
-    "smtp-server": "3.21.6"
+    "smtp-server": "3.21.7"
   }
 }
