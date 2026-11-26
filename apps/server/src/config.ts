@@ -98,7 +98,11 @@ const Env = z.object({
     .describe(
       'Comma-separated proxy/loopback ranges whose forwarding headers are trusted, e.g. 127.0.0.1/32,::1/128,10.0.0.0/8; empty ignores forwarding headers and uses the socket address, so set the ranges when a proxy is in front',
     ),
-  DATABASE_URL: z.string().describe('Owner/admin connection, used for migrations and auth tables'),
+  DATABASE_URL: z
+    .string()
+    .describe(
+      'Owner/admin connection, used for migrations and auth tables; must be SUPERUSER or have BYPASSRLS because the admin pool reads every workspace without app.workspace_id',
+    ),
   APP_DB_ROLE: z
     .string()
     .regex(/^[a-z_][a-z0-9_]{0,62}$/)

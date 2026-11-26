@@ -94,7 +94,7 @@ config:
 
 Check the result with `am doctor` in a pod: the `trusted-proxy-cidrs` row must be `ok`, not the empty-list warning.
 
-Then create the first workspace with `cli bootstrap` (the chart's notes print the command). `DATABASE_URL` is an owner of the database: migrations create the `am_app` role that the application itself uses under row-level security.
+Then create the first workspace with `cli bootstrap` (the chart's notes print the command). `DATABASE_URL` must own the tables **and** be a `SUPERUSER` or have `BYPASSRLS`: migrations create the `am_app` role that the application itself uses under row-level security, while the server's admin pool reads sessions, API tokens and workspaces without `app.workspace_id`, which only a role that bypasses row-level security can see. As a superuser, `ALTER ROLE <the DATABASE_URL role> BYPASSRLS` adds the attribute to an existing role. The Compose `am` role is a superuser already. Startup and `am doctor` (`postgres.admin-role`) refuse or report a role that lacks it.
 
 ## Keys: MASTER_KEY, OpenBao or AWS KMS
 

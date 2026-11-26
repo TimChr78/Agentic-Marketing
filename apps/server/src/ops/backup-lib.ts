@@ -18,6 +18,7 @@ import {
   RESTORE_APPLICATION_NAME,
   type ReplayErasuresAfterMigrateOptions,
   type ReplayErasuresResult,
+  RowsHiddenByRlsError,
   readDataKeySample,
   readErasureLog,
   replayErasuresAfterMigrate,
@@ -361,6 +362,9 @@ async function backupKeyInfo(
       log('the configured key unwraps a data key in this database');
     }
   } catch (err) {
+    // A role that cannot see `data_keys` must not be reported as "the key unwraps nothing" (#1221):
+    // the backup would look verifiable while the trial unseal never read a row.
+    if (err instanceof RowsHiddenByRlsError) throw err;
     log(
       `warning: the configured key does not unwrap a data key in this database (${(err as Error).message}); ` +
         'restoring this backup with it would leave provider and connector secrets unreadable',

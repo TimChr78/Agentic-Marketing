@@ -134,9 +134,12 @@ export function createDb(config: DbConfig): Db {
     ...(config.connectionTimeoutMillis === undefined ? {} : { connectionTimeoutMillis: config.connectionTimeoutMillis }),
     ...(config.queryTimeoutMillis === undefined ? {} : { query_timeout: config.queryTimeoutMillis }),
   };
-  const announced = config.applicationName === undefined ? {} : { application_name: config.applicationName };
-  const admin = new pg.Pool({ connectionString: config.adminUrl, max: 5, ...announced, ...timeouts });
-  const app = new pg.Pool({ connectionString: config.appUrl, max: config.poolSize ?? 20, ...announced, ...timeouts });
+  // node-postgres gives a URL's `?application_name=` precedence over the client option, so a
+  // DATABASE_URL that names another one would hide the server's connections from `am restore`
+  // (#1232). Rewrite both URLs, as every restore connection already does.
+  const announcedUrl = (url: string) => (config.applicationName === undefined ? url : withApplicationName(url, config.applicationName));
+  const admin = new pg.Pool({ connectionString: announcedUrl(config.adminUrl), max: 5, ...timeouts });
+  const app = new pg.Pool({ connectionString: announcedUrl(config.appUrl), max: config.poolSize ?? 20, ...timeouts });
   const onIdleError =
     config.onIdleError ??
     ((err: Error, pool: 'admin' | 'app') => {
