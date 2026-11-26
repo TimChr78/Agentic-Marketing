@@ -13,7 +13,13 @@ import {
   sanitiseOutboxError,
 } from '@agentic-marketing/db';
 import { type EmailRequest, requestEmail } from '@agentic-marketing/email';
-import { type BusEvent, type EventBus, type EventStore, messageEventPayloadSchema } from '@agentic-marketing/events';
+import {
+  type BusEvent,
+  type EventBus,
+  type EventStore,
+  journeyEventPayloadSchema,
+  messageEventPayloadSchema,
+} from '@agentic-marketing/events';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { segmentChangePayloadSchema } from '@agentic-marketing/segments';
 import { logger } from '@agentic-marketing/telemetry';
@@ -105,6 +111,16 @@ async function deliver(deps: OutboxDispatcherDeps, claim: OutboxClaim): Promise<
         { outboxId: claim.id, messageId: decision.messageId, status: decision.status, reason: decision.reason },
         'confirmation e-mail not queued',
       );
+    return;
+  }
+  if (claim.kind === 'journey_event') {
+    const { events } = parseOrPermanent(journeyEventPayloadSchema, claim.payload, 'journey_event');
+    if (events.some((event) => event.workspaceId !== claim.workspaceId))
+      throw new PermanentOutboxError('journey_event payload names another workspace');
+    // The table is a ReplacingMergeTree on (journey, participant, seq, type), and the sweep's stable
+    // operation key already keeps a re-enqueue from adding a second row, so a redelivery of this
+    // batch is harmless (#1244).
+    await deps.events.insertJourneyEvents(events);
     return;
   }
   if (claim.kind === 'segment_change') {

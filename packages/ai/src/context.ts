@@ -66,16 +66,14 @@ export async function personContext(
     .select({ type: schema.identifiers.type, value: schema.identifiers.value })
     .from(schema.identifiers)
     .where(and(eq(schema.identifiers.workspaceId, workspaceId), eq(schema.identifiers.profileId, p.id)));
-  const recent = await events
-    .eventsOf(
-      workspaceId,
-      {
-        anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-        userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
-      },
-      { limit: 20 },
-    )
-    .catch(() => []);
+  const recent = await events.eventsOf(
+    workspaceId,
+    {
+      anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+      userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+    },
+    { limit: 20 },
+  );
   return redact({
     id: p.id,
     traits,

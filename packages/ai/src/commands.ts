@@ -1,7 +1,7 @@
 import { defineCommand } from '@agentic-marketing/commands';
-import { isoDateTime } from '@agentic-marketing/core';
+import { AppError, decodeTimestampCursor, encodeTimestampCursor, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { and, desc, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { classifyCommands, classifyInputForLog } from './classify';
 import { copilotCommands } from './copilot';
@@ -47,15 +47,31 @@ export const listAiCalls = defineCommand({
     profileId: z.string().optional(),
     kind: z.enum(['decide', 'generate', 'copilot', 'test', 'classify', 'check', 'hosted', 'score']).optional(),
     limit: z.number().int().min(1).max(200).default(50),
-    before: isoDateTime('before').optional(),
+    before: isoDateTime('before')
+      .optional()
+      .describe('Deprecated timestamp boundary: rows created strictly before it. Paginate with `cursor`, which keeps ties'),
+    cursor: z.string().max(256).optional().describe('Opaque `nextCursor` from the previous page; omit for the first page'),
   }),
-  output: z.object({ calls: z.array(Call) }),
+  output: z.object({
+    calls: z.array(Call),
+    nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null on the last page'),
+  }),
   permission: 'artifacts:read',
   effect: 'read',
   handler: async (input, ctx) => {
     const c = schema.aiCalls;
+    const cursor = input.cursor ? decodeTimestampCursor(input.cursor) : undefined;
+    if (input.cursor && !cursor) throw new AppError('invalid_input', 'The cursor is not valid. Omit it to start from the first page.');
+    // Compare in the database's timestamp type so microseconds survive the round trip, and break
+    // a tie on the id exactly as the sort order does. A millisecond `before` cannot: every row
+    // that shares the last row's timestamp and sorts after it was skipped (#1243).
+    const boundary = cursor
+      ? or(lt(c.createdAt, sql`${cursor.at}::timestamptz`), and(eq(c.createdAt, sql`${cursor.at}::timestamptz`), lt(c.id, cursor.id)))
+      : input.before
+        ? lt(c.createdAt, sql`${input.before}::timestamptz`)
+        : undefined;
     const rows = await ctx.tx
-      .select()
+      .select({ call: c, cursorAt: sql<string>`to_char(${c.createdAt} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` })
       .from(c)
       .where(
         and(
@@ -63,13 +79,15 @@ export const listAiCalls = defineCommand({
           input.promptId ? eq(c.promptId, input.promptId) : undefined,
           input.profileId ? eq(c.profileId, input.profileId) : undefined,
           input.kind ? eq(c.kind, input.kind) : undefined,
-          input.before ? lt(c.createdAt, new Date(input.before)) : undefined,
+          boundary,
         ),
       )
       .orderBy(desc(c.createdAt), desc(c.id))
-      .limit(input.limit);
+      .limit(input.limit + 1);
+    const page = rows.slice(0, input.limit);
+    const last = page[page.length - 1];
     return {
-      calls: rows.map((r) => ({
+      calls: page.map(({ call: r }) => ({
         id: r.id,
         kind: r.kind,
         status: r.status,
@@ -92,6 +110,7 @@ export const listAiCalls = defineCommand({
         review: r.reviewStatus ? { status: r.reviewStatus, verdict: r.reviewVerdict ?? null, note: r.reviewNote ?? null } : null,
         createdAt: r.createdAt.toISOString(),
       })),
+      nextCursor: rows.length > input.limit && last ? encodeTimestampCursor({ at: last.cursorAt, id: last.call.id }) : null,
     };
   },
 });

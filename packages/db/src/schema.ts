@@ -983,6 +983,8 @@ export const journeyParticipants = pgTable(
     converted: boolean('converted').notNull().default(false),
     context: jsonb('context').$type<Record<string, unknown>>().notNull().default({}),
     error: text('error'),
+    /** Consecutive failed advances of the current step; reset on success (#1240). */
+    attempts: integer('attempts').notNull().default(0),
     enteredAt: ts('entered_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },

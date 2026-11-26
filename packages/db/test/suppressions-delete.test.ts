@@ -119,6 +119,7 @@ describe.skipIf(!hasTestDatabase())('0088 grants DELETE on suppressions with row
       'erasure_keys',
       'erasure_generations',
       'data_keys',
+      'journey_participants',
       'journey_processed_events',
       'writer_protocol',
       'segment_memberships',

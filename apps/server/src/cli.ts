@@ -63,7 +63,7 @@ Set the new key first and keep the old one in MASTER_KEY_PREVIOUS.`,
   outbox: `usage: am outbox [--kind KIND] [--permanent]
 
 Requeues transactional-outbox rows that failed after their retries: all of them, or only
-KIND (message_event, doi_send, segment_change). Each row goes back to pending with a fresh attempt budget;
+KIND (message_event, journey_event, doi_send, segment_change). Each row goes back to pending with a fresh attempt budget;
 the scheduler role publishes it. Permanent failures (a payload the dispatcher cannot parse)
 are skipped; --permanent requeues them too.`,
   loadtest: `usage: am loadtest [--profiles N] [--keep]

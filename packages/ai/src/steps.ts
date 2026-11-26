@@ -233,9 +233,18 @@ export async function finishIn(
   // same profile lock first, and the profile row's foreign key cascades the score deletion.
   let waiting = true;
   if (c.kind === 'score') {
-    // The call keeps its own profile id even when a merge has folded it away (the score is stored
-    // under it), so lock that row whether or not it is the person today — before the participant.
-    const lockedProfile = c.profileId ? await lockProfileRows(tx, c.workspaceId, [c.profileId], { includeMerged: true }) : [];
+    // The call keeps its own profile id even when a merge has folded it away, so resolve the
+    // person today before locking (#1241). Locking the stored alias and then its survivor would
+    // invert the shared ascending-id profile lock order of a merge (#1011); lock only the
+    // canonical row. A merge that commits while this waits leaves no unmerged row to lock, so
+    // follow the new survivor once more instead of treating the step as too late.
+    let person = c.profileId ? await canonicalProfile(tx, c.workspaceId, c.profileId) : null;
+    let lockedProfile: string[] = [];
+    for (let follow = 0; person && follow < 4; follow++) {
+      lockedProfile = await lockProfileRows(tx, c.workspaceId, [person.id]);
+      if (lockedProfile.length) break;
+      person = await canonicalProfile(tx, c.workspaceId, person.id);
+    }
     const lockedParticipant = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants
         WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'

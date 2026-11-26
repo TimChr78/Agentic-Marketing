@@ -180,7 +180,7 @@ export const score = defineCommand({
     const first = result.answers[0];
     let stored: { profileId: string; key: string; value: number; expiresAt: string } | null = null;
     if (input.store && input.profileId && first) {
-      const expiresAt = await storeProfileScore(db, ctx.principal.workspaceId, {
+      const storedScore = await storeProfileScore(db, ctx.principal.workspaceId, {
         profileId: input.profileId,
         key: input.store.key,
         answer: first,
@@ -189,10 +189,16 @@ export const score = defineCommand({
         callId,
         ttlHours: input.store.ttlHours,
       });
-      // The profile may have been erased between the consent check and the write; the lock in
-      // insertProfileScore then finds no row and no score is stored.
-      if (expiresAt) {
-        stored = { profileId: input.profileId, key: input.store.key, value: first.probability, expiresAt: expiresAt.toISOString() };
+      // The profile may have been erased between the consent check and the write; insertProfileScore
+      // then finds no canonical row and no score is stored. A merge meanwhile writes against the
+      // survivor, which is the id reported back (#1241).
+      if (storedScore) {
+        stored = {
+          profileId: storedScore.profileId,
+          key: input.store.key,
+          value: first.probability,
+          expiresAt: storedScore.expiresAt.toISOString(),
+        };
       }
     }
     return {

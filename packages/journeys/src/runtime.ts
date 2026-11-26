@@ -1,7 +1,7 @@
 import { artifactTypes, canonicalPeople, DEFAULT_PURPOSES, type JourneyDefinition, publishedSingleton } from '@agentic-marketing/artifacts';
 import { type PublishedCampaign, publishedCampaigns } from '@agentic-marketing/campaigns';
-import { newId, safeErrorText, sleep } from '@agentic-marketing/core';
-import { assertJourneyEventAgeBound, type Db, JOURNEY_EVENT_MAX_AGE_DAYS, schema, type Tx } from '@agentic-marketing/db';
+import { AppError, hashValue, newId, safeErrorText, sleep } from '@agentic-marketing/core';
+import { assertJourneyEventAgeBound, type Db, enqueueOutbox, JOURNEY_EVENT_MAX_AGE_DAYS, schema, type Tx } from '@agentic-marketing/db';
 import { fingerprintParts, requestEmail, requestPush, requestSms, sendRequestHash } from '@agentic-marketing/email';
 import type { EventStore, JourneyEvent } from '@agentic-marketing/events';
 import {
@@ -9,6 +9,7 @@ import {
   consentStateOf,
   currentConsent,
   dropErasedProfileRows,
+  erasedProfileIdsInTx,
   lockProfileRows,
   purposeAllowed,
   type ResolvedEvent,
@@ -39,6 +40,10 @@ const graphs = new Map<string, Graph>();
 
 /** How many due candidates one sweep may examine, per unit of its batch. */
 const SCAN_LIMIT_FACTOR = 10;
+/** Advance attempts before a participant whose step failed transiently is failed for good (#1240). */
+const MAX_ADVANCE_ATTEMPTS = 3;
+/** Backoff after a transient advance failure: 15 s, then 30 s — a store restart is usually shorter. */
+const advanceRetryDelayMs = (attempts: number) => Math.min(300_000, 15_000 * 2 ** Math.max(0, attempts - 1));
 /**
  * Where each workspace's last bounded scan stopped, so the next sweep continues past a run of
  * people another transaction is writing instead of re-examining them (and never walks a whole
@@ -701,6 +706,42 @@ async function applyEffect(
 }
 
 /**
+ * Queues a sweep's journey events in the same transaction as the participant rows (#1244). One
+ * outbox row per journey carries them; the stable operation key makes a re-enqueue a no-op and the
+ * dispatcher retries the ClickHouse insert, so a failed write no longer loses a split take, a goal
+ * conversion or a step count. The payload's profile ids let an erasure's outbox cleanup remove it.
+ */
+async function enqueueJourneyEvents(tx: Tx, workspaceId: string, events: JourneyEvent[]): Promise<void> {
+  if (!events.length) return;
+  // An erasure may already have recorded the person. The direct write filtered these rows before it
+  // ran; the outbox row names the profile id, so keep them out before a dispatcher can publish them.
+  const erased = await erasedProfileIdsInTx(
+    tx,
+    workspaceId,
+    events.map((event) => event.profileId),
+  );
+  const kept = erased.size ? events.filter((event) => !erased.has(event.profileId)) : events;
+  if (!kept.length) return;
+  const byJourney = new Map<string, JourneyEvent[]>();
+  for (const event of kept) {
+    const group = byJourney.get(event.journeyId);
+    if (group) group.push(event);
+    else byJourney.set(event.journeyId, [event]);
+  }
+  for (const [journeyId, group] of byJourney) {
+    // The event identity is the whole content of the row, so replaying the same batch enqueues
+    // nothing new; ClickHouse's replacing key collapses a duplicate even if two rows survive.
+    const identities = group.map((event) => `${event.participantId}:${event.seq}:${event.type}:${event.at}`).sort();
+    await enqueueOutbox(tx, workspaceId, {
+      kind: 'journey_event',
+      operationKey: `journey-event:${hashValue({ journeyId, events: identities })}`,
+      subjectRef: journeyId,
+      payload: { events: group },
+    });
+  }
+}
+
+/**
  * One sweep: per workspace, lock the due people's profile rows, claim their due participants,
  * advance them, apply effects and write states in one transaction. Returns how many participants
  * moved. See the row order in `packages/profiles/src/identity.ts`: profile rows are locked first and
@@ -709,8 +750,15 @@ async function applyEffect(
 export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; now?: () => Date } = {}): Promise<number> {
   const now = opts.now ?? (() => new Date());
   const batch = opts.batch ?? 200;
+  // The workspace whose people have been due longest goes first (#1245). A plain `DISTINCT
+  // workspace_id LIMIT 100` came back in plan order (by workspace_id), so a workspace with a
+  // backlog kept its slot every round and every workspace past the first 100 starved.
   const { rows } = await db.admin.query<{ workspace_id: string }>(
-    `SELECT DISTINCT workspace_id FROM journey_participants WHERE status IN ('ready', 'waiting') AND due_at <= $1 LIMIT 100`,
+    `SELECT workspace_id FROM journey_participants
+     WHERE status IN ('ready', 'waiting') AND due_at <= $1
+     GROUP BY workspace_id
+     ORDER BY min(due_at), workspace_id
+     LIMIT 100`,
     [now()],
   );
   let moved = 0;
@@ -856,22 +904,35 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           });
         } catch (err) {
           const error = journeyErrorText(err);
-          await tx
-            .update(schema.journeyParticipants)
-            .set({ status: 'failed', error, dueAt: null, waitingUntil: null, updatedAt: t })
-            .where(eq(schema.journeyParticipants.id, p.id));
-          journeyEvents.push({
-            workspaceId: ws,
-            journeyId: p.journeyId,
-            version: p.version,
-            participantId: p.id,
-            profileId: p.profileId,
-            node: p.node,
-            type: 'failed',
-            seq: p.seq + 1,
-            at: t.toISOString(),
-            detail: error,
-          });
+          // A broken condition (an AppError('invalid_input'): an unknown purpose, a personal-data
+          // trait, a segment loop) is permanent. Anything else is a transient store or database
+          // failure: leave the participant where it is, due after a backoff, and fail it only when
+          // the retry budget is spent (#1240, docs/architecture/journeys-and-editors.md:63).
+          const attempts = p.attempts + 1;
+          const broken = err instanceof AppError && err.code === 'invalid_input';
+          if (broken || attempts >= MAX_ADVANCE_ATTEMPTS) {
+            await tx
+              .update(schema.journeyParticipants)
+              .set({ status: 'failed', error, attempts, dueAt: null, waitingUntil: null, updatedAt: t })
+              .where(eq(schema.journeyParticipants.id, p.id));
+            journeyEvents.push({
+              workspaceId: ws,
+              journeyId: p.journeyId,
+              version: p.version,
+              participantId: p.id,
+              profileId: p.profileId,
+              node: p.node,
+              type: 'failed',
+              seq: p.seq + 1,
+              at: t.toISOString(),
+              detail: error,
+            });
+          } else {
+            await tx
+              .update(schema.journeyParticipants)
+              .set({ attempts, error, dueAt: new Date(t.getTime() + advanceRetryDelayMs(attempts)), updatedAt: t })
+              .where(eq(schema.journeyParticipants.id, p.id));
+          }
           continue;
         }
         const details = new Map<string, string>();
@@ -884,7 +945,7 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
         }
         await tx
           .update(schema.journeyParticipants)
-          .set({ ...result.state, ...(flags.wakeNow ? { dueAt: t } : {}), updatedAt: t })
+          .set({ ...result.state, attempts: 0, error: null, ...(flags.wakeNow ? { dueAt: t } : {}), updatedAt: t })
           .where(eq(schema.journeyParticipants.id, p.id));
         if (p.seq === 0)
           journeyEvents.push({
@@ -913,12 +974,11 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
             detail: details.get(`${s.node}:${s.seq}`) ?? s.detail,
           });
       }
+      // Same transaction as the participant rows: a committed step and its events are one unit
+      // (#1244). Nothing here does network I/O; the dispatcher publishes afterwards.
+      await enqueueJourneyEvents(tx, ws, journeyEvents);
       return list.length;
     });
-    if (journeyEvents.length) {
-      const kept = await dropErasedProfileRows(db, ws, journeyEvents);
-      if (kept.length) await deps.events.insertJourneyEvents(kept).catch((err) => logger.warn({ err }, 'journey events not stored'));
-    }
   }
   return moved;
 }

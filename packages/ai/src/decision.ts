@@ -5,6 +5,7 @@ import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
+import { canonicalProfile } from '@agentic-marketing/profiles';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, sql } from 'drizzle-orm';
@@ -435,6 +436,12 @@ export async function decisionCall(
   return result;
 }
 
+/** A score that was written, under the canonical person and its expiry. */
+export interface StoredProfileScore {
+  profileId: string;
+  expiresAt: Date;
+}
+
 /** Writes the newest value of a named score for a person, with its TTL, in the caller's transaction. */
 export async function insertProfileScore(
   tx: Tx,
@@ -448,12 +455,17 @@ export async function insertProfileScore(
     callId: string | null;
     ttlHours: number;
   },
-): Promise<Date | null> {
+): Promise<StoredProfileScore | null> {
+  // Follow a merge that happened before this write (#1144, #1241). Readers look only at the
+  // canonical id, and a merge only moves the rows that exist when it runs, so a score inserted
+  // under an already folded-away id would never be read again.
+  const person = await canonicalProfile(tx, workspaceId, score.profileId);
+  if (!person) return null;
   // Lock and recheck the profile in the score's own transaction. the existing erasure DELETE locks the profile
   // before its foreign key cascades to profile_scores, so an erasure that got there first leaves no profile to lock
   // and no score is written; an erasure that arrives later waits and then deletes this row.
   const locked = await tx.execute<{ id: string }>(
-    sql`SELECT id FROM profiles WHERE workspace_id = ${workspaceId} AND id = ${score.profileId} FOR UPDATE`,
+    sql`SELECT id FROM profiles WHERE workspace_id = ${workspaceId} AND id = ${person.id} AND merged_into IS NULL FOR UPDATE`,
   );
   if (!locked.rows.length) return null;
   const expiresAt = new Date(Date.now() + score.ttlHours * 3_600_000);
@@ -461,7 +473,7 @@ export async function insertProfileScore(
     .insert(schema.profileScores)
     .values({
       workspaceId,
-      profileId: score.profileId,
+      profileId: person.id,
       key: score.key,
       value: score.answer.probability,
       confidence: score.answer.confidence ?? null,
@@ -484,7 +496,7 @@ export async function insertProfileScore(
         expiresAt,
       },
     });
-  return expiresAt;
+  return { profileId: person.id, expiresAt };
 }
 
 /** Writes the newest value of a named score for a person, with its TTL. */
@@ -534,16 +546,14 @@ export async function nonPersonalState(
     .select({ type: schema.identifiers.type, value: schema.identifiers.value })
     .from(schema.identifiers)
     .where(and(eq(schema.identifiers.workspaceId, workspaceId), eq(schema.identifiers.profileId, profileId)));
-  const recent = await events
-    .eventsOf(
-      workspaceId,
-      {
-        anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-        userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
-      },
-      { limit: 100 },
-    )
-    .catch(() => []);
+  const recent = await events.eventsOf(
+    workspaceId,
+    {
+      anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+      userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+    },
+    { limit: 100 },
+  );
   const counts: Record<string, number> = {};
   for (const e of recent) if (e.name) counts[e.name] = (counts[e.name] ?? 0) + 1;
   const state = {
