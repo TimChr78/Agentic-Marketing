@@ -342,8 +342,8 @@ describe.skipIf(!hasTestDatabase())('a send that finished after the stale sweep 
   }, 120_000);
 });
 
-describe.skipIf(!hasTestDatabase())('a message the stale sweep took before delivery (#1148)', () => {
-  it('is not sent and keeps the sweep’s outcome when the worker reaches it later', async () => {
+describe.skipIf(!hasTestDatabase())('a message the stale sweep took before delivery (#1148, #1237)', () => {
+  it('responds to a slow send by delivering the messages that waited behind it, not by failing them (#1237)', async () => {
     const first = await queuedMessage(await person('pre-first'), '2026-01-07T00:00:00Z');
     const second = await queuedMessage(await person('pre-second'), '2026-01-07T00:00:01Z');
     await d.db.admin.query(`DELETE FROM messages WHERE workspace_id = $1 AND status = 'queued' AND id NOT IN ($2, $3)`, [
@@ -362,30 +362,36 @@ describe.skipIf(!hasTestDatabase())('a message the stale sweep took before deliv
       calls++;
       reachedProvider();
       await held;
-      return new Response(JSON.stringify({ MessageID: 'pm-first' }), { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ MessageID: `pm-${calls}` }), { status: 200, headers: { 'content-type': 'application/json' } });
     }) as typeof fetch;
 
     const round = deliverRound(d.db, { kp, events: {} as EventStore, email: { ...email(), adapterDeps: { fetch: fetchImpl } } });
     await sending;
-    // Both rows were claimed; the first is still on the wire. Make the second look stuck and let
-    // another round's sweep settle it before the first round reaches it.
+    // The first message holds its provider call; the second one waited behind it and was never
+    // handed to a provider. Its lease starts only when the worker reaches it (#1237), so it is
+    // still `queued`, not a `sending` row another round could call `unknown_outcome`.
+    expect(await message(second)).toMatchObject({ status: 'queued', attempts: 0 });
+    // Ten minutes pass while the first is on the wire; make the second look as old as it would.
     await d.db.admin.query(`UPDATE messages SET updated_at = now() - interval '11 minutes' WHERE workspace_id = $1 AND id = $2`, [
       d.workspace,
       second,
     ]);
-    await deliverRound(d.db, { kp, events: {} as EventStore, email: email() });
+    // Another worker's round. It has nothing to sweep and sends the waiting message itself.
+    const secondFetch = (async () => {
+      calls++;
+      return new Response(JSON.stringify({ MessageID: 'pm-second' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    await deliverRound(d.db, { kp, events: {} as EventStore, email: { ...email(), adapterDeps: { fetch: secondFetch } } });
 
     releaseSend();
     await round;
 
-    // The provider was called for the first message only: the swept second one is skipped.
-    expect(calls).toBe(1);
+    // Both messages reached the provider and neither ended as unknown_outcome.
+    expect(calls).toBe(2);
     expect((await message(first)).status).toBe('sent');
-    const swept = await message(second);
-    expect(swept).toMatchObject({ status: 'failed', next_attempt_at: null });
-    expect(swept.reason).toMatch(/^unknown_outcome: /);
-    // No phantom `suppressed`/`queued`/`sent` beside the sweep's `failed`.
-    expect((await decisionEvents(second)).map((event) => event.type)).toEqual(['failed']);
+    const delivered = await message(second);
+    expect(delivered.status).toBe('sent');
+    expect(delivered.reason).toBeNull();
   }, 120_000);
 
   it('does not revert a swept SMS message to queued or suppressed', async () => {

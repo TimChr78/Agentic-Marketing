@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import http from 'node:http';
 import { SSO_SAML_CALLBACK_MAX_BODY, SSO_SAML_MAX_RESPONSE_BYTES } from '@agentic-marketing/auth';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { SCIM_MAX_BODY } from '../src/http/scim';
 import { PASSWORD, startTestServer, testPort, type User } from './harness';
 import { findUnboundedRoutes } from './route-sweep';
 
@@ -385,22 +386,44 @@ describe('e-mail delivery webhook (#377)', () => {
   });
 });
 
-describe('SCIM (#377)', () => {
+describe('SCIM (#377, #1236)', () => {
   it('refuses an oversized body with a correct Content-Length before the bearer check', async () => {
     const res = await fetch(`${t.base}/scim/v2/Users`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ userName: 'a@example.com', pad: oversize(2 * 1024 * 1024) }),
+      body: JSON.stringify({ userName: 'a@example.com', pad: oversize(SCIM_MAX_BODY + 1024) }),
     });
     expect(res.status).toBe(413);
     expect(await res.json()).toMatchObject({ status: '413' });
   });
 
   it('refuses an oversized chunked body without Content-Length', async () => {
-    const total = 8 * 1024 * 1024;
+    const total = SCIM_MAX_BODY + 2 * 1024 * 1024;
     const res = await postChunked('/scim/v2/Users', { total, headers: { authorization: 'Bearer not-a-token' } });
     expect(res.status).toBe(413);
     expect(res.writtenAtResponse).toBeLessThan(total);
+  });
+
+  it('does not refuse a group at the size its command accepts (#1236)', async () => {
+    // `scimUpsertGroup` accepts 50,000 members; a provider that also sends each member's display
+    // name (Okta and Entra ID do) needs about 6 MB for that. The guard must be sized for the
+    // schema, not for a bare list of ids (#1236).
+    const members = Array.from({ length: 50_000 }, (_, i) => ({
+      value: `usr_${i.toString(16).padStart(28, '0')}`,
+      display: `Person ${i}`,
+      type: 'User',
+    }));
+    const body = JSON.stringify({ displayName: 'All employees', members });
+    const res = await fetch(`${t.base}/scim/v2/Groups`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/scim+json', authorization: 'Bearer not-a-token' },
+      body,
+    });
+    // Past the body guard: the bearer check is the next gate, and it refuses the dummy token. A
+    // 413 here is the defect (#1236): about 4 MB is the body the schema itself allows.
+    expect(res.status).toBe(401);
+    // The guard stays sized for that body, so a later schema change that outgrows it fails here.
+    expect(body.length).toBeLessThan(SCIM_MAX_BODY);
   });
 
   it('still checks the token for a normal body', async () => {

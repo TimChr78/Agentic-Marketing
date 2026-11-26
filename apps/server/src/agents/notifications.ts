@@ -3,7 +3,7 @@ import { activeMandate, artifactTypes } from '@agentic-marketing/artifacts';
 import { sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, asc, desc, eq, gt, inArray, isNotNull, notInArray } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, sql } from 'drizzle-orm';
 
 // Sponsor notifications and agent digests (#226, ADR-0016). The scheduler reads the agent action
 // ledger from a stored cursor: a hold, a guardrail/limit escalation or a refusal is e-mailed to the
@@ -13,6 +13,8 @@ import { and, asc, desc, eq, gt, inArray, isNotNull, notInArray } from 'drizzle-
 
 const DAY_MS = 86_400_000;
 const DIGEST_WINDOW_MS = DAY_MS;
+/** How far back an open digest window may reach: a window no one could close stays bounded (#1227). */
+const MAX_DIGEST_LOOKBACK_MS = 7 * DAY_MS;
 const EXPIRY_WINDOW_MS = 3 * DAY_MS;
 const MAX_ACTIONS_PER_RUN = 500;
 
@@ -206,6 +208,21 @@ async function notifyEvents(
     const mandate = await activeMandate(tx, agentId, now);
     const recipients = [...new Set([agent.sponsorUserId, ...(mandate?.content.escalation.userIds ?? [])])];
     if (!recipients.length) continue;
+    // A recipient who is not a workspace member can never be mailed: `sendMemberEmails` refuses
+    // that address for good. Counting them as a failed recipient held the ledger cursor before
+    // their first action until a mandate or sponsor changed, and once 500 newer rows followed it,
+    // nobody was told about anything (#1234). They are not a recipient for this action, so the
+    // cursor may pass it once the members were reached.
+    const members = new Set(
+      (
+        await tx
+          .select({ userId: schema.workspaceMembers.userId })
+          .from(schema.workspaceMembers)
+          .where(and(eq(schema.workspaceMembers.workspaceId, workspaceId), inArray(schema.workspaceMembers.userId, recipients)))
+      ).map((row) => row.userId),
+    );
+    const reachable = recipients.filter((userId) => members.has(userId));
+    if (!reachable.length) continue;
     const lines: EventLine[] = [];
     for (const action of rows) {
       const approval =
@@ -221,7 +238,7 @@ async function notifyEvents(
     // sweeps (a failure, a new action), and recording each delivered action keeps that retry from
     // re-sending what a different batch already covered for this recipient (#276).
     const pending = new Map<string, ActionRow[]>();
-    for (const userId of recipients) {
+    for (const userId of reachable) {
       const rowsForUser = rows.filter((action) => !delivered.has(deliveryKey(action.id, userId)));
       if (rowsForUser.length) pending.set(userId, rowsForUser);
     }
@@ -318,6 +335,54 @@ ${list('Refused', d.refusals.map(actionLine))}
   return { subject, text: text.join('\n'), html };
 }
 
+/**
+ * Where one sponsor's next digest begins. A row that failed or was suppressed leaves its window
+ * open, so the next sweep retries that window with its own key (#1184); a row the provider accepted
+ * closed it at the time it was sent, so the next digest starts there. One sponsor's window never
+ * holds another's (#1227).
+ */
+interface DigestWindow {
+  start: Date;
+  open: boolean;
+  key: string;
+}
+
+/** The window record of every sponsor who has had a digest in this workspace. */
+async function digestWindows(tx: Tx, workspaceId: string): Promise<Map<string, DigestWindow>> {
+  const prefix = `agent-digest:${workspaceId}:`;
+  // The newest row per sponsor, from the message log's (workspace, key) unique index. A sponsor
+  // accumulates one row per digest day, so reading only the newest keeps the sweep's cost flat.
+  const { rows } = await tx.execute<{ key: string; status: string; data: Record<string, unknown> | null }>(sql`
+    SELECT DISTINCT ON (split_part(idempotency_key, ':', 3)) idempotency_key AS key, status, data
+    FROM messages
+    WHERE workspace_id = ${workspaceId}
+      AND idempotency_key >= ${prefix}
+      AND idempotency_key < ${`${prefix}\uffff`}
+    ORDER BY split_part(idempotency_key, ':', 3), created_at DESC`);
+  const windows = new Map<string, DigestWindow>();
+  for (const row of rows) {
+    // `agent-digest:<workspace>:<sponsor>:<window start>`; the ids never contain a colon, the
+    // timestamp does. Rows written before the window key existed carry the UTC day instead.
+    const rest = row.key.slice(prefix.length);
+    // The sponsor id (a colon-free id) comes first; the rest is the timestamp, which has colons.
+    const at = rest.indexOf(':');
+    if (at <= 0) continue;
+    const keyStart = new Date(rest.slice(at + 1));
+    if (Number.isNaN(keyStart.getTime())) continue;
+    const open = row.status === 'failed' || row.status === 'suppressed';
+    // The row records the window it covered, so the next one begins where this ended rather than
+    // at the wall clock of the send: a pass with a test clock, or a late one, stays consistent.
+    const window = row.data?.digestWindow as { start?: string; end?: string } | undefined;
+    const marked = new Date((open ? window?.start : window?.end) ?? '');
+    windows.set(rest.slice(0, at), {
+      start: Number.isNaN(marked.getTime()) ? keyStart : marked,
+      open,
+      key: row.key,
+    });
+  }
+  return windows;
+}
+
 async function notifyDigest(
   deps: AgentNotificationDeps,
   tx: Tx,
@@ -325,10 +390,20 @@ async function notifyDigest(
   cursor: typeof schema.agentNotificationCursor.$inferSelect,
   now: Date,
 ): Promise<{ sent: number; at: Date | null }> {
-  if (cursor.lastDigestAt && now.getTime() - cursor.lastDigestAt.getTime() < DAY_MS) return { sent: 0, at: null };
-  // The window starts where the last complete digest ended, so a retry hours later still covers
-  // the same actions, and a late pass leaves no gap (#1184). A first digest looks back one day.
-  const since = cursor.lastDigestAt ?? new Date(now.getTime() - DIGEST_WINDOW_MS);
+  // A first digest looks back one day; the cursor is the baseline for a sponsor with no row yet.
+  const base = cursor.lastDigestAt ?? new Date(now.getTime() - DIGEST_WINDOW_MS);
+  const windows = await digestWindows(tx, workspaceId);
+  const windowOf = (sponsor: string): DigestWindow => windows.get(sponsor) ?? { start: base, open: false, key: '' };
+  const due = (start: Date) => now.getTime() - start.getTime() >= DIGEST_WINDOW_MS;
+  // Nothing is due while every window is closed and younger than a day, and the baseline is too:
+  // the sweep does no ledger work on the four out of five minutes that are not a digest minute.
+  if (![...windows.values()].some((window) => window.open || due(window.start)) && !due(base)) return { sent: 0, at: null };
+
+  // The window starts where a sponsor's last digest ended, so a retry hours later still covers the
+  // same actions and a late pass leaves no gap (#1184). A window kept open by a failure is bounded,
+  // so a sponsor who can never be mailed cannot make every sweep re-read the whole ledger (#1227).
+  const oldest = Math.min(base.getTime(), ...[...windows.values()].map((window) => window.start.getTime()));
+  const since = new Date(Math.max(oldest, now.getTime() - MAX_DIGEST_LOOKBACK_MS));
   const recent = (
     await tx
       .select()
@@ -344,85 +419,56 @@ async function notifyDigest(
     .select()
     .from(schema.agents)
     .where(inArray(schema.agents.id, [...byAgent.keys()]));
-  const digests: AgentDigest[] = [];
+  const bySponsor = new Map<string, AgentDigest[]>();
   for (const agent of agents) {
-    const actions = byAgent.get(agent.id) ?? [];
+    // Each sponsor is cut at their own window, so one sponsor being behind the others costs only
+    // that sponsor the extra lines (#1227).
+    const window = windowOf(agent.sponsorUserId);
+    const actions = (byAgent.get(agent.id) ?? []).filter((action) => action.at > window.start);
+    if (!actions.length) continue;
     const counts = { allow: 0, hold: 0, ask: 0, deny: 0 };
     for (const a of actions) counts[a.decision]++;
     const holds: AgentDigest['holds'] = [];
     for (const action of actions.filter((a) => a.decision === 'hold'))
       holds.push({ action, approval: await approvalForAction(tx, action) });
-    digests.push({
+    const digest: AgentDigest = {
       agent,
       counts,
       autonomous: actions.filter((a) => a.decision === 'allow' && a.ok),
       holds,
       refusals: actions.filter((a) => a.decision === 'deny'),
-    });
+    };
+    bySponsor.set(agent.sponsorUserId, [...(bySponsor.get(agent.sponsorUserId) ?? []), digest]);
   }
-  if (!digests.length) return { sent: 0, at: null };
 
-  const bySponsor = new Map<string, AgentDigest[]>();
-  for (const d of digests) bySponsor.set(d.agent.sponsorUserId, [...(bySponsor.get(d.agent.sponsorUserId) ?? []), d]);
-  // The digest is keyed by the window it covers, not by the UTC day of `now` (#1184). The window
-  // starts at the last completed digest, which a partial failure does not advance, so a retry of the
-  // same window reuses its key and skips the sponsors whose mail already went out, even when the
-  // retry crosses UTC midnight. A cursor with no digest yet (a hand-primed or pre-feature row) has
-  // no window to key on and keeps the old per-day key for that pass.
-  const windowStart = cursor.lastDigestAt;
-  const digestKey = (sponsor: string) =>
-    windowStart
-      ? `agent-digest:${workspaceId}:${sponsor}:${windowStart.toISOString()}`
-      : `agent-digest:${workspaceId}:${sponsor}:${now.toISOString().slice(0, 10)}`;
-  // Digests sent before the window key existed were keyed by the UTC day of the pass. A pass for
-  // this window can only have run from a day after the last digest up to `now`, so those two days'
-  // keys are checked as well: an upgrade in the middle of a failed pass must not mail the sponsors
-  // that already got the digest again. An older day key belongs to the previous window and is
-  // ignored, so it cannot swallow today's digest.
-  const keyedTo = new Map<string, string>();
-  for (const sponsor of bySponsor.keys()) {
-    const key = digestKey(sponsor);
-    keyedTo.set(key, sponsor);
-    if (!windowStart) continue;
-    for (const at of [new Date(windowStart.getTime() + DIGEST_WINDOW_MS), now])
-      keyedTo.set(`agent-digest:${workspaceId}:${sponsor}:${at.toISOString().slice(0, 10)}`, sponsor);
-  }
-  // A message row for a key of this window that is not failed or suppressed is that record: a
-  // `delivered` or `bounced` webhook means the provider accepted it, not that it needs resending.
-  const mailed = new Set(
-    (
-      await tx
-        .select({ idempotencyKey: schema.messages.idempotencyKey })
-        .from(schema.messages)
-        .where(
-          and(
-            eq(schema.messages.workspaceId, workspaceId),
-            inArray(schema.messages.idempotencyKey, [...keyedTo.keys()]),
-            notInArray(schema.messages.status, ['failed', 'suppressed']),
-          ),
-        )
-    ).map((row) => keyedTo.get(row.idempotencyKey)!),
-  );
   let sent = 0;
-  let complete = true;
+  let attempted = false;
   for (const [sponsor, own] of bySponsor) {
-    const key = digestKey(sponsor);
-    if (mailed.has(sponsor)) continue;
+    const window = windowOf(sponsor);
+    if (!due(window.start)) continue;
+    attempted = true;
+    // A retry of an open window reuses its exact key, so the sponsor gets one digest per window
+    // even when the retry crosses UTC midnight (#1184).
+    const key = window.open ? window.key : `agent-digest:${workspaceId}:${sponsor}:${window.start.toISOString()}`;
     const content = digestEmail(deps.publicUrl, own);
     const results = await sendMemberEmails(tx, deps, workspaceId, [
       {
         userId: sponsor,
         idempotencyKey: key,
         ...content,
-        data: { digest: own.map((d) => ({ agentId: d.agent.id, counts: d.counts })) },
+        data: {
+          digest: own.map((d) => ({ agentId: d.agent.id, counts: d.counts })),
+          // Where this digest's window began and ended, so the next one starts here even when the
+          // pass runs on a clock of its own (a test) or late (#1184, #1227).
+          digestWindow: { start: window.start.toISOString(), end: now.toISOString() },
+        },
       },
     ]);
-    // A failure keeps lastDigestAt where it is, so the next sweep retries this sponsor with the
-    // same key; the successful sponsors above are skipped by their sent message rows.
     if (results.every((r) => r.status === 'sent')) sent++;
-    else complete = false;
   }
-  return { sent, at: complete ? now : null };
+  // The baseline moves on even when a sponsor's mail failed: their own row keeps that window open
+  // for a retry, and the others must not wait a day for it (#1227).
+  return { sent, at: attempted ? now : null };
 }
 
 async function notifyExpiry(
@@ -521,10 +567,18 @@ async function notifyWorkspace(deps: AgentNotificationDeps, workspaceId: string,
     }
     if (!cursor) return null;
 
+    // Only the decisions this path announces are read, so a burst of drafts or allows cannot fill
+    // the window and hide a hold behind it (#1234). The digest reads the ledger by time on its own.
     const actions = await tx
       .select()
       .from(schema.agentActions)
-      .where(and(eq(schema.agentActions.workspaceId, workspaceId), gt(schema.agentActions.id, cursor.lastActionId)))
+      .where(
+        and(
+          eq(schema.agentActions.workspaceId, workspaceId),
+          gt(schema.agentActions.id, cursor.lastActionId),
+          inArray(schema.agentActions.decision, ['hold', 'ask', 'deny']),
+        ),
+      )
       .orderBy(asc(schema.agentActions.id))
       .limit(MAX_ACTIONS_PER_RUN);
     return { cursor, actions };

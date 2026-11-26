@@ -437,6 +437,40 @@ describe('SCIM account safety (#1129)', () => {
     expect((await off.json()).active).toBe(false);
   });
 
+  it('answers 409 uniqueness when a replace takes an address another account already holds (#1233)', async () => {
+    const w = await scimWorkspace();
+    const original = `scim-kept-${++unique}-${Date.now()}@example.test`;
+    const created = await w.call('/Users', {
+      method: 'POST',
+      body: JSON.stringify({ userName: original, displayName: 'Provisioned Person', active: true }),
+    });
+    expect(created.status).toBe(201);
+    const provisioned = await created.json();
+
+    // An account that already exists in this installation, unknown to this workspace, holds the
+    // address the replace asks for. Create answers 409 `uniqueness` for that (#1129); replace must
+    // not let the unique index turn it into a 500.
+    const other = await t.signUp(`scim-taken-${++unique}-${Date.now()}@example.test`);
+    const replace = await w.call(`/Users/${provisioned.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ userName: other.email, displayName: 'Provisioned Person', active: true }),
+    });
+    expect(replace.status).toBe(409);
+    expect((await replace.json()).scimType).toBe('uniqueness');
+
+    // Neither account's sign-in address changed.
+    const addresses = await t.srv.db.admin.query<{ id: string; email: string }>(
+      'SELECT id, email FROM "user" WHERE id IN ($1, $2) ORDER BY id',
+      [provisioned.id, other.id],
+    );
+    expect(addresses.rows).toEqual(
+      expect.arrayContaining([
+        { id: provisioned.id, email: original },
+        { id: other.id, email: other.email.toLowerCase() },
+      ]),
+    );
+  });
+
   it('deprovisions only the calling workspace’s scim_users row for a shared account (#1182)', async () => {
     const a = await scimWorkspace();
     const b = await scimWorkspace();

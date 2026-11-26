@@ -27,6 +27,7 @@ import {
   checkRecipient,
   checkSmsRecipient,
   type Decision,
+  decisionEvent,
   deliveryPolicy,
   type EmailRequest,
   enqueueMessageEvents,
@@ -1755,11 +1756,15 @@ async function sendBatch(db: Db, ws: string, broadcastId: string, deps: Broadcas
         if (!canaryLatestStart || at > canaryLatestStart) canaryLatestStart = at;
       }
       if (windowSkip && d.status === 'queued') {
-        // The gateway queues only eligible people; a window skip is a separate refusal.
-        await tx
+        // The gateway queues only eligible people; a window skip is a separate refusal. It is a
+        // suppression like the control group's, not a failure: the message log and ClickHouse keep
+        // it with the reason, in the same transaction as the status (#1239).
+        const [refused] = await tx
           .update(schema.messages)
           .set({ status: 'suppressed', reason: windowReason, notBefore: null })
-          .where(eq(schema.messages.id, d.messageId));
+          .where(eq(schema.messages.id, d.messageId))
+          .returning();
+        if (refused) await enqueueMessageEvents(tx, ws, [decisionEvent(refused, 'suppressed', windowReason)]);
         skipped++;
         windowSkipped++;
       } else if (d.status === 'queued') {

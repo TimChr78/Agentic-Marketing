@@ -292,6 +292,55 @@ export async function requestEmail(tx: Tx, workspaceId: string, kp: KeyProvider,
 
 const STALE_SENDING_MS = 10 * 60_000;
 
+/** How many workspaces one round visits; a later round continues after them (#1238). */
+const WORKSPACES_PER_ROUND = 100;
+
+/**
+ * The rows a round may claim right now: queued, past their retry back-off and outside any hold.
+ * Written once, because the workspace scan and the per-row claim must use the same predicate: a
+ * workspace whose only rows are held for quiet hours or a send window has no work this round and
+ * must not use one of the round's slots (#1238).
+ */
+const claimable = (alias: string) => `${alias}.status = 'queued'
+    AND ((${alias}.next_attempt_at IS NOT NULL AND ${alias}.next_attempt_at <= now())
+      OR (${alias}.next_attempt_at IS NULL AND ${alias}.updated_at <= now() - make_interval(secs => 30 * ${alias}.attempts * ${alias}.attempts)))
+    AND (${alias}.not_before IS NULL OR ${alias}.not_before <= now())`;
+
+/**
+ * Where the last round's workspace page ended. A page of workspace ids is visited in id order, so
+ * a workspace with due work that falls past the round's bound is served by the next round instead
+ * of never (#1238). Module state, so each worker process walks the ids on its own.
+ */
+let workspaceCursor = '';
+
+/**
+ * The workspaces with work this round, rotated: a workspace holding only rows the claim cannot
+ * take now (a quiet hour, a send window, a retry back-off) neither appears here nor starves the
+ * ones behind it. A `sending` row past its lease is due work too: the sweep must still reach it.
+ */
+async function workspacesWithDueWork(db: Db): Promise<string[]> {
+  const page = async (after: string | null) => {
+    const { rows } = await db.admin.query<{ workspace_id: string }>(
+      `SELECT DISTINCT m.workspace_id FROM messages m
+       WHERE ($1::uuid IS NULL OR m.workspace_id > $1::uuid)
+         AND ((m.status = 'sending' AND m.updated_at < now() - make_interval(secs => ${STALE_SENDING_MS / 1000}))
+           OR (${claimable('m')}))
+       ORDER BY m.workspace_id
+       LIMIT ${WORKSPACES_PER_ROUND}`,
+      [after],
+    );
+    return rows.map((row) => row.workspace_id);
+  };
+  let ids = await page(workspaceCursor || null);
+  if (!ids.length && workspaceCursor) {
+    // Past the last workspace id: start the next round from the beginning.
+    workspaceCursor = '';
+    ids = await page(null);
+  }
+  workspaceCursor = ids.length === WORKSPACES_PER_ROUND ? ids[ids.length - 1]! : '';
+  return ids;
+}
+
 /**
  * One round of the delivery worker: claims queued messages per workspace, re-checks the
  * recipient, renders, sends, and records the outcome. Returns how many it handled.
@@ -300,14 +349,13 @@ export async function deliverRound(
   db: Db,
   deps: { kp: KeyProvider; events: EventStore; email: EmailServices; batch?: number },
 ): Promise<number> {
-  const { rows: workspaces } = await db.admin.query<{ workspace_id: string }>(
-    `SELECT DISTINCT workspace_id FROM messages WHERE status IN ('queued', 'sending') LIMIT 100`,
-  );
+  const batch = deps.batch ?? 50;
+  const workspaces = await workspacesWithDueWork(db);
   let handled = 0;
   // Shared campaign lookups for this batch: the first message of a broadcast or journey in a
   // campaign loads the campaign once, the rest hit the map (never a query per message).
   const utmCache: CampaignUtmCache = new Map();
-  for (const { workspace_id: ws } of workspaces) {
+  for (const ws of workspaces) {
     // A message stuck in "sending" means a worker stopped mid-send: the outcome is unknown, and
     // sending again could duplicate it, so it is marked failed for a person to look at. The status
     // and its decision event commit together (#1098), so reports and guardrails see the same
@@ -350,24 +398,27 @@ export async function deliverRound(
         stale.map((message) => decisionEvent(message, 'failed', reason)),
       );
     });
-    const claimed = await db.withWorkspace(ws, async (tx) => {
-      const res = await tx.execute<{ id: string; channel: string; created_at: string }>(sql`
-        UPDATE messages SET status = 'sending', attempts = attempts + 1, updated_at = now(), next_attempt_at = NULL
-        WHERE (workspace_id, id) IN (
-          SELECT workspace_id, id FROM messages
-          WHERE status = 'queued'
-            AND ((next_attempt_at IS NOT NULL AND next_attempt_at <= now())
-              OR (next_attempt_at IS NULL AND updated_at <= now() - make_interval(secs => 30 * attempts * attempts)))
-            AND (not_before IS NULL OR not_before <= now())
-          ORDER BY created_at LIMIT ${deps.batch ?? 50} FOR UPDATE SKIP LOCKED)
-        RETURNING id, channel, created_at`);
-      // RETURNING does not keep the subquery's order: deliver oldest first, as the claim chose them.
-      return res.rows.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : 1));
+    // The ids this round would like to send, oldest first. Nothing is leased here: a row's lease
+    // starts when the worker begins it, one at a time below (#1237).
+    const candidates = await db.withWorkspace(ws, async (tx) => {
+      const res = await tx.execute<{ id: string; channel: string }>(sql`
+        SELECT m.id, m.channel FROM messages m
+        WHERE m.workspace_id = ${ws} AND ${sql.raw(claimable('m'))}
+        ORDER BY m.created_at
+        LIMIT ${batch}`);
+      // An earlier worker may have taken one between this scan and its claim; the claim below is
+      // conditional, and a taken row is simply not ours to send.
+      return res.rows;
     });
-    for (const { id, channel } of claimed) {
-      // One message's unexpected failure must not abandon the rest of the claimed batch (#1054).
-      // The claim already moved the rows to `sending`; a message whose handler threw is recovered
-      // on its own, before the loop moves on.
+    for (const { id, channel } of candidates) {
+      // The lease begins here, immediately before the attempt, so a row still waiting behind
+      // slower rows of the same batch never looks like a send that may have reached a provider: the
+      // stale sweep must not turn it into `unknown_outcome` (packages/email/src/attempt.ts, #1237).
+      const claimed = await claimMessage(db, ws, id);
+      if (!claimed) continue;
+      // One message's unexpected failure must not abandon the rest of the batch (#1054). The claim
+      // above moved the row to `sending`; a message whose handler threw is recovered on its own,
+      // before the loop moves on.
       const attempt: DeliveryAttempt = { providerCalled: false };
       try {
         if (channel === 'sms') await deliverSms(db, ws, id, deps, attempt);
@@ -387,6 +438,17 @@ export async function deliverRound(
     }
   }
   return handled;
+}
+
+/** Leases one row for this attempt. False when another worker took it first or it is no longer due. */
+async function claimMessage(db: Db, ws: string, id: string): Promise<boolean> {
+  return db.withWorkspace(ws, async (tx) => {
+    const res = await tx.execute<{ id: string }>(sql`
+      UPDATE messages m SET status = 'sending', attempts = attempts + 1, updated_at = now(), next_attempt_at = NULL
+      WHERE m.workspace_id = ${ws} AND m.id = ${id} AND ${sql.raw(claimable('m'))}
+      RETURNING m.id`);
+    return res.rows.length > 0;
+  });
 }
 
 /**

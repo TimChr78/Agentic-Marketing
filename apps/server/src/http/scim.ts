@@ -27,9 +27,11 @@ const ERROR = 'urn:ietf:params:scim:api:messages:2.0:Error';
 const PATCH = 'urn:ietf:params:scim:api:messages:2.0:PatchOp';
 const TYPE = 'application/scim+json';
 
-// A User or Group resource is small; even a large group membership stays far below 1 MB. The limit
-// runs before the bearer token lookup and before the JSON is parsed.
-const SCIM_MAX_BODY = 1024 * 1024;
+// Sized for the biggest resource the command schemas accept, not for a typical one: `scimUpsertGroup`
+// takes 50,000 members, and an identity provider that also sends each member's display name (Okta
+// and Entra ID do) needs about 6 MB for that group alone (#1236). The limit runs before the bearer
+// token lookup and before the JSON is parsed.
+export const SCIM_MAX_BODY = 8 * 1024 * 1024;
 
 // biome-ignore lint/suspicious/noExplicitAny: SCIM bodies are free-form JSON from the identity provider, read field by field
 type Json = Record<string, any>;
@@ -218,6 +220,24 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
           'This account’s e-mail address and name cannot be changed through SCIM here. Change only active and externalId.',
           'mutability',
         );
+      }
+      // A replace must not take an address another account already holds: the unique index on
+      // `user.email` would answer with a driver error, which the handler reports as a 500 and an
+      // identity provider then retries forever (#1233). Create looks the address up first, so
+      // replace does too, and answers 409 `uniqueness` in the same words.
+      if (email !== current.email.toLowerCase()) {
+        const taken = await ctx.internalAdapter.findUserByEmail(email);
+        if (taken && taken.user.id !== userId) {
+          await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
+          const known = (await users(ws, 'AND u.id = $2', [taken.user.id]))[0];
+          throw known
+            ? new ScimError(409, `${email} is already provisioned.`, 'uniqueness')
+            : new ScimError(
+                409,
+                'This user name cannot be provisioned automatically. The person must sign in through a verified single sign-on domain of this workspace, or be invited.',
+                'uniqueness',
+              );
+        }
       }
       await ctx.internalAdapter.updateUser(userId, { name, email });
     }

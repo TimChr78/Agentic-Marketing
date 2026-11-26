@@ -364,6 +364,22 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
     for (const email of emails) {
       const person = people.get(email.userId);
       if (!person || !stillMembers.has(email.userId)) {
+        // The refusal is a decision, so the message log records it; the digest reads this row as
+        // the record of that sponsor's window, which is what lets a retry of that window happen
+        // without holding the other sponsors' windows open (#1227).
+        await tx
+          .insert(schema.messages)
+          .values({
+            workspaceId,
+            id: newId('msg'),
+            idempotencyKey: email.idempotencyKey,
+            purpose: email.purpose ?? 'onboarding',
+            status: 'failed',
+            reason: 'not a workspace member',
+            data: email.data ?? {},
+            requestHash: sendRequestHash('email', fingerprintParts.alert({ recipient: email.userId, key: email.idempotencyKey })),
+          })
+          .onConflictDoNothing();
         out.push({ userId: email.userId, status: 'failed', error: 'not a workspace member' });
         continue;
       }

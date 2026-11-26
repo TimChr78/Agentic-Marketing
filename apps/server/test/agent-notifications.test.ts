@@ -526,4 +526,83 @@ describe('agent notifications (#226)', () => {
     expect(outsiderDigests()).toHaveLength(2);
     expect(await emailRows(s.ws, 'agent-digest:')).toHaveLength(4);
   }, 40_000);
+
+  it('a sponsor who can never be mailed does not stop the other sponsors’ daily digests (#1227)', async () => {
+    // A removed member stays the sponsor of an agent (`members.remove` leaves `agents.sponsor_user_id`),
+    // and `sendMemberEmails` refuses that address for good. Since the #1184 fix a failed sponsor kept
+    // the whole digest window open, so nobody else got another digest.
+    const s = await setup({ level: 3 });
+    const second = await addAgent(s, { name: 'Departed sponsor agent', level: 3 });
+    const departed = await t.signUp(`departed-digest-${Date.now()}@example.com`);
+    await t.srv.db.admin.query('UPDATE agents SET sponsor_user_id = $2 WHERE workspace_id = $1 AND id = $3', [
+      s.ws,
+      departed.id,
+      second.agentId,
+    ]);
+    expect((await publishNote(s, 'Day 1 for the owner')).body.status).toBe('published');
+    expect((await publishNoteWith(second.token, 'Day 1 for the departed sponsor')).body.status).toBe('published');
+
+    const ownerDigests = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Daily agent digest'));
+    const departedDigests = () => outbox.filter((m) => m.to === departed.email && m.subject.startsWith('Daily agent digest'));
+    const lastDigestAt = async () =>
+      (
+        await t.srv.db.admin.query<{ last_digest_at: Date | null }>(
+          'SELECT last_digest_at FROM agent_notification_cursor WHERE workspace_id = $1',
+          [s.ws],
+        )
+      ).rows[0]?.last_digest_at;
+
+    const t0 = new Date('2026-03-10T12:00:00.000Z');
+    await primeDigestDue(s.ws, t0);
+    expect((await run(t0)).digests).toBe(1); // the owner's digest went out; the departed sponsor has no mailbox here
+    expect(ownerDigests()).toHaveLength(1);
+    expect(departedDigests()).toHaveLength(0);
+
+    // A day later the owner's agent acted again: the owner is due a digest for the new activity.
+    expect((await publishNote(s, 'Day 2 for the owner')).body.status).toBe('published');
+    const t1 = new Date(t0.getTime() + DAY);
+    expect((await run(t1)).digests).toBeGreaterThanOrEqual(1);
+    expect(ownerDigests()).toHaveLength(2);
+    expect((await lastDigestAt())?.toISOString()).toBe(t1.toISOString());
+
+    // ... and three days later still, with more activity.
+    expect((await publishNote(s, 'Day 5 for the owner')).body.status).toBe('published');
+    await run(new Date(t0.getTime() + 4 * DAY));
+    expect(ownerDigests()).toHaveLength(3);
+  }, 60_000);
+
+  it('a recipient who is not a member does not hold the event cursor before later holds (#1234)', async () => {
+    // The mandate's escalation target is not a member of the workspace: the send to them can never
+    // succeed. The cursor must pass that action once the sponsor was reached, or after 500 newer
+    // ledger rows every later hold, ask and refusal is outside the window the sweep reads.
+    const departed = await t.signUp(`departed-escalation-${Date.now()}@example.com`);
+    const s = await setup({ level: 2, escalationUserId: departed.id });
+    expect((await publishNote(s, 'Held one')).body.status).toBe('on_hold');
+    const first = await run();
+    const heldMails = () => outbox.filter((m) => m.to === s.owner.email && m.subject.startsWith('Held:'));
+    expect(first.events).toBeGreaterThanOrEqual(1);
+    expect(heldMails()).toHaveLength(1);
+    const heldOne = Number(
+      (
+        await t.srv.db.admin.query<{ id: string }>(
+          "SELECT max(id) AS id FROM agent_actions WHERE workspace_id = $1 AND decision = 'hold'",
+          [s.ws],
+        )
+      ).rows[0].id,
+    );
+    expect(await cursorOf(s.ws)).toBeGreaterThanOrEqual(heldOne);
+
+    // 505 more ledger rows for this workspace (an active agent's drafts and allows).
+    await t.srv.db.admin.query(
+      `INSERT INTO agent_actions (workspace_id, agent_id, command, action_class, decision, ok, surface)
+       SELECT $1, $2, 'artifacts.create', 'draft', 'allow', true, 'rest' FROM generate_series(1, 505)`,
+      [s.ws, s.agentId],
+    );
+    // A new hold by the same agent; its sponsor is a member and reachable.
+    expect((await publishNote(s, 'Held two')).body.status).toBe('on_hold');
+    const second = await run();
+    expect(second.events).toBeGreaterThanOrEqual(1);
+    expect(heldMails()).toHaveLength(2);
+    expect(heldMails().some((m) => m.text.includes('Held two'))).toBe(true);
+  }, 60_000);
 });
