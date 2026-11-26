@@ -689,9 +689,12 @@ export async function runErasurePublicationBacklog(
   let first = true;
   while (!signal.aborted) {
     const reopenPublishedFailed = first;
-    first = false;
     try {
       const count = await enqueueUnpublishedErasures(deps.db, { reopenPublishedFailed });
+      // Only a pass that actually reached the database counts as this start's recovery pass. A
+      // failed first call must leave the flag set, so the next tick still re-opens published
+      // failures instead of skipping the recovery until the next scheduler start (#1226).
+      first = false;
       if (count) opts.log?.(`re-enqueued ${count} erasure cleanup job(s)`);
     } catch (err) {
       opts.onError?.(err);

@@ -1616,7 +1616,15 @@ export interface SubjectKeyCoverageCheckDeps {
 
 export async function checkSubjectKeyCoverage(config: Config, db: Db, deps: SubjectKeyCoverageCheckDeps = {}): Promise<Check> {
   const ownsStore = !deps.store;
-  const store = deps.store ?? clickHouseStore({ url: config.clickhouse.url, database: config.clickhouse.database });
+  // The configured mode reaches this store too: with policies installed a server that no longer
+  // takes `SQL_workspace` hides every row, and a silent empty count would report full coverage.
+  const store =
+    deps.store ??
+    clickHouseStore({
+      url: config.clickhouse.url,
+      database: config.clickhouse.database,
+      rowPolicies: config.clickhouse.rowPolicies,
+    });
   try {
     const workspaces = await db.admin.query<{ id: string }>('SELECT id FROM workspaces');
     const coverage = await withTimeout(

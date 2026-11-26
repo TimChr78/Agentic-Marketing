@@ -186,6 +186,12 @@ export function createAnalytics(opts: AnalyticsOptions) {
     return { ...saved, ...captureClickIds(l.search, l.cookies) };
   })();
   let pending: QueuedEvent[] = [];
+  // Events for a purpose whose basis the consent banner is still looking up. A returning visitor's
+  // saved choice may not mention the tracking purpose at all, and the basis then decides whether it
+  // is allowed (#1224 review). Bounded like the undecided queue, so a lookup that never settles
+  // cannot grow memory without limit.
+  let waitingForBasis: QueuedEvent[] = [];
+  let basisLookupPending = false;
   const outbox: QueuedEvent[] = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
   let backoff = 0;
@@ -222,8 +228,36 @@ export function createAnalytics(opts: AnalyticsOptions) {
       if (pending.length < MAX_QUEUE) pending.push(ev);
       return;
     }
-    if (!allowed() && ev.event !== CONSENT_EVENT) return;
+    if (!allowed() && ev.event !== CONSENT_EVENT) {
+      // The banner may still be resolving this purpose's basis (legitimate interest or contract
+      // allows it), so hold the event instead of dropping it. `setPurposes` rechecks the held
+      // queue, and a failed lookup drops it (fail closed).
+      if (basisLookupPending && waitingForBasis.length < MAX_QUEUE) waitingForBasis.push(ev);
+      return;
+    }
     outbox.push({ ...ev, anonymousId, ...(userId ? { userId } : {}), context: { ...context(), ...(ev.context ?? {}) } });
+    if (outbox.length >= (opts.batchSize ?? 20)) void flush();
+    else schedule();
+  }
+
+  /**
+   * Rechecks the basis-pending queue. With `stillPending` an event that is not allowed stays held
+   * for the answer; otherwise it is dropped, because the lookup has settled and cannot allow it.
+   */
+  function releaseWaitingForBasis(stillPending: boolean) {
+    if (!waitingForBasis.length) return;
+    const keep: QueuedEvent[] = [];
+    let moved = 0;
+    for (const e of waitingForBasis) {
+      if (!allowed()) {
+        if (stillPending) keep.push(e);
+        continue;
+      }
+      outbox.push({ ...e, anonymousId, ...(userId ? { userId } : {}), context: { ...context(), ...(e.context ?? {}) } });
+      moved += 1;
+    }
+    waitingForBasis = keep;
+    if (!moved) return;
     if (outbox.length >= (opts.batchSize ?? 20)) void flush();
     else schedule();
   }
@@ -325,6 +359,20 @@ export function createAnalytics(opts: AnalyticsOptions) {
     setPurposes(purposes: { key: string; basis: string }[]) {
       basis.clear();
       for (const p of purposes) basis.set(p.key, p.basis);
+      // The answer is in: send what the resolved bases (and any refusal) now allow, drop the rest.
+      basisLookupPending = false;
+      releaseWaitingForBasis(false);
+    },
+
+    /** A consent banner is starting its purpose lookup; hold events it may allow until it settles. */
+    beginPurposes() {
+      basisLookupPending = true;
+    },
+
+    /** The purpose lookup failed: drop what it held instead of sending on an unknown basis. */
+    failPurposes() {
+      basisLookupPending = false;
+      waitingForBasis = [];
     },
 
     /** Record the visitor's choice (from your consent banner or CMP). Merges with earlier choices. */
@@ -352,6 +400,9 @@ export function createAnalytics(opts: AnalyticsOptions) {
       if (allowed())
         for (const e of held)
           outbox.push({ ...e, anonymousId, ...(userId ? { userId } : {}), context: { ...context(), ...(e.context ?? {}) } });
+      // An explicit yes allows a held event even before the basis lookup answers; a refusal leaves
+      // it to the lookup's own recheck, which drops it once the lookup settles.
+      releaseWaitingForBasis(basisLookupPending);
       void flush();
     },
 

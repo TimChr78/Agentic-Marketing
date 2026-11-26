@@ -67,6 +67,7 @@ async function eventually(check: () => string | undefined, timeoutMs = 10_000): 
 
 let databaseUrl = '';
 let sessionDatabaseUrl = '';
+let slowDatabaseUrl = '';
 let relays: Relay[] = [];
 
 beforeAll(async () => {
@@ -74,6 +75,7 @@ beforeAll(async () => {
   // until the socket is closed, and an exclusive lock in the next test would wait for it.
   databaseUrl = (await freshDatabase('restore_lock_liveness')).url.toString();
   sessionDatabaseUrl = (await freshDatabase('restore_lock_session')).url.toString();
+  slowDatabaseUrl = (await freshDatabase('restore_lock_slow')).url.toString();
 }, 180_000);
 
 afterAll(async () => {
@@ -99,6 +101,31 @@ describe('restore lock sessions notice a silently lost connection (#1222)', () =
       relay.cut();
       await eventually(() => lostWith);
       expect(lostWith).toMatch(/timed out|liveness|query/i);
+    } finally {
+      await lock.release();
+    }
+  }, 60_000);
+
+  // #1222 review: a fence write or check runs on the same session as the heartbeat. pg arms a
+  // statement's timeout when it is submitted, so a probe queued behind a slow fence query timed out
+  // while the session was still healthy and reported a false loss. Probes now share the session's
+  // queue and run only when it is idle, and the probe timeout starts when the probe does.
+  it('does not report a loss while a slow foreground statement holds the session', async () => {
+    let lostWith: string | undefined;
+    const lock = await acquireRestoreSessionLock(slowDatabaseUrl, {
+      onLost: (err) => (lostWith = err.message),
+      livenessMs: 30,
+      livenessTimeoutMs: 100,
+    });
+    try {
+      // Longer than both the heartbeat interval and its timeout: under the old code the probe
+      // queued behind this statement and timed out while the lock was still held, and the client's
+      // query timeout would also have aborted the statement itself.
+      await lock.client.query('SELECT pg_sleep(0.5)');
+      expect(lostWith).toBeUndefined();
+      // Let several heartbeats run once the session is idle again; each answers immediately.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(lostWith).toBeUndefined();
     } finally {
       await lock.release();
     }

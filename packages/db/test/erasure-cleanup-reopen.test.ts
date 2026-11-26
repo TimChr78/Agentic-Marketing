@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterAll, describe, expect, it } from 'vitest';
 import { claimErasureCleanupJobs, enqueueUnpublishedErasures, runErasurePublicationBacklog } from '../src/erasureCleanup';
+import type { Db } from '../src/pool';
 import { createDisposableDb, type DisposableDb, hasTestDatabase } from './disposable';
 
 // #1219: a cleanup job that failed AFTER its exclusion was published had no exit from `failed`.
@@ -126,5 +127,52 @@ describe.skipIf(!hasTestDatabase())('re-opening an erasure cleanup job that fail
       [d.workspace, erasureId],
     );
     expect(rows[0]).toMatchObject({ state: 'pending_external', attempts: 0 });
+  }, 60_000);
+
+  // #1226: the startup recovery pass is the loop's only chance to re-open a job that failed after
+  // publishing. If its first database call fails, the flag must stay set so the next tick still runs
+  // the recovery, instead of the outage silently skipping it until the next scheduler start.
+  it('retries the startup recovery pass when its first call fails', async () => {
+    const d = await createDisposableDb('erasure_reopen_retry');
+    open.push(d);
+    const erasureId = 'era_00000000000000000000000000012221';
+    const profile = 'prf_00000000000000000000000000012221';
+    const { workspace } = await seedPublishedFailure(d, erasureId, profile);
+
+    let calls = 0;
+    const flaky: Db = {
+      ...d.db,
+      admin: {
+        query: (text: string, values?: unknown[]) => {
+          calls += 1;
+          if (calls === 1) return Promise.reject(new Error('admin connection reset'));
+          return d.db.admin.query(text, values);
+        },
+      } as unknown as Db['admin'],
+    };
+
+    const errors: unknown[] = [];
+    const controller = new AbortController();
+    const running = runErasurePublicationBacklog({ db: flaky }, controller.signal, {
+      tickMs: 10,
+      onError: (err) => errors.push(err),
+    });
+    try {
+      const deadline = Date.now() + 10_000;
+      let state = 'failed';
+      while (Date.now() < deadline && state === 'failed') {
+        const { rows } = await d.db.admin.query<{ state: string }>(
+          'SELECT state FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
+          [workspace, erasureId],
+        );
+        state = rows[0]?.state ?? 'missing';
+        if (state === 'failed') await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(state).toBe('pending_external');
+    } finally {
+      controller.abort();
+      await running;
+    }
+    expect(errors).toHaveLength(1);
   }, 60_000);
 });

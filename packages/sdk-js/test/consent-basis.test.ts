@@ -124,6 +124,47 @@ describe('a tracking purpose on a non-consent basis (#1224)', () => {
     expect(consent.events()).toHaveLength(0);
   });
 
+  // #1224 review: a returning visitor with a saved choice for another purpose can call `page()`
+  // before the banner's purpose fetch resolves. The basis was still unknown, so the SDK dropped the
+  // event although the lookup then showed a legitimate-interest purpose that allows it. The SDK now
+  // holds a bounded queue while the lookup is pending and rechecks it against the resolved basis.
+  it('holds a page for an unresolved purpose until a delayed purposes answer arrives', async () => {
+    const win = new HappyWindow({ url: 'https://shop.example.com/' }) as unknown as Window;
+    const doc = win.document;
+    const h = harness(JSON.stringify({ web_personalization: true }));
+    let resolvePurposes!: (response: Response) => void;
+    const answer = new Promise<Response>((resolve) => (resolvePurposes = resolve));
+    const banner = createConsentBanner(h.analytics, {
+      document: doc,
+      fetch: (() => answer) as unknown as typeof fetch,
+    });
+    h.analytics.page('Landing');
+    await h.analytics.flush();
+    expect(h.events()).toHaveLength(0);
+    resolvePurposes(new Response(JSON.stringify({ purposes: legitimateInterest })));
+    await banner.ready;
+    await h.analytics.flush();
+    expect(h.events().some((e) => e.type === 'page' && e.name === 'Landing')).toBe(true);
+  });
+
+  it('drops a held page when the purposes lookup fails, and a later basis cannot resurrect it', async () => {
+    const win = new HappyWindow({ url: 'https://shop.example.com/' }) as unknown as Window;
+    const doc = win.document;
+    const h = harness(JSON.stringify({ web_personalization: true }));
+    let rejectPurposes!: (err: Error) => void;
+    const answer = new Promise<Response>((_resolve, reject) => (rejectPurposes = reject));
+    const banner = createConsentBanner(h.analytics, {
+      document: doc,
+      fetch: (() => answer) as unknown as typeof fetch,
+    });
+    h.analytics.page('Landing');
+    rejectPurposes(new Error('network down'));
+    await banner.ready;
+    h.analytics.setPurposes(legitimateInterest);
+    await h.analytics.flush();
+    expect(h.events()).toHaveLength(0);
+  });
+
   it('still allows nothing before the visitor has chosen', async () => {
     const h = harness();
     h.analytics.setPurposes([{ key: 'analytics', basis: 'legitimate_interest' }]);

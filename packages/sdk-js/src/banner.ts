@@ -52,6 +52,13 @@ interface AnalyticsLike {
    * already fetches them, so the tracking gate uses the same basis as the gateway (#1224).
    */
   setPurposes?(purposes: { key: string; basis: string }[]): void;
+  /**
+   * Announces that a purpose lookup is starting, so the SDK holds events for an unresolved purpose
+   * instead of dropping them before the answer arrives.
+   */
+  beginPurposes?(): void;
+  /** The lookup failed; the SDK drops what it held rather than sending on an unknown basis. */
+  failPurposes?(): void;
 }
 
 const DEFAULT_TEXTS: BannerTexts = {
@@ -108,10 +115,20 @@ export function createConsentBanner(analytics: AnalyticsLike, opts: BannerOption
   let purposes: BannerPurpose[] = opts.purposes ?? [];
 
   const loadPurposes = async () => {
-    if (!opts.purposes) {
-      const doFetch = opts.fetch ?? win.fetch.bind(win);
-      const res = await doFetch(`${analytics.host}/v1/consent/purposes?writeKey=${encodeURIComponent(analytics.writeKey)}`);
-      if (res.ok) purposes = ((await res.json()) as { purposes: BannerPurpose[] }).purposes;
+    // A returning visitor can call `page()` before this answer arrives. The SDK holds those events
+    // until the bases are known instead of dropping a purpose the answer may allow (#1224 review).
+    analytics.beginPurposes?.();
+    try {
+      if (!opts.purposes) {
+        const doFetch = opts.fetch ?? win.fetch.bind(win);
+        const res = await doFetch(`${analytics.host}/v1/consent/purposes?writeKey=${encodeURIComponent(analytics.writeKey)}`);
+        if (!res.ok) throw new Error(`purposes answered ${res.status}`);
+        purposes = ((await res.json()) as { purposes: BannerPurpose[] }).purposes;
+      }
+    } catch (err) {
+      // An unknown basis must never let a held event through: the SDK drops it (fail closed).
+      analytics.failPurposes?.();
+      throw err;
     }
     // Always hand the bases over, also when the banner does not render (a visitor who already
     // chose): the SDK's tracking gate needs them to allow a non-consent purpose (#1224).
