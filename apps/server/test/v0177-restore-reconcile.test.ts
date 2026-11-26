@@ -39,7 +39,7 @@ import {
 const open: Awaited<ReturnType<typeof createDisposableDb>>[] = [];
 afterAll(async () => {
   for (const d of open) await d.close().catch(() => {});
-});
+}, 180_000);
 
 const CH_URL = process.env.CLICKHOUSE_URL ?? 'http://localhost:8123';
 
@@ -758,12 +758,25 @@ describe.skipIf(!hasTestDatabase())('a restore drains the previous run’s work 
     const databaseUrl = d.url.toString();
     const backup = new pg.Client({ connectionString: databaseUrl, application_name: BACKUP_APPLICATION_NAME });
     await backup.connect();
+    const waitMessages: string[] = [];
     try {
-      await expect(assertRestoreWorkDrained(databaseUrl, { timeoutMs: 800, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } })).rejects.toThrow(
-        /a backup is still running.*am-backup/,
-      );
+      await expect(
+        assertRestoreWorkDrained(databaseUrl, {
+          timeoutMs: 800,
+          pollMs: 25,
+          log: (line) => waitMessages.push(line),
+          env: { CLICKHOUSE_URL: CH_URL },
+        }),
+      ).rejects.toThrow(/a backup is still running.*am-backup/);
     } finally {
       await backup.end();
+    }
+    // While it waited, the log said what it was actually waiting for: a backup is not "a previous
+    // restore's work" (#1214 review).
+    expect(waitMessages.length).toBeGreaterThan(0);
+    for (const line of waitMessages) {
+      expect(line).toContain('backup');
+      expect(line).not.toContain("previous restore's work");
     }
     // The read-only dump is gone: the same drain passes.
     await assertRestoreWorkDrained(databaseUrl, { timeoutMs: 1_000, pollMs: 25, env: { CLICKHOUSE_URL: CH_URL } });

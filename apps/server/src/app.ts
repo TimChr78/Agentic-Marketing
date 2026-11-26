@@ -358,7 +358,12 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     // A registered hostname whose verification has not succeeded yet still reaches the app (its
     // challenge is answered there) and may sit in an Ingress for days. It serves only its public
     // surface and never the admin UI, auth, MCP, SCIM or REST (#1157, #1231).
-    if (await domains.isPendingHost(host)) {
+    //
+    // The pending check is per host, while rows are unique per (host, prefix): one workspace can
+    // hold a host verified at the root and pending at /am. Only a host with no verified row is
+    // pending in that sense; otherwise the verified row keeps its brand scoping, or another
+    // workspace's form would be accepted on this host (#1230 review).
+    if (!(await domains.isBrandHost(host)) && (await domains.isPendingHost(host))) {
       if (isBrandSurfacePath(path) || exactProbe(path) || DOMAIN_CHALLENGE.test(path)) return next();
       return c.json({ error: 'not_found', message: 'Not found.' }, 404);
     }
@@ -674,8 +679,9 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
   }
 
   // Last, so every API route above wins. Without a build (packages/tests, server-only install) the
-  // middleware is a no-op and the server behaves exactly as before.
-  if (existsSync(config.webDist)) {
+  // middleware is a no-op and the server behaves exactly as before. The admin SPA is the api
+  // role's surface; an ingest-only pod must answer 404 on `/`, not the shell (#1230).
+  if (config.roles.has('api') && existsSync(config.webDist)) {
     app.use('*', staticSite({ root: config.webDist }));
     logger.info({ webDist: config.webDist }, 'serving the admin UI at /');
   }

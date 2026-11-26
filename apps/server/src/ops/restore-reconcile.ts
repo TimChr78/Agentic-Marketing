@@ -323,9 +323,13 @@ export async function assertRestoreWorkDrained(databaseUrl: string, opts: Restor
             'Wait until that run has stopped and retry.',
         );
       }
+      // While it waits, say what it is waiting for: a drain held open by a backup alone names the
+      // backup, not a previous restore (#1214 review).
       opts.log?.(
-        `waiting for a previous restore's work to stop (${backends} PostgreSQL connection(s)` +
-          `${backups ? `, ${backups} backup connection(s)` : ''}, ${queries} ClickHouse request(s))`,
+        backends === 0 && queries === 0
+          ? `waiting for a running backup to stop (${backups} PostgreSQL connection(s) still tagged ${BACKUP_APPLICATION_NAME})`
+          : `waiting for a previous restore's work to stop (${backends} PostgreSQL connection(s)` +
+              `${backups ? `, ${backups} backup connection(s)` : ''}, ${queries} ClickHouse request(s))`,
       );
       await sleep(pollMs);
     }

@@ -1,4 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTestServer, testPort, type User } from './harness';
 
@@ -47,15 +50,21 @@ let ingest: Awaited<ReturnType<typeof startTestServer>>;
 let owner: User;
 let workspaceId = '';
 let formId = '';
+let webDist = '';
 
 beforeAll(async () => {
+  // A built admin UI, so the SPA mount is real: both pods read WEB_DIST, but only api serves it.
+  webDist = mkdtempSync(join(tmpdir(), 'am-split-web-'));
+  writeFileSync(join(webDist, 'index.html'), '<!doctype html><html><body>admin</body></html>');
   api = await startTestServer('test_brand_split_api', API_PORT, {
     ROLE: 'api',
+    WEB_DIST: webDist,
     PUBLIC_URL: `http://localhost:${API_PORT}`,
     PUBLIC_LINKS_URL: `http://localhost:${API_PORT}`,
   });
   ingest = await startTestServer('test_brand_split_ingest', INGEST_PORT, {
     ROLE: 'ingest',
+    WEB_DIST: webDist,
     PUBLIC_URL: `http://localhost:${INGEST_PORT}`,
     PUBLIC_LINKS_URL: `http://localhost:${INGEST_PORT}`,
   });
@@ -92,6 +101,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await api?.close();
   await ingest?.close();
+  rmSync(webDist, { recursive: true, force: true });
 });
 
 describe('path-prefixed brand routes on an api-only role (#1157)', () => {
@@ -218,6 +228,14 @@ describe('path-prefixed brand routes on an api-only role (#1157)', () => {
 });
 
 describe('admin REST is api-only (#1157)', () => {
+  it('serves the admin UI only on the api role, never on an ingest pod (#1230)', async () => {
+    // The same WEB_DIST is mounted on both pods; the shell belongs to the admin role alone.
+    const onApi = await request(API_PORT, '/');
+    expect(onApi.status).toBe(200);
+    expect(onApi.body).toContain('admin');
+    expect((await request(INGEST_PORT, '/')).status).toBe(404);
+  });
+
   it('does not mount the command surface on an ingest pod', async () => {
     const rest = await request(INGEST_PORT, '/v1/workspace.get', {
       method: 'POST',
