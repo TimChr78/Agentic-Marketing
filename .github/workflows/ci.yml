@@ -159,7 +159,7 @@ jobs:
       # Service containers cannot take arguments, and NATS needs `-js` for JetStream.
       - run: docker run -d --name nats -p 4222:4222 nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a -js
       # OpenBao in dev mode, for the Transit key-provider test (packages/secrets).
-      - run: docker run -d --name openbao -p 8200:8200 openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
+      - run: docker run -d --name openbao -p 8200:8200 openbao/openbao:2.7.3@sha256:ba4b133eb9586630024e71a617e66f37f29cc3534cdd46a6233e098ceded8dc9 server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
