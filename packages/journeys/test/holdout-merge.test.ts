@@ -249,4 +249,44 @@ describe.skipIf(!hasTestDatabase())('journeys.holdoutResult resolves merge famil
     expect(report.note).toContain('256 or more merges deep');
     expect(report.note).not.toContain('more than');
   }, 120_000);
+
+  it('withholds an actionable verdict while the journey events are still queued (#1244 review)', async () => {
+    outcomes.unsubscribed = [];
+    const journeyId = await publishJourney();
+    const control = Array.from({ length: 10 }, () => newId('prf'));
+    const treatment = Array.from({ length: 10 }, () => newId('prf'));
+    await seedPeople([...control, ...treatment]);
+    for (const id of control) await assign(journeyId, id, 'control', EARLY);
+    for (const id of treatment) await assign(journeyId, id, 'treatment', EARLY);
+    outcomes.converted = control;
+
+    const complete = await result(journeyId);
+    expect(complete.verdict).toBe('treatment_worse');
+
+    const outboxId = newId('obx');
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, subject_ref, state)
+       VALUES ($1, $2, 'journey_event', '{"events":[]}'::jsonb, $3, $4, 'pending')`,
+      [ws, outboxId, `journey-event:test:${journeyId}`, journeyId],
+    );
+    try {
+      const report = await result(journeyId);
+      expect(report.verdict).toBe('not_enough_data');
+      expect(report.absoluteLift).toBeNull();
+      expect(report.relativeLift).toBeNull();
+      expect(report.ci95).toBeNull();
+      expect(report.note).toContain("Publication of this journey's journey events is incomplete");
+      expect(report.note).toContain('1 pending');
+      expect(report.note).not.toContain('am outbox');
+
+      // A dead-lettered row keeps the verdict withheld, and the note says how to recover (#1269 re-review).
+      await d.db.admin.query(`UPDATE outbox SET state = 'failed' WHERE workspace_id = $1 AND id = $2`, [ws, outboxId]);
+      const failed = await result(journeyId);
+      expect(failed.verdict).toBe('not_enough_data');
+      expect(failed.note).toContain('1 failed');
+      expect(failed.note).toContain('am outbox --kind journey_event');
+    } finally {
+      await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND id = $2', [ws, outboxId]);
+    }
+  }, 120_000);
 });

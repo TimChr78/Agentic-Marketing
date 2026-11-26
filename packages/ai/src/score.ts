@@ -106,12 +106,18 @@ export const score = defineCommand({
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     if (input.store && !input.profileId) throw new AppError('invalid_input', 'store needs profileId: a score is stored for a person.');
-    if (input.profileId) {
-      const consent = await aiAllowed(ctx.tx, ctx.principal.workspaceId, input.profileId);
+    // A caller may pass an id a merge has folded away. Follow it before the consent check, the
+    // context read and the write, or the survivor's consent and data are missed (#1241 review).
+    const profileId = input.profileId ? (await canonicalProfile(ctx.tx, ctx.principal.workspaceId, input.profileId))?.id : undefined;
+    if (input.profileId && !profileId) throw new AppError('not_found', `No profile ${input.profileId}.`);
+    if (profileId) {
+      const consent = await aiAllowed(ctx.tx, ctx.principal.workspaceId, profileId);
       if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
     }
     if (!ctx.services.db) throw new AppError('conflict', 'ai.score needs the database service.');
     const db = ctx.services.db;
+    // The call row names the person the score is for today, so an erasure and the audit trail agree.
+    const callInput = profileId ? { ...input, profileId } : input;
     let provider: Awaited<ReturnType<typeof decisionProvider>>;
     try {
       provider = await decisionProvider(ctx.tx, ctx.services.keyProvider, input.providerId);
@@ -120,16 +126,15 @@ export const score = defineCommand({
     }
     let state = input.state;
     if (state === undefined) {
-      if (!input.profileId)
-        throw new AppError('invalid_input', 'Give a state, or profileId to build a non-personal state from the person.');
-      state = await nonPersonalState(ctx.tx, ctx.principal.workspaceId, ctx.services.events, input.profileId).catch(appError);
+      if (!profileId) throw new AppError('invalid_input', 'Give a state, or profileId to build a non-personal state from the person.');
+      state = await nonPersonalState(ctx.tx, ctx.principal.workspaceId, ctx.services.events, profileId).catch(appError);
       if (!state) throw new AppError('not_found', `No profile ${input.profileId}.`);
     }
     const callId = newId('aic');
     try {
       assertStateAllowed(state, provider, input.questions);
     } catch (err) {
-      await logCall(db, ctx.principal, callId, provider, input, state, {
+      await logCall(db, ctx.principal, callId, provider, callInput, state, {
         status: 'failed',
         error: safeErrorText(err instanceof Error ? err.message : String(err), 1000),
       });
@@ -143,7 +148,7 @@ export const score = defineCommand({
         // never sees neither the hold nor the tokens. If that transaction fails, the same row is
         // retried on its own before the hold is released.
         record: (tx, r) =>
-          insertCall(tx, ctx.principal, callId, provider, input, state, {
+          insertCall(tx, ctx.principal, callId, provider, callInput, state, {
             status: 'done',
             modelVersion: r.modelVersion,
             answers: r.answers,
@@ -152,7 +157,7 @@ export const score = defineCommand({
             latencyMs: r.latencyMs,
           }),
         recordUsage: (r) =>
-          logCall(db, ctx.principal, callId, provider, input, state, {
+          logCall(db, ctx.principal, callId, provider, callInput, state, {
             status: 'done',
             modelVersion: r.modelVersion,
             answers: r.answers,
@@ -163,7 +168,7 @@ export const score = defineCommand({
         // Even a refused or unreadable answer may have been billed; record what the provider says,
         // or the reserved estimate, in the transaction that releases the hold (#941).
         recordFailure: (tx, usage, error, estimated) =>
-          insertCall(tx, ctx.principal, callId, provider, input, state, {
+          insertCall(tx, ctx.principal, callId, provider, callInput, state, {
             status: 'failed',
             error,
             ...usage,
@@ -171,7 +176,7 @@ export const score = defineCommand({
           }),
       });
     } catch (err) {
-      await logCall(db, ctx.principal, callId, provider, input, state, {
+      await logCall(db, ctx.principal, callId, provider, callInput, state, {
         status: 'failed',
         error: safeErrorText(err instanceof Error ? err.message : String(err), 1000),
       });
@@ -179,9 +184,9 @@ export const score = defineCommand({
     }
     const first = result.answers[0];
     let stored: { profileId: string; key: string; value: number; expiresAt: string } | null = null;
-    if (input.store && input.profileId && first) {
-      const expiresAt = await storeProfileScore(db, ctx.principal.workspaceId, {
-        profileId: input.profileId,
+    if (input.store && profileId && first) {
+      const storedScore = await storeProfileScore(db, ctx.principal.workspaceId, {
+        profileId,
         key: input.store.key,
         answer: first,
         model: provider.model,
@@ -189,10 +194,16 @@ export const score = defineCommand({
         callId,
         ttlHours: input.store.ttlHours,
       });
-      // The profile may have been erased between the consent check and the write; the lock in
-      // insertProfileScore then finds no row and no score is stored.
-      if (expiresAt) {
-        stored = { profileId: input.profileId, key: input.store.key, value: first.probability, expiresAt: expiresAt.toISOString() };
+      // The profile may have been erased between the consent check and the write; insertProfileScore
+      // then finds no canonical row and no score is stored. A merge meanwhile writes against the
+      // survivor, which is the id reported back (#1241).
+      if (storedScore) {
+        stored = {
+          profileId: storedScore.profileId,
+          key: input.store.key,
+          value: first.probability,
+          expiresAt: storedScore.expiresAt.toISOString(),
+        };
       }
     }
     return {

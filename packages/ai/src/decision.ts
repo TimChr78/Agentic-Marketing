@@ -5,9 +5,10 @@ import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
+import { canonicalProfile, lockProfileRows } from '@agentic-marketing/profiles';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { personalDataIn } from './context';
 import {
   AiUnavailable,
@@ -435,6 +436,32 @@ export async function decisionCall(
   return result;
 }
 
+/** A score that was written, under the canonical person and its expiry. */
+export interface StoredProfileScore {
+  profileId: string;
+  expiresAt: Date;
+}
+
+/**
+ * Locks the person a profile id belongs to today and returns its canonical id, or null when the
+ * person no longer exists.
+ *
+ * A merge may commit between the canonical lookup and the lock: the locking statement carries
+ * `merged_into IS NULL`, so it then locks nothing. Resolve the survivor once more and lock that
+ * instead of treating the write as too late (#1241 review). The loop is bounded like every other
+ * merge walk; a chain past the bound is a corrupt family, not a person. Callers use this both for
+ * standalone scoring and for decision finalisation, so both writers follow a merge identically.
+ */
+export async function lockCanonicalProfile(tx: Tx, workspaceId: string, profileId: string): Promise<string | null> {
+  let person = await canonicalProfile(tx, workspaceId, profileId);
+  for (let follow = 0; person && follow < 4; follow++) {
+    const locked = await lockProfileRows(tx, workspaceId, [person.id]);
+    if (locked.length) return person.id;
+    person = await canonicalProfile(tx, workspaceId, person.id);
+  }
+  return null;
+}
+
 /** Writes the newest value of a named score for a person, with its TTL, in the caller's transaction. */
 export async function insertProfileScore(
   tx: Tx,
@@ -448,20 +475,18 @@ export async function insertProfileScore(
     callId: string | null;
     ttlHours: number;
   },
-): Promise<Date | null> {
-  // Lock and recheck the profile in the score's own transaction. the existing erasure DELETE locks the profile
-  // before its foreign key cascades to profile_scores, so an erasure that got there first leaves no profile to lock
-  // and no score is written; an erasure that arrives later waits and then deletes this row.
-  const locked = await tx.execute<{ id: string }>(
-    sql`SELECT id FROM profiles WHERE workspace_id = ${workspaceId} AND id = ${score.profileId} FOR UPDATE`,
-  );
-  if (!locked.rows.length) return null;
+): Promise<StoredProfileScore | null> {
+  // Follow a merge that happened before this write (#1144, #1241), and lock the person the merge
+  // leaves. A merge that commits between the lookup and the lock leaves no unmerged row to lock;
+  // the helper follows the new survivor instead of returning null.
+  const personId = await lockCanonicalProfile(tx, workspaceId, score.profileId);
+  if (!personId) return null;
   const expiresAt = new Date(Date.now() + score.ttlHours * 3_600_000);
   await tx
     .insert(schema.profileScores)
     .values({
       workspaceId,
-      profileId: score.profileId,
+      profileId: personId,
       key: score.key,
       value: score.answer.probability,
       confidence: score.answer.confidence ?? null,
@@ -484,7 +509,7 @@ export async function insertProfileScore(
         expiresAt,
       },
     });
-  return expiresAt;
+  return { profileId: personId, expiresAt };
 }
 
 /** Writes the newest value of a named score for a person, with its TTL. */
@@ -534,16 +559,14 @@ export async function nonPersonalState(
     .select({ type: schema.identifiers.type, value: schema.identifiers.value })
     .from(schema.identifiers)
     .where(and(eq(schema.identifiers.workspaceId, workspaceId), eq(schema.identifiers.profileId, profileId)));
-  const recent = await events
-    .eventsOf(
-      workspaceId,
-      {
-        anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
-        userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
-      },
-      { limit: 100 },
-    )
-    .catch(() => []);
+  const recent = await events.eventsOf(
+    workspaceId,
+    {
+      anonymousIds: ids.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
+      userIds: ids.filter((i) => i.type === 'user_id').map((i) => i.value),
+    },
+    { limit: 100 },
+  );
   const counts: Record<string, number> = {};
   for (const e of recent) if (e.name) counts[e.name] = (counts[e.name] ?? 0) + 1;
   const state = {

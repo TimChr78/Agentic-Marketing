@@ -64,6 +64,9 @@ async function latestSegment(tx: Tx, workspaceId: string, id: string): Promise<L
   return { id, name: a.name, version: a.latestVersion, definition: parseSegmentDefinition(v.content) };
 }
 
+/** The note the membership commands share with `requireList`'s rule, so the text cannot drift. */
+const STATIC_LIST_NOTE = 'Only a static segment is edited directly; a snapshot changes only with audiences.refreshSnapshot.';
+
 /**
  * Editing membership is only meaningful for a static list. A snapshot changes only through
  * audiences.refreshSnapshot: it exists so the audience can't change between review and send.
@@ -348,8 +351,7 @@ function asPublished(seg: ListSegment, definition = seg.definition): PublishedSe
 export const addAudienceMembers = defineCommand({
   name: 'audiences.add',
   title: 'Add people to a static audience',
-  description:
-    'Add up to 1,000 people to a static or snapshot segment by profile id, e-mail or user id. Adding someone twice changes nothing. Membership is not consent: sends still check consent, suppression and delivery policy.',
+  description: `Add up to 1,000 people to a static segment by profile id, e-mail or user id. ${STATIC_LIST_NOTE} Adding someone twice changes nothing. Membership is not consent: sends still check consent, suppression and delivery policy.`,
   input: ListSelector.extend({
     source: z.enum(['manual', 'api']).default('api').describe('Where the addition came from, kept per member'),
   })
@@ -431,8 +433,7 @@ export const addAudienceMembers = defineCommand({
 export const removeAudienceMembers = defineCommand({
   name: 'audiences.remove',
   title: 'Remove people from a static audience',
-  description:
-    'Remove up to 1,000 people from a static or snapshot segment by profile id, e-mail or user id. Removing someone who is not on the list changes nothing.',
+  description: `Remove up to 1,000 people from a static segment by profile id, e-mail or user id. ${STATIC_LIST_NOTE} Removing someone who is not on the list changes nothing.`,
   input: ListSelector,
   output: z.object({
     removed: z.number().int(),
@@ -521,8 +522,7 @@ async function recordImport(
 export const importAudienceCsv = defineCommand({
   name: 'audiences.import',
   title: 'Import people into a static audience from CSV',
-  description:
-    'Parse a CSV (up to 5 MB) and add the people in one column to a static or snapshot segment. Use dryRun to preview matches and unmatched rows before applying; re-importing adds nobody twice. Ids are matched by e-mail hash, user id or profile id. Unmatched rows are reported by row number and reason only, without personal data. Membership is not consent.',
+  description: `Parse a CSV (up to 5 MB) and add the people in one column to a static segment. ${STATIC_LIST_NOTE} Use dryRun to preview matches and unmatched rows before applying; re-importing adds nobody twice. Ids are matched by e-mail hash, user id or profile id. Unmatched rows are reported by row number and reason only, without personal data. Membership is not consent.`,
   input: z.object({
     segmentId: SegmentId,
     csv: z.string().min(1).max(MAX_IMPORT_BYTES).describe('The file contents as text'),

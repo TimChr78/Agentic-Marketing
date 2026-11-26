@@ -122,4 +122,21 @@ describe.skipIf(!hasTestDatabase())('journeys.migrate follows the new wait event
     expect(impact.touches?.artifacts).toEqual([{ id: journeyId, type: 'journey' }]);
     expect(impact.touches?.channels).toEqual([]);
   }, 60_000);
+
+  it('clears the old step’s retry budget and error when a migration restarts a participant', async () => {
+    const journeyId = await publishVersions('Order Placed', 'Order Completed');
+    const moved = await participant(journeyId, 1, 'wait', 'waiting', 'Order Placed');
+    await d.db.admin.query('UPDATE journey_participants SET attempts = 2, error = $2 WHERE id = $1', [moved, 'store unavailable']);
+
+    const out = await d.db.withWorkspace(ws, (tx) =>
+      migrateJourney.handler({ artifactId: journeyId, mapping: { wait: 'done' }, unmatched: 'stay', dryRun: false }, context(tx)),
+    );
+
+    expect(out).toMatchObject({ toVersion: 2, restarted: 1 });
+    const after = await d.db.admin.query<{ node: string; status: string; attempts: number; error: string | null }>(
+      'SELECT node, status, attempts, error FROM journey_participants WHERE id = $1',
+      [moved],
+    );
+    expect(after.rows[0]).toEqual({ node: 'done', status: 'ready', attempts: 0, error: null });
+  }, 60_000);
 });

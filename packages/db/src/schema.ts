@@ -977,12 +977,14 @@ export const journeyParticipants = pgTable(
     seq: integer('seq').notNull().default(0),
     dueAt: ts('due_at'),
     waitingEvent: text('waiting_event'),
-    /** waitUntil's absolute timeout; dueAt is the next check, not the deadline. */
+    /** The absolute deadline of a waitUntil, waitEvent or goal; dueAt is the next check or a retry backoff. */
     waitingUntil: ts('waiting_until'),
     matched: boolean('matched').notNull().default(false),
     converted: boolean('converted').notNull().default(false),
     context: jsonb('context').$type<Record<string, unknown>>().notNull().default({}),
     error: text('error'),
+    /** Consecutive failed advances of the current step; reset on success (#1240). */
+    attempts: integer('attempts').notNull().default(0),
     enteredAt: ts('entered_at').notNull().defaultNow(),
     updatedAt: ts('updated_at').notNull().defaultNow(),
   },

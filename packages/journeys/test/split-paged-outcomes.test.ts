@@ -330,6 +330,33 @@ describe.skipIf(!hasTestDatabase())('journeys.splitResult reads its outcomes one
     expect(report.note).toContain('256 or more merges deep');
     expect(report.note).not.toContain('more than');
   }, 120_000);
+
+  it('withholds an actionable verdict while the journey events are still queued (#1244 review)', async () => {
+    const journeyId = await publishJourney();
+    const ids = Array.from({ length: 12 }, () => newId('prf'));
+    await seedPeople(ids);
+    reset(ids.map((id, i) => ({ participantId: 900 + i, profileId: id, arm: i % 2, at: at(i) })));
+    converted = ids.map((profileId, i) => ({ profileId, participantId: 900 + i, at: at(i + 100) })).filter((_, i) => i % 2 === 0);
+
+    const complete = await splitResult(journeyId);
+    expect(complete.comparisons.map((c) => c.verdict)).toEqual(['treatment_worse']);
+
+    // The sweep queued this journey's step events in the outbox; ClickHouse has not seen them yet.
+    const outboxId = newId('obx');
+    await d.db.admin.query(
+      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, subject_ref, state)
+       VALUES ($1, $2, 'journey_event', '{"events":[]}'::jsonb, $3, $4, 'pending')`,
+      [ws, outboxId, `journey-event:test:${journeyId}`, journeyId],
+    );
+    try {
+      const report = await splitResult(journeyId);
+      expect(report.comparisons).toEqual([]);
+      expect(report.note).toContain("Publication of this journey's journey events is incomplete");
+      expect(report.note).toContain('1 pending');
+    } finally {
+      await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND id = $2', [ws, outboxId]);
+    }
+  }, 120_000);
 });
 
 describe.skipIf(!hasTestDatabase())('the split’s k floor counts people (#1105 review)', () => {

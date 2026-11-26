@@ -1016,7 +1016,7 @@ export const DEMO_AI_USAGE: Out<'ai.usage'> = {
   ],
 };
 
-export const DEMO_AI_CALLS: Out<'ai.calls'> = { calls: [] };
+export const DEMO_AI_CALLS: Out<'ai.calls'> = { calls: [], nextCursor: null };
 export const DEMO_AI_REVIEWS: Out<'ai.reviews'> = { reviews: [], quality: [] };
 
 // --- Templates, blocks, assets and recipes -------------------------------------------------

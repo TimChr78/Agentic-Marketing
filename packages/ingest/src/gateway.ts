@@ -280,12 +280,18 @@ export function ingestApi(deps: IngestDeps) {
 
       // sendBeacon posts text/plain, so parse the body ourselves whatever the content type says.
       const raw = await c.req.text();
-      let body: Record<string, unknown>;
+      let parsed: unknown;
       try {
-        body = JSON.parse(raw);
+        parsed = JSON.parse(raw);
       } catch {
         return fail(400, 'invalid_json', 'The body is not JSON.');
       }
+      // A body that parses to `null`, an array or a scalar is as unusable as invalid JSON: the
+      // edge worker refuses it the same way, and reading `body.batch` before the write-key check
+      // used to turn an unauthenticated `null` into a 500 with an unhandled-error log line (#1246).
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+        return fail(400, 'invalid_json', 'The body is not a JSON object.');
+      const body = parsed as Record<string, unknown>;
 
       const key = writeKeyOf(c, body);
       const source = key ? await loadSource(key) : null;

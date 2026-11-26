@@ -54,6 +54,37 @@ export const messageEventPayloadSchema = z.object({
   receivedAt: z.string().min(1).optional(),
 });
 
+const JOURNEY_EVENT_TYPES = [
+  'entered',
+  'step',
+  'waiting',
+  'resumed',
+  'converted',
+  'completed',
+  'exited',
+  'failed',
+  'holdout_assigned',
+] as const;
+
+/** Complete shape of one ClickHouse journey event; a partial object would fail inside ClickHouse. */
+export const journeyEventSchema = z.object({
+  workspaceId: z.string().min(1),
+  journeyId: z.string().min(1),
+  version: z.number().int().nonnegative(),
+  participantId: z.number().int().nonnegative(),
+  profileId: z.string(),
+  node: z.string(),
+  type: z.enum(JOURNEY_EVENT_TYPES),
+  seq: z.number().int().nonnegative(),
+  at: z.string().min(1),
+  detail: z.string(),
+});
+
+/** The payload one `journey_event` outbox row carries: exactly the events it will publish (#1244). */
+export const journeyEventPayloadSchema = z.object({
+  events: z.array(journeyEventSchema).min(1),
+});
+
 /**
  * The events an outbox payload carries. Throws when the payload is not a well-formed batch: such a
  * row cannot have been a real event, so a reader that finds one cannot count it either.

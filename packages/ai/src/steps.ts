@@ -3,7 +3,7 @@ import { safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
-import { canonicalProfile, lockProfileRows } from '@agentic-marketing/profiles';
+import { canonicalProfile } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -15,6 +15,7 @@ import {
   decisionCall,
   decisionProvider,
   insertProfileScore,
+  lockCanonicalProfile,
   nonPersonalState,
   stateHash,
 } from './decision';
@@ -233,14 +234,16 @@ export async function finishIn(
   // same profile lock first, and the profile row's foreign key cascades the score deletion.
   let waiting = true;
   if (c.kind === 'score') {
-    // The call keeps its own profile id even when a merge has folded it away (the score is stored
-    // under it), so lock that row whether or not it is the person today — before the participant.
-    const lockedProfile = c.profileId ? await lockProfileRows(tx, c.workspaceId, [c.profileId], { includeMerged: true }) : [];
+    // The call keeps its own profile id even when a merge has folded it away, so resolve the
+    // person today before locking (#1241). Locking the stored alias and then its survivor would
+    // invert the shared ascending-id profile lock order of a merge (#1011); lock only the
+    // canonical row. The shared helper follows a merge that commits while this waits.
+    const lockedProfile = c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
     const lockedParticipant = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants
         WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'
         FOR UPDATE`);
-    waiting = lockedParticipant.rows.length > 0 && (!c.profileId || lockedProfile.length > 0);
+    waiting = lockedParticipant.rows.length > 0 && (!c.profileId || lockedProfile !== null);
     // The score and the wakeup commit together: a worker cannot claim the participant and read a
     // missing (or previous) value, and a failed score write leaves the step waiting to retry.
     if (waiting && out.storeScore) await insertProfileScore(tx, c.workspaceId, out.storeScore);
@@ -737,17 +740,24 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
   const questions = parsed.data as DecisionQuestion[];
   const scoreKey = typeof raw.scoreKey === 'string' ? raw.scoreKey : questions[0].key;
   const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
+    // A decision queued before a merge keeps the old profile id. Resolve the person today before
+    // the consent check and the context, or a survivor's consent is missed and the step falls back
+    // with no_lawful_basis (#1241 review).
+    let profileId: string | null = null;
     if (c.profileId) {
-      const consent = await aiAllowed(tx, c.workspaceId, c.profileId);
+      const person = await canonicalProfile(tx, c.workspaceId, c.profileId);
+      if (!person) return { error: 'no_profile: the person does not exist (or was erased)' };
+      profileId = person.id;
+      const consent = await aiAllowed(tx, c.workspaceId, profileId);
       if (!consent.ok) return { error: consent.reason ?? 'no_lawful_basis' };
     }
     try {
       const provider = await decisionProvider(tx, deps.kp);
-      if (!c.profileId) return { error: 'no_profile: a decision step needs a person' };
+      if (!profileId) return { error: 'no_profile: a decision step needs a person' };
       const triggerName = typeof raw.trigger?.name === 'string' ? raw.trigger.name : undefined;
-      const state = await nonPersonalState(tx, c.workspaceId, deps.events, c.profileId, triggerName ? { trigger: triggerName } : undefined);
+      const state = await nonPersonalState(tx, c.workspaceId, deps.events, profileId, triggerName ? { trigger: triggerName } : undefined);
       if (!state) return { error: 'no_profile: the person does not exist (or was erased)' };
-      return { provider, state };
+      return { provider, state, profileId };
     } catch (err) {
       if (err instanceof AiUnavailable || err instanceof DecisionError) return { error: `${err.message}` };
       throw err;
@@ -774,10 +784,10 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
       providerId: ready.provider.providerId,
       model: r.modelVersion,
       // Committed before the participant is woken, in the same transaction (#351).
-      ...(c.profileId && routed
+      ...(ready.profileId && routed
         ? {
             storeScore: {
-              profileId: c.profileId,
+              profileId: ready.profileId,
               key: scoreKey,
               answer: routed,
               model: ready.provider.model,

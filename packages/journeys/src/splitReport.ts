@@ -1,10 +1,16 @@
 import { randomBytes } from 'node:crypto';
 import { analyseHoldout, anyArmBelowK, artifactTypes, K } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
-import { schema, type Tx } from '@agentic-marketing/db';
+import { outboxPublicationBarrier, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { and, eq, sql } from 'drizzle-orm';
-import { JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT, type PageUnresolved, pageOutcomeScope, unresolvedOutcomeNote } from './holdout';
+import {
+  incompletePublicationNote,
+  JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT,
+  type PageUnresolved,
+  pageOutcomeScope,
+  unresolvedOutcomeNote,
+} from './holdout';
 import { attributeSplitOutcomes, type SplitCounts, type SplitEntry } from './split';
 
 // journeys.splitResult (#313), split out of the command so the paging can be tested against a
@@ -107,6 +113,11 @@ export async function computeJourneySplit(
   const ws = deps.workspaceId;
   const pageProfileLimit = deps.pageProfileLimit ?? JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT;
   const unresolved = new Set<PageUnresolved>();
+  // Snapshot the outbox before the ClickHouse reads: an event still queued here is not in what
+  // follows, and one published afterwards must not make this report look complete. A verdict is
+  // actionable (the lifecycle optimiser promotes or retires an arm), so it waits for publication.
+  const publication = await outboxPublicationBarrier(deps.tx, ws, input.journeyId);
+  const publicationIncomplete = publication.outstanding > 0 || publication.failed > 0;
 
   // The split's takes land in a transaction-scoped temporary table, the way the holdout's winners
   // do (#1108). The ClickHouse read is a bounded keyset page and the report then pages the takes by
@@ -269,30 +280,33 @@ export async function computeJourneySplit(
           suppressed: false,
         },
   );
-  const comparisons: JourneySplitComparison[] = belowK
-    ? []
-    : counts.slice(1).map((c, i) => {
-        const r = analyseHoldout(counts[0]!, c, input.minSampleSize);
-        return {
-          arm: i + 1,
-          versus: 0 as const,
-          absoluteLift: r.absoluteLift,
-          relativeLift: r.relativeLift,
-          ci95: r.ci95,
-          minSampleSizeMet: r.minSampleSizeMet,
-          verdict: r.verdict,
-        };
-      });
+  const comparisons: JourneySplitComparison[] =
+    belowK || publicationIncomplete
+      ? []
+      : counts.slice(1).map((c, i) => {
+          const r = analyseHoldout(counts[0]!, c, input.minSampleSize);
+          return {
+            arm: i + 1,
+            versus: 0 as const,
+            absoluteLift: r.absoluteLift,
+            relativeLift: r.relativeLift,
+            ci95: r.ci95,
+            minSampleSizeMet: r.minSampleSizeMet,
+            verdict: r.verdict,
+          };
+        });
   const better = comparisons.filter((c) => c.verdict === 'treatment_better').map((c) => `arm ${c.arm}`);
-  const baseNote = !takeCount
-    ? 'Nobody has reached this split yet.'
-    : belowK
-      ? `An arm has fewer than k=${K} people, so its counts and rates and every comparison are withheld.`
-      : better.length
-        ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
-        : comparisons.every((c) => c.verdict === 'not_enough_data')
-          ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
-          : 'No arm is clearly better than arm 0 yet.';
+  const baseNote = publicationIncomplete
+    ? `${incompletePublicationNote(publication, 'every comparison is withheld')}${belowK ? ` An arm has fewer than k=${K} people, so its counts and rates are withheld.` : ''}`
+    : !takeCount
+      ? 'Nobody has reached this split yet.'
+      : belowK
+        ? `An arm has fewer than k=${K} people, so its counts and rates and every comparison are withheld.`
+        : better.length
+          ? `${better.join(', ')} converts better than arm 0 with a 95% interval above zero.`
+          : comparisons.every((c) => c.verdict === 'not_enough_data')
+            ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
+            : 'No arm is clearly better than arm 0 yet.';
   const note =
     unresolved.size === 0
       ? baseNote
