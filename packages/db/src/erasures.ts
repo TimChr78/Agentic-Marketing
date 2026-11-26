@@ -728,7 +728,7 @@ export async function replayErasures(
               // again. A job that was still pending, running or failed is queued for its remaining
               // sweep. The upsert is idempotent: a second replay rewrites the same queued state.
               const wasComplete = job?.state === 'complete';
-              const inserted = await client.query(
+              const inserted = await client.query<{ state: string }>(
                 `INSERT INTO erasure_cleanup_jobs
                    (workspace_id, erasure_id, profile_ids, selectors, selector_key, selector_kek,
                     state, clickhouse_done, hotstate_done, completed_at)
@@ -759,7 +759,8 @@ export async function replayErasures(
                        selector_kek = CASE WHEN erasure_cleanup_jobs.selectors IS NOT NULL THEN erasure_cleanup_jobs.selector_kek
                                            ELSE EXCLUDED.selector_kek END,
                        updated_at = now()
-                 WHERE erasure_cleanup_jobs.state <> 'complete'`,
+                 WHERE erasure_cleanup_jobs.state <> 'complete'
+                 RETURNING state`,
                 [
                   workspaceId,
                   erasure.id,
@@ -770,8 +771,13 @@ export async function replayErasures(
                   wasComplete,
                 ],
               );
-              if (wasComplete) result.completedJobs += inserted.rowCount ?? 0;
-              else result.cleanupJobs += inserted.rowCount ?? 0;
+              // Count what the row ended up as, not what the snapshot said. A live `complete` job
+              // whose snapshot row was still unfinished is re-opened by the upsert above, so it is
+              // queued for a sweep and must not be reported as restored without one (#1223). The
+              // conditional upsert returns no row when it left a live completed job alone.
+              const restoredState = inserted.rows[0]?.state;
+              if (restoredState === 'complete') result.completedJobs += 1;
+              else if (restoredState) result.cleanupJobs += 1;
             }
           }
           result.erasures += 1;

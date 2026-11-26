@@ -309,9 +309,25 @@ export async function applyRowPolicies(
     for (const t of SCOPED_TABLES) await client.command({ query: `DROP ROW POLICY IF EXISTS ${ROW_POLICY} ON ${database}.${t}` });
     return false;
   }
+  // A failed probe is not an answer about custom settings: a refused connection, reset socket or
+  // timeout says nothing about `SQL_`, and treating it as "not accepted" would leave the policies
+  // unapplied for good (#1225). Fail so the migration can be retried once ClickHouse answers.
+  let accepts: boolean;
   try {
-    if (!(await acceptsWorkspaceSetting(client)))
-      throw new Error('the server does not accept SQL_ custom settings (custom_settings_prefixes)');
+    accepts = await acceptsWorkspaceSetting(client);
+  } catch (err) {
+    throw new Error(
+      `ClickHouse row policies could not be applied: the server did not answer the SQL_ setting probe (${(err as Error).message.split('\n')[0]}). Retry once ClickHouse is reachable.`,
+      { cause: err },
+    );
+  }
+  if (!accepts) {
+    const why = 'ClickHouse row policies could not be applied: the server does not accept SQL_ custom settings (custom_settings_prefixes)';
+    if (mode === 'required') throw new Error(`${why}. Grant the user access management, or set CLICKHOUSE_ROW_POLICIES=auto.`);
+    log(`${why}; queries are still filtered by workspace in code`);
+    return false;
+  }
+  try {
     for (const t of SCOPED_TABLES)
       await client.command({
         query: `CREATE ROW POLICY OR REPLACE ${ROW_POLICY} ON ${database}.${t} FOR SELECT
@@ -326,12 +342,25 @@ export async function applyRowPolicies(
   }
 }
 
+/** Only the server's own "unknown setting" answer may mean it does not take `SQL_` settings. */
+function isUnknownSetting(err: unknown): boolean {
+  const e = err as { type?: unknown; code?: unknown } | null;
+  return e?.type === 'UNKNOWN_SETTING' || Number(e?.code) === 115;
+}
+
 /**
  * Whether the server takes `SQL_` custom settings. A restore's store tags the probe with its
  * `query_id` and passes its lock-loss signal, so a successor's drain sees it and a lost lock
  * cancels it instead of leaving an untagged request behind (#1204 review).
+ *
+ * `false` is reserved for the one answer that proves the server does not take the setting. A
+ * transport error or timeout rejects: callers must not cache "not accepted" from a failed request
+ * (#1225). Exported for the test that pins that distinction.
  */
-async function acceptsWorkspaceSetting(client: ClickHouseClient, opts: { signal?: AbortSignal; queryIdPrefix?: string } = {}) {
+export async function acceptsWorkspaceSetting(
+  client: Pick<ClickHouseClient, 'command'>,
+  opts: { signal?: AbortSignal; queryIdPrefix?: string } = {},
+) {
   try {
     await client.command({
       query: 'SELECT 1',
@@ -340,9 +369,29 @@ async function acceptsWorkspaceSetting(client: ClickHouseClient, opts: { signal?
       ...(opts.signal ? { abort_signal: opts.signal } : {}),
     });
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    if (isUnknownSetting(err)) return false;
+    throw err;
   }
+}
+
+/**
+ * The settings one workspace read carries for a probe answer. In `required` mode a server that does
+ * not take `SQL_workspace` is an error, not an empty set: with the row policies applied the policy
+ * would hide every row and the read would look like an empty workspace (#1225).
+ */
+export function workspaceSettings(
+  workspaceId: string,
+  accepts: boolean,
+  mode: 'required' | 'auto' | 'off' | undefined,
+): Record<string, string> {
+  if (accepts) return { SQL_workspace: workspaceId };
+  if (mode === 'required')
+    throw new Error(
+      'ClickHouse no longer accepts the SQL_workspace setting, so row policies would hide every row; refusing to read without it. ' +
+        'Restore the SQL_ custom-settings prefix on the server, or set CLICKHOUSE_ROW_POLICIES=auto.',
+    );
+  return {};
 }
 
 export interface MessageEvent {
@@ -730,8 +779,15 @@ async function writeBackfillCursor(client: ClickHouseClient, table: string, work
   });
 }
 
-/** The keyset predicate after the last processed primary-key tuple, typed per sort column. */
-function cursorPredicate(
+/**
+ * The keyset predicate after the last processed primary-key tuple, typed per sort column.
+ *
+ * ClickHouse's primary-key analysis does not use a tuple comparison (`(a, b, c) > (A, B, C)`) to
+ * choose granules, so that form reads the workspace's whole range for every batch. The expanded
+ * column comparisons it does analyse — `a > A OR (a = A AND (b > B OR …))` — select the same rows
+ * but let the server start at the cursor's granule (#1226).
+ */
+export function cursorPredicate(
   spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number],
   cursor: string,
 ): { sql: string; params: Record<string, unknown> } {
@@ -740,11 +796,37 @@ function cursorPredicate(
   const params: Record<string, unknown> = {};
   const typed = spec.sortColumns.map((column, index) => {
     params[`c${index}`] = values[column.name];
-    return `{c${index}:${column.type}}`;
+    return { name: `t.${column.name}`, value: `{c${index}:${column.type}}` };
   });
+  const expand = (index: number): string => {
+    const { name, value } = typed[index]!;
+    const after = `${name} > ${value}`;
+    if (index === typed.length - 1) return after;
+    return `(${after} OR (${name} = ${value} AND ${expand(index + 1)}))`;
+  };
+  return { sql: `AND ${expand(0)}`, params };
+}
+
+/**
+ * One batch select of the subject-key backfill: the next `limit` uncovered rows after the cursor,
+ * in the table's sort order. Exported so a test can pin the predicate the server actually analyses
+ * rather than a copy, and so a plan guard can run `EXPLAIN indexes = 1` on it.
+ */
+export function subjectKeyBackfillBatchQuery(
+  spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number],
+  o: { workspaceId: string; cursor?: string; limit?: number },
+) {
+  const after = cursorPredicate(spec, o.cursor ?? '');
   return {
-    sql: `AND (${spec.sortColumns.map((column) => `t.${column.name}`).join(', ')}) > (${typed.join(', ')})`,
-    params,
+    // FINAL sees one logical row per replacing key, so a complete concurrent redelivery hides an
+    // older incomplete copy. The side join skips identities already backfilled.
+    query: `SELECT t.* FROM ${spec.table} AS t FINAL
+            LEFT JOIN subject_key_backfill AS s FINAL
+              ON s.workspace_id = t.workspace_id AND s.table_name = {table:String} AND ${identityJoin(spec)}
+            WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full' AND s.table_name = '' ${after.sql}
+            ORDER BY ${spec.sortColumns.map((column) => `t.${column.name}`).join(', ')}
+            LIMIT {limit:UInt32}`,
+    query_params: { table: spec.table, ws: o.workspaceId, ...after.params, limit: o.limit ?? 5_000 },
   };
 }
 
@@ -925,6 +1007,12 @@ export function clickHouseStore(opts: {
    * in-flight exclusion publication in ClickHouse's `system.processes` before it writes.
    */
   queryIdPrefix?: string;
+  /**
+   * The server's row-policy mode. With `required`, a workspace read refuses to run when the server
+   * answers that it no longer takes `SQL_workspace`: without the setting the policy hides every
+   * row, so a silent empty read would look like an empty workspace (#1225).
+   */
+  rowPolicies?: 'required' | 'auto' | 'off';
 }): EventStore {
   const client = createClient({
     ...clientOptions(opts.url),
@@ -943,13 +1031,18 @@ export function clickHouseStore(opts: {
     users: ids.userIds,
   });
   // Whether the server takes the SQL_workspace setting; when it does, every query names its workspace.
+  // Only a real answer is cached. A transport failure rejects this call and clears the cache, so the
+  // next request probes again instead of running without the setting for the process's life (#1225).
   let accepts: Promise<boolean> | undefined;
   const settingsFor = async (workspaceId: string): Promise<Record<string, string>> => {
     accepts ??= acceptsWorkspaceSetting(client, {
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.queryIdPrefix ? { queryIdPrefix: opts.queryIdPrefix } : {}),
+    }).catch((err: unknown) => {
+      accepts = undefined;
+      throw err;
     });
-    return (await accepts) ? { SQL_workspace: workspaceId } : {};
+    return workspaceSettings(workspaceId, await accepts, opts.rowPolicies);
   };
   type QueryArgs = Parameters<ClickHouseClient['query']>[0];
   const abort = () => (opts.signal ? { abort_signal: opts.signal } : {});
@@ -1626,17 +1719,10 @@ export function clickHouseStore(opts: {
         const settings = await settingsFor(workspaceId);
         for (const spec of SUBJECT_KEY_BACKFILL_TABLES) {
           const state = await readBackfillCursor(client, spec.table, workspaceId);
-          const after = cursorPredicate(spec, state.cursor);
+          const batch = subjectKeyBackfillBatchQuery(spec, { workspaceId, cursor: state.cursor, limit: batchSize });
           const rs = await client.query({
-            // FINAL sees one logical row per replacing key, so a complete concurrent redelivery
-            // hides an older incomplete copy. The side join skips identities already backfilled.
-            query: `SELECT t.* FROM ${spec.table} AS t FINAL
-                    LEFT JOIN subject_key_backfill AS s FINAL
-                      ON s.workspace_id = t.workspace_id AND s.table_name = {table:String} AND ${identityJoin(spec)}
-                    WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full' AND s.table_name = '' ${after.sql}
-                    ORDER BY ${spec.sortColumns.map((column) => `t.${column.name}`).join(', ')}
-                    LIMIT {limit:UInt32}`,
-            query_params: { table: spec.table, ws: workspaceId, ...after.params, limit: batchSize },
+            query: batch.query,
+            query_params: batch.query_params,
             format: 'JSONEachRow',
             clickhouse_settings: settings,
           });

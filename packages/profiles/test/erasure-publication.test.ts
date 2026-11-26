@@ -459,8 +459,9 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
       'SELECT state, published_at, clickhouse_done, attempts FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2',
       [workspace, erasureId],
     );
-    // Re-opened for a fresh publication: the earlier sweep checkpoints and publication do not count.
-    expect(rows[0]).toMatchObject({ state: 'pending_external', published_at: null, clickhouse_done: false, attempts: 36 });
+    // Re-opened for a fresh publication: the earlier sweep checkpoints and publication do not count,
+    // and the job gets a whole retry budget instead of one attempt (#1219).
+    expect(rows[0]).toMatchObject({ state: 'pending_external', published_at: null, clickhouse_done: false, attempts: 0 });
   }, 60_000);
 
   it('keeps a restored workspace on the protected path with ledger rows but no generation row', async () => {

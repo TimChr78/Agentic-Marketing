@@ -136,6 +136,9 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
         hasErasures: erasureLedgerChecker(db, {
           onError: (err) => logger.error({ err }, 'the erasure ledger could not be read; person-linked reads fail closed'),
         }),
+        // With row policies required, a server that stops taking `SQL_workspace` must fail the read
+        // instead of letting the policy hide every row (#1225).
+        rowPolicies: config.clickhouse.rowPolicies,
       }),
       db,
     ),

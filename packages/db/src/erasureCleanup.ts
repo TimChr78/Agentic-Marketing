@@ -603,8 +603,13 @@ export function erasureLedgerChecker(
  * Only `full`-coverage rows are publishable, while the read-layer check protects on **any** ledger
  * row. A workspace whose only rows are `unavailable` therefore stays on the protected path with an
  * empty published set: fail closed, and nothing to publish. That asymmetry is deliberate.
+ *
+ * `reopenPublishedFailed` is the documented recovery for a job that failed **after** publishing:
+ * `am doctor` and the operations guide tell an operator to fix Valkey or ClickHouse and restart the
+ * scheduler role. The background pass runs it once at scheduler start, not on every tick, so a
+ * permanent outage is retried with a fresh budget per start rather than forever (#1219).
  */
-export async function enqueueUnpublishedErasures(db: Db): Promise<number> {
+export async function enqueueUnpublishedErasures(db: Db, opts: { reopenPublishedFailed?: boolean } = {}): Promise<number> {
   const { rowCount } = await db.admin.query(
     `INSERT INTO erasure_cleanup_jobs (workspace_id, erasure_id, profile_ids)
      SELECT e.workspace_id, e.id, e.profile_ids
@@ -615,6 +620,7 @@ export async function enqueueUnpublishedErasures(db: Db): Promise<number> {
       )
      ON CONFLICT (workspace_id, erasure_id) DO UPDATE
        SET state = 'pending_external',
+           attempts = 0,
            next_attempt_at = now(),
            clickhouse_done = false,
            hotstate_done = false,
@@ -627,11 +633,30 @@ export async function enqueueUnpublishedErasures(db: Db): Promise<number> {
        -- checkpoints, and a scheduler start on another replica must not reset it underneath the
        -- worker; a pending_external job is already queued, so the pass leaves it alone (a
        -- repeated pass is a no-op). published_at stays the second condition: a job that already
-       -- published must never run again.
+       -- published must never publish again. A re-opened job gets a whole retry budget: keeping
+       -- the burnt attempt count gave it one attempt before it landed in failed again.
        WHERE erasure_cleanup_jobs.published_at IS NULL
          AND erasure_cleanup_jobs.state IN ('complete', 'failed')`,
   );
-  return rowCount ?? 0;
+  let reopened = rowCount ?? 0;
+  if (opts.reopenPublishedFailed) {
+    // A job that failed after its exclusion was published: reads already exclude the person, but
+    // its ClickHouse purge and Valkey hot-state cleanup stopped, so a scheduler restart must queue
+    // it again. Publication, checkpoints and the final-sweep clock are kept: the worker skips
+    // publishing a job with `published_at` set and only redoes the stores that are not done.
+    const { rowCount: published } = await db.admin.query(
+      `UPDATE erasure_cleanup_jobs
+          SET state = 'pending_external',
+              attempts = 0,
+              next_attempt_at = now(),
+              lease_until = NULL,
+              claim_token = NULL,
+              updated_at = now()
+        WHERE state = 'failed' AND published_at IS NOT NULL`,
+    );
+    reopened += published ?? 0;
+  }
+  return reopened;
 }
 
 /**
@@ -650,7 +675,9 @@ export interface ErasurePublicationBacklogOptions {
  * The scheduler's periodic publication backlog pass (#1062). A cleanup job that burned its retry
  * budget lands `failed`, and the claim query only takes `pending_external`/`running`; without this
  * pass nothing re-opens it after the scheduler started. Re-enqueueing is idempotent, leaves a
- * running claim alone and never re-runs a published job. The abortable sleep stops the loop on
+ * running claim alone and never re-publishes a job that already published. The first pass after a
+ * start also re-opens a job that failed after publishing, which is what the doctor hint and the
+ * operations guide promise a scheduler restart does (#1219). The abortable sleep stops the loop on
  * shutdown instead of waiting out a whole tick.
  */
 export async function runErasurePublicationBacklog(
@@ -659,10 +686,13 @@ export async function runErasurePublicationBacklog(
   opts: ErasurePublicationBacklogOptions = {},
 ): Promise<void> {
   const tickMs = opts.tickMs ?? ERASURE_PUBLICATION_BACKLOG_INTERVAL_MS;
+  let first = true;
   while (!signal.aborted) {
+    const reopenPublishedFailed = first;
+    first = false;
     try {
-      const count = await enqueueUnpublishedErasures(deps.db);
-      if (count) opts.log?.(`re-enqueued ${count} erasure(s) without a published exclusion`);
+      const count = await enqueueUnpublishedErasures(deps.db, { reopenPublishedFailed });
+      if (count) opts.log?.(`re-enqueued ${count} erasure cleanup job(s)`);
     } catch (err) {
       opts.onError?.(err);
     }

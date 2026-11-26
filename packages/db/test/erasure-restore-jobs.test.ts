@@ -333,6 +333,59 @@ describe.skipIf(!hasTestDatabase())('restore recreates erasure cleanup jobs (#97
     expect(rows[0]!.next_attempt_at.getTime()).toBeLessThanOrEqual(Date.now() + 1000);
   }, 120_000);
 
+  it('counts a live completed job it re-opens because the snapshot was unfinished as queued, not complete (#1223)', async () => {
+    const live = await createDisposableDb('erasure_live_complete_l');
+    const restored = await createDisposableDb('erasure_live_complete_r');
+    open.push(live, restored);
+    const profile = 'prf_0000000000000000000000000000ab23';
+    const erasureId = 'era_0000000000000000000000000000ab23';
+    await live.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [live.workspace, profile]);
+    await live.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'live complete, snapshot unfinished', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await live.db.admin.query(
+      `INSERT INTO erasure_keys (workspace_id, kind, key_value, key_version, erasure_id, coverage)
+       VALUES ($1, 'anonymous_id', $2, 'dk_exclusion_live_complete', $3, 'full')`,
+      [live.workspace, 'e'.repeat(64), erasureId],
+    );
+    // The live job finished after the backup was taken, so the snapshot still carries it running.
+    await live.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation, published_at, coverage_cleared_at, completed_at)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'complete', 4, true, true, 8, now(), now(), now())`,
+      [live.workspace, erasureId, profile],
+    );
+    const log = await readErasureLog(live.url.toString());
+    expect(log.cleanupJobs).toMatchObject([{ state: 'complete' }]);
+
+    await restored.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Restored', 'none')", [live.workspace]);
+    await restored.db.admin.query(
+      `INSERT INTO erasures (workspace_id, id, profile_ids, requested_by, reason, counts)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'user_test', 'live complete, snapshot unfinished', '{"profiles":1}')`,
+      [live.workspace, erasureId, profile],
+    );
+    await restored.db.admin.query(
+      `INSERT INTO erasure_cleanup_jobs
+         (workspace_id, erasure_id, profile_ids, state, attempts, clickhouse_done, hotstate_done,
+          published_generation)
+       VALUES ($1, $2, ARRAY[$3]::text[], 'running', 2, false, false, 2)`,
+      [live.workspace, erasureId, profile],
+    );
+
+    const replayed = await replayErasures(restored.url.toString(), log);
+    // The upsert re-opened the snapshot's unfinished row, so the job is queued for a sweep and must
+    // not be reported as restored without one.
+    expect(replayed).toMatchObject({ cleanupJobs: 1, completedJobs: 0 });
+    const { rows } = await restored.db.admin.query<{ state: string; attempts: number; published_at: Date | null }>(
+      `SELECT state, attempts, published_at FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2`,
+      [live.workspace, erasureId],
+    );
+    expect(rows[0]).toMatchObject({ state: 'pending_external', attempts: 0, published_at: null });
+  }, 120_000);
+
   it('migrates a pre-0108 snapshot before replaying, so the restored cleanup jobs exist', async () => {
     const live = await createDisposableDb('erasure_jobs_pre0108_live');
     // A snapshot taken before durable cleanup: its schema stops at 0107 and has no job table.

@@ -701,6 +701,64 @@ export interface RestoreSessionLockOptions {
    * included, and fail (#1204 review).
    */
   onLost?: (err: Error) => void;
+  /** TCP keepalive after this much idle time. Default 10 s; 0 keeps the platform default. */
+  keepAliveInitialDelayMs?: number;
+  /** How often the session proves it still answers with `SELECT 1`. Default 30 s; 0 disables it. */
+  livenessMs?: number;
+  /** How long one statement on the lock session may take before it counts as lost. Default 15 s. */
+  livenessTimeoutMs?: number;
+}
+
+/** TCP keepalive after this much idle time, so a peer that vanished without a FIN is probed. */
+const RESTORE_LOCK_KEEPALIVE_MS = 10_000;
+/** How often a lock session proves it still answers. */
+const RESTORE_LOCK_LIVENESS_MS = 30_000;
+/** How long a statement on the lock session may take; also bounds one liveness check. */
+const RESTORE_LOCK_LIVENESS_TIMEOUT_MS = 15_000;
+
+/**
+ * The dedicated connection a lock is held on (#1222). `keepAlive` makes the OS probe an idle peer,
+ * and `query_timeout` bounds the periodic liveness query: without either, a peer that drops the
+ * connection without a FIN is never noticed, and the holder keeps serving (or restoring) as if its
+ * lock were still there.
+ */
+function restoreLockClient(connectionString: string, opts: { keepAliveInitialDelayMs?: number; livenessTimeoutMs?: number }): pg.Client {
+  return new pg.Client({
+    connectionString,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: opts.keepAliveInitialDelayMs ?? RESTORE_LOCK_KEEPALIVE_MS,
+    query_timeout: opts.livenessTimeoutMs ?? RESTORE_LOCK_LIVENESS_TIMEOUT_MS,
+  });
+}
+
+/**
+ * Proves periodically that the lock session still answers. Only a query that is answered proves the
+ * session is alive, and the client's `query_timeout` turns a silently dropped peer into a rejection
+ * so the existing lock-loss path runs. Returns the stop function.
+ */
+function watchRestoreLock(client: pg.Client, lost: (err: Error) => void, livenessMs: number | undefined): () => void {
+  const ms = livenessMs ?? RESTORE_LOCK_LIVENESS_MS;
+  if (!(ms > 0)) return () => {};
+  let stopped = false;
+  let probing = false;
+  const timer = setInterval(() => {
+    // One probe at a time: a hung answer is already bounded by the client's query timeout, and
+    // queueing another statement behind it would only repeat the deprecation pg warns about.
+    if (stopped || probing) return;
+    probing = true;
+    client
+      .query('SELECT 1')
+      .catch((err: unknown) => lost(err instanceof Error ? err : new Error(String(err))))
+      .finally(() => {
+        probing = false;
+      });
+  }, ms);
+  // The probe must not keep a shutting-down process alive on its own.
+  timer.unref?.();
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
 }
 
 /**
@@ -717,7 +775,7 @@ export interface RestoreSessionLockOptions {
 export async function acquireRestoreSessionLock(databaseUrl: string, opts: RestoreSessionLockOptions = {}): Promise<RestoreSessionLock> {
   // The lock session announces the restore name too: a successor's drain must see it, and excludes
   // it by PID while this attempt is the successor (#1204 review).
-  const client = new pg.Client({ connectionString: withRestoreAppName(databaseUrl) });
+  const client = restoreLockClient(withRestoreAppName(databaseUrl), opts);
   await client.connect();
   let pid = 0;
   try {
@@ -734,19 +792,26 @@ export async function acquireRestoreSessionLock(databaseUrl: string, opts: Resto
     throw err;
   }
   let released = false;
+  let lostReported = false;
   const lost = (err: Error) => {
-    if (!released) opts.onLost?.(err);
+    if (released || lostReported) return;
+    lostReported = true;
+    opts.onLost?.(err);
   };
   // Keep a listener on both events: pg emits 'error' when the backend is terminated, and without
   // one Node would treat it as an unhandled error and exit without the caller's cleanup.
   client.on('error', lost);
   client.on('end', () => lost(new Error('the restore lock connection ended unexpectedly')));
+  const stopLiveness = watchRestoreLock(client, lost, opts.livenessMs);
   return {
     client,
     pid,
     async release() {
       released = true;
-      await client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
+      stopLiveness();
+      // A lost session cannot answer, and the server drops its lock with the connection; sending
+      // the unlock would only queue behind the unanswered liveness query.
+      if (!lostReported) await client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
       await client.end().catch(() => {});
     },
   };
@@ -768,6 +833,12 @@ export interface RestoreStartupLockOptions {
   onLost?: (err: Error) => void;
   /** How long to wait for an active restore to finish before refusing. Default 3 s. */
   waitMs?: number;
+  /** TCP keepalive after this much idle time. Default 10 s. */
+  keepAliveInitialDelayMs?: number;
+  /** How often the held lock proves it still answers with `SELECT 1`. Default 30 s; 0 disables it. */
+  livenessMs?: number;
+  /** How long one statement on the lock session may take before it counts as lost. Default 15 s. */
+  livenessTimeoutMs?: number;
 }
 
 const RESTORE_STARTUP_WAIT_MS = 3_000;
@@ -794,7 +865,7 @@ const fenceBlockMessage = (fence: RestoreFenceState) =>
  * restore could start while this process is still serving.
  */
 export async function acquireRestoreStartupLock(databaseUrl: string, opts: RestoreStartupLockOptions = {}): Promise<RestoreStartupLock> {
-  const client = new pg.Client({ connectionString: databaseUrl });
+  const client = restoreLockClient(databaseUrl, opts);
   await client.connect();
   let lockPid = 0;
   try {
@@ -825,16 +896,21 @@ export async function acquireRestoreStartupLock(databaseUrl: string, opts: Resto
   }
 
   let released = false;
+  let lostReported = false;
   const lost = (err: Error) => {
-    if (!released) opts.onLost?.(err);
+    if (released || lostReported) return;
+    lostReported = true;
+    opts.onLost?.(err);
   };
   client.on('error', lost);
   client.on('end', () => lost(new Error('the restore lock connection ended unexpectedly')));
+  const stopLiveness = watchRestoreLock(client, lost, opts.livenessMs);
   return {
     pid: lockPid,
     async release() {
       if (released) return;
       released = true;
+      stopLiveness();
       // Keep the listeners: after this flag they are no-ops, and an error during `end()` must not
       // become an unhandled 'error' event on the client.
       await client.end().catch(() => {});

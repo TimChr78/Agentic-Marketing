@@ -12,7 +12,7 @@ export interface BannerPurpose {
   key: string;
   name: string;
   description: string;
-  /** Purposes that do not need consent are shown as always on. */
+  /** Purposes that do not need consent are on by default, and the visitor can refuse them. */
   basis: string;
 }
 
@@ -47,6 +47,11 @@ interface AnalyticsLike {
   readonly host: string;
   readonly writeKey: string;
   setConsent(choice: Consent): void;
+  /**
+   * Tells the SDK which purposes need consent and which hold until someone objects. The banner
+   * already fetches them, so the tracking gate uses the same basis as the gateway (#1224).
+   */
+  setPurposes?(purposes: { key: string; basis: string }[]): void;
 }
 
 const DEFAULT_TEXTS: BannerTexts = {
@@ -103,10 +108,14 @@ export function createConsentBanner(analytics: AnalyticsLike, opts: BannerOption
   let purposes: BannerPurpose[] = opts.purposes ?? [];
 
   const loadPurposes = async () => {
-    if (opts.purposes) return;
-    const doFetch = opts.fetch ?? win.fetch.bind(win);
-    const res = await doFetch(`${analytics.host}/v1/consent/purposes?writeKey=${encodeURIComponent(analytics.writeKey)}`);
-    if (res.ok) purposes = ((await res.json()) as { purposes: BannerPurpose[] }).purposes;
+    if (!opts.purposes) {
+      const doFetch = opts.fetch ?? win.fetch.bind(win);
+      const res = await doFetch(`${analytics.host}/v1/consent/purposes?writeKey=${encodeURIComponent(analytics.writeKey)}`);
+      if (res.ok) purposes = ((await res.json()) as { purposes: BannerPurpose[] }).purposes;
+    }
+    // Always hand the bases over, also when the banner does not render (a visitor who already
+    // chose): the SDK's tracking gate needs them to allow a non-consent purpose (#1224).
+    analytics.setPurposes?.(purposes);
   };
 
   const el = <K extends keyof HTMLElementTagNameMap>(tag: K, style: Partial<CSSStyleDeclaration> = {}, text?: string) => {
@@ -135,8 +144,10 @@ export function createConsentBanner(analytics: AnalyticsLike, opts: BannerOption
     if (useGcm && win) gtagOf(win)('consent', 'update', mode({ ...(analytics.consent ?? {}), ...choice }));
     close();
   };
-  const optional = () => purposes.filter((p) => p.basis === 'consent');
-  const all = (value: boolean) => Object.fromEntries(optional().map((p) => [p.key, value]));
+  // A non-consent purpose (legitimate interest, contract) holds until the visitor objects, so an
+  // "Accept all" records it too and a "Reject all" records the objection (#1224). It used to be
+  // left out and the SDK then dropped every event for it, although the banner said it was on.
+  const all = (value: boolean) => Object.fromEntries(purposes.map((p) => [p.key, value]));
 
   function render() {
     root?.remove();
@@ -173,9 +184,10 @@ export function createConsentBanner(analytics: AnalyticsLike, opts: BannerOption
       const row = el('label', { display: 'flex', gap: '8px', alignItems: 'flex-start', margin: '6px 0' });
       const box = el('input', { marginTop: '3px' });
       box.type = 'checkbox';
-      box.checked = p.basis !== 'consent' || current[p.key] === true;
-      box.disabled = p.basis !== 'consent';
-      if (p.basis === 'consent') boxes.set(p.key, box);
+      // A purpose that does not need consent is on by default, but the visitor must be able to
+      // object: the gateway honours a "no", so the box is offered and checked (#1224).
+      box.checked = p.basis === 'consent' ? current[p.key] === true : current[p.key] !== false;
+      boxes.set(p.key, box);
       const textCol = el('span');
       textCol.append(
         el('strong', { display: 'block' }, p.basis === 'consent' ? p.name : `${p.name} (${texts.alwaysOn})`),
@@ -213,7 +225,9 @@ export function createConsentBanner(analytics: AnalyticsLike, opts: BannerOption
 
   async function open() {
     await loadPurposes().catch(() => {});
-    if (!optional().length) return;
+    // A workspace may list only non-consent purposes: the banner still opens so the visitor can
+    // object, and that choice is recorded. It used to never open and then nothing was ever sent.
+    if (!purposes.length) return;
     render();
   }
   function close() {
@@ -230,7 +244,9 @@ export function createConsentBanner(analytics: AnalyticsLike, opts: BannerOption
     }
   });
 
-  const ready = analytics.consent === null || opts.open ? open() : Promise.resolve();
+  // Load the purpose bases even when the banner stays closed (a visitor who already chose): the SDK
+  // needs them to allow a non-consent tracking purpose (#1224).
+  const ready = analytics.consent === null || opts.open ? open() : loadPurposes().catch(() => {});
   return {
     open,
     close,

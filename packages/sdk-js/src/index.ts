@@ -92,6 +92,21 @@ const uuid = () =>
   globalThis.crypto?.randomUUID?.() ??
   `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}-${Math.random().toString(16).slice(2)}`;
 
+/**
+ * Whether the SDK may send data for its tracking purpose. Mirrors the gateway's `consentAllows`:
+ * a purpose on a non-consent basis (legitimate interest, contract) holds until the visitor objects,
+ * while a consent-basis purpose needs an explicit yes (#1224). Nothing is allowed before a choice.
+ */
+function consentAllowsTracking(consent: Consent | null, purpose: string, basis: Map<string, string>): boolean {
+  if (consent === null) return false;
+  const signal = consent[purpose];
+  if (signal !== undefined) return signal === true;
+  // The workspace lists this purpose on a non-consent basis: the gateway keeps the event unless
+  // the visitor refused, and the SDK must agree or the two disagree about the same visitor.
+  const known = basis.get(purpose);
+  return known !== undefined && known !== 'consent';
+}
+
 function safeStorage(s: AnalyticsOptions['storage']) {
   // Storage can be missing or throw (private mode, blocked cookies); the SDK must keep working.
   return {
@@ -151,7 +166,10 @@ export function createAnalytics(opts: AnalyticsOptions) {
       return null;
     }
   })();
-  const allowed = () => consent?.[purpose] === true;
+  // The purposes' bases, as the consent banner loaded them. Empty means unknown, and an unknown
+  // purpose needs an explicit yes. See `consentAllowsTracking`.
+  const basis = new Map<string, string>();
+  const allowed = () => consentAllowsTracking(consent, purpose, basis);
   let anonymousId = (allowed() && store.get(KEYS.anonymousId)) || uuid();
   let userId = (allowed() && store.get(KEYS.userId)) || undefined;
   // Click ids live in memory until ad_measurement is allowed, then (and only then) in storage.
@@ -297,6 +315,16 @@ export function createAnalytics(opts: AnalyticsOptions) {
     },
     get writeKey() {
       return opts.writeKey;
+    },
+
+    /**
+     * Tell the SDK the purpose bases the consent banner loaded. A purpose on a non-consent basis
+     * (legitimate interest, contract) is then allowed unless the visitor refused it, matching the
+     * gateway's `consentAllows` (#1224).
+     */
+    setPurposes(purposes: { key: string; basis: string }[]) {
+      basis.clear();
+      for (const p of purposes) basis.set(p.key, p.basis);
     },
 
     /** Record the visitor's choice (from your consent banner or CMP). Merges with earlier choices. */
