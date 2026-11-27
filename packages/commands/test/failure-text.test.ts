@@ -42,6 +42,66 @@ const ordinary = defineCommand({
   },
 });
 
+/** A command with a fixed failure text whose own refusal categories must keep their reason. */
+const denied = defineCommand({
+  name: 'test.providerBoundDenied',
+  title: 'A denied profile-bound AI failure',
+  description: 'A test-only write refused before any provider ran.',
+  input: z.object({}),
+  output: z.object({ ok: z.literal(true) }),
+  permission: null,
+  effect: 'write',
+  actionClass: 'draft',
+  failureText: FIXED,
+  handler: async () => {
+    throw new AppError('forbidden', 'The workspace policy denies this write.');
+  },
+});
+
+const invalid = defineCommand({
+  name: 'test.providerBoundInvalid',
+  title: 'An invalid profile-bound AI failure',
+  description: 'A test-only write whose own validation refused it.',
+  input: z.object({}),
+  output: z.object({ ok: z.literal(true) }),
+  permission: null,
+  effect: 'write',
+  actionClass: 'draft',
+  failureText: FIXED,
+  handler: async () => {
+    throw new AppError('invalid_input', 'The state has personal data.');
+  },
+});
+
+/** A command whose input validation can refuse it before the handler runs. */
+const preflight = defineCommand({
+  name: 'test.providerBoundPreflight',
+  title: 'A preflight profile-bound AI failure',
+  description: 'A test-only write refused by input validation.',
+  input: z.object({ n: z.number() }),
+  output: z.object({ ok: z.literal(true) }),
+  permission: null,
+  effect: 'write',
+  actionClass: 'draft',
+  failureText: FIXED,
+  handler: async () => ({ ok: true as const }),
+});
+
+const crashed = defineCommand({
+  name: 'test.providerBoundCrash',
+  title: 'A crashed profile-bound AI failure',
+  description: 'A test-only write that throws an unexpected exception.',
+  input: z.object({}),
+  output: z.object({ ok: z.literal(true) }),
+  permission: null,
+  effect: 'write',
+  actionClass: 'draft',
+  failureText: FIXED,
+  handler: async () => {
+    throw new Error(`boom ${SENTINEL}`);
+  },
+});
+
 let d: DisposableDb;
 let db: ReturnType<typeof createDb>;
 let executor: Executor;
@@ -110,5 +170,45 @@ describe.skipIf(!hasTestDatabase())('a profile-bound AI failure stores a fixed d
       'still published',
     );
     expect(await auditErrors('test.ordinaryFailure')).toEqual(['conflict: the artifact is still published']);
+  }, 60_000);
+
+  it('keeps a policy refusal’s own reason instead of calling it a provider failure', async () => {
+    await expect(executor.execute(denied, {}, userPrincipal('usr_probe', workspaceId(), 'owner'), { surface: 'rest' })).rejects.toThrow(
+      'policy denies',
+    );
+    expect(await auditErrors('test.providerBoundDenied')).toEqual(['forbidden: The workspace policy denies this write.']);
+  }, 60_000);
+
+  it('keeps a validation refusal’s own reason in both stores', async () => {
+    const principal = agentPrincipal('usr_probe', 'client_probe', workspaceId(), 'owner', ['artifacts:write'], {
+      id: agentId,
+      name: 'Failure text probe',
+      status: 'active',
+      statusReason: null,
+    });
+    await expect(executor.execute(invalid, {}, principal, { surface: 'mcp' })).rejects.toThrow('personal data');
+    expect(await auditErrors('test.providerBoundInvalid')).toEqual(['invalid_input: The state has personal data.']);
+    expect(await ledgerError('test.providerBoundInvalid')).toBe('invalid_input: The state has personal data.');
+  }, 60_000);
+
+  it('keeps a preflight refusal’s own validation text', async () => {
+    // A schema rejection never reaches the handler (or a provider): it keeps its own validation text.
+    await expect(
+      executor.execute(preflight, { n: 'not a number' }, userPrincipal('usr_probe', workspaceId(), 'owner'), { surface: 'rest' }),
+    ).rejects.toThrow('input does not match');
+    expect(await auditErrors('test.providerBoundPreflight')).toEqual(['invalid_input: The input does not match the command schema.']);
+  }, 60_000);
+
+  it('stores one fixed marker for an unexpected exception, in both stores', async () => {
+    const principal = agentPrincipal('usr_probe', 'client_probe', workspaceId(), 'owner', ['artifacts:write'], {
+      id: agentId,
+      name: 'Failure text probe',
+      status: 'active',
+      statusReason: null,
+    });
+    await expect(executor.execute(crashed, {}, principal, { surface: 'mcp' })).rejects.toThrow('boom');
+    const marker = 'internal: The command failed with an unexpected error.';
+    expect(await auditErrors('test.providerBoundCrash')).toEqual([marker]);
+    expect(await ledgerError('test.providerBoundCrash')).toBe(marker);
   }, 60_000);
 });

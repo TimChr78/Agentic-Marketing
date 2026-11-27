@@ -379,6 +379,29 @@ export type AuditedError = { code: string; message: string };
 export const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
 
 /**
+ * The error codes whose message is this codebase's own text: a policy denial, a permission or
+ * existence refusal, or input validation. None can quote a provider's answer, so a command with a
+ * `failureText` keeps them instead of replacing every failure with the provider diagnostic (#1300).
+ */
+const OWN_FAILURE_CODES = new Set(['invalid_input', 'unauthorized', 'forbidden', 'not_found', 'precondition_failed']);
+
+/**
+ * The diagnostic a failure leaves in the long-lived stores (the audit log and the agent ledger),
+ * chosen in one place so a preflight refusal, a policy denial and a handler failure agree. A
+ * command's `failureText` replaces the message only of a failure that may carry the provider's own
+ * text (a `conflict`); an expected refusal keeps its own reason, and an unexpected exception keeps
+ * the one fixed marker. Both stores write it as `code: message`.
+ */
+export function storedFailure(cmd: { failureText?: string }, err: AppError | null): AuditedError {
+  if (!err) return UNEXPECTED_FAILURE;
+  if (cmd.failureText !== undefined && !OWN_FAILURE_CODES.has(err.code)) return { code: err.code, message: cmd.failureText };
+  return { code: err.code, message: err.message };
+}
+
+/** `code: message`, the form both persistent stores record. */
+const failureLine = (error: AuditedError) => `${error.code}: ${error.message}`;
+
+/**
  * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for
  * every command; a command that records several items itself (agents.renewMandates, one per
  * mandate) calls it directly and declares `auditsItself`.
@@ -528,15 +551,15 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const unknown = findUnknownInputKeys(cmd.input, input);
       const unknownMessages = unknownKeyMessages(cmd.name, unknown);
 
-      const fail = async (err: AppError, stored?: AuditedError): Promise<never> => {
+      const fail = async (err: AppError): Promise<never> => {
         // Every AppError leaving the executor is redacted first (#885): the message may have been
         // assembled from a provider body or an exception, and it is about to be returned to the
-        // caller and written to the audit log. `stored` is the fixed diagnostic a command with
-        // `failureText` records instead of that message (#1300).
+        // caller and written to the audit log. `storedFailure` picks the copy the audit log keeps
+        // (a command's fixed `failureText`, or the refusal's own reason) (#1300).
         const safe = sanitizeAppError(err);
         // The main transaction rolled back; record the failed attempt in its own.
         await db.withWorkspace(principal.workspaceId, (tx) =>
-          appendAudit(tx, principal, opts.surface, cmd, inputHash, target, stored ?? safe),
+          appendAudit(tx, principal, opts.surface, cmd, inputHash, target, storedFailure(cmd, safe)),
         );
         report('error');
         span.setStatus({ code: SpanStatusCode.ERROR, message: safe.code });
@@ -556,7 +579,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
           `${cmd.name} changes data, but this connection acts as an agent without an agent record. Sign in again or create a new agent credential; only reads are allowed.`,
         );
         await db
-          .withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, refused))
+          .withWorkspace(principal.workspaceId, (tx) =>
+            appendAudit(tx, principal, opts.surface, cmd, inputHash, target, storedFailure(cmd, refused)),
+          )
           .catch(() => {});
         report('error');
         span.setStatus({ code: SpanStatusCode.ERROR, message: refused.code });
@@ -853,16 +878,15 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         // log. The original exception stays on the span for diagnostics (#838). An AppError's own
         // message is redacted before it is stored (#885): it may name a credential a provider echoed.
         const safe = err instanceof AppError ? sanitizeAppError(err) : null;
-        // A command whose failure can quote the person it was about stores a fixed diagnostic, not
-        // the message (#1300). The caller's own copy of the error is unchanged.
-        const failure = safe ? (cmd.failureText ? `${safe.code}: ${cmd.failureText}` : safe.message) : UNEXPECTED_FAILURE.message;
+        // One rule picks the stored diagnostic for the audit log and the agent ledger alike (#1300).
+        const failure = failureLine(storedFailure(cmd, safe));
         if (agent && outcome)
           await db
             .withWorkspace(principal.workspaceId, (tx) =>
               recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure, intentOf(parsed.data)),
             )
             .catch((e) => span.recordException(e as Error));
-        if (safe) return fail(safe, cmd.failureText ? { code: safe.code, message: cmd.failureText } : undefined);
+        if (safe) return fail(safe);
         // An unexpected exception is audited too (as a sanitized internal failure): a write that
         // failed must leave a trace whatever the cause. Its own transaction; the original text stays
         // on the span only.
