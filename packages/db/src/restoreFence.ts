@@ -10,10 +10,11 @@ import type pg from 'pg';
  *
  * - a fence row, written **before** the Postgres replacement and removed only after the restored
  *   ledger is confirmed visible in ClickHouse. It lives in `public.restore_fence`, which dumps this
- *   build writes exclude (`pg_dump --exclude-table`); the restore also raises the row again right
- *   after the load, so a dump from an older build that still carries the table cannot drop it or
- *   replace this attempt's marker. A failed or interrupted restore leaves it behind for the next
- *   server start to refuse;
+ *   build writes exclude (`pg_dump --exclude-table`). The restore also removes the table's entries
+ *   from the archive's table of contents before loading it (`pg_restore --use-list`) and raises the
+ *   row again after the load, so a dump from an older build that still carries the table can
+ *   neither drop it nor replace this attempt's marker. A failed or interrupted restore leaves it
+ *   behind for the next server start to refuse;
  * - one session-level advisory lock held by `am restore` from before the drain check until the
  *   fence is cleared. It is server state rather than data, so it survives `pg_restore`, and it
  *   refuses a second restore even when the two use different backup directories.

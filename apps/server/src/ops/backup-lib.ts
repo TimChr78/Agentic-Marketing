@@ -2,7 +2,8 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { accessSync, createReadStream, createWriteStream, constants as fsConstants, readFileSync, statSync } from 'node:fs';
-import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -41,6 +42,7 @@ import {
   markRestoreStarted,
   restoreClickHouseQueryId,
 } from './restore-reconcile';
+import { filterRestoreFenceEntries } from './restore-toc';
 
 // Backup and restore without loading the full server configuration: an operator must be able to
 // run them with only DATABASE_URL (and CLICKHOUSE_URL for events), even when other secrets are
@@ -269,20 +271,56 @@ function childExited(child: ChildProcess): Promise<void> {
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Runs one child process for a backup or restore, and keeps it in `restoreChildren` while it runs. */
-export function runRestoreChild(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+/** A bounded description of a secondary failure, for a note that wraps another error. */
+function describeError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.length > 300 ? `${message.slice(0, 300)}…` : message;
+}
+
+/** Bounds how much of a child's stdout is kept; a dump's table of contents is far smaller. */
+const RESTORE_STDOUT_LIMIT = 32 * 1024 * 1024;
+
+export interface RunRestoreChildOptions {
+  /** Keep the child's stdout as text instead of discarding it. */
+  captureStdout?: boolean;
+}
+
+/**
+ * Runs one child process for a backup or restore, and keeps it in `restoreChildren` while it runs.
+ * `stdout` holds the child's output only when `captureStdout` asked for it.
+ */
+export function runRestoreChild(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  options: RunRestoreChildOptions = {},
+): Promise<{ stdout: string }> {
   return new Promise((done, fail) => {
-    const child = spawn(command, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(command, args, {
+      env: { ...process.env, ...env },
+      stdio: ['ignore', options.captureStdout ? 'pipe' : 'ignore', 'pipe'],
+    });
     restoreChildren.add(child);
     let stderr = '';
+    let stdout = '';
     let settled = false;
     const finish = (err?: Error) => {
       if (settled) return;
       settled = true;
       restoreChildren.delete(child);
       if (err) fail(err);
-      else done();
+      else done({ stdout });
     };
+    child.stdout?.on('data', (chunk: Buffer) => {
+      if (stdout.length + chunk.length > RESTORE_STDOUT_LIMIT) {
+        // Truncating the table of contents would silently keep entries the caller meant to remove.
+        stderr = `${stderr}\noutput exceeded ${RESTORE_STDOUT_LIMIT} bytes`;
+        stdout = '';
+        child.kill('SIGTERM');
+        return;
+      }
+      stdout += chunk.toString();
+    });
     child.stderr?.on('data', (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-8_000);
     });
@@ -482,8 +520,9 @@ function newestRelease(version: string | null): string | null {
  * `public.restore_fence` is excluded on purpose (#1194): in a dump this build writes, the fence
  * then survives `pg_restore --clean`, so an interrupted restore still fails closed. `pg_restore`
  * only drops objects the archive names. A dump written by a build from before the exclusion existed
- * can still carry the table, which is why the restore raises its marker again after the load.
- * Excluding a table that an older database does not have is harmless.
+ * can still carry the table; the restore removes its entries from the archive's table of contents
+ * before the load and raises its marker again afterwards. Excluding a table that an older database
+ * does not have is harmless.
  */
 export async function dumpPostgres(databaseUrl: string, outFile: string): Promise<void> {
   await runRestoreChild(
@@ -493,24 +532,42 @@ export async function dumpPostgres(databaseUrl: string, outFile: string): Promis
   );
 }
 
-/** Runs pg_restore --clean --if-exists --no-owner against DATABASE_URL. */
+/**
+ * Runs pg_restore --clean --if-exists --no-owner against DATABASE_URL.
+ *
+ * The archive's table of contents is read first and every entry for `public.restore_fence` is
+ * removed, then the load runs with `--use-list`. `--clean` drops only the objects its list names,
+ * so no dump can drop the table or copy its own row over this attempt's marker while the load is
+ * running, including one written before the exclusion existed. A table cannot be excluded from a
+ * custom-format restore any other way: `pg_restore` has no `--exclude-table`.
+ */
 export async function restorePostgres(databaseUrl: string, dumpFile: string): Promise<void> {
   const clientEnv = postgresClientEnv(databaseUrl);
   if (!clientEnv.PGDATABASE) throw new Error('DATABASE_URL has no database name');
-  // The database name is safe in argv; the password stays in PGPASSWORD.
-  const args = ['--clean', '--if-exists', '--no-owner', '--dbname', clientEnv.PGDATABASE, dumpFile];
+  // The filtered list lives in a private temporary directory: the backup directory can be a
+  // read-only mount, and the list names every object in the archive.
+  const listDir = await mkdtemp(join(tmpdir(), 'am-restore-toc-'));
   try {
-    await runRestoreChild('pg_restore', args, clientEnv);
-  } catch (err) {
-    // pg_dump 18 writes `SET transaction_timeout = 0` (a 17+ setting) into every archive, including
-    // one read from a 16 server, and pg_restore 18 then gets one error from that statement when the
-    // target is 16. It ignores the error and restores everything else; accept exactly that case so
-    // an install kept on 16 with POSTGRES_IMAGE can still restore (#1001).
-    const message = err instanceof Error ? err.message : String(err);
-    if (!(await onlyRejectedTransactionTimeout(databaseUrl, message))) throw err;
-    process.stderr.write(
-      'warning: PostgreSQL 16 rejected the 18 client\'s "SET transaction_timeout"; the rest of the dump restored normally.\n',
-    );
+    const { stdout: toc } = await runRestoreChild('pg_restore', ['--list', dumpFile], clientEnv, { captureStdout: true });
+    const listFile = join(listDir, 'restore.list');
+    await writeFile(listFile, filterRestoreFenceEntries(toc), { mode: 0o600 });
+    // The database name is safe in argv; the password stays in PGPASSWORD.
+    const args = ['--clean', '--if-exists', '--no-owner', '--dbname', clientEnv.PGDATABASE, '--use-list', listFile, dumpFile];
+    try {
+      await runRestoreChild('pg_restore', args, clientEnv);
+    } catch (err) {
+      // pg_dump 18 writes `SET transaction_timeout = 0` (a 17+ setting) into every archive, including
+      // one read from a 16 server, and pg_restore 18 then gets one error from that statement when the
+      // target is 16. It ignores the error and restores everything else; accept exactly that case so
+      // an install kept on 16 with POSTGRES_IMAGE can still restore (#1001).
+      const message = err instanceof Error ? err.message : String(err);
+      if (!(await onlyRejectedTransactionTimeout(databaseUrl, message))) throw err;
+      process.stderr.write(
+        'warning: PostgreSQL 16 rejected the 18 client\'s "SET transaction_timeout"; the rest of the dump restored normally.\n',
+      );
+    }
+  } finally {
+    await rm(listDir, { recursive: true, force: true });
   }
 }
 
@@ -1632,12 +1689,12 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       );
 
     // The fence is raised *before* the replacement (#1194 review): `pg_restore --clean` can commit
-    // changes and then fail, and a marker written afterwards would miss exactly that case. Every
-    // dump this build writes excludes the table, so the row survives the restore and only
-    // reconciliation clears it. A dump from an older build can still carry the table, so the load
-    // raises the marker again afterwards (below). A server started between this point and
-    // reconciliation refuses to serve reads. It is written through the locked session, so a restore
-    // that has already lost the lock cannot raise it (#1204 review).
+    // changes and then fail, and a marker written afterwards would miss exactly that case. The load
+    // removes every `public.restore_fence` entry from the archive's table of contents first, so the
+    // row survives the whole load whether or not the dump names the table; for an archive it cannot
+    // read, or a load via the injected seam, the marker is raised again below. A server started
+    // between this point and reconciliation refuses to serve reads. It is written through the
+    // locked session, so a restore that has already lost the lock cannot raise it (#1204 review).
     assertLock();
     const fenceState = await markRestoreStarted(session.client, dir);
     log('restore fence raised; Postgres replacement starts now');
@@ -1647,21 +1704,41 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     try {
       await (opts.pgRestore ?? restorePostgres)(databaseUrl, manifestPath(dir, manifest.postgres.file));
     } catch (err) {
-      // `--clean` drops every object the archive names before copying it. A dump written before the
-      // fence exclusion existed therefore drops the row raised above, and a load that fails after
-      // that would leave the database unfenced. Raise this attempt's marker again — the same
-      // timestamp, so the matched clear still finds it — before reporting the load's failure. A lost
-      // lock session cannot write, and that error stays secondary to the load's.
-      if (!lockLost) await markRestoreStarted(session.client, dir, fenceState.startedAt).catch(() => {});
+      // `--clean` can commit changes and then fail, and a load running through the injected seam
+      // replaces the database without the table-of-contents filtering. Raise this attempt's marker
+      // again — the same timestamp, so the matched clear still finds it — before reporting the
+      // load's failure. A lost lock session cannot write, and that error stays secondary to the
+      // load's.
+      if (!lockLost) {
+        try {
+          await markRestoreStarted(session.client, dir, fenceState.startedAt);
+        } catch (fenceErr) {
+          // The load's failure is what the operator must act on, but the database may now have no
+          // fence at all, which nothing else would report. Say so on stderr and in the error.
+          const note =
+            `warning: the restore fence could not be raised again after the failed load (${describeError(fenceErr)}). ` +
+            'Do not start the app against this database; re-run `am restore` with the same backup first.';
+          process.stderr.write(`${note}\n`);
+          if (err instanceof Error) err.message = `${err.message}\n${note}`;
+        }
+      }
       throw err;
     }
     // Nothing after a lost lock: the next step would write into a database another restore owns.
     assertLock();
-    // The load may also have dropped the table or replaced this attempt's row: a dump written before
-    // the exclusion existed still names `public.restore_fence`. Raise this attempt's marker again so
-    // the steps below fail closed if they stop, and so the final matched clear removes this row
-    // rather than leaving the dump's stale one behind.
-    await markRestoreStarted(session.client, dir, fenceState.startedAt);
+    // Belt and braces after the load: an archive whose table of contents this build could not read,
+    // or a load from an older build via the injected seam, may still have dropped the table or
+    // replaced this attempt's row. Raise this attempt's marker again so the steps below fail closed
+    // if they stop, and so the final matched clear removes this row rather than leaving a stale one.
+    try {
+      await markRestoreStarted(session.client, dir, fenceState.startedAt);
+    } catch (fenceErr) {
+      throw new Error(
+        `the restore replaced Postgres, but could not raise the restore fence again (${describeError(fenceErr)}). ` +
+          'Do not start the app against this database; re-run `am restore` with the same backup first.',
+        { cause: fenceErr },
+      );
+    }
 
     // The pre-restore check used the sealed value in the manifest; this proves the key also opens a
     // real data key in the restored data, still before the app is started. `--skip-key-check`

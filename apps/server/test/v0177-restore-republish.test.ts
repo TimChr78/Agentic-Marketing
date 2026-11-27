@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,8 +23,10 @@ import {
   restoreBackup,
   restoreErasureLogPath,
   restoreLockPath,
+  restorePostgres,
 } from '../src/ops/backup-lib';
 import { acquireRestoreStartupLock, clearRestoreFenceForUrl, finishRestoreReconciliation } from '../src/ops/restore-reconcile';
+import { filterRestoreFenceEntries } from '../src/ops/restore-toc';
 import { APP_ROLE, startTestServer, testDatabaseUrl, testPort, type User } from './harness';
 
 // #1194 review: a restore can pair a Postgres snapshot that already contains a completed cleanup
@@ -257,9 +260,10 @@ async function fenceTablePresent(databaseUrl: string): Promise<boolean> {
 }
 
 /**
- * The effect a loaded archive has on the fence. Dumps written before the exclusion existed carry
- * the table: `pg_restore --clean` drops it and copies the dump's row, so the restore's own marker
- * is gone or replaced. A stand-in models that final state; `pg_restore` is not installed here.
+ * The effect a loaded archive has on the fence, for the injected `pgRestore` seam. Dumps written
+ * before the exclusion existed carry the table: `pg_restore --clean` drops it and copies the dump's
+ * row, so the restore's own marker is gone or replaced. The real round trips below cover what a real
+ * archive does when the load filters the table out of its table of contents.
  */
 async function loadFenceShape(databaseUrl: string, shape: 'row' | 'dropped'): Promise<void> {
   const client = new pg.Client({ connectionString: databaseUrl });
@@ -289,6 +293,89 @@ async function startupBlock(databaseUrl: string): Promise<string | null> {
   } catch (err) {
     return (err as Error).message;
   }
+}
+
+/** The live fence row an older build's dump would carry: none, or a stale one. */
+async function setFenceSourceRow(state: 'empty' | 'stale'): Promise<void> {
+  const client = new pg.Client({ connectionString: testDatabaseUrl(t.dbName).toString() });
+  await client.connect();
+  try {
+    if (state === 'empty') {
+      await client.query('DELETE FROM public.restore_fence');
+      return;
+    }
+    await client.query(
+      `INSERT INTO public.restore_fence (id, started_at, backup) VALUES (1, '2026-11-01T00:00:00Z', '/backups/am-older-build')
+       ON CONFLICT (id) DO UPDATE SET started_at = EXCLUDED.started_at, backup = EXCLUDED.backup`,
+    );
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * A backup whose Postgres part is what a build before 0.17.7 wrote: `pg_dump -Fc --no-owner` with
+ * no fence exclusion, so the archive names `public.restore_fence`. The manifest is the real backup's,
+ * with the Postgres size and hash updated and the ClickHouse part removed.
+ */
+async function oldStyleBackup(name: string, fence: 'empty' | 'stale'): Promise<{ dir: string; dump: string }> {
+  const databaseUrl = testDatabaseUrl(t.dbName).toString();
+  await setFenceSourceRow(fence);
+  const dir = await mkdtemp(join(tmpdir(), `am-old-dump-${name}-`));
+  const dump = join(dir, 'postgres.dump');
+  await exec('pg_dump', ['-Fc', '--no-owner', '--file', dump, databaseUrl], { maxBuffer: 8 * 1024 * 1024 });
+  const manifest = JSON.parse(await readFile(join(backupPath, 'manifest.json'), 'utf8')) as BackupManifest;
+  const bytes = await readFile(dump);
+  manifest.postgres = { file: 'postgres.dump', bytes: bytes.byteLength, sha256: createHash('sha256').update(bytes).digest('hex') };
+  delete manifest.clickhouse;
+  await writeFile(join(dir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
+  return { dir, dump };
+}
+
+interface FenceObservation {
+  backup: string;
+  startedAt: Date;
+}
+
+/**
+ * Polls the fence while the real load runs. The marker is raised before `pg_restore` starts, so an
+ * archive that dropped the table (or replaced the row) at any point of the load shows up here, even
+ * though the re-raise afterwards would repair the final state.
+ */
+function watchFence(databaseUrl: string): { observations: FenceObservation[]; failures: string[]; stop: () => Promise<void> } {
+  const observations: FenceObservation[] = [];
+  const failures: string[] = [];
+  let running = true;
+  const loop = (async () => {
+    const client = new pg.Client({ connectionString: databaseUrl });
+    await client.connect();
+    try {
+      await client.query('SET statement_timeout = 2000');
+      while (running) {
+        try {
+          const { rows } = await client.query<{ backup: string; started_at: Date }>(
+            'SELECT backup, started_at FROM public.restore_fence WHERE id = 1',
+          );
+          const row = rows[0];
+          if (row) observations.push({ backup: row.backup, startedAt: new Date(row.started_at) });
+          else failures.push('the fence row was missing during the load');
+        } catch (err) {
+          failures.push((err as Error).message);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    } finally {
+      await client.end().catch(() => {});
+    }
+  })();
+  return {
+    observations,
+    failures,
+    stop: async () => {
+      running = false;
+      await loop;
+    },
+  };
 }
 
 /**
@@ -781,5 +868,96 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
       expect(await fenceRow(databaseUrl)).toBeNull();
       expect(await startupBlock(databaseUrl)).toBeNull();
     }, 180_000);
+  });
+
+  describe('loading an archive written before the fence exclusion', () => {
+    // `pg_restore --clean` drops every object the archive names before copying it. An archive that
+    // still names `public.restore_fence` would therefore drop this attempt's marker (or copy the
+    // dump's row over it) at the very start of the load, and nothing would raise it again if the
+    // process stopped there. The restore removes the table's entries from the archive's table of
+    // contents (`--use-list`), so the marker stays in place throughout. Real dumps, real pg_restore.
+
+    it('keeps this attempt’s marker throughout the load of a dump with an empty fence table, then clears it', async () => {
+      const databaseUrl = testDatabaseUrl(t.dbName).toString();
+      if (!serverClosed) {
+        await t.close();
+        serverClosed = true;
+      }
+      const { dir, dump } = await oldStyleBackup('empty-fence', 'empty');
+      try {
+        const raw = await exec('pg_restore', ['--list', dump], { maxBuffer: 8 * 1024 * 1024 });
+        // The archive really does name the table; the filter, not the absence of the entry, is
+        // what keeps the load away from it.
+        expect(raw.stdout).toContain('TABLE public restore_fence');
+        const filtered = filterRestoreFenceEntries(raw.stdout);
+        expect(filtered.split('\n').filter((line) => line.includes('restore_fence'))).toEqual([]);
+
+        let watch: ReturnType<typeof watchFence> | undefined;
+        await restoreBackup({
+          dir,
+          env: restoreEnv(databaseUrl),
+          log: () => {},
+          pgRestore: async (url, file) => {
+            const watcher = watchFence(url);
+            watch = watcher;
+            try {
+              await restorePostgres(url, file);
+            } finally {
+              await watcher.stop();
+            }
+          },
+        });
+
+        expect(watch?.failures).toEqual([]);
+        expect(watch?.observations.length).toBeGreaterThan(0);
+        expect(watch?.observations.filter((row) => row.backup !== dir)).toEqual([]);
+        // This attempt's row, then the matched clear after a successful load.
+        expect(await fenceRow(databaseUrl)).toBeNull();
+        expect(await startupBlock(databaseUrl)).toBeNull();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, 240_000);
+
+    it('keeps this attempt’s marker throughout the load of a dump carrying a stale fence row, then clears it', async () => {
+      const databaseUrl = testDatabaseUrl(t.dbName).toString();
+      if (!serverClosed) {
+        await t.close();
+        serverClosed = true;
+      }
+      const { dir, dump } = await oldStyleBackup('stale-fence', 'stale');
+      try {
+        const raw = await exec('pg_restore', ['--list', dump], { maxBuffer: 8 * 1024 * 1024 });
+        expect(raw.stdout).toContain('TABLE DATA public restore_fence');
+        const filtered = filterRestoreFenceEntries(raw.stdout);
+        expect(filtered.split('\n').filter((line) => line.includes('restore_fence'))).toEqual([]);
+
+        let watch: ReturnType<typeof watchFence> | undefined;
+        await restoreBackup({
+          dir,
+          env: restoreEnv(databaseUrl),
+          log: () => {},
+          pgRestore: async (url, file) => {
+            const watcher = watchFence(url);
+            watch = watcher;
+            try {
+              await restorePostgres(url, file);
+            } finally {
+              await watcher.stop();
+            }
+          },
+        });
+
+        expect(watch?.failures).toEqual([]);
+        expect(watch?.observations.length).toBeGreaterThan(0);
+        // The dump's row never replaced this attempt's; only the matched clear removed the marker.
+        expect(watch?.observations.filter((row) => row.backup !== dir)).toEqual([]);
+        expect(watch?.observations.some((row) => row.backup === '/backups/am-older-build')).toBe(false);
+        expect(await fenceRow(databaseUrl)).toBeNull();
+        expect(await startupBlock(databaseUrl)).toBeNull();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    }, 240_000);
   });
 });
