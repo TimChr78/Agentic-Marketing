@@ -111,7 +111,7 @@ services:
 
   app:
     # Pull the release image; docker-compose.build.yml builds this checkout from source instead.
-    image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.17.8}
+    image: ghcr.io/timchr78/agentic-marketing:${AM_VERSION:-0.17.9}
     restart: unless-stopped
     # Shutdown drains the workers and lets an in-flight provider call (an OAuth token exchange that
     # may rotate the refresh token) finish within its 10 s request deadline and be stored; Docker's
