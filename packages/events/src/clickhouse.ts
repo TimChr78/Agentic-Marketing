@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import type {} from '@agentic-marketing/commands';
+import { logger } from '@agentic-marketing/telemetry';
 import { type ClickHouseClient, createClient, TupleParam } from '@clickhouse/client';
 import { messageEventsWithPending } from './pending';
 import { personReadSource } from './protected';
@@ -95,8 +96,8 @@ export interface EventStore {
    * uses the same keyed matching as the protected views (including `events.profile_id`, through its
    * subject hash), never the raw identifiers and never the ledger or selector rows themselves. `keys`
    * is the workspace's retained exclusion list read from the PostgreSQL ledger, and it is the
-   * authority: the sweep matches exactly that set, sent to ClickHouse as external data, so a key
-   * committed but not yet published is still swept and a published row with no ledger key is not.
+   * authority: the sweep stages exactly that set in ClickHouse for this run, so a key committed but
+   * not yet published is still swept and a published row with no ledger key is not.
    * `complete` is false when the batch bound was reached with matching rows left, or when
    * `checkpoint` reports that the caller's claim was lost. `checkpoint` runs between batches and
    * tables, before each mutation; returning false stops the sweep without another delete.
@@ -294,7 +295,17 @@ export const CLICKHOUSE_REQUEST_TIMEOUT_MS = 30_000;
  */
 const SYNC_INSERT = { async_insert: 0, wait_for_async_insert: 1 } as const;
 
-const SCOPED_TABLES = ['events', 'message_events', 'journey_events', 'ad_spend', 'erased_subjects', 'subject_key_backfill'];
+const SCOPED_TABLES = [
+  'events',
+  'message_events',
+  'journey_events',
+  'ad_spend',
+  'erased_subjects',
+  'subject_key_backfill',
+  // Per-sweep staging of a purge's key set (migration 0011): a select policy keeps one workspace's
+  // staged keys out of another workspace's read even if a statement forgot its filter.
+  'erasure_purge_keys',
+];
 
 /**
  * Row policies: every table with a workspace_id returns only the rows of the workspace named in
@@ -887,18 +898,18 @@ function purgeSideJoin(spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number]): stri
 }
 
 /**
- * The external table the purge reads its exclusion set from. The set is the exact, full-coverage
- * key list PostgreSQL committed for the workspace, sent with each request as external data (a
- * multipart file plus its `_structure` field), so it never travels as a query parameter and never
- * depends on how much of the ledger has been published to ClickHouse. ClickHouse reads it once per
- * query and `IN (SELECT …)` matches it as a set; the earlier `hasAny(array, groupArray(…))` built an
- * aggregate per row and timed out at the sizes this purge runs at.
+ * The staging table a sweep loads its exclusion set into (migration 0011). The set is the exact,
+ * full-coverage key list PostgreSQL committed for the workspace, inserted once per sweep in bounded
+ * batches under a fresh run id, so it never travels as a query parameter and never depends on how
+ * much of the ledger has been published to ClickHouse. ClickHouse reads it once per statement and
+ * `IN (SELECT …)` matches it as a set; the earlier `hasAny(array, groupArray(…))` built an aggregate
+ * per row and timed out at the sizes this purge runs at.
  */
-const PURGE_KEY_TABLE = '_purge_keys';
+const PURGE_KEY_TABLE = 'erasure_purge_keys';
 
-/** The purge's exclusion predicate: any effective subject key is one of the committed keys. */
+/** The purge's exclusion predicate: any effective subject key is one of this run's committed keys. */
 function purgeMatch(): string {
-  return `arrayExists(k -> k != '' AND k IN (SELECT key FROM ${PURGE_KEY_TABLE}), [${effectiveSubjectKeys()}])`;
+  return `arrayExists(k -> k != '' AND k IN (SELECT key FROM ${PURGE_KEY_TABLE} WHERE workspace_id = {ws:UUID} AND run_id = {run:String}), [${effectiveSubjectKeys()}])`;
 }
 
 /**
@@ -1017,6 +1028,50 @@ function stringChunks(values: readonly string[]): string[][] {
 }
 
 /**
+ * How many keys one staged insert carries. The key set is loaded in bounded batches so no request
+ * body grows with the ledger (#1205): 2,000 keys is a body of a few hundred kilobytes, and the byte
+ * bound below also holds for a wider key than the hex the hasher produces.
+ */
+const PURGE_KEY_INSERT_BATCH = 2_000;
+const PURGE_KEY_INSERT_BUDGET = 256 * 1024;
+
+/** A sweep's key set split into batches that bound both the row count and the encoded size. */
+function purgeKeyBatches(keys: readonly string[]): string[][] {
+  const chunks: string[][] = [];
+  let chunk: string[] = [];
+  let bytes = 0;
+  for (const key of keys) {
+    // A JSONEachRow line carries the key plus its field names and separators.
+    const size = Buffer.byteLength(key, 'utf8') + 24;
+    if (chunk.length && (chunk.length >= PURGE_KEY_INSERT_BATCH || bytes + size > PURGE_KEY_INSERT_BUDGET)) {
+      chunks.push(chunk);
+      chunk = [];
+      bytes = 0;
+    }
+    chunk.push(key);
+    bytes += size;
+  }
+  if (chunk.length) chunks.push(chunk);
+  return chunks;
+}
+
+/**
+ * The count a purge statement returned, or an error. A table may only be treated as empty when the
+ * server answered with a valid `n`: a missing row (an empty result where a count was asked) or a
+ * value that is not a non-negative integer is a broken answer, never zero. The client's error
+ * handling covers an exception header and a streamed exception tag; this covers a truncated
+ * `JSONEachRow` answer that still parsed as no rows.
+ */
+function purgeCount(rows: readonly Record<string, string | number>[], table: string): number {
+  const row = rows[0];
+  if (!row || row.n === undefined || row.n === null || row.n === '')
+    throw new Error(`ClickHouse returned no count for ${table}; the purge cannot treat it as empty`);
+  const n = Number(row.n);
+  if (!Number.isSafeInteger(n) || n < 0) throw new Error(`ClickHouse returned an invalid count for ${table}`);
+  return n;
+}
+
+/**
  * Logical rows that still lack coverage: their own writer did not fill the subject columns and the
  * side table has no result for their identity. FINAL is deliberate — it sees one logical row per
  * replacing key, so a complete concurrent redelivery is never counted as missing.
@@ -1116,55 +1171,96 @@ export function clickHouseStore(opts: {
       clickhouse_settings: { ...args.clickhouse_settings, ...((await settingsFor(workspaceId)) as object) },
     });
   /**
-   * One purge read with the committed key set as external data. `@clickhouse/client` has no API for
-   * external tables, so this request goes to the same endpoint over fetch, carrying the set as a
-   * multipart TSV file and its `_structure` field. That has no field-size limit (unlike a query
-   * parameter) and ClickHouse builds the set once per query. The workspace's row-policy setting
-   * travels as a URL setting, exactly as the client sends it, and the caller's signal and timeout
-   * bound the request.
+   * Server-side bound on one purge statement, in seconds. It matches the client's request timeout,
+   * so a statement that outlives the client cannot keep executing unbounded after the caller's
+   * request was abandoned. The client also closes the HTTP connection on an abort; ClickHouse
+   * checks the connection between blocks and stops a read, and this bound ends a mutation too. A
+   * `KILL QUERY` would need privileges the application user does not necessarily hold, so it is
+   * deliberately not used: the bound plus the connection close is the cancellation contract.
+   */
+  const PURGE_EXECUTION_BOUND_SECONDS = Math.ceil(CLICKHOUSE_REQUEST_TIMEOUT_MS / 1_000);
+
+  /** A client request that reports the caller's own abort reason when its signal fired meanwhile. */
+  const withAbortReason = async <T>(run: () => Promise<T>): Promise<T> => {
+    try {
+      return await run();
+    } catch (err) {
+      if (opts.signal?.aborted) throw storeAbortReason(opts.signal);
+      throw err;
+    }
+  };
+
+  /**
+   * One purge read. It goes through the configured client, so the request uses the configured
+   * database, path, credentials, settings and error handling, and the key set stays in the staged
+   * table rather than travelling as a parameter. The workspace settings are resolved first (that
+   * probe is a request of its own on the fast path), and the abort is checked again before the
+   * statement is issued: an abort while the settings resolved must not add another request.
    */
   const purgeQuery = async (
     workspaceId: string,
     sql: string,
     queryParams: Record<string, string | number>,
-    keys: readonly string[],
   ): Promise<Record<string, string>[]> => {
     assertStoreNotAborted(opts.signal);
-    const target = new URL(endpoint.url);
-    target.searchParams.set('database', opts.database);
-    target.searchParams.set('query', sql);
-    // Unlike the client, this request does not add the row format to the query.
-    target.searchParams.set('default_format', 'JSONEachRow');
-    for (const [name, value] of Object.entries(queryParams)) target.searchParams.set(`param_${name}`, String(value));
-    for (const [name, value] of Object.entries(await settingsFor(workspaceId))) target.searchParams.set(name, String(value));
-    if (opts.queryIdPrefix) target.searchParams.set('query_id', `${opts.queryIdPrefix}${randomUUID()}`);
-    const form = new FormData();
-    form.append(`${PURGE_KEY_TABLE}_structure`, 'key String');
-    // TSV with a trailing newline: one `String` column, so a key containing a tab or newline would
-    // split the row. Exclusion keys are hex produced by the hasher, so this is the whole format.
-    form.append(PURGE_KEY_TABLE, new Blob([keys.map((key) => `${key}\n`).join('')], { type: 'text/tab-separated-values' }), 'keys.tsv');
-    const headers: Record<string, string> = {};
-    if (endpoint.username !== undefined)
-      headers.authorization = `Basic ${Buffer.from(`${endpoint.username}:${endpoint.password ?? ''}`).toString('base64')}`;
-    const signals = [AbortSignal.timeout(CLICKHOUSE_REQUEST_TIMEOUT_MS)];
-    if (opts.signal) signals.push(opts.signal);
-    const response = await fetch(target, { method: 'POST', headers, body: form, signal: AbortSignal.any(signals) }).catch(
-      (err: unknown) => {
-        if (opts.signal?.aborted) throw storeAbortReason(opts.signal);
-        throw err;
-      },
+    const settings = await settingsFor(workspaceId);
+    assertStoreNotAborted(opts.signal);
+    const rs = await withAbortReason(() =>
+      client.query({
+        query: sql,
+        query_params: queryParams,
+        format: 'JSONEachRow',
+        ...abort(),
+        ...queryId(),
+        clickhouse_settings: { ...settings, max_execution_time: PURGE_EXECUTION_BOUND_SECONDS },
+      }),
     );
-    const text = await response.text();
-    if (!response.ok)
-      throw new Error(`ClickHouse purge query failed (${response.status}): ${text.slice(0, 1_000).trim() || response.statusText}`);
-    if (opts.signal?.aborted) throw storeAbortReason(opts.signal);
-    // JSONEachRow is one object per line, the same shape `ResultSet.json()` assembles.
-    return text.trim()
-      ? text
-          .trim()
-          .split('\n')
-          .map((line) => JSON.parse(line) as Record<string, string>)
-      : [];
+    const rows = await withAbortReason(() => rs.json<Record<string, string>>());
+    assertStoreNotAborted(opts.signal);
+    return rows;
+  };
+
+  /**
+   * Loads this sweep's committed key set into the staging table, in bounded batches. Nothing is
+   * purged until every batch has been acknowledged, so a partial upload cannot make the sweep read
+   * a narrower set than PostgreSQL committed.
+   */
+  const stagePurgeKeys = async (workspaceId: string, runId: string, keys: readonly string[]): Promise<void> => {
+    const settings = await settingsFor(workspaceId);
+    for (const chunk of purgeKeyBatches(keys)) {
+      assertStoreNotAborted(opts.signal);
+      await withAbortReason(() =>
+        client.insert({
+          table: PURGE_KEY_TABLE,
+          format: 'JSONEachRow',
+          values: chunk.map((key) => ({ workspace_id: workspaceId, run_id: runId, key })),
+          clickhouse_settings: { ...SYNC_INSERT, ...settings },
+        }),
+      );
+    }
+  };
+
+  /**
+   * Drops this run's staged keys. Best effort: the rows are transport state and the table's TTL is
+   * the backstop, so a cleanup failure must not turn a completed sweep into a failed one. The
+   * caller's abort signal is deliberately not passed: cancellation must not leak the run's rows
+   * until the TTL removes them.
+   */
+  const clearPurgeKeys = async (workspaceId: string, runId: string): Promise<void> => {
+    try {
+      const settings = await settingsFor(workspaceId);
+      await client.command({
+        query: `DELETE FROM ${PURGE_KEY_TABLE} WHERE workspace_id = {ws:UUID} AND run_id = {run:String}`,
+        query_params: { ws: workspaceId, run: runId },
+        clickhouse_settings: { ...settings, max_execution_time: PURGE_EXECUTION_BOUND_SECONDS },
+      });
+    } catch (err) {
+      // A provider message can echo the statement; only the class name is safe to log.
+      logger.warn(
+        { workspaceId, errorClass: err instanceof Error ? err.name : 'other' },
+        'erasure purge key staging could not be cleared; its TTL will remove it',
+      );
+    }
   };
   const countQuery = (
     workspaceId: string,
@@ -1401,197 +1497,199 @@ export function clickHouseStore(opts: {
       let deleted = 0;
       let complete = true;
       let stopped = false;
-      for (const spec of SUBJECT_KEY_BACKFILL_TABLES) {
-        let tableDeleted = 0;
-        let remaining = false;
-        // No keys means there is nothing to match; do not issue a query whose predicate cannot be true.
-        if (unique.length) {
-          const join = purgeSideJoin(spec);
-          const match = purgeMatch();
-          const queryParams = { ws: workspaceId, table: spec.table, batch: batchSize };
-          // Identities travel as literal tuples (`IN {ids:Array(Tuple(...))}`) rather than a
-          // self-referencing subquery: a mutation may evaluate a subquery again, and an unordered
-          // LIMIT inside it can then choose different rows than the ones counted, so a delete could
-          // remove nothing (ClickHouse 26.8). The batch is selected once, deterministically, and the
-          // delete removes exactly that batch. Values go through `toString` so one parameter shape
-          // covers String, DateTime64 and integer identity columns.
-          // One identity shape per table, shared by the select, the guard, the delete and the
-          // survivor count.
-          const base = baseShape(spec);
-          const tupleParams = (ids: string[][]) => ({ ws: workspaceId, ids: ids.map((id) => new TupleParam(id)) });
-          // Scope the match to this workspace explicitly: with row policies off, the same identity
-          // or subject key in another workspace must not inflate the count or consume the batch
-          // limit (#1146).
-          const countBase = async () => {
-            const rows = await purgeQuery(
-              workspaceId,
-              `SELECT count() AS n FROM ${spec.table} AS t FINAL ${join} WHERE t.workspace_id = {ws:UUID} AND ${match}`,
-              queryParams,
-              unique,
-            );
-            return Number(rows[0]?.n ?? 0);
-          };
-          const selectBatch = async () => {
-            const rows = await purgeQuery(
-              workspaceId,
-              `SELECT ${base.select('t')} FROM ${spec.table} AS t FINAL ${join}
+      // Each sweep stages its own copy of the committed keys under a fresh run id, and every
+      // statement below reads only that copy. A retry or a second replica therefore cannot widen,
+      // narrow or clear another sweep's set, and nothing is purged before every batch has landed.
+      const runId = randomUUID();
+      try {
+        if (unique.length) await stagePurgeKeys(workspaceId, runId, unique);
+        for (const spec of SUBJECT_KEY_BACKFILL_TABLES) {
+          let tableDeleted = 0;
+          let remaining = false;
+          // No keys means there is nothing to match; do not issue a query whose predicate cannot be true.
+          if (unique.length) {
+            const join = purgeSideJoin(spec);
+            const match = purgeMatch();
+            const queryParams = { ws: workspaceId, run: runId, table: spec.table, batch: batchSize };
+            // Identities travel as literal tuples (`IN {ids:Array(Tuple(...))}`) rather than a
+            // self-referencing subquery: a mutation may evaluate a subquery again, and an unordered
+            // LIMIT inside it can then choose different rows than the ones counted, so a delete could
+            // remove nothing (ClickHouse 26.8). The batch is selected once, deterministically, and the
+            // delete removes exactly that batch. Values go through `toString` so one parameter shape
+            // covers String, DateTime64 and integer identity columns.
+            // One identity shape per table, shared by the select, the guard, the delete and the
+            // survivor count.
+            const base = baseShape(spec);
+            const tupleParams = (ids: string[][]) => ({ ws: workspaceId, ids: ids.map((id) => new TupleParam(id)) });
+            // Scope the match to this workspace explicitly: with row policies off, the same identity
+            // or subject key in another workspace must not inflate the count or consume the batch
+            // limit (#1146).
+            const countBase = async () => {
+              const rows = await purgeQuery(
+                workspaceId,
+                `SELECT count() AS n FROM ${spec.table} AS t FINAL ${join} WHERE t.workspace_id = {ws:UUID} AND ${match}`,
+                queryParams,
+              );
+              return purgeCount(rows, spec.table);
+            };
+            const selectBatch = async () => {
+              const rows = await purgeQuery(
+                workspaceId,
+                `SELECT ${base.select('t')} FROM ${spec.table} AS t FINAL ${join}
                        WHERE t.workspace_id = {ws:UUID} AND ${match}
                        ORDER BY ${base.columns.map((_, index) => `id${index}`).join(', ')}
                        LIMIT {batch:UInt32}`,
-              queryParams,
-              unique,
-            );
-            return base.read(rows);
-          };
-          const countSurvivors = async (ids: string[][]) => {
-            if (!ids.length) return 0;
-            const rs = await query(workspaceId, {
-              query: `SELECT count() AS n FROM ${spec.table} AS t FINAL
-                       WHERE t.workspace_id = {ws:UUID} AND ${base.tuple('t')} IN {ids:${base.type}}`,
-              query_params: tupleParams(ids),
-              format: 'JSONEachRow',
-            });
-            const [row] = await rs.json<{ n: number | string }>();
-            return Number(row?.n ?? 0);
-          };
-          for (let batch = 0; batch < maxBatches; batch++) {
-            const matching = await countBase();
-            if (matching === 0) {
-              remaining = false;
-              break;
-            }
-            const ids = await selectBatch();
-            if (!ids.length) {
-              // The rows the count saw were swept by another pass. Leave the table open for a later
-              // round rather than reporting progress it did not make.
-              remaining = true;
-              break;
-            }
-            // The batch is selected once, but its delete is split so no single request carries more
-            // than the server accepts as one query parameter (see `identityChunks`). Each chunk is
-            // one mutation, and the claim is checked before every one of them.
-            for (const chunk of identityChunks(ids)) {
-              if (!(await keepClaim())) {
-                stopped = true;
-                break;
-              }
-              await command(workspaceId, {
-                query: `DELETE FROM ${spec.table}
-                         WHERE workspace_id = {ws:UUID}
-                           AND ${base.tuple('')} IN {ids:${base.type}}`,
-                query_params: tupleParams(chunk),
-                clickhouse_settings: { mutations_sync: '2' },
-              });
-              // `deleted` is measured against the fixed chunk, not against the difference between
-              // two counts: a concurrent insert of another matching row would otherwise cancel out a
-              // real deletion and report zero (#1198).
-              tableDeleted += Math.max(0, chunk.length - (await countSurvivors(chunk)));
-            }
-            if (stopped) {
-              remaining = true;
-              break;
-            }
-            // `mutations_sync=2` makes this count observe the deletes; a write that landed in the
-            // meantime keeps the table open.
-            const after = await countBase();
-            remaining = after > 0;
-            if (!remaining) break;
-          }
-
-          // The backfill side table is keyed by the row's raw identity. Once the base rows are gone
-          // it is the last raw trace of the person, so the same purge round deletes the matching
-          // side entries. Only do this once the base table has no matching row left: deleting a
-          // side entry while its base row still exists would make that row visible again.
-          if (!remaining && !stopped) {
-            const sideMatch = `arrayExists(k -> k != '' AND k IN (SELECT key FROM ${PURGE_KEY_TABLE}), [${SUBJECT_KEY_KINDS.map(
-              (kind) => SUBJECT_KEY_COLUMNS[kind],
-            ).join(', ')}])`;
-            const sideKey = sideShape.tuple('');
-            const countSide = async () => {
-              const rows = await purgeQuery(
-                workspaceId,
-                `SELECT count() AS n FROM subject_key_backfill FINAL
-                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}`,
                 queryParams,
-                unique,
               );
-              return Number(rows[0]?.n ?? 0);
+              return base.read(rows);
             };
-            const selectSide = async () => {
-              const rows = await purgeQuery(
-                workspaceId,
-                `SELECT ${sideShape.select('')}
-                          FROM subject_key_backfill FINAL
-                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}
-                         ORDER BY ${sideShape.columns.join(', ')}
-                         LIMIT {batch:UInt32}`,
-                queryParams,
-                unique,
-              );
-              return sideShape.read(rows);
-            };
-            // A side entry pins the subject keys of a base row that has not been rewritten since
-            // the backfill. If a late legacy row arrives after the base count reached zero, that
-            // entry is the only thing that excludes it, so it must stay until its base row is gone
-            // (#1198). Only a row whose coverage is not `full` uses the entry: a full-coverage row
-            // ignores its side entry, so that entry is stale and may be removed. The delete repeats
-            // this check in the same statement, which closes the small window between the read and
-            // the mutation. The guard compares the side entry's leading keys with the base identity,
-            // which is narrower for message events.
-            const sideGuardKeys = sideShape.tuple('', base.columns.length);
-            /** The side identity projected onto the base table's (possibly narrower) identity. */
-            const baseId = (id: string[]) => id.slice(0, base.columns.length);
-            const existingBaseIds = async (ids: string[][]) => {
-              if (!ids.length) return new Set<string>();
-              const rs = await query(workspaceId, {
-                query: `SELECT ${base.select('t')} FROM ${spec.table} AS t FINAL
-                         WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full'
-                           AND ${base.tuple('t')} IN {ids:${base.type}}`,
-                query_params: { ws: workspaceId, ids: ids.map((id) => new TupleParam(baseId(id))) },
-                format: 'JSONEachRow',
-              });
-              const rows = base.read(await rs.json<Record<string, string>>());
-              return new Set(rows.map((row) => JSON.stringify(row)));
-            };
-            const countSideSurvivors = async (ids: string[][]) => {
+            const countSurvivors = async (ids: string[][]) => {
               if (!ids.length) return 0;
               const rs = await query(workspaceId, {
-                query: `SELECT count() AS n FROM subject_key_backfill FINAL
-                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideKey} IN {ids:${sideShape.type}}`,
-                query_params: { ...tupleParams(ids), table: spec.table },
+                query: `SELECT count() AS n FROM ${spec.table} AS t FINAL
+                       WHERE t.workspace_id = {ws:UUID} AND ${base.tuple('t')} IN {ids:${base.type}}`,
+                query_params: tupleParams(ids),
                 format: 'JSONEachRow',
+                clickhouse_settings: { max_execution_time: PURGE_EXECUTION_BOUND_SECONDS },
               });
-              const [row] = await rs.json<{ n: number | string }>();
-              return Number(row?.n ?? 0);
+              return purgeCount(await rs.json<Record<string, string | number>>(), spec.table);
             };
             for (let batch = 0; batch < maxBatches; batch++) {
-              const matching = await countSide();
+              const matching = await countBase();
               if (matching === 0) {
                 remaining = false;
                 break;
               }
-              const candidates = await selectSide();
-              if (!candidates.length) {
+              const ids = await selectBatch();
+              if (!ids.length) {
+                // The rows the count saw were swept by another pass. Leave the table open for a later
+                // round rather than reporting progress it did not make.
                 remaining = true;
                 break;
               }
-              let blocked = false;
-              for (const chunk of identityChunks(candidates)) {
+              // The batch is selected once, but its delete is split so no single request carries more
+              // than the server accepts as one query parameter (see `identityChunks`). Each chunk is
+              // one mutation, and the claim is checked before every one of them.
+              for (const chunk of identityChunks(ids)) {
                 if (!(await keepClaim())) {
                   stopped = true;
                   break;
                 }
-                const stillBacked = await existingBaseIds(chunk);
-                const deletable = chunk.filter((id) => !stillBacked.has(JSON.stringify(baseId(id))));
-                if (!deletable.length) {
-                  // Every side entry in this chunk still backs a base row, including one that
-                  // arrived after the base sweep: leave them and let the next round remove the row
-                  // first.
-                  blocked = true;
-                  continue;
-                }
                 await command(workspaceId, {
-                  query: `DELETE FROM subject_key_backfill
+                  query: `DELETE FROM ${spec.table}
+                         WHERE workspace_id = {ws:UUID}
+                           AND ${base.tuple('')} IN {ids:${base.type}}`,
+                  query_params: tupleParams(chunk),
+                  clickhouse_settings: { mutations_sync: '2', max_execution_time: PURGE_EXECUTION_BOUND_SECONDS },
+                });
+                // `deleted` is measured against the fixed chunk, not against the difference between
+                // two counts: a concurrent insert of another matching row would otherwise cancel out a
+                // real deletion and report zero (#1198).
+                tableDeleted += Math.max(0, chunk.length - (await countSurvivors(chunk)));
+              }
+              if (stopped) {
+                remaining = true;
+                break;
+              }
+              // `mutations_sync=2` makes this count observe the deletes; a write that landed in the
+              // meantime keeps the table open.
+              const after = await countBase();
+              remaining = after > 0;
+              if (!remaining) break;
+            }
+
+            // The backfill side table is keyed by the row's raw identity. Once the base rows are gone
+            // it is the last raw trace of the person, so the same purge round deletes the matching
+            // side entries. Only do this once the base table has no matching row left: deleting a
+            // side entry while its base row still exists would make that row visible again.
+            if (!remaining && !stopped) {
+              const sideMatch = `arrayExists(k -> k != '' AND k IN (SELECT key FROM ${PURGE_KEY_TABLE} WHERE workspace_id = {ws:UUID} AND run_id = {run:String}), [${SUBJECT_KEY_KINDS.map(
+                (kind) => SUBJECT_KEY_COLUMNS[kind],
+              ).join(', ')}])`;
+              const sideKey = sideShape.tuple('');
+              const countSide = async () => {
+                const rows = await purgeQuery(
+                  workspaceId,
+                  `SELECT count() AS n FROM subject_key_backfill FINAL
+                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}`,
+                  queryParams,
+                );
+                return purgeCount(rows, 'subject_key_backfill');
+              };
+              const selectSide = async () => {
+                const rows = await purgeQuery(
+                  workspaceId,
+                  `SELECT ${sideShape.select('')}
+                          FROM subject_key_backfill FINAL
+                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideMatch}
+                         ORDER BY ${sideShape.columns.join(', ')}
+                         LIMIT {batch:UInt32}`,
+                  queryParams,
+                );
+                return sideShape.read(rows);
+              };
+              // A side entry pins the subject keys of a base row that has not been rewritten since
+              // the backfill. If a late legacy row arrives after the base count reached zero, that
+              // entry is the only thing that excludes it, so it must stay until its base row is gone
+              // (#1198). Only a row whose coverage is not `full` uses the entry: a full-coverage row
+              // ignores its side entry, so that entry is stale and may be removed. The delete repeats
+              // this check in the same statement, which closes the small window between the read and
+              // the mutation. The guard compares the side entry's leading keys with the base identity,
+              // which is narrower for message events.
+              const sideGuardKeys = sideShape.tuple('', base.columns.length);
+              /** The side identity projected onto the base table's (possibly narrower) identity. */
+              const baseId = (id: string[]) => id.slice(0, base.columns.length);
+              const existingBaseIds = async (ids: string[][]) => {
+                if (!ids.length) return new Set<string>();
+                const rs = await query(workspaceId, {
+                  query: `SELECT ${base.select('t')} FROM ${spec.table} AS t FINAL
+                         WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full'
+                           AND ${base.tuple('t')} IN {ids:${base.type}}`,
+                  query_params: { ws: workspaceId, ids: ids.map((id) => new TupleParam(baseId(id))) },
+                  format: 'JSONEachRow',
+                });
+                const rows = base.read(await rs.json<Record<string, string>>());
+                return new Set(rows.map((row) => JSON.stringify(row)));
+              };
+              const countSideSurvivors = async (ids: string[][]) => {
+                if (!ids.length) return 0;
+                const rs = await query(workspaceId, {
+                  query: `SELECT count() AS n FROM subject_key_backfill FINAL
+                         WHERE workspace_id = {ws:UUID} AND table_name = {table:String} AND ${sideKey} IN {ids:${sideShape.type}}`,
+                  query_params: { ...tupleParams(ids), table: spec.table },
+                  format: 'JSONEachRow',
+                  clickhouse_settings: { max_execution_time: PURGE_EXECUTION_BOUND_SECONDS },
+                });
+                return purgeCount(await rs.json<Record<string, string | number>>(), 'subject_key_backfill');
+              };
+              for (let batch = 0; batch < maxBatches; batch++) {
+                const matching = await countSide();
+                if (matching === 0) {
+                  remaining = false;
+                  break;
+                }
+                const candidates = await selectSide();
+                if (!candidates.length) {
+                  remaining = true;
+                  break;
+                }
+                let blocked = false;
+                for (const chunk of identityChunks(candidates)) {
+                  if (!(await keepClaim())) {
+                    stopped = true;
+                    break;
+                  }
+                  const stillBacked = await existingBaseIds(chunk);
+                  const deletable = chunk.filter((id) => !stillBacked.has(JSON.stringify(baseId(id))));
+                  if (!deletable.length) {
+                    // Every side entry in this chunk still backs a base row, including one that
+                    // arrived after the base sweep: leave them and let the next round remove the row
+                    // first.
+                    blocked = true;
+                    continue;
+                  }
+                  await command(workspaceId, {
+                    query: `DELETE FROM subject_key_backfill
                            WHERE workspace_id = {ws:UUID} AND table_name = {table:String}
                              AND ${sideKey} IN {ids:${sideShape.type}}
                              AND ${sideGuardKeys} NOT IN (
@@ -1599,37 +1697,42 @@ export function clickHouseStore(opts: {
                                 WHERE t.workspace_id = {ws:UUID} AND t.subject_coverage != 'full'
                                   AND ${base.tuple('t')} IN {guards:${base.type}}
                              )`,
-                  // `guards` is the same identity projected onto the base table's columns, which are
-                  // narrower than the side table's four keys for message events; one parameter
-                  // cannot carry both shapes.
-                  query_params: {
-                    ws: workspaceId,
-                    table: spec.table,
-                    ids: deletable.map((id) => new TupleParam(id)),
-                    guards: deletable.map((id) => new TupleParam(baseId(id))),
-                  },
-                  clickhouse_settings: { mutations_sync: '2' },
-                });
-                tableDeleted += Math.max(0, deletable.length - (await countSideSurvivors(deletable)));
+                    // `guards` is the same identity projected onto the base table's columns, which are
+                    // narrower than the side table's four keys for message events; one parameter
+                    // cannot carry both shapes.
+                    query_params: {
+                      ws: workspaceId,
+                      table: spec.table,
+                      ids: deletable.map((id) => new TupleParam(id)),
+                      guards: deletable.map((id) => new TupleParam(baseId(id))),
+                    },
+                    clickhouse_settings: { mutations_sync: '2', max_execution_time: PURGE_EXECUTION_BOUND_SECONDS },
+                  });
+                  tableDeleted += Math.max(0, deletable.length - (await countSideSurvivors(deletable)));
+                }
+                if (stopped) {
+                  remaining = true;
+                  break;
+                }
+                if (blocked) {
+                  remaining = true;
+                  break;
+                }
+                const after = await countSide();
+                remaining = after > 0;
+                if (!remaining) break;
               }
-              if (stopped) {
-                remaining = true;
-                break;
-              }
-              if (blocked) {
-                remaining = true;
-                break;
-              }
-              const after = await countSide();
-              remaining = after > 0;
-              if (!remaining) break;
             }
           }
+          deleted += tableDeleted;
+          if (remaining) complete = false;
+          tables.push({ table: spec.table, deleted: tableDeleted, remaining });
+          if (stopped) break;
         }
-        deleted += tableDeleted;
-        if (remaining) complete = false;
-        tables.push({ table: spec.table, deleted: tableDeleted, remaining });
-        if (stopped) break;
+      } finally {
+        // The staged rows are transport state; the TTL is the backstop if this fails. A sweep that
+        // stopped early (a taken-over claim) still drops its own run's rows.
+        if (unique.length) await clearPurgeKeys(workspaceId, runId);
       }
       return { deleted, complete, tables };
     },
@@ -1825,17 +1928,29 @@ export function clickHouseStore(opts: {
       // before the abort must not be mistaken for confirmation after it (#1204 review).
       for (const chunk of stringChunks(unique)) {
         assertStoreNotAborted(opts.signal);
-        const rs = await query(workspaceId, {
-          // A key is the HMAC of one identifier under one exclusion key version, so counting distinct
-          // values present is the same as counting the exact rows. FINAL is the visibility check:
-          // it reads the merged state a later query will see, not the insert's acknowledgement.
-          query: `SELECT countDistinct(key) AS n FROM erased_subjects FINAL
-                  WHERE workspace_id = {ws:UUID} AND key IN {keys:Array(String)}`,
-          query_params: { ws: workspaceId, keys: chunk },
-          format: 'JSONEachRow',
-        });
-        const [row] = await rs.json<{ n: number | string }>();
-        if (Number(row?.n ?? 0) !== chunk.length) return false;
+        // Resolving the workspace settings can itself be a request on the fast path, so the abort
+        // is checked again once they are known and before this chunk is issued.
+        const settings = await settingsFor(workspaceId);
+        assertStoreNotAborted(opts.signal);
+        const rs = await withAbortReason(() =>
+          client.query({
+            // A key is the HMAC of one identifier under one exclusion key version, so counting distinct
+            // values present is the same as counting the exact rows. FINAL is the visibility check:
+            // it reads the merged state a later query will see, not the insert's acknowledgement.
+            query: `SELECT countDistinct(key) AS n FROM erased_subjects FINAL
+                    WHERE workspace_id = {ws:UUID} AND key IN {keys:Array(String)}`,
+            query_params: { ws: workspaceId, keys: chunk },
+            format: 'JSONEachRow',
+            ...abort(),
+            ...queryId(),
+            clickhouse_settings: settings,
+          }),
+        );
+        const rows = await withAbortReason(() => rs.json<{ n: number | string }>());
+        // After the answer is read and before it is interpreted: an abort that landed while the
+        // chunk was in flight must throw, never be mistaken for a visible key set.
+        assertStoreNotAborted(opts.signal);
+        if (purgeCount(rows, 'erased_subjects') !== chunk.length) return false;
       }
       assertStoreNotAborted(opts.signal);
       return true;

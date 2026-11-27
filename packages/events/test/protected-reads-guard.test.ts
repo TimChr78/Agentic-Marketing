@@ -49,7 +49,7 @@ const INTERPOLATED_ALLOWED: { file: string; expression: string; why: string }[] 
   {
     file: 'packages/events/src/clickhouse.ts',
     expression: 'PURGE_KEY_TABLE',
-    why: 'the physical purge’s external-data table, supplied per request; never a person table',
+    why: 'the physical purge’s per-run staging table; it holds exclusion keys, never a person row',
   },
   { file: 'packages/events/src/pending.ts', expression: 'published', why: 'built by personReadSource' },
   { file: 'packages/analytics/src/query.ts', expression: 'table', why: 'built by personReadSource' },

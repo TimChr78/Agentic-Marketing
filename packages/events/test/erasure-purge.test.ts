@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { newUuid } from '@agentic-marketing/core';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runScoped } from '../../db/test/run';
 import {
   type BusEvent,
@@ -102,8 +102,9 @@ async function rows<T>(query: string, params: Record<string, unknown> = {}, work
 const count = async (table: string) => Number((await rows<{ n: number | string }>(`SELECT count() AS n FROM ${table} FINAL`))[0]?.n ?? 0);
 
 /**
- * Publishes a workspace's exclusion keys, as the erasure cleanup does before a sweep. The purge
- * matches the published set in `erased_subjects`, so a key must be published to be swept.
+ * Publishes a workspace's exclusion keys, as the erasure cleanup does before a sweep. Protected
+ * reads hide a matching row through these rows; the physical purge reads the key list its caller
+ * passes, not this table.
  */
 async function publish(target: EventStore, workspaceId: string, keys: readonly string[]) {
   await target.publishErasedSubjects(
@@ -405,27 +406,173 @@ describe('recurring physical purge (#1037 part 3)', () => {
     ]);
   }, 120_000);
 
-  it('sweeps a workspace whose published ledger is larger than one query parameter', async () => {
+  it('sweeps a workspace whose committed ledger is larger than one query parameter and one staged batch', async () => {
     const ledgerWs = newUuid();
     const total = 3_200;
     // A ledger this size is ordinary for a long-lived person. Bound as one `Array(String)`, it is
     // over ClickHouse's 128 KiB field limit and every count, batch select and delete failed, so the
-    // physical purge could never make progress.
+    // physical purge could never make progress. It is also over one staged insert's bound, so the
+    // load itself must be split.
     const anonymousIds = Array.from({ length: total }, (_, i) => `ledger-${String(i).padStart(4, '0')}-${'k'.repeat(40)}`);
     const keys = anonymousIds.map((id) => hmac('anonymous_id', id));
     await publish(store, ledgerWs, keys);
     await store.insert([event(0, { workspaceId: ledgerWs, anonymousId: anonymousIds[0], userId: '', profileId: '' })]);
 
-    const result = await store.purgeErasedSubjects(ledgerWs, keys, { batchSize: 100 });
+    const originalInsert = store.client.insert.bind(store.client);
+    const staged: number[] = [];
+    store.client.insert = (async (args) => {
+      if ((args as unknown as { table?: string }).table === 'erasure_purge_keys')
+        staged.push(((args as unknown as { values?: readonly unknown[] }).values ?? []).length);
+      return originalInsert(args);
+    }) as typeof store.client.insert;
+    let result: Awaited<ReturnType<typeof store.purgeErasedSubjects>>;
+    try {
+      result = await store.purgeErasedSubjects(ledgerWs, keys, { batchSize: 100 });
+    } finally {
+      store.client.insert = originalInsert;
+    }
+    expect(staged.length).toBeGreaterThan(1);
+    expect(Math.max(...staged)).toBeLessThanOrEqual(2_000);
+    expect(staged.reduce((sum, rows) => sum + rows, 0)).toBe(total);
     expect(result).toMatchObject({ complete: true, deleted: 1 });
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, ledgerWs)).toEqual([
       { n: 0 },
     ]);
-    // The purge never deletes the exclusions it matched.
+    // The purge never deletes the exclusions it matched, and it drops its own staged run.
     expect(
       await rows<{ n: number }>('SELECT count() AS n FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID}', {}, ledgerWs),
     ).toEqual([{ n: total }]);
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM erasure_purge_keys WHERE workspace_id = {ws:UUID}', {}, ledgerWs)).toEqual([
+      { n: 0 },
+    ]);
   }, 120_000);
+
+  it('stages its key set through the configured client and never bypasses it', async () => {
+    const clientWs = newUuid();
+    const anonymousId = `client-stage-${'c'.repeat(40)}`;
+    const key = hmac('anonymous_id', anonymousId);
+    await store.insert([event(0, { workspaceId: clientWs, anonymousId, userId: '', profileId: '' })]);
+
+    // A request that did not go through the configured client would have to use fetch. The store's
+    // client carries the configured database, path, credentials and settings, so anything else is
+    // a bypass.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      throw new Error('the purge must use the configured ClickHouse client');
+    });
+    const originalInsert = store.client.insert.bind(store.client);
+    const inserted: { table: string; rows: number }[] = [];
+    store.client.insert = (async (args) => {
+      const insert = args as unknown as { table?: string; values?: readonly unknown[] };
+      inserted.push({ table: insert.table ?? '', rows: (insert.values ?? []).length });
+      return originalInsert(args);
+    }) as typeof store.client.insert;
+    const originalQuery = store.client.query.bind(store.client);
+    const queries: { sql: string; settings: Record<string, unknown> }[] = [];
+    store.client.query = (async (args) => {
+      const query = args as { query: string; clickhouse_settings?: Record<string, unknown> };
+      queries.push({ sql: query.query, settings: query.clickhouse_settings ?? {} });
+      return originalQuery(args);
+    }) as typeof store.client.query;
+    try {
+      expect(await store.purgeErasedSubjects(clientWs, [key], { batchSize: 100 })).toMatchObject({ complete: true, deleted: 1 });
+    } finally {
+      store.client.insert = originalInsert;
+      store.client.query = originalQuery;
+      fetchSpy.mockRestore();
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(inserted).toContainEqual({ table: 'erasure_purge_keys', rows: 1 });
+    // Every matching read names this run's staged set in the configured database.
+    const matching = queries.filter((query) => query.sql.includes('FROM erasure_purge_keys'));
+    expect(matching.length).toBeGreaterThan(0);
+    for (const query of matching) {
+      expect(query.sql).toContain('workspace_id = {ws:UUID}');
+      expect(query.sql).toContain('run_id = {run:String}');
+    }
+    // The staged rows are gone afterwards, which also shows they landed in the configured database.
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM erasure_purge_keys WHERE workspace_id = {ws:UUID}', {}, clientWs)).toEqual([
+      { n: 0 },
+    ]);
+  }, 60_000);
+
+  it('bounds every purge statement on the server as well as the client', async () => {
+    const boundWs = newUuid();
+    const key = hmac('anonymous_id', 'bounded-statement');
+    await store.insert([event(0, { workspaceId: boundWs, anonymousId: 'bounded-statement', userId: '', profileId: '' })]);
+    const originalQuery = store.client.query.bind(store.client);
+    const readBounds: unknown[] = [];
+    store.client.query = (async (args) => {
+      const query = args as { query: string; clickhouse_settings?: Record<string, unknown> };
+      if (query.query.includes('SELECT count() AS n FROM events')) readBounds.push(query.clickhouse_settings?.max_execution_time);
+      return originalQuery(args);
+    }) as typeof store.client.query;
+    const originalCommand = store.client.command.bind(store.client);
+    const deleteBounds: unknown[] = [];
+    store.client.command = (async (args) => {
+      const command = args as { query: string; clickhouse_settings?: Record<string, unknown> };
+      if (command.query.includes('DELETE FROM events')) deleteBounds.push(command.clickhouse_settings?.max_execution_time);
+      return originalCommand(args);
+    }) as typeof store.client.command;
+    try {
+      expect(await store.purgeErasedSubjects(boundWs, [key], { batchSize: 100 })).toMatchObject({ complete: true, deleted: 1 });
+    } finally {
+      store.client.query = originalQuery;
+      store.client.command = originalCommand;
+    }
+    expect(readBounds.length).toBeGreaterThan(0);
+    expect(deleteBounds.length).toBeGreaterThan(0);
+    // 30 s: the same bound as the client's request timeout.
+    expect([...readBounds, ...deleteBounds].every((value) => value === 30)).toBe(true);
+  }, 60_000);
+
+  it('does not treat a table as empty when its count answer is missing or invalid', async () => {
+    for (const answer of [[], [{ n: 'many' }]]) {
+      const badWs = newUuid();
+      const anonymousId = 'bad-count-anon';
+      const key = hmac('anonymous_id', anonymousId);
+      await store.insert([event(0, { workspaceId: badWs, anonymousId, userId: '', profileId: '' })]);
+      const originalQuery = store.client.query.bind(store.client);
+      store.client.query = (async (args) => {
+        const query = args as { query: string };
+        if (query.query.includes('SELECT count() AS n FROM events AS t FINAL'))
+          return { json: async () => answer } as Awaited<ReturnType<typeof originalQuery>>;
+        return originalQuery(args);
+      }) as typeof store.client.query;
+      try {
+        await expect(store.purgeErasedSubjects(badWs, [key], { batchSize: 10 })).rejects.toThrow(/count for events/);
+      } finally {
+        store.client.query = originalQuery;
+      }
+      // Nothing was deleted, and the failed sweep still dropped its staged run.
+      expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, badWs)).toEqual([
+        { n: 1 },
+      ]);
+      expect(await rows<{ n: number }>('SELECT count() AS n FROM erasure_purge_keys WHERE workspace_id = {ws:UUID}', {}, badWs)).toEqual([
+        { n: 0 },
+      ]);
+    }
+  }, 60_000);
+
+  it('propagates a ClickHouse failure instead of reporting a completed purge', async () => {
+    const errorWs = newUuid();
+    const anonymousId = 'client-error-anon';
+    const key = hmac('anonymous_id', anonymousId);
+    await store.insert([event(0, { workspaceId: errorWs, anonymousId, userId: '', profileId: '' })]);
+    const originalQuery = store.client.query.bind(store.client);
+    store.client.query = (async (args) => {
+      const query = args as { query: string };
+      if (query.query.includes('SELECT count() AS n FROM events AS t FINAL')) throw new Error('Code: 47. DB::Exception: Missing columns');
+      return originalQuery(args);
+    }) as typeof store.client.query;
+    try {
+      await expect(store.purgeErasedSubjects(errorWs, [key], { batchSize: 10 })).rejects.toThrow(/Code: 47/);
+    } finally {
+      store.client.query = originalQuery;
+    }
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, errorWs)).toEqual([
+      { n: 1 },
+    ]);
+  }, 60_000);
 
   it('measures non-ASCII and escaped identities in URL-encoded bytes, not characters', async () => {
     const wideWs = newUuid();
@@ -591,6 +738,34 @@ describe('recurring physical purge (#1037 part 3)', () => {
       }) as typeof isolated.client.query;
       await expect(isolated.erasedSubjectsVisible(visibilityWs, keys)).rejects.toThrow(/restore lock was lost/);
       expect(issued).toBe(1);
+    } finally {
+      await isolated.close();
+    }
+  }, 60_000);
+
+  it('issues no chunk request when its caller aborts while the workspace settings resolve', async () => {
+    const settingsWs = newUuid();
+    const keys = [hmac('anonymous_id', 'settings-abort')];
+    await publish(store, settingsWs, keys);
+    const abort = new AbortController();
+    const isolated = clickHouseStore({ url: CH_URL, database: CH_DB, subjectKeys: factory, signal: abort.signal });
+    try {
+      // `settingsFor` probes the server once (`SELECT 1`) before it can answer. The lock is lost as
+      // that probe returns, so the abort lands between the settings resolve and the chunk request.
+      const realCommand = isolated.client.command.bind(isolated.client);
+      isolated.client.command = (async (args: Parameters<typeof realCommand>[0]) => {
+        const result = await realCommand(args);
+        if ((args as { query?: string }).query === 'SELECT 1') abort.abort(new Error('the restore lock was lost'));
+        return result;
+      }) as typeof isolated.client.command;
+      const realQuery = isolated.client.query.bind(isolated.client);
+      let chunks = 0;
+      isolated.client.query = (async (args: Parameters<typeof realQuery>[0]) => {
+        if (String((args as { query?: string }).query).includes('countDistinct')) chunks += 1;
+        return realQuery(args);
+      }) as typeof isolated.client.query;
+      await expect(isolated.erasedSubjectsVisible(settingsWs, keys)).rejects.toThrow(/restore lock was lost/);
+      expect(chunks).toBe(0);
     } finally {
       await isolated.close();
     }

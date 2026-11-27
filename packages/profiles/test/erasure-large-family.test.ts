@@ -74,17 +74,24 @@ async function tombstoneCount(erasureId: string): Promise<number> {
 }
 
 describe.skipIf(!hasTestDatabase())('erasure of a profile with a large identifier family', () => {
-  it('records the whole ledger for 10,923 rows, more than one statement can bind', async () => {
-    const profile = 'prf_0000000000000000000000000000c101';
-    const anon = 'ledger-large-1-';
-    const anonymousIds = 5_460;
+  it('records the whole ledger and every tombstone for a family past one statement’s parameters', async () => {
+    const profile = 'prf_0000000000000000000000000000c103';
+    const anon = 'bind-limit-';
+    // One bound parameter per anonymous id in the push-subscription delete put this list over
+    // PostgreSQL's 65,535-parameter limit; the statement failed, the stage rolled back, and the
+    // person could never be erased. No push subscription row exists: the statement still binds the
+    // whole list.
+    //
+    // The same family also covers both insert walls the batching fixes: one ledger row per
+    // identifier value (two per anonymous id, its own kind and `alias_previous_id`) at six bound
+    // parameters each, and one tombstone per identifier at three each.
+    const anonymousIds = 65_600;
     await seedPerson(profile, anon, anonymousIds);
 
-    // Profile, user id, and two rows per anonymous id: 1 + 2 + 2 × 5,460 ledger rows, six
-    // parameters each, so 65,538 bound parameters.
     const result = await erase(profile);
     expect(result).toMatchObject({ status: 'pending', counts: { profiles: 1, identifiers: anonymousIds + 1 } });
     expect(await ledgerCount(result.erasureId)).toBe(1 + 2 + 2 * anonymousIds);
+    expect(await tombstoneCount(result.erasureId)).toBe(anonymousIds + 1);
 
     const hasher = await subjectKeyHasher({ db: d.db, kp: keyProvider })(d.workspace);
     const firstAnon = await hasher.hash('anonymous_id', `${anon}1`);
@@ -107,46 +114,11 @@ describe.skipIf(!hasTestDatabase())('erasure of a profile with a large identifie
         expect.objectContaining({ kind: 'profile', key_value: profileKey, coverage: 'full' }),
       ]),
     );
-  }, 120_000);
-
-  it('records every tombstone for 21,847 identifiers, more than one statement can bind', async () => {
-    const profile = 'prf_0000000000000000000000000000c102';
-    const anon = 'tombstone-large-2-';
-    const anonymousIds = 21_846;
-    await seedPerson(profile, anon, anonymousIds);
-
-    // One tombstone per identifier at three bound parameters each: 21,847 × 3 = 65,541, past the
-    // limit as well; the ledger for the same family is 43,695 rows.
-    const result = await erase(profile);
-    expect(result).toMatchObject({ status: 'pending', counts: { profiles: 1, identifiers: anonymousIds + 1 } });
-    expect(await tombstoneCount(result.erasureId)).toBe(anonymousIds + 1);
-    expect(await ledgerCount(result.erasureId)).toBe(1 + 2 + 2 * anonymousIds);
-
-    const hasher = await subjectKeyHasher({ db: d.db, kp: keyProvider })(d.workspace);
-    const probed = [await hasher.hash('anonymous_id', `${anon}1`), await hasher.hash('anonymous_id', `${anon}${anonymousIds}`)];
-    hasher.dispose();
-    const { rows } = await d.db.admin.query<{ key_value: string; coverage: string }>(
-      'SELECT key_value, coverage FROM erasure_keys WHERE workspace_id = $1 AND erasure_id = $2 AND kind = $3 AND key_value = ANY($4::text[])',
-      [d.workspace, result.erasureId, 'anonymous_id', probed],
-    );
-    expect(rows).toHaveLength(2);
-    for (const row of rows) expect(row.coverage).toBe('full');
-  }, 120_000);
-
-  it("erases a family whose anonymous-id list exceeds one statement's parameters", async () => {
-    const profile = 'prf_0000000000000000000000000000c103';
-    const anon = 'bind-limit-';
-    // One bound parameter per anonymous id in the push-subscription delete put this list over
-    // PostgreSQL's 65,535-parameter limit; the statement failed, the stage rolled back, and the
-    // person could never be erased. No push subscription row exists: the statement still binds the
-    // whole list.
-    const anonymousIds = 65_600;
-    await seedPerson(profile, anon, anonymousIds);
-
-    const result = await erase(profile);
-    expect(result).toMatchObject({ status: 'pending', counts: { profiles: 1, identifiers: anonymousIds + 1 } });
-    expect(await ledgerCount(result.erasureId)).toBe(1 + 2 + 2 * anonymousIds);
-    const { rows } = await d.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [d.workspace, profile]);
-    expect(rows).toHaveLength(0);
+    // The stage committed: the profile row and its identifiers are gone.
+    const { rows: remaining } = await d.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [
+      d.workspace,
+      profile,
+    ]);
+    expect(remaining).toHaveLength(0);
   }, 240_000);
 });
