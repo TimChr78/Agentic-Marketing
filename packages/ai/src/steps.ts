@@ -178,6 +178,19 @@ async function ownsAttempt(tx: Tx, c: CallRow): Promise<boolean | null> {
   return row.attempts === c.attempts;
 }
 
+/**
+ * Drops the person-derived parts of a call's stored input after a consent refusal (#1300 review):
+ * the prepared person context, and the properties of the trigger event that started the step. The
+ * step's own configuration (its questions, threshold and prompt) and the trigger's name stay.
+ */
+function clearPersonDerived(input: Record<string, unknown>) {
+  delete input.person;
+  if (!('trigger' in input)) return;
+  const trigger = input.trigger as { name?: unknown } | string | null | undefined;
+  const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
+  input.trigger = typeof name === 'string' ? { name } : null;
+}
+
 export async function finishIn(
   tx: Tx,
   c: CallRow,
@@ -225,9 +238,13 @@ export async function finishIn(
   // A score step writes consent-gated data, and a finished decision or generated text is person
   // data too. Take the workspace identity lock before the profile row: a standalone consent writer
   // serialises on that lock, not on the profile row, so a refusal that commits while this waits is
-  // visible to the re-check under the lock (#1300).
+  // visible to the re-check under the lock (#1300). Only an outcome that can write a score or commit
+  // a person's answer needs it: a step taking its fallback for a budget, configuration or prompt
+  // reason writes no person data, and holding the workspace-wide lock there would only queue other
+  // consent writers (#1300 review).
   const commitsPersonData =
-    c.kind === 'score' || (c.profileId !== null && (c.kind === 'decide' || c.kind === 'generate') && out.status === 'done');
+    (c.kind === 'score' && out.storeScore !== undefined) ||
+    (c.profileId !== null && (c.kind === 'decide' || c.kind === 'generate') && out.status === 'done');
   if (commitsPersonData) await lockIdentity(tx, c.workspaceId);
   const lockedProfile = c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
   // A person who is gone has no participant row to wait at: the wakeup below finds nothing and a
@@ -258,6 +275,10 @@ export async function finishIn(
   let error = out.error;
   // On a fallback the journey fills the slots with the prompt's fallback texts itself.
   let content = out.slots;
+  // A consent refusal may carry everything the model answered about the person: the answer, its
+  // rationale, the generated text and the prepared context. None of it may be persisted for a person
+  // who no longer allows AI processing (#1300 review); billing metadata stays.
+  let refused = false;
   // A decision call logs a state hash and a sanitised question set, never the person's state
   // or a trigger event with its properties (#358). Redacting the questions also keeps contact
   // details out of a refused call's audit row (#352).
@@ -294,6 +315,7 @@ export async function finishIn(
     if ('refused' in write) {
       status = 'fallback';
       error = write.refused;
+      refused = true;
     }
   }
   // A decision or a generated text is person data: the consent check that admitted the model call
@@ -307,8 +329,10 @@ export async function finishIn(
       status = 'fallback';
       error = consent.reason;
       content = undefined;
+      refused = true;
     }
   }
+  if (refused) clearPersonDerived(input);
   const outcome = {
     seq: c.seq,
     ...(status === 'done' && out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
@@ -335,9 +359,9 @@ export async function finishIn(
       promptVersion: prep?.version ?? null,
       providerId: prep?.model?.providerId ?? out.providerId ?? c.providerId ?? null,
       model: prep?.model?.modelId ?? out.model ?? null,
-      input: { ...input, ...(c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
-      output: out.output ?? null,
-      rationale: out.rationale ?? null,
+      input: { ...input, ...(!refused && c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
+      output: refused ? null : (out.output ?? null),
+      rationale: refused ? null : (out.rationale ?? null),
       error: late ? 'too_late: the step had timed out and took its fallback' : (error ?? null),
       // Accumulate in SQL rather than from the claim snapshot: a late attempt may already have
       // added its tokens, and both attempts were billed (#941 review).

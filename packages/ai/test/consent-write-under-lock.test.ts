@@ -239,12 +239,26 @@ describe.skipIf(!hasTestDatabase())('a decision or generate step re-checks conse
         node: kind,
         seq: 1,
         profileId: person,
-        input: {},
+        // What a journey step records: the event that started it, properties included.
+        input: { trigger: { name: 'Order Completed', properties: { email: 'ada@example.com' } } },
       });
       const [call] = await tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, callId));
       return { call: call!, participantId: participant!.id };
     });
   }
+
+  /** The settled call row: what it kept of the answer and of the input. */
+  const settledCall = async (callId: string) =>
+    (
+      await d.db.admin.query<{
+        status: string;
+        error: string | null;
+        input_tokens: number;
+        output: unknown;
+        rationale: string | null;
+        input: Record<string, unknown>;
+      }>('SELECT status, error, input_tokens, output, rationale, input FROM ai_calls WHERE workspace_id = $1 AND id = $2', [ws, callId])
+    ).rows[0]!;
 
   async function holdsOnIdentityLock(pending: Promise<unknown>, held: Awaited<ReturnType<typeof withheldConsentChange>>) {
     return Promise.race([
@@ -272,9 +286,11 @@ describe.skipIf(!hasTestDatabase())('a decision or generate step re-checks conse
     await seedProfile(person);
     await grantAi(person);
     const { call, participantId } = await seedStep(person, 'decide');
+    // The preparation that was sent to the provider: the person's context is in the call's input.
+    const prep = { person: { id: person, traits: { plan: 'pro' } } };
     await commitAfterObjection(person, () =>
       d.db.withWorkspace(ws, (tx) =>
-        finishIn(tx, call, null, {
+        finishIn(tx, call, prep, {
           status: 'done',
           option: 'a',
           rationale: 'Ada is likely to convert',
@@ -284,15 +300,14 @@ describe.skipIf(!hasTestDatabase())('a decision or generate step re-checks conse
         }),
       ),
     );
-    const settled = (
-      await d.db.admin.query<{ status: string; error: string | null; input_tokens: number }>(
-        'SELECT status, error, input_tokens FROM ai_calls WHERE workspace_id = $1 AND id = $2',
-        [ws, call.id],
-      )
-    ).rows[0]!;
-    // Usage is still settled: the provider was called and billed.
-    expect(settled).toMatchObject({ status: 'fallback', input_tokens: 20 });
+    const settled = await settledCall(call.id);
+    // Usage is still settled: the provider was called and billed. The answer, its rationale and the
+    // prepared context are not kept for a person who refused.
+    expect(settled).toMatchObject({ status: 'fallback', input_tokens: 20, output: null, rationale: null });
     expect(settled.error).toContain('no_lawful_basis');
+    expect(settled.input.person).toBeUndefined();
+    expect(JSON.stringify(settled.input)).not.toContain('ada@example.com');
+    expect(settled.input.trigger).toEqual({ name: 'Order Completed' });
     const context = (
       await d.db.admin.query<{ context: { ai?: { decide?: Record<string, unknown> } } }>(
         'SELECT context FROM journey_participants WHERE workspace_id = $1 AND id = $2',
@@ -310,9 +325,10 @@ describe.skipIf(!hasTestDatabase())('a decision or generate step re-checks conse
     await seedProfile(person);
     await grantAi(person);
     const { call, participantId } = await seedStep(person, 'generate');
+    const prep = { person: { id: person, traits: { plan: 'pro' } } };
     await commitAfterObjection(person, () =>
       d.db.withWorkspace(ws, (tx) =>
-        finishIn(tx, call, null, {
+        finishIn(tx, call, prep, {
           status: 'done',
           slots: { subject: 'Ada, your order is ready' },
           output: { slots: { subject: 'Ada, your order is ready' } },
@@ -321,13 +337,12 @@ describe.skipIf(!hasTestDatabase())('a decision or generate step re-checks conse
         }),
       ),
     );
-    const settled = (
-      await d.db.admin.query<{ status: string; error: string | null; input_tokens: number }>(
-        'SELECT status, error, input_tokens FROM ai_calls WHERE workspace_id = $1 AND id = $2',
-        [ws, call.id],
-      )
-    ).rows[0]!;
-    expect(settled).toMatchObject({ status: 'fallback', input_tokens: 30 });
+    const settled = await settledCall(call.id);
+    // The generated slots and the context that produced them are not kept; the tokens are.
+    expect(settled).toMatchObject({ status: 'fallback', input_tokens: 30, output: null, rationale: null });
+    expect(settled.input.person).toBeUndefined();
+    expect(JSON.stringify(settled)).not.toContain('your order is ready');
+    expect(settled.input.trigger).toEqual({ name: 'Order Completed' });
     const context = (
       await d.db.admin.query<{ context: { content?: Record<string, unknown>; ai?: { generate?: Record<string, unknown> } } }>(
         'SELECT context FROM journey_participants WHERE workspace_id = $1 AND id = $2',
@@ -338,6 +353,67 @@ describe.skipIf(!hasTestDatabase())('a decision or generate step re-checks conse
     expect(context.content?.subject).toBeUndefined();
     expect(context.ai?.generate?.fallback).toContain('no_lawful_basis');
     expect(JSON.stringify(context)).not.toContain('your order is ready');
+  }, 60_000);
+});
+
+describe.skipIf(!hasTestDatabase())('a score step takes the identity lock only when it can write a score (#1300)', () => {
+  it('settles a budget fallback while a consent writer holds the identity lock', async () => {
+    const person = newId('prf');
+    await seedProfile(person);
+    await grantAi(person);
+    const { call } = await d.db.withWorkspace(ws, async (tx) => {
+      const [participant] = await tx
+        .insert(schema.journeyParticipants)
+        .values({
+          workspaceId: ws,
+          journeyId: newId('jrn'),
+          version: 1,
+          profileId: person,
+          entryKey: `test:${person}`,
+          node: 'decide',
+          seq: 1,
+          status: 'waiting',
+          dueAt: new Date(Date.UTC(2026, 9, 2)),
+        })
+        .returning({ id: schema.journeyParticipants.id });
+      const callId = newId('aic');
+      await tx.insert(schema.aiCalls).values({
+        workspaceId: ws,
+        id: callId,
+        kind: 'score',
+        status: 'running',
+        attempts: 1,
+        participantId: participant!.id,
+        node: 'decide',
+        seq: 1,
+        profileId: person,
+        input: { questions: [] },
+      });
+      const [row] = await tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, callId));
+      return { call: row! };
+    });
+    // A consent writer holds the workspace identity lock. A fallback writes no person data, so the
+    // step must not queue behind the lock: only a done answer (or a score) does.
+    const held = await withheldConsentChange(person, 'identity');
+    try {
+      const pending = d.db.withWorkspace(ws, (tx) =>
+        finishIn(tx, call, null, { status: 'fallback', error: 'budget: the monthly tokens are used up', inputTokens: 10, outputTokens: 0 }),
+      );
+      const first = await Promise.race([
+        pending.then(() => 'settled' as const),
+        new Promise<'waiting'>((resolve) => setTimeout(() => resolve('waiting'), 5_000)),
+      ]);
+      expect(first).toBe('settled');
+    } finally {
+      await held.drop();
+    }
+    const settled = (
+      await d.db.admin.query<{ status: string; error: string | null }>(
+        'SELECT status, error FROM ai_calls WHERE workspace_id = $1 AND id = $2',
+        [ws, call.id],
+      )
+    ).rows[0]!;
+    expect(settled).toMatchObject({ status: 'fallback', error: 'budget: the monthly tokens are used up' });
   }, 60_000);
 });
 
