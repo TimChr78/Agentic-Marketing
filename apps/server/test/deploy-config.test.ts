@@ -310,6 +310,15 @@ describe('.env.example', () => {
     expect(envExample).not.toContain('change-me');
   });
 
+  it('keeps the development database and origin values commented (#1279)', () => {
+    // A bare non-Compose install must set its own; the template's localhost database and the Vite
+    // dev-server origin are examples, not defaults.
+    expect(envExample).toMatch(/^# DATABASE_URL=postgres:\/\//m);
+    expect(envExample).toMatch(/^# TRUSTED_ORIGINS=http:\/\/localhost:5173$/m);
+    expect(envExample).not.toMatch(/^DATABASE_URL=/m);
+    expect(envExample).not.toMatch(/^TRUSTED_ORIGINS=/m);
+  });
+
   it('documents every variable the server reads, including runtime plumbing (#387)', () => {
     const documented = new Set(envFileKeys(envExample));
     expect(ENV_KEYS.filter((key) => !documented.has(key))).toEqual([]);

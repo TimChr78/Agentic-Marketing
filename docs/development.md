@@ -82,7 +82,7 @@ Requirements: Node 26 LTS, pnpm 10, PostgreSQL 18 (16 is still supported), Click
 
 ```bash
 pnpm install
-cp .env.example .env          # fill POSTGRES_PASSWORD and APP_DB_PASSWORD (the template keeps them empty; hex, openssl rand -hex 32, because Compose puts POSTGRES_PASSWORD into DATABASE_URL raw), plus AUTH_SECRET and MASTER_KEY (openssl rand -base64 32); point DATABASE_URL at Postgres
+cp .env.example .env          # fill POSTGRES_PASSWORD and APP_DB_PASSWORD (the template keeps them empty; hex, openssl rand -hex 32, because Compose puts POSTGRES_PASSWORD into DATABASE_URL raw), plus AUTH_SECRET and MASTER_KEY (openssl rand -base64 32); point DATABASE_URL at Postgres (uncomment the development line in the template)
 pnpm --silent --filter @agentic-marketing/server cli bootstrap --email you@example.com --workspace 'My shop'
 pnpm dev                       # API on http://localhost:3000 (migrates on start)
 pnpm dev:web                   # the admin UI on http://localhost:5173 (the demo is at /demo)

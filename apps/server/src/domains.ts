@@ -50,8 +50,15 @@ export interface DomainService {
   isBrandHost(host: string): Promise<boolean>;
   /** True when Host is registered but still pending verification, so it must not serve admin paths. */
   isPendingHost(host: string): Promise<boolean>;
+  /**
+   * True when the request Host is the installation's admin host (`PUBLIC_URL`), the only Host that
+   * serves the admin and API surface once Host checking is active (#1279).
+   */
+  isAdminHost(host: string): boolean;
   /** Persist that Host checking is on, so it cannot be switched off by removing the last domain (#463). */
   activateHostChecking(): Promise<void>;
+  /** Whether Host checking is active; installation policy, persisted once it has been switched on. */
+  hostCheckingActive(): Promise<boolean>;
   /**
    * Hostnames reserved installation-wide: the admin host (PUBLIC_URL) and the fallback links host
    * (PUBLIC_LINKS_URL). A workspace can never register them as a brand domain (#480).
@@ -76,8 +83,27 @@ export function createDomainService(db: Db, fallbackLinksUrl: string, publicUrl?
   const reservedHosts = [...new Set([fallback?.host, hostOfUrl(publicUrl)].filter((host): host is string => !!host))];
   const resolver = createWorkspaceDomainResolver(db, { reservedHosts });
 
+  // The admin host is the only Host that serves the UI, auth, MCP, SCIM and admin REST once Host
+  // checking is active (#1279). A development install configured on loopback is reached as
+  // localhost, 127.0.0.1 or ::1; only then are the loopback names interchangeable, so a public
+  // admin host can never be reached through a loopback Host header.
+  const adminHost = hostOfUrl(publicUrl);
+  let adminHostIsLoopback = false;
+  if (adminHost) adminHostIsLoopback = isLoopbackHost(adminHost);
+  const isAdminHost = (host: string): boolean => {
+    if (!adminHost) return false;
+    let normalized: string;
+    try {
+      normalized = normalizeHost(host);
+    } catch {
+      return false;
+    }
+    return normalized === adminHost || (adminHostIsLoopback && isLoopbackHost(normalized));
+  };
+
   return {
     reservedHosts,
+    isAdminHost,
     resolveWorkspaceForRequest: (host, path) => resolver.resolveWorkspaceForRequest(host, path),
     isBrandHost: (host) => resolver.isBrandHost(host),
     isPendingHost: (host) => resolver.isPendingHost(host),
@@ -116,6 +142,7 @@ export function createDomainService(db: Db, fallbackLinksUrl: string, publicUrl?
     },
     linksUrlFor: async (workspaceId) => (await resolver.linksUrlFor(workspaceId)) ?? fallbackLinksUrl,
     activateHostChecking: () => resolver.activateHostChecking(),
+    hostCheckingActive: () => resolver.hostCheckingActive(),
     invalidate: () => resolver.invalidate(),
   };
 }

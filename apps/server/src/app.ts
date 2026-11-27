@@ -426,6 +426,15 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     const resolved = await domains.resolvePublicRequest(host, path);
     if (!resolved) {
       if (brandPath || (await domains.isBrandHost(host))) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      // Health probes and the metrics scrape belong to no surface and answer on every Host:
+      // Kubernetes sends the pod IP, Docker and Compose send 127.0.0.1, Prometheus the Service
+      // name (#1279).
+      if (exactProbe(path) || path === '/metrics') return next();
+      // Once Host checking is active, an unregistered Host must not fall through to the admin
+      // surface either: the UI, auth, MCP, SCIM and REST are served on the admin host (PUBLIC_URL)
+      // alone (#1279).
+      if (!domains.isAdminHost(host) && (await domains.hostCheckingActive()))
+        return c.json({ error: 'not_found', message: 'Not found.' }, 404);
       return next();
     }
 
@@ -467,6 +476,11 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       // Health probes answer on every host, like the prefixed branch above and the public listener.
       if (exactProbe(path)) return next();
       if (resolved.matched) return c.json({ error: 'not_found', message: 'Not found.' }, 404);
+      // The fallback links host (PUBLIC_LINKS_URL) is a public host. Once Host checking is active it
+      // serves the public surface only, like a verified brand host; admin stays on PUBLIC_URL's host
+      // (#1279).
+      if (!domains.isAdminHost(host) && (await domains.hostCheckingActive()))
+        return c.json({ error: 'not_found', message: 'Not found.' }, 404);
       return next();
     }
     (c as unknown as Context<{ Variables: { publicRequest: PublicRequest } }>).set('publicRequest', resolved);
