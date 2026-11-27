@@ -89,7 +89,7 @@ export const score = defineCommand({
   name: 'ai.score',
   title: 'Score with a decision model',
   description:
-    'Ask a decision provider typed questions about a state and get probabilities and confidence, never text: noul (yes/no probability), choice (label and probabilities) or score (number and confidence). With profileId the person’s AI consent is checked and, unless a state is given, the state is built from non-personal data only (segment ids, event counts, agent-visible non-personal traits). A state with personal data is refused unless the provider is marked allowPersonalData under a no-retention agreement. With store, the first answer is saved as a named score for the person. Spends the workspace’s LLM budget: agents need a mandate with a spend level.',
+    'Ask a decision provider typed questions about a state and get probabilities and confidence, never text: noul (yes/no probability), choice (label and probabilities) or score (number and confidence). With profileId the person’s AI consent is checked — an unknown, erased or refusing person all get the same forbidden answer — and, unless a state is given, the state is built from non-personal data only (segment ids, event counts, agent-visible non-personal traits). A state with personal data is refused unless the provider is marked allowPersonalData under a no-retention agreement. With store, the first answer is saved as a named score for the person. Spends the workspace’s LLM budget: agents need a mandate with a spend level.',
   input: z.object({
     providerId: ProviderId.optional().describe('A decision provider; default: the enabled provider used for decisions'),
     questions: decisionQuestions,
@@ -373,8 +373,11 @@ export const profileScores = defineCommand({
   effect: 'read',
   auditReads: true,
   target: (i) => i.profileId,
-  // A replay must not answer with an erased person's scores (#1300).
-  replayCheck: async (replayInput, _replay, { tx, workspaceId }) => {
+  // A replay must not answer with an erased person's scores (#1300). An empty answer holds no
+  // person data, and an id that never named a profile legitimately answers `{ scores: [] }`: only
+  // a stored list has something to withhold.
+  replayCheck: async (replayInput, replay, { tx, workspaceId }) => {
+    if (!replay.scores.length) return;
     const person = await canonicalProfile(tx, workspaceId, replayInput.profileId);
     if (!person) throw new AppError('not_found', `No profile ${replayInput.profileId}.`);
   },

@@ -11,7 +11,9 @@ vi.mock('@agentic-marketing/secrets', async (importOriginal) => {
   return { ...original, openJson: async () => ({ apiKey: 'sk-test' }) };
 });
 
-import { score } from '../src/score';
+import { classification } from '../src/classify';
+import { listAiCalls } from '../src/commands';
+import { profileScores, score } from '../src/score';
 import { fakeSystemOne } from '../src/testing';
 
 // #1300: an idempotent REST request stores the command's whole answer for 30 days. A profile-bound
@@ -84,6 +86,36 @@ const input = (profileId: string) => ({
 
 const principal = () => userPrincipal('usr_idem', ws, 'owner');
 
+/** Runs the erasure's SQL stage, the same one a person's erasure runs. */
+async function erase(person: string) {
+  const prepared = await prepareErasure(db, ws, kp);
+  try {
+    await db.withWorkspace(ws, (tx) =>
+      eraseProfileStage(tx, { workspaceId: ws, profileId: person, requestedBy: 'user_test', reason: 'test erasure', prepared }),
+    );
+  } finally {
+    disposeErasure(prepared);
+  }
+}
+
+/** One settled AI call for the person, as the log commands read it. */
+async function seedCall(person: string, kind: 'decide' | 'classify', rationale: string) {
+  const id = newId('aic');
+  await d.db.withWorkspace(ws, (tx) =>
+    tx.insert(schema.aiCalls).values({
+      workspaceId: ws,
+      id,
+      kind,
+      status: 'done',
+      profileId: person,
+      input: { text: 'redacted' },
+      output: kind === 'classify' ? { label: 'interested' } : { answers: [] },
+      rationale,
+    }),
+  );
+  return id;
+}
+
 describe.skipIf(!hasTestDatabase())('an idempotent answer does not outlive the person (#1300)', () => {
   it('refuses a replay of a stored score after the person was erased', async () => {
     const person = await seedPerson();
@@ -120,5 +152,60 @@ describe.skipIf(!hasTestDatabase())('an idempotent answer does not outlive the p
     const replay = await executor().execute(score, input(person), principal(), { surface: 'rest', idempotencyKey: key });
     expect(replay.callId).toBe(first.callId);
     expect(replay.stored).toMatchObject({ profileId: person });
+  }, 120_000);
+
+  it('replays the empty score list for an ID that has never existed', async () => {
+    // An unknown profile answers `{ scores: [] }`, which holds no person data. Checking whether the
+    // profile exists would turn that first (fine) answer into a 404 on the replay.
+    const profileId = newId('prf');
+    const opts = { surface: 'rest' as const, idempotencyKey: `missing-${profileId}` };
+    const exec = executor();
+    expect(await exec.execute(profileScores, { profileId }, principal(), opts)).toEqual({ scores: [] });
+    expect(await exec.execute(profileScores, { profileId }, principal(), opts)).toEqual({ scores: [] });
+  }, 120_000);
+
+  it('refuses a replay of the call log after the person was erased', async () => {
+    const person = await seedPerson();
+    const callId = await seedCall(person, 'decide', 'Ada is likely to convert');
+    const opts = { surface: 'rest' as const, idempotencyKey: `calls-${person}` };
+    const first = await executor().execute(listAiCalls, { profileId: person }, principal(), opts);
+    expect(first.calls.map((c) => c.id)).toEqual([callId]);
+    expect(first.calls[0]!.rationale).toContain('Ada');
+
+    await erase(person);
+
+    // The cached log answers for a person who no longer exists, and the call rows are gone with
+    // the person. The retry must not hand the stored rationale back.
+    const replay = await executor()
+      .execute(listAiCalls, { profileId: person }, principal(), opts)
+      .catch((err: { code?: string; message?: string }) => err);
+    expect(replay).toMatchObject({ code: 'not_found' });
+    expect(JSON.stringify(replay)).not.toContain('Ada is likely');
+  }, 120_000);
+
+  it('still replays the call log while the person exists', async () => {
+    const person = await seedPerson();
+    const callId = await seedCall(person, 'decide', 'Enough signal');
+    const opts = { surface: 'rest' as const, idempotencyKey: `calls-alive-${person}` };
+    const first = await executor().execute(listAiCalls, { profileId: person }, principal(), opts);
+    const replay = await executor().execute(listAiCalls, { profileId: person }, principal(), opts);
+    expect(replay.calls.map((c) => c.id)).toEqual([callId]);
+    expect(replay).toEqual(first);
+  }, 120_000);
+
+  it('refuses a replay of a classification after the person was erased', async () => {
+    const person = await seedPerson();
+    const callId = await seedCall(person, 'classify', 'The reply asks for a refund');
+    const opts = { surface: 'rest' as const, idempotencyKey: `classification-${callId}` };
+    const first = await executor().execute(classification, { callId }, principal(), opts);
+    expect(first).toMatchObject({ status: 'done', label: 'interested', traitSet: null });
+
+    await erase(person);
+
+    const replay = await executor()
+      .execute(classification, { callId }, principal(), opts)
+      .catch((err: { code?: string; message?: string }) => err);
+    expect(replay).toMatchObject({ code: 'not_found' });
+    expect(JSON.stringify(replay)).not.toContain('refund');
   }, 120_000);
 });

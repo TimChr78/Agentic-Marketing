@@ -1,6 +1,7 @@
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
+import { canonicalProfile } from '@agentic-marketing/profiles';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { aiAllowed, NO_PROFILE, redact, refuseAi } from './context';
@@ -115,6 +116,19 @@ export const classification = defineCommand({
   }),
   permission: 'artifacts:read',
   effect: 'read',
+  // The stored answer holds the label, the rationale and the stored trait, which are person data.
+  // Erasure deletes the call row with the person, so replay it only while the row (and its person)
+  // still exist (#1300).
+  replayCheck: async (replayInput, _replay, { tx, workspaceId }) => {
+    const [c] = await tx
+      .select({ profileId: schema.aiCalls.profileId })
+      .from(schema.aiCalls)
+      .where(
+        and(eq(schema.aiCalls.workspaceId, workspaceId), eq(schema.aiCalls.id, replayInput.callId), eq(schema.aiCalls.kind, 'classify')),
+      );
+    if (!c || (c.profileId !== null && !(await canonicalProfile(tx, workspaceId, c.profileId))))
+      throw new AppError('not_found', `No classification ${replayInput.callId}.`);
+  },
   handler: async (input, ctx) => {
     const [c] = await ctx.tx
       .select()
