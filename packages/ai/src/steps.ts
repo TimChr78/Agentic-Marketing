@@ -50,12 +50,23 @@ export interface AiStepDeps {
 type CallRow = typeof schema.aiCalls.$inferSelect;
 const LEASE_MS = 120_000;
 
+/**
+ * A preparation refusal: the person's gate (or the person-bound build) refused before any model
+ * ran. It is more than a fallback reason: the call's person-derived input must be cleared when the
+ * outcome is stored (#1300 review).
+ */
+export interface PreparationRefusal {
+  reason: string;
+}
+
 interface Prepared {
   def: PromptDefinition;
   version: number;
   model?: ReadyModel;
   person?: Record<string, unknown>;
   fallback?: string;
+  /** Set when preparation refused the person, so finalisation clears person-derived input. */
+  refusal?: PreparationRefusal;
   /** Per-segment text cache (generate prompts with `cache`): the key, and the slots when cached. */
   cache?: { key: string; slots?: Record<string, string> };
 }
@@ -138,7 +149,7 @@ export async function prepareCall(tx: Tx, c: CallRow, deps: AiStepDeps): Promise
       }
     },
   );
-  if ('refusal' in prepared) return { ...base, fallback: prepared.refusal };
+  if ('refusal' in prepared) return { ...base, fallback: prepared.refusal, refusal: { reason: prepared.refusal } };
   return { ...base, ...prepared.value };
 }
 
@@ -180,11 +191,16 @@ async function ownsAttempt(tx: Tx, c: CallRow): Promise<boolean | null> {
 
 /**
  * Drops the person-derived parts of a call's stored input after a consent refusal (#1300 review):
- * the prepared person context, and the properties of the trigger event that started the step. The
- * step's own configuration (its questions, threshold and prompt) and the trigger's name stay.
+ * the prepared person context, the properties of the trigger event that started the step, and a
+ * decision's state hash and size. The step's own configuration (its questions, threshold and
+ * prompt) and the trigger's name stay.
  */
-function clearPersonDerived(input: Record<string, unknown>) {
+function clearPersonDerived(input: Record<string, unknown>, kind: CallRow['kind']) {
   delete input.person;
+  if (kind === 'score') {
+    delete input.stateHash;
+    delete input.stateTokens;
+  }
   if (!('trigger' in input)) return;
   const trigger = input.trigger as { name?: unknown } | string | null | undefined;
   const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
@@ -212,6 +228,10 @@ export async function finishIn(
     cached?: boolean;
     providerId?: string;
     model?: string;
+    /** The model id the workspace configured, kept in place of a provider's own version on refusal. */
+    configuredModel?: string;
+    /** Preparation already refused the person: finalisation clears person-derived input too. */
+    refusal?: PreparationRefusal;
     /**
      * A decision score to commit in the same transaction as the wakeup, before the participant
      * can be claimed again (#350, #351).
@@ -276,9 +296,11 @@ export async function finishIn(
   // On a fallback the journey fills the slots with the prompt's fallback texts itself.
   let content = out.slots;
   // A consent refusal may carry everything the model answered about the person: the answer, its
-  // rationale, the generated text and the prepared context. None of it may be persisted for a person
-  // who no longer allows AI processing (#1300 review); billing metadata stays.
-  let refused = false;
+  // rationale, the generated text, the predicted probability and the prepared context. None of it
+  // may be persisted for a person who no longer allows AI processing (#1300 review); billing metadata
+  // stays. A preparation refusal arrives typed from the step, so this applies there too (#1300).
+  let refused = out.refusal !== undefined;
+  if (out.refusal) error = out.refusal.reason;
   // A decision call logs a state hash and a sanitised question set, never the person's state
   // or a trigger event with its properties (#358). Redacting the questions also keeps contact
   // details out of a refused call's audit row (#352).
@@ -332,13 +354,17 @@ export async function finishIn(
       refused = true;
     }
   }
-  if (refused) clearPersonDerived(input);
-  const outcome = {
-    seq: c.seq,
-    ...(status === 'done' && out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
-    ...(out.probability !== undefined ? { probability: out.probability } : {}),
-    ...(status !== 'done' ? { fallback: error ?? 'failed' } : {}),
-  };
+  if (refused) clearPersonDerived(input, c.kind);
+  // A refusal's outcome is an explicit allowlist too: the fallback reason and the step's seq. The
+  // model's option, rationale and probability, and the generated slots, are dropped (#1300 review).
+  const outcome = refused
+    ? { seq: c.seq, fallback: error ?? 'failed' }
+    : {
+        seq: c.seq,
+        ...(status === 'done' && out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
+        ...(out.probability !== undefined ? { probability: out.probability } : {}),
+        ...(status !== 'done' ? { fallback: error ?? 'failed' } : {}),
+      };
   // Wake the participant only if it still waits at this step; otherwise the answer came too late.
   const woke = waiting
     ? await tx.execute(sql`
@@ -351,6 +377,33 @@ export async function finishIn(
       WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'`)
     : { rowCount: 0 };
   const late = !woke.rowCount && status === 'done';
+  if (refused) {
+    // The refused call row is built from an explicit allowlist: the fallback reason, the tokens, the
+    // configured model, the provider and the billing fields. Everything else is dropped — the
+    // model's output and rationale, a decision's state hash and estimated state size, the prepared
+    // person context, and the provider's own model version (#1300 review).
+    await tx
+      .update(schema.aiCalls)
+      .set({
+        status,
+        leaseUntil: null,
+        providerId: prep?.model?.providerId ?? out.providerId ?? c.providerId ?? null,
+        model: prep?.model?.modelId ?? out.configuredModel ?? null,
+        input,
+        output: null,
+        rationale: null,
+        error: late ? 'too_late: the step had timed out and took its fallback' : (error ?? null),
+        inputTokens: sql`${schema.aiCalls.inputTokens} + ${out.inputTokens ?? 0}`,
+        outputTokens: sql`${schema.aiCalls.outputTokens} + ${out.outputTokens ?? 0}`,
+        billedAt: sql`coalesce(${schema.aiCalls.billedAt}, now())`,
+        usageEstimated: sql`${schema.aiCalls.usageEstimated} OR ${out.usageEstimated === true || c.usageEstimated}`,
+        reservationId: null,
+        reviewStatus: null,
+        finishedAt: new Date(),
+      })
+      .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
+    return;
+  }
   await tx
     .update(schema.aiCalls)
     .set({
@@ -359,9 +412,9 @@ export async function finishIn(
       promptVersion: prep?.version ?? null,
       providerId: prep?.model?.providerId ?? out.providerId ?? c.providerId ?? null,
       model: prep?.model?.modelId ?? out.model ?? null,
-      input: { ...input, ...(!refused && c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
-      output: refused ? null : (out.output ?? null),
-      rationale: refused ? null : (out.rationale ?? null),
+      input: { ...input, ...(c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
+      output: out.output ?? null,
+      rationale: out.rationale ?? null,
       error: late ? 'too_late: the step had timed out and took its fallback' : (error ?? null),
       // Accumulate in SQL rather than from the claim snapshot: a late attempt may already have
       // added its tokens, and both attempts were billed (#941 review).
@@ -535,7 +588,8 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
   c = await settleStaleReservation(db, c);
   const prep = await db.withWorkspace(c.workspaceId, (tx) => prepareCall(tx, c, deps));
   if (!prep) return finish(db, c, null, { status: 'failed', error: 'no_prompt: the prompt has no published version' });
-  if (prep.fallback || !prep.model || !prep.person) return finish(db, c, prep, { status: 'fallback', error: prep.fallback });
+  if (prep.fallback || !prep.model || !prep.person)
+    return finish(db, c, prep, { status: 'fallback', error: prep.fallback, refusal: prep.refusal });
   if (prep.cache?.slots)
     return finish(db, c, prep, {
       status: 'done',
@@ -883,7 +937,12 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
       },
     );
   });
-  if ('refusal' in prepared) return finish(db, c, null, { status: 'fallback', error: prepared.refusal });
+  if ('refusal' in prepared)
+    return finish(db, c, null, {
+      status: 'fallback',
+      error: prepared.refusal,
+      refusal: { reason: prepared.refusal },
+    });
   const ready = { ...prepared.value, profileId: prepared.profileId };
   // A choice routes on the probability of the configured label, not on whichever label won.
   const done = (r: Awaited<ReturnType<typeof decisionCall>>): Parameters<typeof finishIn>[3] => {
@@ -904,6 +963,8 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
       latencyMs: r.latencyMs,
       providerId: ready.provider.providerId,
       model: r.modelVersion,
+      // Kept in place of the provider's own version if finalisation finds a refusal (#1300 review).
+      configuredModel: ready.provider.model,
       // Committed before the participant is woken, in the same transaction (#351).
       ...(ready.profileId && routed
         ? {

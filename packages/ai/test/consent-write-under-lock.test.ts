@@ -157,7 +157,14 @@ describe.skipIf(!hasTestDatabase())('a score write re-checks consent under the p
         node: 'decide',
         seq: 1,
         profileId: person,
-        input: {},
+        // What the decision step stores once the state is built: a hash and its size, never the
+        // state itself, and the event that started the step with its properties.
+        input: {
+          questions: [{ key: 'propensity', type: 'noul', instructions: 'Will this person convert?' }],
+          stateHash: 'hash-of-the-person-state',
+          stateTokens: 1234,
+          trigger: { name: 'Order Completed', properties: { email: 'ada@example.com' } },
+        },
       }),
     );
     const [call] = await d.db.withWorkspace(ws, (tx) => tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, callId)));
@@ -168,6 +175,9 @@ describe.skipIf(!hasTestDatabase())('a score write re-checks consent under the p
           status: 'done',
           probability: answer.probability,
           output: { answers: [answer] },
+          // What the provider answered with, which must not survive a refusal.
+          model: 'provider-reported-9.1',
+          configuredModel: 'test-model',
           storeScore: {
             profileId: person,
             key: 'journey_lock',
@@ -193,21 +203,33 @@ describe.skipIf(!hasTestDatabase())('a score write re-checks consent under the p
     }
     expect(await scoreRows('journey_lock')).toEqual([]);
     const settled = (
-      await d.db.admin.query<{ status: string; error: string | null }>(
-        'SELECT status, error FROM ai_calls WHERE workspace_id = $1 AND id = $2',
-        [ws, callId],
-      )
+      await d.db.admin.query<{
+        status: string;
+        error: string | null;
+        model: string | null;
+        input: Record<string, unknown>;
+        output: unknown;
+      }>('SELECT status, error, model, input, output FROM ai_calls WHERE workspace_id = $1 AND id = $2', [ws, callId])
     ).rows[0]!;
-    // The answer is recorded as a fallback so the participant takes its fallback edge.
-    expect(settled.status).toBe('fallback');
+    // The answer is recorded as a fallback so the participant takes its fallback edge. The call row
+    // keeps only the fallback reason and the billing fields: the predicted probability, the state
+    // hash and its estimated size, and the provider's own model version are dropped (#1300 review).
+    expect(settled).toMatchObject({ status: 'fallback', output: null, model: 'test-model' });
     expect(settled.error).toContain('no_lawful_basis');
-    const participantStatus = (
-      await d.db.admin.query<{ status: string }>('SELECT status FROM journey_participants WHERE workspace_id = $1 AND id = $2', [
-        ws,
-        participant!.id,
-      ])
+    expect(settled.input.stateHash).toBeUndefined();
+    expect(settled.input.stateTokens).toBeUndefined();
+    expect(JSON.stringify(settled.input)).not.toContain('ada@example.com');
+    expect(settled.input.trigger).toEqual({ name: 'Order Completed' });
+    const waitingRow = (
+      await d.db.admin.query<{
+        status: string;
+        context: { ai?: { decide?: Record<string, unknown> } };
+      }>('SELECT status, context FROM journey_participants WHERE workspace_id = $1 AND id = $2', [ws, participant!.id])
     ).rows[0]!;
-    expect(participantStatus.status).toBe('waiting');
+    expect(waitingRow.status).toBe('waiting');
+    // The participant takes its fallback edge, and the prediction is not kept beside it.
+    expect(waitingRow.context.ai?.decide?.fallback).toContain('no_lawful_basis');
+    expect(waitingRow.context.ai?.decide?.probability).toBeUndefined();
   }, 60_000);
 });
 
