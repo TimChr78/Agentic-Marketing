@@ -2,4 +2,4 @@
 section: Fixed
 issues: [1300]
 ---
-- A failed `ai.score` call stores a fixed diagnostic (the error code and "the AI provider refused or failed") in the audit log and the agent ledger instead of the decision provider's message, which can quote the person's data.
+- A failed profile-bound AI command stores a fixed diagnostic in the audit log and the agent ledger instead of a message the provider may have built from the person's data. Only a provider-originated failure gets "the AI provider refused or failed"; a policy denial, a permission or existence refusal and a validation error keep their own reason, and an unexpected exception keeps one fixed marker.
