@@ -13,7 +13,7 @@ export const createArtifact = defineCommand({
   input: JourneyDraftInput,          // zod
   output: ArtifactVersionRef,        // zod
   permission: 'artifacts:write',
-  effect: 'write',                   // read | write | publish | send | destructive
+  effect: 'write',                   // read | write | publish | destructive
   actionClass: 'draft',              // what it changes in the world (ADR-0016)
   handler: async (input, ctx) => { ... },
 });
@@ -31,7 +31,7 @@ The command layer is the only place that does authorization, validation, idempot
 
 ## 2. MCP server design
 
-- **Transport:** Streamable HTTP at `/mcp` (remote agents: Claude, ChatGPT, IDEs, n8n), plus stdio via the CLI for local development. MCP spec 2026-07-28 with SDK v2: a fresh, stateless server per request, so no MCP session store is needed; 2025-era clients are served statelessly too.
+- **Transport:** Streamable HTTP at `/mcp` only (remote agents: Claude, ChatGPT, IDEs, n8n); there is no stdio transport. MCP spec 2026-07-28 with SDK v2: a fresh, stateless server per request, so no MCP session store is needed; 2025-era clients are served statelessly too.
 - **Auth:** OAuth 2.1 with PKCE, served by our auth layer (`@better-auth/mcp` — see [tech-stack.md](tech-stack.md)): RFC 9728/8414 discovery, Client ID Metadata Documents and dynamic client registration, JWT access tokens bound to the `/mcp` resource. Personal access tokens for scripts. Every request acts as a **principal** (`user` or `agent`); an agent's permissions are the user's role permissions ∩ the scopes the user granted.
 - **Least privilege:** MCP clients request every scope the server advertises, so the **consent screen** is where the person chooses what the agent may do (read-only by default). Scope step-up ships: read scopes are advertised up front, a write without its scope answers with an `insufficient_scope` challenge, and the client asks the person to grant it. Validated in [spike 1](../../spikes/command-registry/FINDINGS.md).
 - **Tools** (grouped; MCP clients can filter by group):
@@ -44,9 +44,9 @@ The command layer is the only place that does authorization, validation, idempot
   - `agents.*` (list, get, activity, report, pause, undo, events and hosted-run commands; a person manages mandates, pause and undo)
   - `learnings.*` (list, add, retract — retraction is people-only), `content.*` (sources, items, topics, briefs), `recipes.*` (list, get, preview, install)
   - `analytics.*` (predefined, safe queries — no raw SQL for agents in v1): `query`, `metrics.list`, `emailPerformance`, `journeyFunnel`, `campaignSummary`
-- **Resources:** journey graphs, template sources, tracking plan, attribute schema, brand kit, node-type catalogue, docs, `business-context://current`, `learnings://current` — so an agent can read the "manual" of this workspace and what its predecessors learned.
-- **Prompts:** curated starters ("Build a welcome series", "Diagnose a journey's drop-off", "Create a win-back segment").
-- **Discoverability for LLMs:** node types and DSLs are published as JSON Schema resources with examples; validation errors are written to be actionable for an LLM ("node n3: `timeout` must be ISO-8601 duration, got '2 days'").
+- **Resources:** exactly three: `agentic-marketing://guide` (the agent guide, also sent as `initialize` instructions), `business-context://current` (the published brief) and `learnings://current` (active conclusions with their evidence) — so an agent can read the "manual" of this workspace and what its predecessors learned.
+- **Prompts:** none are registered; the guide is served as instructions and as the `agentic-marketing://guide` resource.
+- **Discoverability for LLMs:** `artifacts.types` returns each artifact type's JSON Schema with examples (pass a type to keep it small); validation errors are written to be actionable for an LLM ("node n3: `timeout` must be ISO-8601 duration, got '2 days'").
 
 ## 3. Guardrails for agent principals
 
@@ -55,7 +55,7 @@ All of these are enforced in the command layer at 0.6.1; the status says when ea
 | Guardrail | Default / status |
 |---|---|
 | Writes produce **drafts**; publishing follows the workspace approval policy or the agent's mandate | on |
-| `send` / `publish` / `destructive` effects require an explicit scope | not granted to agents by default |
+| `publish` / `destructive` effects require an explicit scope | not granted to agents by default |
 | Audience-size threshold above which an agent action needs a person, whatever the approval policy | 1,000 people (`workspace.setAutonomy`), since 0.3.0 |
 | Per-agent limits per 24 hours (changes, direct messages) and the mandate's own limits; AI budgets per provider; the delivery policy's caps | 500 changes, 1,000 messages (`workspace.setAutonomy`), since 0.3.0. A mandate can narrow them further. Hosted runs also have per-run `maxTokensPerRun` and `maxToolCallsPerRun` budgets (0.5.0) charged to the monthly provider budget |
 | **Mandates and autonomy levels** (L0 observe, L1 propose, L2 act with veto, L3 act within limits, L4 run the loop) | 0.4.0; L4 in 0.6.0, earned per agent and class |
@@ -70,16 +70,11 @@ All of these are enforced in the command layer at 0.6.1; the status says when ea
 
 ## 4. LLM gateway (bring your own keys)
 
-- **Provider configs per workspace:**
-  ```
-  { kind: "openai-compatible" | "anthropic-compatible",
-    baseUrl, auth: { type: "api_key", secretRef } | { type: "oauth", connectionRef },
-    models: { default, fast }, region/dataResidency note, allowedPurposes }
-  ```
+- **Provider configs per workspace:** `aiProviders.create` takes `name`, `kind` (`openai-compatible`, `anthropic-compatible` or `decision`), `baseUrl`, an `apiKey`, `models: { default, fast }`, `useFor` (`journeys`, `copilot`, `decisions`), `region`, `monthlyTokenBudget`, `structuredOutputs` and `allowPersonalData` (decision providers only).
   `openai-compatible` covers OpenAI, Azure OpenAI, Mistral, Ollama, vLLM, LiteLLM, OpenRouter, etc.; `anthropic-compatible` covers Anthropic, Amazon Bedrock/Vertex proxies exposing the Anthropic API, and compatible gateways.
-- Implemented with the **Vercel AI SDK** (Apache-2.0) — `@ai-sdk/openai-compatible` / `@ai-sdk/openai` and `@ai-sdk/anthropic` with custom `baseURL` — giving one interface for structured output (zod), tool calling and streaming.
-- **OAuth:** the credential abstraction supports OAuth tokens (stored encrypted, refreshed by a worker). Whether OpenAI offers a third-party OAuth flow for API access must be verified (see [open-questions.md](open-questions.md)); the design does not depend on it.
-- Keys are stored encrypted (envelope encryption), never returned by any API, never logged.
+- Implemented with the **Vercel AI SDK** (Apache-2.0) — `@ai-sdk/openai-compatible` and `@ai-sdk/anthropic` with a custom `baseURL` — giving one interface for structured output (zod), tool calling and streaming.
+- **Decision providers** (`kind: "decision"`, `useFor: ["decisions"]`) answer `aiDecide` steps; `allowPersonalData` is people only and is set only when the provider is covered by a no-retention agreement.
+- There is no OAuth credential flow for AI providers: a provider is an API key sealed with the workspace key, never returned by any API and never logged.
 - Metering: tokens & cost per workspace, per purpose, per journey → budgets and alerts.
 
 ## 5. AI inside journeys (scope B)

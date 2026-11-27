@@ -1,6 +1,6 @@
 # Recipes
 
-Each step is one tool call: `tool {input}`. Replace `…` ids with real ones from earlier calls. Under the approval policy "agent changes need a person", `artifacts.requestPublish` creates an approval request. Anything that references an artifact (a broadcast's template, a journey's templates) can be published only after that artifact is, so get the dependencies approved first.
+Each step is one tool call: `tool {input}`. Replace `…` ids with real ones from earlier calls. A step marked **a person runs this** is not an agent call: a people-only command answers `forbidden` to an agent principal, whatever its scopes. Under the approval policy "agent changes need a person", `artifacts.requestPublish` creates an approval request. Anything that references an artifact (a broadcast's template, a journey's templates) can be published only after that artifact is, so get the dependencies approved first.
 
 ## Contents
 - Install a starter recipe
@@ -231,14 +231,16 @@ artifacts.create {"type":"broadcast","name":"Signal #45","content":{
 
 ## Static and CSV audiences
 
+`audiences.add`, `audiences.remove`, `audiences.import`, `audiences.snapshot` and `audiences.refreshSnapshot` are people only. An agent drafts the segment and hands every write to a person; `audiences.imports` is readable by an agent.
+
 1. Draft a static segment (no condition):
    `artifacts.create {"type":"segment","name":"Launch list","content":{"mode":"static","description":"One-off launch"}}`
-2. Add people by profile id, e-mail or user id (up to 1,000):
+2. **A person runs this.** Add people by profile id, e-mail or user id (up to 1,000):
    `audiences.add {"segmentId":"seg_…","emails":["ada@example.com"],"source":"manual"}`
-3. Or import a CSV (up to 5 MB and 50,000 rows); dry run first:
+3. **A person runs this.** Or import a CSV (up to 5 MB and 50,000 rows); dry run first:
    `audiences.import {"segmentId":"seg_…","csv":"email\nalex@example.com\n","column":"email","idType":"email","dryRun":true}`
    Repeat with `"dryRun":false`. `audiences.imports {"segmentId":"seg_…"}` lists imports, counts and unmatched row numbers.
-4. Freeze a dynamic segment when the audience must not move between review and send:
+4. **A person runs this.** Freeze a dynamic segment when the audience must not move between review and send:
    `audiences.snapshot {"sourceSegmentId":"seg_…","name":"Launch list (frozen)","note":"Send on 2026-11-06"}`. Re-copy its source only on purpose with `audiences.refreshSnapshot {"segmentId":"seg_…"}`.
 5. Membership is not consent: sends still check consent, suppression and delivery policy.
 
@@ -306,7 +308,7 @@ A programme (#314) for an agent that runs web experiments within its mandate (`e
 
 A programme (#315) for an agent that keeps audiences healthy. Read-mostly: changes are drafts a person (or a mandate granting `audience.publish`) decides on.
 
-1. **Sizes.** `segments.refresh {"artifactId":"seg_…"}` for each segment in scope; compare with last week (`agents.report {}` and your previous run).
-2. **Inactivity.** Preview a segment of members with no `email_opened`/`email_clicked` event within, e.g., `P180D` (`segments.preview`), to size a sunset policy.
+1. **Sizes.** `segments.preview {"artifactId":"seg_…"}` for each segment in scope (read-only, so your mandate allows it); compare with last week (`agents.report {}` and your previous run). `segments.refresh` is a write under `audience.publish`: it needs level 3 or a person, and at the documented level 1 it is refused.
+2. **Inactivity.** Preview a segment of members with no message engagement within, e.g., `P180D`, to size a sunset policy: `segments.preview {"condition":{"not":{"message":"clicked","within":"P180D"}}}` (use `"opened"` only where the tracking pixel is on).
 3. **Propose.** Draft the inactive segment and a re-engagement journey or an exclusion (`artifacts.create`), submit with `artifacts.requestPublish`. Never delete profiles and never change consent.
 4. **Report** sizes, overlaps and proposals without personal data.

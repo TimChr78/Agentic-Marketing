@@ -2,9 +2,12 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { commands } from '../src/registry';
 
 // Pure documentation checks: the pilot pages must agree on retention, on the two public-path
-// options and on what a plain-HTTP admin URL can serve. No server, database or network involved.
+// options and on what a plain-HTTP admin URL can serve, and the architecture pages and skills must
+// name the commands, key providers and MCP surface the code ships. No server, database or network
+// involved: importing the registry builds command definitions only.
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
 const paths = {
@@ -102,6 +105,81 @@ describe('agent spend contract', () => {
       expect(row, `${tool} is missing from the generated catalog`).toBeDefined();
       expect(row).toContain('need no spend mandate');
     }
+  });
+});
+
+describe('architecture pages and skills name the shipped surface', () => {
+  // #1290: the action-class table's Examples column is read as the list of commands in each class.
+  it('names only registered commands in the action-class examples', async () => {
+    const doc = await read(join(root, 'docs/architecture/agentic-autonomy.md'));
+    const table = doc.slice(doc.indexOf('| Class | Examples | Reversible? |'));
+    const rows = table.slice(0, table.indexOf('\n\n')).split('\n');
+    const registered = new Set<string>(commands.map((command) => command.name));
+    const documented = rows.flatMap((row) => {
+      const examples = row.split('|')[2] ?? '';
+      return [...examples.matchAll(/`([a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)+)`/g)].map((match) => match[1]);
+    });
+    expect(documented.length).toBeGreaterThan(10);
+    expect(documented.filter((name) => !registered.has(name))).toEqual([]);
+  });
+
+  // #1291: KEY_PROVIDER accepts local, openbao and aws-kms; there is no GCP KMS or file KEK.
+  it('lists only the key providers the configuration accepts', async () => {
+    const docs = await Promise.all([
+      read(join(root, 'docs/architecture/security-and-privacy.md')),
+      read(join(root, 'docs/architecture/tech-stack.md')),
+    ]);
+    for (const doc of docs) {
+      expect(doc).not.toMatch(/GCP|env\/file/i);
+      expect(doc).toMatch(/MASTER_KEY/);
+      expect(doc).toMatch(/OpenBao/);
+      expect(doc).toMatch(/AWS KMS/);
+    }
+  });
+
+  // #1292: one installation-wide allow-list, not one per workspace.
+  it('describes the egress allow-list as installation-wide', async () => {
+    const doc = await read(join(root, 'docs/architecture/security-and-privacy.md'));
+    expect(doc).toContain('EGRESS_ALLOWED_HOSTS');
+    expect(doc).not.toMatch(/per-workspace allow/i);
+  });
+
+  // #1293: the effect comment must list the registry's union, and the resources are the three
+  // the server registers.
+  it('documents the effect union and resources the MCP server ships', async () => {
+    const [page, registry] = await Promise.all([
+      read(join(root, 'docs/architecture/agents-and-mcp.md')),
+      read(join(root, 'packages/commands/src/registry.ts')),
+    ]);
+    const union = /export type Effect = ([^;]+);/.exec(registry)?.[1] ?? '';
+    const effects = [...union.matchAll(/'([a-z]+)'/g)].map((match) => match[1]);
+    expect(effects.length).toBe(4);
+    const effectLine = page.split('\n').find((line) => line.includes("effect: 'write'"));
+    expect(effectLine).toContain(`// ${effects.join(' | ')}`);
+    for (const uri of ['agentic-marketing://guide', 'business-context://current', 'learnings://current']) {
+      expect(page).toContain(uri);
+    }
+  });
+
+  // #1294: only the remote target and a scaled ClickHouse backup remain open.
+  it('does not call backup verification open', async () => {
+    const doc = await read(join(root, 'docs/architecture/deployment-and-scaling.md'));
+    expect(doc).toContain('am backup --verify');
+    expect(doc).not.toMatch(/integrity checks are still open/i);
+  });
+
+  // #1287, #1288, #1289: recipes an agent follows must be calls its principal may make.
+  it('keeps the audience recipes callable by the agent principal', async () => {
+    const [skill, recipes] = await Promise.all([
+      read(join(root, '.claude/skills/agentic-marketing-mcp/SKILL.md')),
+      read(join(root, '.claude/skills/agentic-marketing-mcp/references/recipes.md')),
+    ]);
+    const audienceRow = skill.split('\n').find((line) => line.startsWith('| Audiences |'));
+    expect(audienceRow).toContain('people only');
+    expect(recipes).not.toMatch(/email_opened|email_clicked/);
+    const curator = recipes.slice(recipes.indexOf('## Audience curator'));
+    expect(curator).toMatch(/1\. \*\*Sizes\.\*\* `segments\.preview/);
+    expect(curator).toContain('{"not":{"message":"clicked","within":"P180D"}}');
   });
 });
 

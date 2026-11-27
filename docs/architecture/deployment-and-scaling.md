@@ -73,7 +73,7 @@ Added later:
 
 - Postgres: WAL-G or pgBackRest to S3; ClickHouse: `clickhouse-backup`; NATS streams are not a source of truth (replayable window only) — Valkey not backed up (rebuildable).
 - Upgrades: semantic versioning, migrations are forward-only and run automatically; breaking changes to the event or artifact schemas carry versioned migrations; ClickHouse schema migrations via a small migration runner in `cli`.
-- Restores replay erasures: `am restore` reads the live `erasures` and `erasure_tombstones` rows first, then deletes those people again after loading the snapshot (profiles, identifiers, consent, messages, membership and browser/app push subscriptions), so a snapshot taken before an erasure cannot bring the person back. `BACKUP_KEEP_DAYS` (14 by default) is the maximum restore-point age and therefore the window in which a snapshot can predate an erasure. This shipped in 0.5.0 (#144); remote backup targets and integrity checks are still open (#142, #143, #145, #146).
+- Restores replay erasures: `am restore` reads the live `erasures` and `erasure_tombstones` rows first, then deletes those people again after loading the snapshot (profiles, identifiers, consent, messages, membership and browser/app push subscriptions), so a snapshot taken before an erasure cannot bring the person back. `BACKUP_KEEP_DAYS` (14 by default) is the maximum restore-point age and therefore the window in which a snapshot can predate an erasure. This shipped in 0.5.0 (#144); verification (`am backup --verify`) and the restore key check shipped too ([backups.md](../deployment/backups.md)). Remote backup targets (#142) and ClickHouse backups at scale (#146) are still open.
 
 ## 5. Operations & health
 
