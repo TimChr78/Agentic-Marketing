@@ -1223,17 +1223,25 @@ async function withIndependentCheck(
   req: { principal: Principal; command: string; input: unknown; intent: string | null; mandate: MandateView; approvable: boolean },
 ): Promise<PolicyOutcome> {
   let verdict: { ok: boolean; reason: string };
-  /** The check failed with a provider's own text, which must not be stored beside the person (#1300). */
+  /** The check's reason is a provider's own text, which must not be stored beside the person (#1300). */
   let providerText = false;
   if (!services.independentCheck)
     verdict = { ok: false, reason: 'The mandate asks for an independent check, but no AI provider is set up.' };
   else
-    verdict = await services.independentCheck(tx, { ...req, policy }).catch((err: Error) => {
-      // The check's provider failures are marked where they happen; an executor-owned failure
-      // (a missing provider, a budget or database problem) keeps its own reason.
-      providerText = err instanceof ProviderError;
-      return { ok: false, reason: `The independent check failed: ${safeErrorText(err.message, 500)}` };
-    });
+    verdict = await services.independentCheck(tx, { ...req, policy }).then(
+      (answered) => {
+        // A valid negative verdict is the model's own answer, not this codebase's refusal: its reason
+        // may quote the person and needs the same provenance as a provider exception (#1300 review).
+        providerText = !answered.ok;
+        return answered;
+      },
+      (err: Error) => {
+        // The check's provider failures are marked where they happen; an executor-owned failure
+        // (a missing provider, a budget or database problem) keeps its own reason.
+        providerText = err instanceof ProviderError;
+        return { ok: false, reason: `The independent check failed: ${safeErrorText(err.message, 500)}` };
+      },
+    );
   return applyVerdict(policy, verdict, req, providerText);
 }
 
