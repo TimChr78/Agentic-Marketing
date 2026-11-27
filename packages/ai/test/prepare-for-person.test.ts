@@ -30,8 +30,8 @@ function fakeTx(answers: { rows: unknown[] }[]) {
   return { tx, state };
 }
 
-const gate = (id: string, status: string | null, mergedInto: string | null = null) => ({
-  rows: [{ origin: id, id, merged_into: mergedInto, status }],
+const gate = (id: string, status: string | null, mergedInto: string | null = null, updatedAt = '2026-10-01T00:00:00.000Z') => ({
+  rows: [{ origin: id, id, merged_into: mergedInto, status, updated_at: updatedAt }],
 });
 
 describe('a preparation discards state built under a changed consent (#1300)', () => {
@@ -58,6 +58,25 @@ describe('a preparation discards state built under a changed consent (#1300)', (
     expect(prepared).toEqual({ profileId: 'prf_two', value: 'state:prf_two' });
     // The build for the merged-away id is discarded, not used for the survivor.
     expect(built).toEqual(['prf_one', 'prf_two']);
+    expect(state.executes).toBe(3);
+  }, 30_000);
+
+  it('rebuilds when a merge changed the survivor’s revision but not its id', async () => {
+    // A profile merging INTO the person keeps the survivor's id. The gate answers the same id and
+    // the same consent both times, so the build has to be discarded for the changed revision.
+    const { tx, state } = fakeTx([
+      gate('prf_one', 'granted', null, '2026-10-01T00:00:00.000Z'),
+      gate('prf_one', 'granted', null, '2026-10-01T00:00:05.000Z'),
+      gate('prf_one', 'granted', null, '2026-10-01T00:00:05.000Z'),
+    ]);
+    const built: string[] = [];
+    const prepared = await prepareForPerson(tx, 'ws_test', 'prf_one', aiAllowed, async (profileId) => {
+      built.push(profileId);
+      return { value: `state:${profileId}:${built.length}` };
+    });
+    expect(prepared).toEqual({ profileId: 'prf_one', value: 'state:prf_one:2' });
+    // The first build straddled the merge and was thrown away, not returned.
+    expect(built).toEqual(['prf_one', 'prf_one']);
     expect(state.executes).toBe(3);
   }, 30_000);
 

@@ -39,7 +39,9 @@ const identity = { rows: [] };
 const person = 'prf_person';
 const canonical = { rows: [{ origin: 'prf_checked', id: person, merged_into: null }] };
 const locked = { rows: [{ id: person }] };
-const gate = (status: string) => ({ rows: [{ origin: person, id: person, merged_into: null, status }] });
+const gate = (status: string) => ({
+  rows: [{ origin: person, id: person, merged_into: null, status, updated_at: '2026-01-01T00:00:00.000Z' }],
+});
 
 describe('the classify trait write reports only what it stored', () => {
   it('returns no trait when the locked person no longer allowed AI processing', async () => {

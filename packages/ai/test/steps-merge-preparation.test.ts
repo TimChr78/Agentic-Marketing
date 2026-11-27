@@ -13,6 +13,27 @@ vi.mock('@agentic-marketing/secrets', async (importOriginal) => {
 // The step's gate call is the moment a merge can land. The mock lets the test commit one right
 // after the first gate read, on another connection, which is the window #1300 closes.
 const hooks = vi.hoisted(() => ({ afterGate: undefined as undefined | (() => Promise<void>) }));
+
+// The context build reads the profile's traits, then the tracking plan, then the identifiers. A
+// merge committed between the first and the last read (the window #1300 closes) leaves the
+// survivor's id unchanged, so only a revision of that row can tell the build it must start again.
+const planHook = vi.hoisted(() => ({ afterTraits: undefined as undefined | (() => Promise<void>) }));
+vi.mock('@agentic-marketing/artifacts', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@agentic-marketing/artifacts')>();
+  return {
+    ...original,
+    publishedSingleton: async (...args: Parameters<typeof original.publishedSingleton>) => {
+      const answer = await original.publishedSingleton(...args);
+      if (args[1] === 'tracking_plan') {
+        const after = planHook.afterTraits;
+        planHook.afterTraits = undefined;
+        if (after) await after();
+      }
+      return answer;
+    },
+  };
+});
+
 vi.mock('../src/context', async (importOriginal) => {
   const original = await importOriginal<typeof import('../src/context')>();
   return {
@@ -203,10 +224,19 @@ async function prepareDuringMerge(call: CallRow, alias: string, survivor: string
   }
 }
 
-async function mergeOnAnotherConnection(alias: string, survivor: string, object: boolean) {
+async function mergeOnAnotherConnection(alias: string, survivor: string, object: boolean, survivorTraits?: Record<string, unknown>) {
   const conn = await d.db.admin.connect();
   try {
     await conn.query('BEGIN');
+    if (survivorTraits) {
+      // The survivor's trait snapshot is rewritten by a real merge; its updated_at is the revision
+      // a preparation compares before and after the context build.
+      await conn.query(`UPDATE profiles SET traits = traits || $3::jsonb, updated_at = now() WHERE workspace_id = $1 AND id = $2`, [
+        ws,
+        survivor,
+        JSON.stringify(survivorTraits),
+      ]);
+    }
     await conn.query(
       `UPDATE profiles SET merged_into = $3, traits = '{}'::jsonb, pii = NULL, updated_at = now()
        WHERE workspace_id = $1 AND id = $2`,
@@ -260,5 +290,33 @@ describe.skipIf(!hasTestDatabase())('an AI step prepares for the person a merge 
     const call = await queuedCall(alias, 'decide', decidePrompt);
     const prepared = await prepareDuringMerge(call, alias, survivor, true);
     expect((prepared as { fallback?: string }).fallback).toContain('no_lawful_basis');
+  }, 60_000);
+
+  it('keeps traits and event identifiers at the same revision when the root survives', async () => {
+    // A profile merges INTO the survivor while the decide context is built: the traits are read
+    // before the merge writes the survivor's union, the identifiers after it moved the alias's.
+    // Both gate reads answer the same id, so only the survivor's revision can catch the mix.
+    const { survivor, alias } = await seedPair({ revision: 'before' });
+    const call = await queuedCall(survivor, 'decide', decidePrompt);
+    planHook.afterTraits = () => mergeOnAnotherConnection(alias, survivor, false, { revision: 'after' });
+    try {
+      const prepared = await d.db.withWorkspace(ws, (tx) =>
+        prepareCall(tx, call, {
+          kp,
+          events: {
+            eventsOf: async (_workspace: string, ids: { anonymousIds: string[] }) =>
+              ids.anonymousIds.includes(`anon-${alias}`)
+                ? [{ name: 'Joined profile event', timestamp: new Date(Date.UTC(2026, 9, 2)).toISOString(), properties: {} }]
+                : [],
+          } as never,
+        }),
+      );
+      const person = (prepared as unknown as { person: { traits: { revision: string }; recentEvents: unknown[] } }).person;
+      // The state is rebuilt for the survivor after the merge, so the traits and the events that
+      // identify the person come from the same revision.
+      expect([person.traits.revision, person.recentEvents.length]).toEqual(['after', 1]);
+    } finally {
+      planHook.afterTraits = undefined;
+    }
   }, 60_000);
 });

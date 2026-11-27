@@ -305,7 +305,7 @@ describe.skipIf(!hasTestDatabase())('the AI consent gate answers for the person 
     // The default purposes put ai_processing on consent.
     await setConsent(consentDb, survivor, 'granted');
 
-    await expect(gate(consentDb, alias)).resolves.toEqual({ ok: true, profileId: survivor });
+    await expect(gate(consentDb, alias)).resolves.toMatchObject({ ok: true, profileId: survivor });
     await expect(checkScoreProfile(consentDb, alias)).resolves.toBe(survivor);
 
     // ai.score proceeds (the fake decision provider answers) and its call row names the survivor.
