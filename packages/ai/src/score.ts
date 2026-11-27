@@ -1,11 +1,11 @@
-import { decisionQuestions } from '@agentic-marketing/artifacts';
+import { canonicalProfileId, decisionQuestions } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { canonicalProfile } from '@agentic-marketing/profiles';
 import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { aiAllowed, redact } from './context';
+import { aiAllowed, prepareWithCanonicalProfile, redact } from './context';
 import {
   assertStateAllowed,
   DecisionError,
@@ -26,6 +26,24 @@ declare module '@agentic-marketing/commands' {
     /** The pool itself, for the budget reservation and score storage (their own transactions). */
     db?: Db;
   }
+}
+
+/**
+ * The person a score may be computed for. A caller may pass an id a merge has folded away (#1241
+ * review), and a merge can also commit between the id's first resolution and this consent read,
+ * which moves the consent rows to the survivor. Refusing then would be a false `no_lawful_basis`,
+ * so a refusal re-resolves the canonical id once and retries when it changed (#1269 review).
+ */
+export async function consentCheckedScoreProfile(tx: Tx, workspaceId: string, profileId: string): Promise<string> {
+  const consent = await aiAllowed(tx, workspaceId, profileId);
+  if (consent.ok) return profileId;
+  const canonical = await canonicalProfileId(tx, workspaceId, profileId);
+  if (canonical && canonical !== profileId) {
+    const retried = await aiAllowed(tx, workspaceId, canonical);
+    if (retried.ok) return canonical;
+    throw new AppError('forbidden', `This person's data may not be processed with AI (${retried.reason}).`);
+  }
+  throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
 }
 
 const ProfileId = z.string().regex(/^prf_[0-9a-f]{32}$/);
@@ -106,30 +124,41 @@ export const score = defineCommand({
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     if (input.store && !input.profileId) throw new AppError('invalid_input', 'store needs profileId: a score is stored for a person.');
-    // A caller may pass an id a merge has folded away. Follow it before the consent check, the
-    // context read and the write, or the survivor's consent and data are missed (#1241 review).
-    const profileId = input.profileId ? (await canonicalProfile(ctx.tx, ctx.principal.workspaceId, input.profileId))?.id : undefined;
-    if (input.profileId && !profileId) throw new AppError('not_found', `No profile ${input.profileId}.`);
-    if (profileId) {
-      const consent = await aiAllowed(ctx.tx, ctx.principal.workspaceId, profileId);
-      if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
-    }
     if (!ctx.services.db) throw new AppError('conflict', 'ai.score needs the database service.');
     const db = ctx.services.db;
+    const ws = ctx.principal.workspaceId;
+    // A caller may pass an id a merge has folded away. Follow it before the consent check, the
+    // context read and the write, or the survivor's consent and data are missed (#1241 review), and
+    // resolve it in one statement so the merged_into check cannot disagree with the walk.
+    const reference = input.profileId ?? null;
+    const initial = reference ? await canonicalProfileId(ctx.tx, ws, reference) : null;
+    if (reference && !initial) throw new AppError('not_found', `No profile ${input.profileId}.`);
+    // A merge that commits during the preparation is caught afterwards and the preparation is redone
+    // with the survivor, so its consent cannot look absent (#1269 review).
+    const prepared = await prepareWithCanonicalProfile(ctx.tx, ws, reference, async (given) => {
+      if (given === null) throw new AppError('not_found', `No profile ${input.profileId}.`);
+      // Both the first run (the id resolved above) and a retry go through the consent check, which
+      // re-resolves once more when a merge landed after that first read.
+      const candidate = given === undefined ? initial : given;
+      const profileId = candidate ? await consentCheckedScoreProfile(ctx.tx, ws, candidate) : null;
+      let provider: Awaited<ReturnType<typeof decisionProvider>>;
+      try {
+        provider = await decisionProvider(ctx.tx, ctx.services.keyProvider, input.providerId);
+      } catch (err) {
+        return appError(err);
+      }
+      let state = input.state;
+      if (state === undefined) {
+        if (!profileId) throw new AppError('invalid_input', 'Give a state, or profileId to build a non-personal state from the person.');
+        state = await nonPersonalState(ctx.tx, ws, ctx.services.events, profileId).catch(appError);
+        if (!state) throw new AppError('not_found', `No profile ${input.profileId}.`);
+      }
+      return { profileId: profileId ?? null, result: { provider, state } };
+    });
+    const profileId = prepared.profileId ?? undefined;
+    const { provider, state } = prepared.result;
     // The call row names the person the score is for today, so an erasure and the audit trail agree.
     const callInput = profileId ? { ...input, profileId } : input;
-    let provider: Awaited<ReturnType<typeof decisionProvider>>;
-    try {
-      provider = await decisionProvider(ctx.tx, ctx.services.keyProvider, input.providerId);
-    } catch (err) {
-      return appError(err);
-    }
-    let state = input.state;
-    if (state === undefined) {
-      if (!profileId) throw new AppError('invalid_input', 'Give a state, or profileId to build a non-personal state from the person.');
-      state = await nonPersonalState(ctx.tx, ctx.principal.workspaceId, ctx.services.events, profileId).catch(appError);
-      if (!state) throw new AppError('not_found', `No profile ${input.profileId}.`);
-    }
     const callId = newId('aic');
     try {
       assertStateAllowed(state, provider, input.questions);

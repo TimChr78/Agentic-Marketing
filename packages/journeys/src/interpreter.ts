@@ -72,6 +72,12 @@ export interface Env {
   ai?(node: string): AiOutcome | undefined;
   /** The outcome of an action step the participant waited at, if it came in time. */
   result?(node: string): { ok: boolean; error?: string } | undefined;
+  /**
+   * Called as soon as a waiting node's edge is decided, before the interpreter follows it. A caller
+   * that can fail after this point (a downstream store read) persists the outcome before its retry,
+   * so the retry cannot take a different edge (#1269 review).
+   */
+  resolved?(node: string, outcome: { matched: boolean }): void;
 }
 
 /** Deterministic weighted choice: the same participant and node always take the same edge. */
@@ -187,11 +193,16 @@ export async function advance(
         break;
       }
       case 'waitUntil': {
-        const deadline = p.waitingUntil ?? new Date(now.getTime() + n.ms);
+        // Only a resume of this same node keeps the stored deadline. A node entered fresh after
+        // another wait (a goal or waitEvent also keeps its deadline in `waitingUntil` since #1244)
+        // starts its own window from now; inheriting the goal's expired deadline made a one-hour
+        // waitUntil time out at once (#1269 review).
+        const deadline = resuming ? (p.waitingUntil ?? new Date(now.getTime() + n.ms)) : new Date(now.getTime() + n.ms);
         if (!resuming) {
           const yes = await env.condition(n);
           steps[steps.length - 1].detail = yes ? 'matched now' : `would wait until ${deadline.toISOString()}`;
           if (yes) {
+            env.resolved?.(n.id, { matched: true });
             if (!goTo(n.matched)) return end('completed', n.id);
             break;
           }
@@ -214,17 +225,20 @@ export async function advance(
         resuming = false;
         if (p.matched) {
           steps[steps.length - 1].detail = 'matched';
+          env.resolved?.(n.id, { matched: true });
           if (!goTo(n.matched)) return end('completed', n.id);
           break;
         }
         if (now.getTime() >= deadline.getTime()) {
           steps[steps.length - 1].detail = 'timed out';
+          env.resolved?.(n.id, { matched: false });
           if (!goTo(n.timeout)) return end('completed', n.id);
           break;
         }
         // The sweeper's fallback check, or an event that was not enough on its own.
         if (await env.condition(n)) {
           steps[steps.length - 1].detail = 'matched';
+          env.resolved?.(n.id, { matched: true });
           if (!goTo(n.matched)) return end('completed', n.id);
           break;
         }

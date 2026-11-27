@@ -8,10 +8,11 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { classifyInputForLog } from './classify';
-import { aiAllowed, personContext, redact } from './context';
+import { aiAllowed, personContext, prepareWithCanonicalProfile, redact } from './context';
 import {
   type DecisionAnswer,
   DecisionError,
+  type DecisionProvider,
   decisionCall,
   decisionProvider,
   insertProfileScore,
@@ -739,30 +740,54 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
   }
   const questions = parsed.data as DecisionQuestion[];
   const scoreKey = typeof raw.scoreKey === 'string' ? raw.scoreKey : questions[0].key;
-  const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
+  const prepared = await db.withWorkspace(c.workspaceId, async (tx) => {
     // A decision queued before a merge keeps the old profile id. Resolve the person today before
     // the consent check and the context, or a survivor's consent is missed and the step falls back
-    // with no_lawful_basis (#1241 review).
-    let profileId: string | null = null;
-    if (c.profileId) {
-      const person = await canonicalProfile(tx, c.workspaceId, c.profileId);
-      if (!person) return { error: 'no_profile: the person does not exist (or was erased)' };
-      profileId = person.id;
-      const consent = await aiAllowed(tx, c.workspaceId, profileId);
-      if (!consent.ok) return { error: consent.reason ?? 'no_lawful_basis' };
-    }
-    try {
-      const provider = await decisionProvider(tx, deps.kp);
-      if (!profileId) return { error: 'no_profile: a decision step needs a person' };
-      const triggerName = typeof raw.trigger?.name === 'string' ? raw.trigger.name : undefined;
-      const state = await nonPersonalState(tx, c.workspaceId, deps.events, profileId, triggerName ? { trigger: triggerName } : undefined);
-      if (!state) return { error: 'no_profile: the person does not exist (or was erased)' };
-      return { provider, state, profileId };
-    } catch (err) {
-      if (err instanceof AiUnavailable || err instanceof DecisionError) return { error: `${err.message}` };
-      throw err;
-    }
+    // with no_lawful_basis (#1241 review). A merge that commits during the preparation is caught by
+    // re-resolving afterwards and preparing again (#1269 review).
+    return prepareWithCanonicalProfile<{ error: string } | { provider: DecisionProvider; state: unknown; profileId: string }>(
+      tx,
+      c.workspaceId,
+      c.profileId ?? null,
+      async (given) => {
+        let profileId: string | null;
+        if (given === undefined) {
+          profileId = null;
+          if (c.profileId) {
+            const person = await canonicalProfile(tx, c.workspaceId, c.profileId);
+            if (!person) return { profileId: null, result: { error: 'no_profile: the person does not exist (or was erased)' } };
+            profileId = person.id;
+          }
+        } else if (given === null) {
+          return { profileId: null, result: { error: 'no_profile: the person does not exist (or was erased)' } };
+        } else {
+          profileId = given;
+        }
+        if (profileId) {
+          const consent = await aiAllowed(tx, c.workspaceId, profileId);
+          if (!consent.ok) return { profileId, result: { error: consent.reason ?? 'no_lawful_basis' } };
+        }
+        try {
+          const provider = await decisionProvider(tx, deps.kp);
+          if (!profileId) return { profileId, result: { error: 'no_profile: a decision step needs a person' } };
+          const triggerName = typeof raw.trigger?.name === 'string' ? raw.trigger.name : undefined;
+          const state = await nonPersonalState(
+            tx,
+            c.workspaceId,
+            deps.events,
+            profileId,
+            triggerName ? { trigger: triggerName } : undefined,
+          );
+          if (!state) return { profileId, result: { error: 'no_profile: the person does not exist (or was erased)' } };
+          return { profileId, result: { provider, state, profileId } };
+        } catch (err) {
+          if (err instanceof AiUnavailable || err instanceof DecisionError) return { profileId, result: { error: `${err.message}` } };
+          throw err;
+        }
+      },
+    );
   });
+  const ready = prepared.result;
   if ('error' in ready) return finish(db, c, null, { status: 'fallback', error: ready.error });
   // A choice routes on the probability of the configured label, not on whichever label won.
   const done = (r: Awaited<ReturnType<typeof decisionCall>>): Parameters<typeof finishIn>[3] => {

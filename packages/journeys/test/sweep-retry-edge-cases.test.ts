@@ -2,6 +2,7 @@ import { newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { localKeyProvider } from '@agentic-marketing/secrets';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import { sweep } from '../src/runtime';
@@ -78,8 +79,8 @@ async function participant(journeyId: string, row: Record<string, unknown>) {
 
 const statusOf = async (profileId: string) =>
   (
-    await d.db.admin.query<{ status: string; due_at: Date | null; error: string | null; attempts: number }>(
-      'SELECT status, due_at, error, attempts FROM journey_participants WHERE workspace_id = $1 AND profile_id = $2',
+    await d.db.admin.query<{ status: string; due_at: Date | null; error: string | null; attempts: number; node: string; matched: boolean }>(
+      'SELECT status, due_at, error, attempts, node, matched FROM journey_participants WHERE workspace_id = $1 AND profile_id = $2',
       [ws, profileId],
     )
   ).rows[0];
@@ -192,6 +193,129 @@ describe.skipIf(!hasTestDatabase())('journey retry review', () => {
     // Exactly three consecutive failures spend the budget; the third fails the participant.
     await sweep(d.db, { kp, events: store(() => true) }, { now: () => at(7_245_000) });
     expect(await statusOf(profileId)).toMatchObject({ status: 'failed', attempts: 3, due_at: null });
+  });
+});
+
+describe.skipIf(!hasTestDatabase())('journey wait-until retry review', () => {
+  it('keeps the matched edge of a waitUntil while a downstream branch is retried (#1269 review)', async () => {
+    const journey = await publishedJourney('Wait until, then a failing branch', [
+      { id: 'start', kind: 'trigger', label: 'Start', config: { event: 'Signed Up' }, next: [{ to: 'until' }] },
+      {
+        id: 'until',
+        kind: 'waitUntil',
+        label: 'Until activated',
+        config: { condition: { event: 'Activated' }, timeout: 'PT1H', recheck: 'PT5M' },
+        next: [{ to: 'ask' }, { to: 'timed_out' }],
+      },
+      {
+        id: 'ask',
+        kind: 'branch',
+        label: 'Purchased?',
+        config: { condition: { event: 'Purchased' } },
+        next: [{ to: 'matched' }, { to: 'matched' }],
+      },
+      { id: 'matched', kind: 'exit', label: 'Matched', config: {} },
+      { id: 'timed_out', kind: 'exit', label: 'Timed out', config: {} },
+    ]);
+    const base = Date.now();
+    const profileId = await participant(journey, {
+      node: 'until',
+      status: 'waiting',
+      seq: 2,
+      dueAt: new Date(base - 60_000),
+      waitingUntil: new Date(base + 3_600_000),
+      matched: false,
+    });
+    await d.db.withWorkspace(ws, (tx) =>
+      tx.insert(schema.identifiers).values({ workspaceId: ws, profileId, type: 'user_id', value: `user-${profileId}` }),
+    );
+
+    // The condition matches, so the advance takes the matched edge; the downstream branch's read
+    // then fails and the participant is retried.
+    let calls = 0;
+    const flaky = {
+      async countEvents() {
+        calls++;
+        if (calls === 1) return [{ anonymousId: '', userId: `user-${profileId}`, count: 1 }];
+        if (calls === 2) throw new Error('connect ECONNREFUSED 127.0.0.1:8123');
+        return [];
+      },
+    } as unknown as EventStore;
+    await sweep(d.db, { kp, events: flaky }, { now: () => new Date(base) });
+    expect(await statusOf(profileId)).toMatchObject({ status: 'waiting', attempts: 1, matched: true, node: 'until' });
+
+    // The retry runs before the deadline, and the condition no longer holds. The persisted match
+    // must still take the matched edge instead of waiting again or timing out.
+    await sweep(d.db, { kp, events: store(() => false) }, { now: () => new Date(base + 60_000) });
+    expect(await statusOf(profileId)).toMatchObject({ status: 'completed', node: 'matched', matched: false });
+  });
+});
+
+describe.skipIf(!hasTestDatabase())('journey participant savepoint review', () => {
+  it('records one participant’s failed consent read as a retry and still finishes the round (#1269 review)', async () => {
+    const journey = await publishedJourney('Consent read failure', [
+      { id: 'start', kind: 'trigger', label: 'Start', config: { event: 'Signed Up' }, next: [{ to: 'done' }] },
+      { id: 'done', kind: 'exit', label: 'Done', config: {} },
+    ]);
+    const due = new Date(Date.now() - 60_000);
+    const first = await participant(journey, { node: 'start', status: 'ready', dueAt: due });
+    const second = await participant(journey, { node: 'start', status: 'ready', dueAt: due });
+    type Tx = Parameters<Parameters<typeof d.db.withWorkspace>[1]>[0];
+    // A PostgreSQL error in the consent lookup (before the old savepoint) used to abort the whole
+    // workspace transaction: both people stayed due and no retry was recorded.
+    let failOnce = true;
+    const db = {
+      ...d.db,
+      withWorkspace: <T>(workspaceId: string, callback: (tx: Tx) => Promise<T>) =>
+        d.db.withWorkspace(workspaceId, (tx) => {
+          const proxied = new Proxy(tx, {
+            get(target, prop) {
+              if (prop !== 'select') {
+                const value = (target as unknown as Record<string | symbol, unknown>)[prop];
+                return typeof value === 'function' ? value.bind(target) : value;
+              }
+              return (...args: unknown[]) => {
+                const builder = (target.select as (...a: unknown[]) => object)(...args);
+                return new Proxy(builder, {
+                  get(b, key) {
+                    const value = (b as unknown as Record<string | symbol, unknown>)[key];
+                    if (key !== 'from') return typeof value === 'function' ? value.bind(b) : value;
+                    return (table: unknown) => {
+                      if (table === schema.consentState && failOnce) {
+                        failOnce = false;
+                        // A real PostgreSQL statement error: `SELECT 1/0` fails with 22012 and
+                        // aborts the transaction (25P02 for every later statement) unless the
+                        // participant's savepoint catches it (#1269 review).
+                        return { where: () => target.execute(sql`SELECT 1/0`) };
+                      }
+                      return (value as (t: unknown) => unknown).call(b, table);
+                    };
+                  },
+                });
+              };
+            },
+          });
+          return callback(proxied);
+        }),
+    } as typeof d.db;
+
+    await expect(sweep(db, { kp, events: store(() => false) })).resolves.toBe(2);
+    const { rows } = await d.db.admin.query<{
+      profile_id: string;
+      status: string;
+      attempts: number;
+      error: string | null;
+    }>('SELECT profile_id, status, attempts, error FROM journey_participants WHERE workspace_id = $1 ORDER BY id', [ws]);
+    // Whichever participant's consent read failed is retried; the other one finishes. The order the
+    // sweep claims them in is not guaranteed, so assert the pair, not which id.
+    expect(rows.map((row) => [row.status, row.attempts]).sort()).toEqual([
+      ['completed', 0],
+      ['ready', 1],
+    ]);
+    // Drizzle wraps a statement error as `Failed query: <sql>`, so the echoed query is the stable
+    // evidence that the real 1/0 error, not a thrown string, reached the retry path.
+    expect(rows.filter((row) => /division by zero|SELECT 1\/0/.test(row.error ?? ''))).toHaveLength(1);
+    expect(new Set(rows.map((row) => row.profile_id))).toEqual(new Set([first, second]));
   });
 });
 

@@ -845,50 +845,54 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           // #1011). The trait step follows the `merged_into` chain itself; the other reads stay on the
           // stored id, which a merge moves along with the person.
           const t = now();
-          // Someone who refused the journey's purpose leaves before the next step (#108). Consent
-          // changes exit them at once (exitRefusedJourneys); this catches whatever got past that.
-          const purpose = await graphOf(tx, p.journeyId, p.version)
-            .then((g) => g.purpose)
-            .catch(() => null);
-          if (purpose && refusedPurposes(await consentStateOf(tx, ws, p.profileId), purposes).includes(purpose)) {
-            const detail = `consent_withdrawn: ${purpose}`;
-            await tx
-              .update(schema.journeyParticipants)
-              .set({ status: 'exited', error: detail, dueAt: null, waitingEvent: null, waitingUntil: null, updatedAt: t })
-              .where(eq(schema.journeyParticipants.id, p.id));
-            journeyEvents.push({
-              workspaceId: ws,
-              journeyId: p.journeyId,
-              version: p.version,
-              participantId: p.id,
-              profileId: p.profileId,
-              node: p.node,
-              type: 'exited',
-              seq: p.seq + 1,
-              at: t.toISOString(),
-              detail,
-            });
-            continue;
-          }
-          const state: ParticipantState = {
-            node: p.node,
-            status: p.status,
-            seq: p.seq,
-            dueAt: p.dueAt,
-            waitingEvent: p.waitingEvent,
-            waitingUntil: p.waitingUntil,
-            matched: p.matched,
-            converted: p.converted,
-          };
-          // One savepoint per participant: a PostgreSQL error inside a read, the advance or an effect
-          // aborts the transaction (25P02), and the retry state could not be written afterwards. The
-          // savepoint lets this participant's partial work be discarded while the round carries on.
+          // One savepoint per participant: a PostgreSQL error inside a read (a graph version, the
+          // consent lookup, an effect, the advance) aborts the transaction (25P02), and the retry
+          // state could not be written afterwards. It opens before the first read of this
+          // participant, so one person's failed read cannot roll back the whole workspace's round
+          // (#1269 review).
           const savepoint = `participant_${p.id}`;
           const eventMark = journeyEvents.length;
           await tx.execute(sql.raw(`SAVEPOINT ${savepoint}`));
           let graph: Graph | undefined;
+          // The edge a waitUntil resolved during this advance; persisted if the advance dies after it.
+          let resolvedWait: { node: string; matched: boolean } | undefined;
           try {
+            // Loaded once, inside the savepoint, and reused for the purpose check and the advance.
             graph = await graphOf(tx, p.journeyId, p.version);
+            // Someone who refused the journey's purpose leaves before the next step (#108). Consent
+            // changes exit them at once (exitRefusedJourneys); this catches whatever got past that.
+            const purpose = graph.purpose;
+            if (purpose && refusedPurposes(await consentStateOf(tx, ws, p.profileId), purposes).includes(purpose)) {
+              const detail = `consent_withdrawn: ${purpose}`;
+              await tx
+                .update(schema.journeyParticipants)
+                .set({ status: 'exited', error: detail, dueAt: null, waitingEvent: null, waitingUntil: null, updatedAt: t })
+                .where(eq(schema.journeyParticipants.id, p.id));
+              journeyEvents.push({
+                workspaceId: ws,
+                journeyId: p.journeyId,
+                version: p.version,
+                participantId: p.id,
+                profileId: p.profileId,
+                node: p.node,
+                type: 'exited',
+                seq: p.seq + 1,
+                at: t.toISOString(),
+                detail,
+              });
+              await tx.execute(sql.raw(`RELEASE SAVEPOINT ${savepoint}`));
+              continue;
+            }
+            const state: ParticipantState = {
+              node: p.node,
+              status: p.status,
+              seq: p.seq,
+              dueAt: p.dueAt,
+              waitingEvent: p.waitingEvent,
+              waitingUntil: p.waitingUntil,
+              matched: p.matched,
+              converted: p.converted,
+            };
             const result = await advance(graph, state, t, {
               key: String(p.id),
               result: (node) => {
@@ -911,6 +915,9 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
                 return ids.has(p.profileId);
               },
               condition: async (n) => matchesCondition(tx, ws, deps.events, segments, p.profileId, n.condition),
+              resolved: (node, outcome) => {
+                resolvedWait = { node, matched: outcome.matched };
+              },
             });
             const details = new Map<string, string>();
             const held = (p.context as { holdout?: { arm?: string } }).holdout;
@@ -966,7 +973,13 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
             const waitOutcome =
               p.status === 'waiting' && (waitingNode?.kind === 'goal' || waitingNode?.kind === 'waitEvent')
                 ? { matched: p.matched, waitingEvent: null }
-                : {};
+                : p.status === 'waiting' && waitingNode?.kind === 'waitUntil' && resolvedWait?.node === p.node
+                  ? // The waitUntil condition matched (or the timeout passed) inside advance, and a
+                    // downstream read then failed. Keep that edge: on the retry the condition may no
+                    // longer hold, and re-evaluating it would take the timeout edge a conversion
+                    // already earned (#1269 review).
+                    { matched: resolvedWait.matched }
+                  : {};
             // A broken condition (an AppError('invalid_input'): an unknown purpose, a personal-data
             // trait, a segment loop) is permanent. Anything else is a transient store or database
             // failure: leave the participant where it is, due after a backoff, and fail it only when
