@@ -40,9 +40,10 @@ import { type ClickHouseEndpoint, clickhouseEndpoint, clickhouseUrl } from './cl
  * recurring purge handles restored rows physically.
  *
  * A crash anywhere between the Postgres replacement and this step leaves the fence row in
- * `public.restore_fence` (written before the replacement, excluded from every dump) and the
- * session-level restore lock gone with the process. A server refuses to start while the fence
- * exists; rerunning the same restore clears it after reconciliation (#1194 review).
+ * `public.restore_fence` (written before the replacement, kept out of the list the load restores
+ * from, and raised again right after it, because a dump from an older build can carry the table)
+ * and the session-level restore lock gone with the process. A server refuses to start while the
+ * fence exists; rerunning the same restore clears it after reconciliation (#1194 review).
  */
 
 /** What one reconciliation did, for the restore log and its tests. */
@@ -696,10 +697,11 @@ export async function finishRestoreReconciliation(opts: ReconcileRestoreOptions)
 }
 
 /**
- * Raises the fence before anything replaces Postgres (#1194). The row lives outside every dump, so
- * a `pg_restore` that commits and then fails leaves it behind; a retry overwrites it and a server
- * started in between refuses to serve reads. It is deliberately not cleared on failure: only
- * reconciliation (or the explicit `am restore --clear-fence`) may remove it.
+ * Raises the fence before anything replaces Postgres (#1194). A `pg_restore` that commits and then
+ * fails leaves it behind — and the restore raises it again after the load, because a dump from an
+ * older build can carry the table and `--clean` can drop or replace the row. A retry overwrites it
+ * and a server started in between refuses to serve reads. It is deliberately not cleared on failure:
+ * only reconciliation (or the explicit `am restore --clear-fence`) may remove it.
  *
  * `client` is the session that holds the exclusive restore lock, so a lost session cannot write a
  * fence for a restore that no longer holds the interlock. Returns the row this attempt raised, which

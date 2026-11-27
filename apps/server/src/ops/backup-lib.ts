@@ -2,7 +2,8 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { accessSync, createReadStream, createWriteStream, constants as fsConstants, readFileSync, statSync } from 'node:fs';
-import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -41,6 +42,7 @@ import {
   markRestoreStarted,
   restoreClickHouseQueryId,
 } from './restore-reconcile';
+import { filterRestoreFenceEntries } from './restore-toc';
 
 // Backup and restore without loading the full server configuration: an operator must be able to
 // run them with only DATABASE_URL (and CLICKHOUSE_URL for events), even when other secrets are
@@ -253,36 +255,72 @@ export async function stopRestoreChildren(): Promise<void> {
   await Promise.race([gone, delay(RESTORE_CHILD_STOP_TIMEOUT_MS)]);
 }
 
-/** Resolves when a tracked child has exited, immediately when it already had. */
+/**
+ * Resolves when a tracked child has closed, which is also when `runRestoreChild` unregisters it.
+ * `exit` fires first, while the child's streams may still be open; waiting for `close` keeps this
+ * promise and `runningRestoreChildren()` in step, so a caller that awaits it sees the child gone.
+ * A child the runner has already forgotten is gone.
+ */
 function childExited(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((done) => {
-    const finish = () => {
-      child.off('close', finish);
-      child.off('exit', finish);
-      done();
-    };
-    child.once('close', finish);
-    child.once('exit', finish);
-  });
+  if (!restoreChildren.has(child)) return Promise.resolve();
+  return new Promise((done) => child.once('close', done));
 }
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Runs one child process for a backup or restore, and keeps it in `restoreChildren` while it runs. */
-export function runRestoreChild(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<void> {
+/** A bounded description of a secondary failure, for a note that wraps another error. */
+function describeError(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.length > 300 ? `${message.slice(0, 300)}…` : message;
+}
+
+/** Bounds how much of a child's stdout is kept; a dump's table of contents is far smaller. */
+const RESTORE_STDOUT_LIMIT = 32 * 1024 * 1024;
+
+export interface RunRestoreChildOptions {
+  /** Keep the child's stdout as text instead of discarding it. */
+  captureStdout?: boolean;
+}
+
+/**
+ * Runs one child process for a backup or restore, and keeps it in `restoreChildren` while it runs.
+ * `stdout` holds the child's output only when `captureStdout` asked for it.
+ */
+export function runRestoreChild(
+  command: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  options: RunRestoreChildOptions = {},
+): Promise<{ stdout: string }> {
   return new Promise((done, fail) => {
-    const child = spawn(command, args, { env: { ...process.env, ...env }, stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(command, args, {
+      env: { ...process.env, ...env },
+      stdio: ['ignore', options.captureStdout ? 'pipe' : 'ignore', 'pipe'],
+    });
     restoreChildren.add(child);
     let stderr = '';
+    let stdout = '';
+    let truncated = false;
     let settled = false;
     const finish = (err?: Error) => {
       if (settled) return;
       settled = true;
       restoreChildren.delete(child);
       if (err) fail(err);
-      else done();
+      else done({ stdout });
     };
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      // Once the bound trips, every later chunk is dropped: keeping a partial table of contents
+      // would silently leave entries the caller meant to remove.
+      if (truncated) return;
+      stdout += chunk;
+      if (stdout.length <= RESTORE_STDOUT_LIMIT) return;
+      truncated = true;
+      stdout = '';
+      stderr = `${stderr}\noutput exceeded ${RESTORE_STDOUT_LIMIT} bytes`;
+      child.kill('SIGTERM');
+    });
     child.stderr?.on('data', (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-8_000);
     });
@@ -294,7 +332,10 @@ export function runRestoreChild(command: string, args: string[], env: NodeJS.Pro
       else finish(err);
     });
     child.on('close', (code) => {
-      if (code === 0) finish();
+      // A child may finish writing before the SIGTERM lands, so the exit code alone cannot tell
+      // that the output was cut; the bound must fail the run either way.
+      if (truncated) finish(new Error(`${command} wrote more than ${RESTORE_STDOUT_LIMIT} bytes to stdout`));
+      else if (code === 0) finish();
       else finish(new Error(`${command} failed (exit ${code}): ${stderr.trim() || 'no error output'}`));
     });
   });
@@ -479,10 +520,12 @@ function newestRelease(version: string | null): string | null {
 /**
  * Runs pg_dump -Fc --no-owner; connection details travel through PG* variables.
  *
- * `public.restore_fence` is excluded on purpose (#1194): the fence must survive `pg_restore --clean`
- * so an interrupted restore still fails closed. `pg_restore` only drops objects the archive names,
- * so leaving the table out of the dump is what protects it. Excluding a table that an older
- * database does not have is harmless.
+ * `public.restore_fence` is excluded on purpose (#1194): in a dump this build writes, the fence
+ * then survives `pg_restore --clean`, so an interrupted restore still fails closed. `pg_restore`
+ * only drops objects the archive names. A dump written by a build from before the exclusion existed
+ * can still carry the table; the restore removes its entries from the archive's table of contents
+ * before the load and raises its marker again afterwards. Excluding a table that an older database
+ * does not have is harmless.
  */
 export async function dumpPostgres(databaseUrl: string, outFile: string): Promise<void> {
   await runRestoreChild(
@@ -492,12 +535,58 @@ export async function dumpPostgres(databaseUrl: string, outFile: string): Promis
   );
 }
 
-/** Runs pg_restore --clean --if-exists --no-owner against DATABASE_URL. */
-export async function restorePostgres(databaseUrl: string, dumpFile: string): Promise<void> {
+/**
+ * Reads the archive's table of contents and writes the list the load restores from, without
+ * `public.restore_fence`.
+ *
+ * This is split from the load so a restore can prepare the list *before* it raises the fence: a
+ * missing or unwritable `TMPDIR`, a full disk, or an archive whose list cannot be read must stop the
+ * restore while the database is still untouched and unfenced, not after the marker exists.
+ */
+async function prepareRestore(databaseUrl: string, dumpFile: string): Promise<{ load: () => Promise<void>; discard: () => Promise<void> }> {
   const clientEnv = postgresClientEnv(databaseUrl);
   if (!clientEnv.PGDATABASE) throw new Error('DATABASE_URL has no database name');
+  // The filtered list lives in a private temporary directory: the backup directory can be a
+  // read-only mount, and the list names every object in the archive.
+  const tempRoot = tmpdir();
+  let listDir: string;
+  try {
+    listDir = await mkdtemp(join(tempRoot, 'am-restore-toc-'));
+  } catch (err) {
+    throw new Error(
+      `could not create the restore's temporary directory under ${tempRoot} (${describeError(err)}). ` +
+        'TMPDIR must name a writable directory; Postgres has not been replaced.',
+      { cause: err },
+    );
+  }
+  try {
+    const { stdout: toc } = await runRestoreChild('pg_restore', ['--list', dumpFile], clientEnv, { captureStdout: true });
+    const listFile = join(listDir, 'restore.list');
+    try {
+      await writeFile(listFile, filterRestoreFenceEntries(toc), { mode: 0o600 });
+    } catch (err) {
+      throw new Error(
+        `could not write the restore's table-of-contents list under ${tempRoot} (${describeError(err)}). ` +
+          'TMPDIR must name a writable directory with room for the list; Postgres has not been replaced.',
+        { cause: err },
+      );
+    }
+    return {
+      load: () => loadRestore(databaseUrl, clientEnv, listFile, dumpFile),
+      discard: () => rm(listDir, { recursive: true, force: true }),
+    };
+  } catch (err) {
+    await rm(listDir, { recursive: true, force: true });
+    throw err;
+  }
+}
+
+/** Loads the archive with the prepared list, accepting the one known PostgreSQL 16 difference. */
+async function loadRestore(databaseUrl: string, clientEnv: NodeJS.ProcessEnv, listFile: string, dumpFile: string): Promise<void> {
+  const database = clientEnv.PGDATABASE;
+  if (!database) throw new Error('DATABASE_URL has no database name');
   // The database name is safe in argv; the password stays in PGPASSWORD.
-  const args = ['--clean', '--if-exists', '--no-owner', '--dbname', clientEnv.PGDATABASE, dumpFile];
+  const args = ['--clean', '--if-exists', '--no-owner', '--dbname', database, '--use-list', listFile, dumpFile];
   try {
     await runRestoreChild('pg_restore', args, clientEnv);
   } catch (err) {
@@ -510,6 +599,24 @@ export async function restorePostgres(databaseUrl: string, dumpFile: string): Pr
     process.stderr.write(
       'warning: PostgreSQL 16 rejected the 18 client\'s "SET transaction_timeout"; the rest of the dump restored normally.\n',
     );
+  }
+}
+
+/**
+ * Runs pg_restore --clean --if-exists --no-owner against DATABASE_URL, with the filtered list.
+ *
+ * The archive's table of contents is read first and every entry for `public.restore_fence` is
+ * removed, then the load runs with `--use-list`. `--clean` drops only the objects its list names,
+ * so no dump can drop the table or copy its own row over this attempt's marker while the load is
+ * running, including one written before the exclusion existed. A table cannot be excluded from a
+ * custom-format restore any other way: `pg_restore` has no `--exclude-table`.
+ */
+export async function restorePostgres(databaseUrl: string, dumpFile: string): Promise<void> {
+  const prepared = await prepareRestore(databaseUrl, dumpFile);
+  try {
+    await prepared.load();
+  } finally {
+    await prepared.discard();
   }
 }
 
@@ -1552,6 +1659,9 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     },
   });
   let releaseFileLock: (() => Promise<void>) | undefined;
+  // The table-of-contents list is written before the fence is raised and removed on every path,
+  // including a later failure, so a failed restore leaves no temporary directory behind.
+  let discardRestoreList: (() => Promise<void>) | undefined;
   try {
     // A previous run's lock session may be gone while its pools, children or ClickHouse requests
     // are still writing: the advisory lock cannot fence them. Wait until that tagged work is gone,
@@ -1631,20 +1741,64 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       );
 
     // The fence is raised *before* the replacement (#1194 review): `pg_restore --clean` can commit
-    // changes and then fail, and a marker written afterwards would miss exactly that case. The row
-    // lives in a table no dump contains, so it survives the restore and only reconciliation clears
-    // it. A server started between this point and reconciliation refuses to serve reads. It is
-    // written through the locked session, so a restore that has already lost the lock cannot raise it
-    // (#1204 review).
+    // changes and then fail, and a marker written afterwards would miss exactly that case. The list
+    // the load restores from is prepared first, so a missing or unwritable TMPDIR, a full disk, or
+    // an archive whose table of contents cannot be read stops the restore while the database is
+    // still untouched and no fence exists. That list omits every `public.restore_fence` entry, so
+    // the row survives the whole load whether or not the dump names the table; a load through the
+    // injected seam does no filtering, which is why the marker is raised again below. A server
+    // started between this point and reconciliation refuses to serve reads. It is written through
+    // the locked session, so a restore that has already lost the lock cannot raise it (#1204
+    // review).
+    assertLock();
+    const preparedRestore = opts.pgRestore ? undefined : await prepareRestore(databaseUrl, manifestPath(dir, manifest.postgres.file));
+    discardRestoreList = preparedRestore?.discard;
     assertLock();
     const fenceState = await markRestoreStarted(session.client, dir);
     log('restore fence raised; Postgres replacement starts now');
 
     assertLock();
     log('restoring Postgres (this replaces the current database)');
-    await (opts.pgRestore ?? restorePostgres)(databaseUrl, manifestPath(dir, manifest.postgres.file));
+    try {
+      if (preparedRestore) await preparedRestore.load();
+      else await (opts.pgRestore as (url: string, dump: string) => Promise<void>)(databaseUrl, manifestPath(dir, manifest.postgres.file));
+    } catch (err) {
+      // `--clean` can commit changes and then fail, and a load running through the injected seam
+      // replaces the database without the table-of-contents filtering. Raise this attempt's marker
+      // again — the same timestamp, so the matched clear still finds it — before reporting the
+      // load's failure. A lost lock session cannot write, and that error stays secondary to the
+      // load's.
+      if (!lockLost) {
+        try {
+          await markRestoreStarted(session.client, dir, fenceState.startedAt);
+        } catch (fenceErr) {
+          // The load's failure is what the operator must act on, but the database may now have no
+          // fence at all, which nothing else would report. The thrown error carries this note; the
+          // operator sees it once, where the failure is reported.
+          const note =
+            `warning: the restore fence could not be raised again after the failed load (${describeError(fenceErr)}). ` +
+            'Do not start the app against this database; re-run `am restore` with the same backup first.';
+          if (err instanceof Error) err.message = `${err.message}\n${note}`;
+        }
+      }
+      throw err;
+    }
     // Nothing after a lost lock: the next step would write into a database another restore owns.
     assertLock();
+    // Belt and braces after the load: the real load drops every fence entry from the list it
+    // restores, but a load through the injected seam does not, and a description this build does
+    // not know is left in the list. Raise this attempt's marker again so the steps below fail
+    // closed if they stop, and so the final matched clear removes this row rather than leaving a
+    // stale one.
+    try {
+      await markRestoreStarted(session.client, dir, fenceState.startedAt);
+    } catch (fenceErr) {
+      throw new Error(
+        `the restore replaced Postgres, but could not raise the restore fence again (${describeError(fenceErr)}). ` +
+          'Do not start the app against this database; re-run `am restore` with the same backup first.',
+        { cause: fenceErr },
+      );
+    }
 
     // The pre-restore check used the sealed value in the manifest; this proves the key also opens a
     // real data key in the restored data, still before the app is started. `--skip-key-check`
@@ -1745,6 +1899,7 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
     // A child stopped by the lock loss reports its own exit code; the operator needs the reason.
     throw lockLost ?? err;
   } finally {
+    await discardRestoreList?.();
     await releaseFileLock?.();
     await session.release();
   }
