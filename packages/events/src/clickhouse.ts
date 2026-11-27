@@ -1029,20 +1029,22 @@ function stringChunks(values: readonly string[]): string[][] {
 
 /**
  * How many keys one staged insert carries. The key set is loaded in bounded batches so no request
- * body grows with the ledger (#1205): 2,000 keys is a body of a few hundred kilobytes, and the byte
- * bound below also holds for a wider key than the hex the hasher produces.
+ * body grows with the ledger (#1205). The byte bound below is the real limit for a normal key: the
+ * workspace and run id repeated in every encoded row are a large part of the line.
  */
 const PURGE_KEY_INSERT_BATCH = 2_000;
 const PURGE_KEY_INSERT_BUDGET = 256 * 1024;
 
 /** A sweep's key set split into batches that bound both the row count and the encoded size. */
-function purgeKeyBatches(keys: readonly string[]): string[][] {
+function purgeKeyBatches(workspaceId: string, runId: string, keys: readonly string[]): string[][] {
   const chunks: string[][] = [];
   let chunk: string[] = [];
   let bytes = 0;
   for (const key of keys) {
-    // A JSONEachRow line carries the key plus its field names and separators.
-    const size = Buffer.byteLength(key, 'utf8') + 24;
+    // Measure the row exactly as JSONEachRow will write it. Counting the key alone left out the
+    // repeated workspace and run id, the field names and any JSON escaping, so a 2,000-key batch of
+    // ordinary hex keys reached about 354 KB against a 256 KiB budget.
+    const size = Buffer.byteLength(JSON.stringify({ workspace_id: workspaceId, run_id: runId, key }), 'utf8') + 1;
     if (chunk.length && (chunk.length >= PURGE_KEY_INSERT_BATCH || bytes + size > PURGE_KEY_INSERT_BUDGET)) {
       chunks.push(chunk);
       chunk = [];
@@ -1057,18 +1059,23 @@ function purgeKeyBatches(keys: readonly string[]): string[][] {
 
 /**
  * The count a purge statement returned, or an error. A table may only be treated as empty when the
- * server answered with a valid `n`: a missing row (an empty result where a count was asked) or a
- * value that is not a non-negative integer is a broken answer, never zero. The client's error
- * handling covers an exception header and a streamed exception tag; this covers a truncated
- * `JSONEachRow` answer that still parsed as no rows.
+ * server answered with exactly one valid `n`: a missing row (an empty result where a count was
+ * asked), more than one row, or a value that is not a non-negative integer is a broken answer,
+ * never zero. The client's error handling covers an exception header and a streamed exception tag;
+ * this covers a truncated or malformed `JSONEachRow` answer that still parsed.
  */
 function purgeCount(rows: readonly Record<string, string | number>[], table: string): number {
-  const row = rows[0];
-  if (!row || row.n === undefined || row.n === null || row.n === '')
-    throw new Error(`ClickHouse returned no count for ${table}; the purge cannot treat it as empty`);
-  const n = Number(row.n);
-  if (!Number.isSafeInteger(n) || n < 0) throw new Error(`ClickHouse returned an invalid count for ${table}`);
-  return n;
+  if (rows.length !== 1) throw new Error(`ClickHouse returned ${rows.length} count rows for ${table}; the purge needs exactly one`);
+  const n = rows[0]?.n;
+  // ClickHouse sends UInt64 as a decimal string by default; a JSON number is the other legal shape.
+  if (typeof n === 'string') {
+    if (!/^[0-9]+$/.test(n)) throw new Error(`ClickHouse returned an invalid count for ${table}`);
+    const value = Number(n);
+    if (!Number.isSafeInteger(value)) throw new Error(`ClickHouse returned an invalid count for ${table}`);
+    return value;
+  }
+  if (typeof n === 'number' && Number.isSafeInteger(n) && n >= 0) return n;
+  throw new Error(`ClickHouse returned an invalid count for ${table}`);
 }
 
 /**
@@ -1227,13 +1234,17 @@ export function clickHouseStore(opts: {
    */
   const stagePurgeKeys = async (workspaceId: string, runId: string, keys: readonly string[]): Promise<void> => {
     const settings = await settingsFor(workspaceId);
-    for (const chunk of purgeKeyBatches(keys)) {
+    for (const chunk of purgeKeyBatches(workspaceId, runId, keys)) {
       assertStoreNotAborted(opts.signal);
       await withAbortReason(() =>
         client.insert({
           table: PURGE_KEY_TABLE,
           format: 'JSONEachRow',
           values: chunk.map((key) => ({ workspace_id: workspaceId, run_id: runId, key })),
+          // The staging inserts are requests like any other: they carry the caller's signal and the
+          // restore's query-id marker, so a lost lock cancels them and a successor can see them.
+          ...abort(),
+          ...queryId(),
           clickhouse_settings: { ...SYNC_INSERT, ...settings },
         }),
       );
@@ -1647,6 +1658,9 @@ export function clickHouseStore(opts: {
                            AND ${base.tuple('t')} IN {ids:${base.type}}`,
                   query_params: { ws: workspaceId, ids: ids.map((id) => new TupleParam(baseId(id))) },
                   format: 'JSONEachRow',
+                  // This guard read is part of the same bounded sweep: it must not outlive the
+                  // client's request timeout on the server either.
+                  clickhouse_settings: { max_execution_time: PURGE_EXECUTION_BOUND_SECONDS },
                 });
                 const rows = base.read(await rs.json<Record<string, string>>());
                 return new Set(rows.map((row) => JSON.stringify(row)));

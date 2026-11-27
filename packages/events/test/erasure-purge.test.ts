@@ -447,6 +447,52 @@ describe('recurring physical purge (#1037 part 3)', () => {
     ]);
   }, 120_000);
 
+  it('bounds a staged batch by the encoded rows as well as the row count', async () => {
+    const limit = 256 * 1024;
+    const capture = async (target: string, keys: string[]) => {
+      const batches: { rows: number; bytes: number }[] = [];
+      const originalInsert = store.client.insert.bind(store.client);
+      store.client.insert = (async (args) => {
+        const insert = args as unknown as { table?: string; values?: readonly Record<string, unknown>[] };
+        if (insert.table === 'erasure_purge_keys') {
+          const values = insert.values ?? [];
+          batches.push({
+            rows: values.length,
+            bytes: values.reduce((sum, row) => sum + Buffer.byteLength(JSON.stringify(row), 'utf8') + 1, 0),
+          });
+        }
+        return originalInsert(args);
+      }) as typeof store.client.insert;
+      try {
+        await store.purgeErasedSubjects(target, keys, { batchSize: 10 });
+      } finally {
+        store.client.insert = originalInsert;
+      }
+      return batches;
+    };
+
+    // Short keys reach the row bound first: the first batch fills to 2,000 rows and the rest follows.
+    const rowsFirst = await capture(
+      newUuid(),
+      Array.from({ length: 2_001 }, (_, i) => `k${i}`),
+    );
+    expect(rowsFirst[0]?.rows).toBe(2_000);
+    expect(rowsFirst.reduce((sum, batch) => sum + batch.rows, 0)).toBe(2_001);
+
+    // A normal key is 64 hex characters. The workspace and run id repeated in every encoded row and
+    // the JSON quoting are most of the line, so 2,000 of them exceed the byte budget even though the
+    // row count is still under its bound: the estimate must count the whole serialized row.
+    const hex = Array.from({ length: 1_900 }, (_, i) => hmac('anonymous_id', `encoded-${i}-${'e'.repeat(40)}`));
+    const bytesFirst = await capture(newUuid(), hex);
+    expect(bytesFirst.length).toBeGreaterThan(1);
+    expect(Math.max(...bytesFirst.map((batch) => batch.rows))).toBeLessThan(2_000);
+    expect(bytesFirst.reduce((sum, batch) => sum + batch.rows, 0)).toBe(1_900);
+    for (const batch of [...rowsFirst, ...bytesFirst]) {
+      expect(batch.rows).toBeLessThanOrEqual(2_000);
+      expect(batch.bytes).toBeLessThanOrEqual(limit);
+    }
+  }, 120_000);
+
   it('stages its key set through the configured client and never bypasses it', async () => {
     const clientWs = newUuid();
     const anonymousId = `client-stage-${'c'.repeat(40)}`;
@@ -525,33 +571,149 @@ describe('recurring physical purge (#1037 part 3)', () => {
     expect([...readBounds, ...deleteBounds].every((value) => value === 30)).toBe(true);
   }, 60_000);
 
-  it('does not treat a table as empty when its count answer is missing or invalid', async () => {
-    for (const answer of [[], [{ n: 'many' }]]) {
-      const badWs = newUuid();
-      const anonymousId = 'bad-count-anon';
+  it('bounds the side-table guard read on the server too', async () => {
+    const guardWs = newUuid();
+    const key = hmac('profile', 'prf_guard_bound');
+    await publish(store, guardWs, [key]);
+    // An orphaned side entry sends the sweep through `existingBaseIds`, the guard that decides
+    // whether a side entry still backs a base row.
+    await store.client.insert({
+      table: 'subject_key_backfill',
+      format: 'JSONEachRow',
+      values: [
+        {
+          workspace_id: guardWs,
+          table_name: 'events',
+          key1: 'Guard bound',
+          key2: 'guard-anon',
+          key3: '2026-08-05 12:00:00.000',
+          key4: 'guard-bound',
+          subject_profile: key,
+          subject_key_version: VERSION,
+          subject_coverage: 'ids_only',
+          version: 1,
+        },
+      ],
+    });
+    const originalQuery = store.client.query.bind(store.client);
+    const guardBounds: unknown[] = [];
+    store.client.query = (async (args) => {
+      const query = args as { query: string; clickhouse_settings?: Record<string, unknown> };
+      if (query.query.includes("subject_coverage != 'full'")) guardBounds.push(query.clickhouse_settings?.max_execution_time);
+      return originalQuery(args);
+    }) as typeof store.client.query;
+    try {
+      expect(await store.purgeErasedSubjects(guardWs, [key], { batchSize: 100 })).toMatchObject({ complete: true, deleted: 1 });
+    } finally {
+      store.client.query = originalQuery;
+    }
+    expect(guardBounds.length).toBeGreaterThan(0);
+    expect(guardBounds.every((value) => value === 30)).toBe(true);
+  }, 60_000);
+
+  it('stops the sweep when its caller aborts while the key set is staging', async () => {
+    const abortWs = newUuid();
+    const keys = Array.from({ length: 2_500 }, (_, i) => hmac('anonymous_id', `staged-abort-${i}-${'a'.repeat(40)}`));
+    const abort = new AbortController();
+    const isolated = clickHouseStore({
+      url: CH_URL,
+      database: CH_DB,
+      subjectKeys: factory,
+      signal: abort.signal,
+      queryIdPrefix: 'purge-abort-',
+    });
+    try {
+      const realInsert = isolated.client.insert.bind(isolated.client);
+      const stages: { queryId: string | undefined; signal: AbortSignal | undefined }[] = [];
+      isolated.client.insert = (async (args) => {
+        const insert = args as { table?: string; query_id?: string; abort_signal?: AbortSignal };
+        const result = await realInsert(args);
+        if (insert.table === 'erasure_purge_keys') {
+          stages.push({ queryId: insert.query_id, signal: insert.abort_signal });
+          // The restore loses its lock after the first staged batch landed.
+          abort.abort(new Error('the sweep was cancelled'));
+        }
+        return result;
+      }) as typeof isolated.client.insert;
+      const realQuery = isolated.client.query.bind(isolated.client);
+      let purgeReads = 0;
+      isolated.client.query = (async (args) => {
+        if (String((args as { query?: string }).query).includes('FROM events AS t FINAL')) purgeReads += 1;
+        return realQuery(args);
+      }) as typeof isolated.client.query;
+      await expect(isolated.purgeErasedSubjects(abortWs, keys, { batchSize: 10 })).rejects.toThrow(/sweep was cancelled/);
+      // The staging inserts carry the store's signal and query-id marker like every other request,
+      // and no purge read follows the abort.
+      expect(stages).toHaveLength(1);
+      expect(stages[0]?.signal).toBe(abort.signal);
+      expect(stages[0]?.queryId).toMatch(/^purge-abort-/);
+      expect(purgeReads).toBe(0);
+    } finally {
+      await isolated.close();
+    }
+  }, 120_000);
+
+  it('accepts only one non-negative integer as a count answer', async () => {
+    const attempt = async (answer: unknown) => {
+      const countWs = newUuid();
+      const anonymousId = 'strict-count-anon';
       const key = hmac('anonymous_id', anonymousId);
-      await store.insert([event(0, { workspaceId: badWs, anonymousId, userId: '', profileId: '' })]);
+      await store.insert([event(0, { workspaceId: countWs, anonymousId, userId: '', profileId: '' })]);
       const originalQuery = store.client.query.bind(store.client);
       store.client.query = (async (args) => {
         const query = args as { query: string };
+        // Only the events table gets the shape under test; the other tables answer normally.
         if (query.query.includes('SELECT count() AS n FROM events AS t FINAL'))
           return { json: async () => answer } as Awaited<ReturnType<typeof originalQuery>>;
         return originalQuery(args);
       }) as typeof store.client.query;
       try {
-        await expect(store.purgeErasedSubjects(badWs, [key], { batchSize: 10 })).rejects.toThrow(/count for events/);
+        return { workspaceId: countWs, result: await store.purgeErasedSubjects(countWs, [key], { batchSize: 10 }) };
+      } catch (error) {
+        return { workspaceId: countWs, error: error as Error };
       } finally {
         store.client.query = originalQuery;
       }
+    };
+
+    // ClickHouse sends UInt64 as a decimal string by default; a JSON number is accepted too.
+    for (const answer of [[{ n: 0 }], [{ n: 7 }], [{ n: '0' }], [{ n: '42' }]]) {
+      expect((await attempt(answer)).error).toBeUndefined();
+    }
+
+    // Every other shape is a broken answer, never an empty table: a missing row, more than one row
+    // (even if the first is zero), a boolean, whitespace, a sign, a fraction, hex or exponent.
+    for (const answer of [
+      [],
+      [{ n: 1 }, { n: 1 }],
+      [{ n: 0 }, { n: 0 }],
+      [{}],
+      [{ n: false }],
+      [{ n: true }],
+      [{ n: '' }],
+      [{ n: ' ' }],
+      [{ n: '1 ' }],
+      [{ n: '-1' }],
+      [{ n: '+1' }],
+      [{ n: '1e3' }],
+      [{ n: '1.5' }],
+      [{ n: '0x10' }],
+      [{ n: 1.5 }],
+      [{ n: -1 }],
+      [{ n: null }],
+      [{ n: undefined }],
+    ]) {
+      const { workspaceId, error } = await attempt(answer);
+      expect(error?.message).toMatch(/count .*for events/);
       // Nothing was deleted, and the failed sweep still dropped its staged run.
-      expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, badWs)).toEqual([
+      expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, workspaceId)).toEqual([
         { n: 1 },
       ]);
-      expect(await rows<{ n: number }>('SELECT count() AS n FROM erasure_purge_keys WHERE workspace_id = {ws:UUID}', {}, badWs)).toEqual([
-        { n: 0 },
-      ]);
+      expect(
+        await rows<{ n: number }>('SELECT count() AS n FROM erasure_purge_keys WHERE workspace_id = {ws:UUID}', {}, workspaceId),
+      ).toEqual([{ n: 0 }]);
     }
-  }, 60_000);
+  }, 120_000);
 
   it('propagates a ClickHouse failure instead of reporting a completed purge', async () => {
     const errorWs = newUuid();

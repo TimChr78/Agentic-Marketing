@@ -1,7 +1,7 @@
 import { type KeyProvider, localKeyProvider } from '@agentic-marketing/secrets';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
-import { disposeErasure, eraseProfileStage, prepareErasure } from '../src/erasure';
+import { disposeErasure, eraseProfileStage, prepareErasure, removeProfiles } from '../src/erasure';
 import { subjectKeyHasher } from '../src/exclusion';
 
 // A profile's identifier list has no bound: resolve() attaches every unknown identifier an event
@@ -74,18 +74,13 @@ async function tombstoneCount(erasureId: string): Promise<number> {
 }
 
 describe.skipIf(!hasTestDatabase())('erasure of a profile with a large identifier family', () => {
-  it('records the whole ledger and every tombstone for a family past one statement’s parameters', async () => {
+  it('records the whole ledger and every tombstone across several insert batches', async () => {
     const profile = 'prf_0000000000000000000000000000c103';
     const anon = 'bind-limit-';
-    // One bound parameter per anonymous id in the push-subscription delete put this list over
-    // PostgreSQL's 65,535-parameter limit; the statement failed, the stage rolled back, and the
-    // person could never be erased. No push subscription row exists: the statement still binds the
-    // whole list.
-    //
-    // The same family also covers both insert walls the batching fixes: one ledger row per
-    // identifier value (two per anonymous id, its own kind and `alias_previous_id`) at six bound
-    // parameters each, and one tombstone per identifier at three each.
-    const anonymousIds = 65_600;
+    // The same family covers both batched writes in the stage: 2,203 ledger rows (one per
+    // identifier value, two per anonymous id) and 1,101 tombstones, each past the 1,000-row batch.
+    // The separate test below pins the largest list the stage binds at once.
+    const anonymousIds = 1_100;
     await seedPerson(profile, anon, anonymousIds);
 
     const result = await erase(profile);
@@ -120,5 +115,25 @@ describe.skipIf(!hasTestDatabase())('erasure of a profile with a large identifie
       profile,
     ]);
     expect(remaining).toHaveLength(0);
-  }, 240_000);
+  }, 120_000);
+
+  it('removes a profile whose identifier list is larger than the bound-parameter limit', async () => {
+    // The largest list the stage binds at once: the push-subscription delete once bound one
+    // parameter per identifier, so a family past PostgreSQL's 65,535-parameter limit failed the
+    // stage and the person could never be erased. It now travels as one `text[]`. No row is seeded:
+    // the statement still binds the whole list.
+    const total = 65_600;
+    const profile = 'prf_0000000000000000000000000000c104';
+    const identifiers = Array.from({ length: total }, (_, i) => ({
+      workspaceId: d.workspace,
+      profileId: profile,
+      type: 'anonymous_id' as const,
+      value: `largest-${i}`,
+    }));
+    const removed = await d.db.withWorkspace(d.workspace, (tx) =>
+      removeProfiles(tx, d.workspace, [profile], identifiers as unknown as Parameters<typeof removeProfiles>[3], { suppress: false }),
+    );
+    expect(removed.anonymousIds).toHaveLength(total);
+    expect(removed).toMatchObject({ profiles: 1, identifiers: total });
+  }, 60_000);
 });
