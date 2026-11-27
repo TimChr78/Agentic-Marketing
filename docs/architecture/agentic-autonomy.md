@@ -110,7 +110,7 @@ Commands are grouped into **action classes** by what they change in the world, n
 | `journey.live` | publish a journey version, enroll, migrate | partly (messages sent no) |
 | `experience.live` | publish a web experience, change traffic allocation | yes |
 | `spend` | paid LLM commands (`prompts.test`, `ai.classify`, `ai.score`); budgets (later) | no (money) |
-| `data.write` | `profiles.update`, imports, consent recording | partly |
+| `data.write` | `consent.record`, `topics.set`, imports (`ads.importSpend`, `shopify.importCustomers`, `warehouse.run`, `content.sources.fetch`) | partly |
 | `settings` | workspace, delivery policy, purposes, providers | yes, but wide blast radius |
 | `destructive` | erase, delete, revoke | **no** |
 

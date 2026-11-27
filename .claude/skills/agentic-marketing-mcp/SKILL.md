@@ -15,6 +15,7 @@ Every capability is a **command**, and every command is an MCP tool with the sam
 You act as an **agent principal**: the person's role permissions, limited to the granted scopes. Some tools are never available to agents, whatever the scopes:
 - approving;
 - managing members, providers, sources, connections and webhooks;
+- adding to, removing from, freezing or refreshing a static or snapshot audience (`audiences.add`, `.remove`, `.import`, `.snapshot`, `.refreshSnapshot`);
 - secrets;
 - importing consent, exporting or erasing people.
 
@@ -93,7 +94,7 @@ Read [references/tools.md](references/tools.md) for the full list with effects a
 | Alerts | `alerts.list`, `.get`, `.create`, `.update`, `.delete`, `.test`, `.history` |
 | Blocks | `blocks.preview`, `blocks.usage`; `templates.check` before publishing an e-mail |
 | Topics | `topics.preferences` (a person’s choices), `topics.set` (agents may only unsubscribe); topics live under a purpose |
-| Audiences | `audiences.add`, `.remove`, `.import`, `.imports`, `.snapshot`, `.refreshSnapshot` for static, CSV and snapshot segments |
+| Audiences | `audiences.imports` (people and agents); `audiences.add`, `.remove`, `.import`, `.snapshot` and `.refreshSnapshot` for static, CSV and snapshot segments are people only |
 | Assets | `assets.upload` (base64, PNG/JPEG/GIF/WebP/SVG/PDF; an SVG is sanitised and returns a `rendition` PNG for e-mail), `.list`, `.get`, `.update` (alt text), `.delete`; use the returned `url` in templates and the brand |
 | Brand | artifact type `brand` (one per workspace); `hostedPages.preview` renders the confirm/unsubscribe pages with a draft brand |
 | People | `profiles.find {type:"email", value}`, `profiles.get`, `profiles.events`, `profiles.list`, `consent.history`, `segments.ofProfile` |

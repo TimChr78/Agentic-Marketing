@@ -2,6 +2,7 @@ import { agentPrincipal, type Principal } from '@agentic-marketing/commands';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
+import { hostedAgentTemplate } from '../src/agents/hostedTemplates';
 import { mcpServerFor } from '../src/http/mcp';
 import { commands } from '../src/registry';
 
@@ -85,6 +86,22 @@ describe('hosted MCP toolset (#364)', () => {
     } finally {
       await client.close().catch(() => {});
     }
+  });
+
+  // #1297 review: a template's default scopes must offer the tools its instructions use, and the
+  // default curator must not get person-level reads. Sizing a published segment is a metric-layer
+  // read (analytics.query with segment.members); segments.preview returns up to 20 profile ids and
+  // needs profiles:read, which the hosted runner would hand to the model with the tool result.
+  it('offers the default audience curator only the narrow toolset it needs', async () => {
+    const template = hostedAgentTemplate('audience_curator')!;
+    const curator = agentPrincipal('usr_curator', 'client_curator', 'ws_1', 'owner', template.scopes, record('curator'));
+    const names = (await toolsOf(curator, false)).map((t) => t.name);
+    for (const name of ['analytics.query', 'artifacts.create', 'artifacts.get']) {
+      expect(names, name).toContain(name);
+      expect(template.instructions, name).toContain(name);
+    }
+    for (const name of ['segments.preview', 'profiles.get', 'profiles.events']) expect(names, name).not.toContain(name);
+    expect(template.scopes).not.toContain('profiles:read');
   });
 
   it('keeps the OAuth step-up listing, which a hosted run deliberately does not use', async () => {

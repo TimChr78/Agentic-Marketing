@@ -14,7 +14,7 @@ A journey is a **directed graph** stored as a versioned artifact (JSON). The sam
     { "id": "n2", "kind": "email", "label": "Welcome",
       "config": { "template": "eml_0123456789abcdef0123456789abcdef" }, "next": [{ "to": "n3" }] },
     { "id": "n3", "kind": "waitEvent", "label": "Wait for a click",
-      "config": { "event": "email_clicked", "timeout": "P2D" },
+      "config": { "event": "Email Link Clicked", "timeout": "P2D" },
       "next": [{ "to": "n4" }, { "to": "n5" }] },
     { "id": "n4", "kind": "split", "label": "Two follow-ups",
       "config": { "weights": [50, 50] }, "next": [{ "to": "n5" }, { "to": "n6" }] },

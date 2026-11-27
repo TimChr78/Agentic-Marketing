@@ -39,7 +39,7 @@ Evaluation in the send gateway: `consent` basis → needs `granted`; `legitimate
 
 - **In transit:** TLS everywhere, terminated by the operator's proxy or tunnel in front of the app (see [compose.md](../deployment/compose.md) and [kubernetes.md](../deployment/kubernetes.md)); internal connections TLS-capable.
 - **At rest:** rely on disk/volume encryption for the base layer, plus **application-level field encryption** for PII:
-  - Envelope encryption: a **KEK** from a pluggable key provider (env/file for small installs, AWS KMS, GCP KMS, OpenBao/HashiCorp Vault transit) wraps **DEKs**.
+  - Envelope encryption: a **KEK** from a pluggable key provider (`MASTER_KEY` in the environment for small installs, OpenBao/HashiCorp Vault transit, or AWS KMS — see [kubernetes.md](../deployment/kubernetes.md#keys-master_key-openbao-or-aws-kms)) wraps **DEKs**.
   - **Per-profile DEK** for PII fields in Postgres and ClickHouse (`properties` PII fields). Erasure = delete the DEK → data in events and **backups** becomes unreadable (crypto-shredding).
   - Lookup via HMAC hashes (`value_hash`) so matching doesn't need decryption.
 - **Secrets** (ESP keys, LLM keys, OAuth tokens, webhook secrets): encrypted with workspace DEK, write-only via API, key rotation command in CLI.
@@ -98,7 +98,7 @@ Completion semantics are now the contract. `profiles.erasureStatus` reports **lo
 
 | Threat | Control |
 |---|---|
-| SSRF via webhooks / HTTP nodes / connector URLs | Egress proxy or resolver guard blocking private/link-local/metadata ranges; per-workspace allow-lists |
+| SSRF via webhooks / HTTP nodes / connector URLs | Egress proxy or resolver guard blocking private/link-local/metadata ranges; one operator-managed, installation-wide allow-list (`EGRESS_ALLOWED_HOSTS`), and an entry applies to every workspace on the installation |
 | Template injection | LiquidJS sandbox (no filesystem, no code), output escaping by default, render time & loop limits |
 | Prompt injection via profile/event data reaching LLMs | Data is passed as clearly delimited data, LLM outputs are schema-validated and can only choose among configured options; AI nodes cannot call platform tools in v1 |
 | Malicious MCP/agent behaviour | Scopes, drafts + approvals, the policy engine (audience threshold, per-agent limits, the autonomy switch), pausing an agent, AI budgets, the send gateway, the action ledger and audit ([agentic-autonomy.md](agentic-autonomy.md)) |

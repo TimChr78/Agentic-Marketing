@@ -62,7 +62,7 @@ This table describes what the repository ships today. Roadmap items are marked *
 |---|---|---|---|---|
 | Authentication | **Better Auth** (email/password, `@better-auth/mcp` OAuth 2.1 authorization server for MCP, per-workspace OIDC/SAML SSO and SCIM 2.0; no organization, passkey or 2FA plugin; all packages pinned to one version) | MIT | Keycloak, Ory, Zitadel, Auth.js | Library, not another server to run; covers MCP OAuth needs. Keycloak/Zitadel remain options as external IdPs via OIDC |
 | Authorization | Own RBAC in command layer → OpenFGA if needed | — / Apache-2.0 | Casbin, Cerbos | Start simple |
-| Key management | Pluggable: env/file KEK, AWS/GCP KMS, **OpenBao** transit | MPL-2.0 | Vault (BSL) | OpenBao is the open fork of Vault |
+| Key management | Pluggable: `MASTER_KEY` in the environment, **OpenBao** transit, AWS KMS (see [kubernetes.md](../deployment/kubernetes.md#keys-master_key-openbao-or-aws-kms)) | MPL-2.0 | Vault (BSL) | OpenBao is the open fork of Vault |
 | HTML sanitizing | **Own sanitisers**: a DOM walk in the browser SDK, htmlparser2 allow-lists on the server | MIT | DOMPurify (not used) | Experience HTML is sanitised before it reaches the page ([sdk-js/personalize.ts](../../packages/sdk-js/src/personalize.ts)); hosted archive bodies and uploaded SVGs use bounded allow-list scans over htmlparser2 ([audience/archive.ts](../../packages/audience/src/archive.ts), [assets/svg.ts](../../packages/assets/src/svg.ts)). Fail-closed, with no DOM dependency on the server |
 
 ## Operations
