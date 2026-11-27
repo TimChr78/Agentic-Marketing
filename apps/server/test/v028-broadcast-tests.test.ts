@@ -589,5 +589,14 @@ describe('recipient-local send window', () => {
     expect(m.status).toBe('suppressed');
     expect(m.reason).toContain('outside_send_window');
     expect(outbox.filter((x) => x.to === 'skip@example.com' && x.subject === 'The default subject')).toHaveLength(0);
+    // A window skip is a suppression the message log records, like the control group's (#1239):
+    // the run already reports it in `delivery`, and `messages` counts events only.
+    const settled = await eventually(
+      () => status(id),
+      (s) => (s.messages.suppressed ?? 0) > 0,
+      20_000,
+    );
+    expect(settled.messages.suppressed).toBe(1);
+    expect(settled.delivery).toMatchObject({ suppressed: 1 });
   }, 60_000);
 });

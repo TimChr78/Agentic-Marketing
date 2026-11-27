@@ -27,9 +27,11 @@ const ERROR = 'urn:ietf:params:scim:api:messages:2.0:Error';
 const PATCH = 'urn:ietf:params:scim:api:messages:2.0:PatchOp';
 const TYPE = 'application/scim+json';
 
-// A User or Group resource is small; even a large group membership stays far below 1 MB. The limit
-// runs before the bearer token lookup and before the JSON is parsed.
-const SCIM_MAX_BODY = 1024 * 1024;
+// Sized for the biggest resource the command schemas accept, not for a typical one: `scimUpsertGroup`
+// takes 50,000 members, and an identity provider that also sends each member's display name (Okta
+// and Entra ID do) needs about 6 MB for that group alone (#1236). The limit runs before the bearer
+// token lookup and before the JSON is parsed.
+export const SCIM_MAX_BODY = 8 * 1024 * 1024;
 
 // biome-ignore lint/suspicious/noExplicitAny: SCIM bodies are free-form JSON from the identity provider, read field by field
 type Json = Record<string, any>;
@@ -50,6 +52,23 @@ function eqFilter(filter: string | undefined): { attr: string; value: string } |
   const m = filter.match(/^\s*([A-Za-z.]+)\s+eq\s+"((?:[^"\\]|\\.)*)"\s*$/i);
   if (!m) throw new ScimError(400, 'Only filters of the form attribute eq "value" are supported.', 'invalidFilter');
   return { attr: m[1].toLowerCase(), value: m[2].replace(/\\(.)/g, '$1') };
+}
+
+/**
+ * PostgreSQL 23505 on the `user.email` unique index, directly or wrapped by the auth adapter. Two
+ * concurrent replaces can both pass the "is this address free?" lookup; the index then decides at
+ * the write (#1272 review).
+ */
+function emailUniqueViolation(err: unknown): boolean {
+  for (
+    let e = err as { code?: unknown; constraint?: unknown; detail?: unknown; cause?: unknown } | undefined, depth = 0;
+    e && depth < 5;
+    e = e.cause as typeof e, depth++
+  ) {
+    if (e.code !== '23505') continue;
+    if (String(e.constraint ?? '').includes('email') || String(e.detail ?? '').includes('(email)')) return true;
+  }
+  return false;
 }
 
 export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUrl: string }) {
@@ -176,6 +195,22 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
     return (rowCount ?? 0) > 0;
   }
 
+  /**
+   * The 409 for an address another account already holds. Create answers it before writing, and a
+   * replace answers the same way — through this helper both when its lookup sees the account and
+   * when two concurrent replaces reach the unique index (#1129, #1233, #1272 review).
+   */
+  async function addressConflict(ws: string, email: string, ownerId: string | undefined) {
+    const known = ownerId ? (await users(ws, 'AND u.id = $2', [ownerId]))[0] : undefined;
+    return known
+      ? new ScimError(409, `${email} is already provisioned.`, 'uniqueness')
+      : new ScimError(
+          409,
+          'This user name cannot be provisioned automatically. The person must sign in through a verified single sign-on domain of this workspace, or be invited.',
+          'uniqueness',
+        );
+  }
+
   /** Applies SCIM user attributes: the account (name, e-mail) and the workspace side (active, external id). */
   async function saveUser(ws: string, id: string | null, body: Json) {
     const ctx = await deps.auth.$context;
@@ -219,7 +254,26 @@ export function scimApi(deps: { auth: Auth; db: Db; executor: Executor; publicUr
           'mutability',
         );
       }
-      await ctx.internalAdapter.updateUser(userId, { name, email });
+      // A replace must not take an address another account already holds: the unique index on
+      // `user.email` would answer with a driver error, which the handler reports as a 500 and an
+      // identity provider then retries forever (#1233). Create looks the address up first, so
+      // replace does too, and answers 409 `uniqueness` in the same words.
+      if (email !== current.email.toLowerCase()) {
+        const taken = await ctx.internalAdapter.findUserByEmail(email);
+        if (taken && taken.user.id !== userId) {
+          await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
+          throw await addressConflict(ws, email, taken.user.id);
+        }
+      }
+      try {
+        await ctx.internalAdapter.updateUser(userId, { name, email });
+      } catch (err) {
+        // Two concurrent replaces can both find the address free; the write then meets the unique
+        // index. The loser answers what its lookup would have answered, never a 500 (#1272 review).
+        if (!emailUniqueViolation(err)) throw err;
+        await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
+        throw await addressConflict(ws, email, (await ctx.internalAdapter.findUserByEmail(email))?.user.id);
+      }
     }
     await run(scimUpsertUser, { userId, externalId: body.externalId ?? null, active: body.active ?? true }, ws);
     return userResource(ws, await userById(ws, userId));

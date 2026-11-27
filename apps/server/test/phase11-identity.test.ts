@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { connectAgent, startTestServer, testPort, type User } from './harness';
 
 // Phase 11 (wave 2), part a: enterprise identity. Single sign-on with an OIDC identity provider
@@ -437,6 +437,40 @@ describe('SCIM account safety (#1129)', () => {
     expect((await off.json()).active).toBe(false);
   });
 
+  it('answers 409 uniqueness when a replace takes an address another account already holds (#1233)', async () => {
+    const w = await scimWorkspace();
+    const original = `scim-kept-${++unique}-${Date.now()}@example.test`;
+    const created = await w.call('/Users', {
+      method: 'POST',
+      body: JSON.stringify({ userName: original, displayName: 'Provisioned Person', active: true }),
+    });
+    expect(created.status).toBe(201);
+    const provisioned = await created.json();
+
+    // An account that already exists in this installation, unknown to this workspace, holds the
+    // address the replace asks for. Create answers 409 `uniqueness` for that (#1129); replace must
+    // not let the unique index turn it into a 500.
+    const other = await t.signUp(`scim-taken-${++unique}-${Date.now()}@example.test`);
+    const replace = await w.call(`/Users/${provisioned.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ userName: other.email, displayName: 'Provisioned Person', active: true }),
+    });
+    expect(replace.status).toBe(409);
+    expect((await replace.json()).scimType).toBe('uniqueness');
+
+    // Neither account's sign-in address changed.
+    const addresses = await t.srv.db.admin.query<{ id: string; email: string }>(
+      'SELECT id, email FROM "user" WHERE id IN ($1, $2) ORDER BY id',
+      [provisioned.id, other.id],
+    );
+    expect(addresses.rows).toEqual(
+      expect.arrayContaining([
+        { id: provisioned.id, email: original },
+        { id: other.id, email: other.email.toLowerCase() },
+      ]),
+    );
+  });
+
   it('deprovisions only the calling workspace’s scim_users row for a shared account (#1182)', async () => {
     const a = await scimWorkspace();
     const b = await scimWorkspace();
@@ -491,4 +525,87 @@ describe('MCP scope step-up', () => {
     expect((await call('artifacts.list', {})).status).toBe(200);
     await agent.client.close();
   });
+});
+
+// PR 1272 review: the body limit now lets a 50,000-member group in; the reconciliation behind it
+// must therefore not bind one SQL parameter per member, and two concurrent replaces that both saw
+// an address free must end in the same 409 the pre-check gives.
+describe('SCIM at the limits (#1236, #1272 review)', () => {
+  const scimCall =
+    (token: string) =>
+    (path: string, init: RequestInit = {}) =>
+      fetch(`${BASE}/scim/v2${path}`, {
+        ...init,
+        headers: { 'content-type': 'application/scim+json', authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+      });
+  const scimWorkspace = async () => {
+    const own = await t.signUp(`scim-limit-${Date.now()}-${Math.random().toString(16).slice(2)}@example.com`);
+    const workspace = await t.workspaceWith([[own, 'owner']], 'none');
+    const token = (await t.api(own, workspace).call('scim.rotateToken', {})).token;
+    return { own, workspace, token, call: scimCall(token) };
+  };
+
+  it('replaces a 50,000-member group with 50,000 different members', async () => {
+    // The replace reconciles the union of the old and the new members. One parameter per id put it
+    // over PostgreSQL's 65,535-parameter limit and answered 500 (#1272 review).
+    const w = await scimWorkspace();
+    const write = (path: string, method: string, offset: number) => {
+      const members = Array.from({ length: 50_000 }, (_, i) => ({
+        value: `usr_${(i + offset).toString(16).padStart(28, '0')}`,
+        display: `Example employee ${i}`,
+        type: 'User',
+      }));
+      return w.call(`/Groups${path}`, {
+        method,
+        body: JSON.stringify({ displayName: 'All employees', members }),
+      });
+    };
+    const created = await write('', 'POST', 0);
+    expect(created.status).toBe(201);
+    const { id } = await created.json();
+    const replaced = await write(`/${id}`, 'PUT', 50_000);
+    expect(replaced.status).toBe(200);
+    expect((await replaced.json()).members).toHaveLength(50_000);
+  }, 90_000);
+
+  it('answers 409 uniqueness when a concurrent replace loses the address race', async () => {
+    // Two PUTs can both find an address free; the unique index on `user.email` then decides at the
+    // write. The loser must get the same 409 `uniqueness` as the loser of a create race, not a 500.
+    const w = await scimWorkspace();
+    const provisioned = await (
+      await w.call('/Users', {
+        method: 'POST',
+        body: JSON.stringify({ userName: `race-${Date.now()}@example.test`, displayName: 'Racing Person', active: true }),
+      })
+    ).json();
+    const holder = await t.signUp(`race-holder-${Date.now()}@example.test`);
+
+    // The pre-check is what a concurrent replace would have passed before the other one wrote.
+    const ctx = await t.srv.auth.$context;
+    const real = ctx.internalAdapter.findUserByEmail.bind(ctx.internalAdapter);
+    const spy = vi
+      .spyOn(ctx.internalAdapter, 'findUserByEmail')
+      .mockImplementation((async (email: string) => (email === holder.email.toLowerCase() ? null : real(email))) as never);
+    try {
+      const put = await w.call(`/Users/${provisioned.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ userName: holder.email, displayName: 'Racing Person', active: true }),
+      });
+      expect(put.status).toBe(409);
+      expect((await put.json()).scimType).toBe('uniqueness');
+    } finally {
+      spy.mockRestore();
+    }
+    // The address still belongs to its account; the provisioned person kept theirs.
+    const rows = await t.srv.db.admin.query<{ id: string; email: string }>('SELECT id, email FROM "user" WHERE id IN ($1, $2)', [
+      provisioned.id,
+      holder.id,
+    ]);
+    expect(rows.rows).toEqual(
+      expect.arrayContaining([
+        { id: provisioned.id, email: provisioned.userName },
+        { id: holder.id, email: holder.email.toLowerCase() },
+      ]),
+    );
+  }, 40_000);
 });

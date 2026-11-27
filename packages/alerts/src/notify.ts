@@ -364,11 +364,27 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
     for (const email of emails) {
       const person = people.get(email.userId);
       if (!person || !stillMembers.has(email.userId)) {
+        // The refusal is a decision, so the message log records it; the digest reads this row as
+        // the record of that sponsor's window, which is what lets a retry of that window happen
+        // without holding the other sponsors' windows open (#1227).
+        await tx
+          .insert(schema.messages)
+          .values({
+            workspaceId,
+            id: newId('msg'),
+            idempotencyKey: email.idempotencyKey,
+            purpose: email.purpose ?? 'onboarding',
+            status: 'failed',
+            reason: 'not a workspace member',
+            data: email.data ?? {},
+            requestHash: sendRequestHash('email', fingerprintParts.alert({ recipient: email.userId, key: email.idempotencyKey })),
+          })
+          .onConflictDoNothing();
         out.push({ userId: email.userId, status: 'failed', error: 'not a workspace member' });
         continue;
       }
       const [existing] = await tx
-        .select({ id: schema.messages.id, status: schema.messages.status })
+        .select({ id: schema.messages.id, status: schema.messages.status, data: schema.messages.data })
         .from(schema.messages)
         .where(and(eq(schema.messages.workspaceId, workspaceId), eq(schema.messages.idempotencyKey, email.idempotencyKey)));
       // Any row the provider may already have accepted counts as done. Marking `delivered`,
@@ -379,12 +395,14 @@ export async function sendMemberEmails(tx: Tx, deps: NotifyDeps, workspaceId: st
         continue;
       }
       // A failed e-mail is retried on the next run; reuse its message row so the log shows one
-      // attempt history rather than a new message per retry.
+      // attempt history rather than a new message per retry. The retry's own payload replaces the
+      // failed attempt's: a digest records the window it actually covered, not the one the failed
+      // attempt opened (#1272 review).
       const messageId = existing?.id ?? newId('msg');
       if (existing)
         await tx
           .update(schema.messages)
-          .set({ status: 'sending', reason: null, attempts: 0, updatedAt: new Date() })
+          .set({ status: 'sending', reason: null, attempts: 0, data: email.data ?? existing.data, updatedAt: new Date() })
           .where(eq(schema.messages.id, messageId));
       else
         await tx.insert(schema.messages).values({
