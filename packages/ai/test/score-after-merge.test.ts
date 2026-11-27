@@ -63,6 +63,22 @@ async function seedProfile(id: string, idents: { anonymous?: string; user?: stri
   });
 }
 
+/** The survivor allows AI processing, as the write's consent re-check requires (#1300). */
+async function grantAi(profileId: string) {
+  await d.db.withWorkspace(ws, (tx) =>
+    tx.insert(schema.consentState).values({
+      workspaceId: ws,
+      profileId,
+      purpose: 'ai_processing',
+      channel: '',
+      status: 'granted',
+      basis: 'consent',
+      source: 'form',
+      updatedAt: new Date(),
+    }),
+  );
+}
+
 const merge = (anonymous: string, user: string) => {
   const batch = [event({ anonymousId: anonymous, userId: user })];
   return withPreparedKeys(
@@ -94,6 +110,8 @@ describe.skipIf(!hasTestDatabase())('a score written after a merge goes to the s
     await seedProfile(survivor, { user: `user-${survivor}` }, new Date(Date.UTC(2026, 6, 1)));
     await seedProfile(alias, { anonymous: `anon-${alias}` }, new Date(Date.UTC(2026, 6, 2)));
     await merge(`anon-${alias}`, `user-${survivor}`);
+    // The write re-reads consent under its lock (#1300): the survivor must allow AI processing.
+    await grantAi(survivor);
 
     const stored = await storeProfileScore(d.db, ws, {
       profileId: alias,
@@ -149,6 +167,8 @@ describe.skipIf(!hasTestDatabase())('a score written after a merge goes to the s
     );
     // The person merges (e.g. signs in) while the decision call is queued or in flight.
     await merge(`anon-${alias}`, `user-${survivor}`);
+    // The finalisation re-checks consent under its lock (#1300).
+    await grantAi(survivor);
     const [call] = await d.db.withWorkspace(ws, (tx) => tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, callId)));
 
     await d.db.withWorkspace(ws, (tx) =>

@@ -3,18 +3,19 @@ import { safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
+import { lockIdentity } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { classifyInputForLog } from './classify';
-import { aiAllowed, personContext, prepareWithCanonicalProfile, redact } from './context';
+import { aiAllowed, personContext, prepareForPerson, redact } from './context';
 import {
   type DecisionAnswer,
   DecisionError,
   type DecisionProvider,
   decisionCall,
   decisionProvider,
-  insertProfileScore,
+  insertProfileScoreChecked,
   lockCanonicalProfile,
   nonPersonalState,
   stateHash,
@@ -83,7 +84,13 @@ async function segmentKey(tx: Tx, profileId: string, segments: string[]) {
   return { key: inside.map((r) => r.id).join('+') || 'none', names: inside.map((r) => r.name) };
 }
 
-async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared | null> {
+/**
+ * What a step may send, and why it must take its fallback instead. Consent and the
+ * person-dependent input are prepared together (#1300): the gate is read again after the build, so
+ * a merge that committed in between cannot make the step use the merged-away profile's cleared
+ * traits (decide) or its empty segment list (cached generate). Exported for the merge-window test.
+ */
+export async function prepareCall(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared | null> {
   const p = await promptVersion(tx, c.promptId ?? '');
   if (!p) return null;
   const base = { def: p.def, version: p.version };
@@ -95,36 +102,44 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
   if (part?.status !== 'waiting' || part.node !== c.node || part.seq !== c.seq)
     return { ...base, fallback: 'too_late: the step was no longer waiting' };
   // The call row keeps the id it was queued with for the audit trail, but a merge may have folded
-  // that person into another profile since. The gate answers for the person the id names today and
-  // returns it, so consent, context and the segment cache all read the same profile (#1281).
-  const consent = await aiAllowed(tx, c.workspaceId, c.profileId ?? '');
-  if (!consent.ok) return { ...base, fallback: consent.reason };
-  const personId = consent.profileId;
-  try {
-    const model = await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress);
-    if (p.def.kind === 'generate' && p.def.cache) {
-      const { key, names } = await segmentKey(tx, personId, p.def.cache.segments);
-      const [hit] = await tx
-        .select({ slots: schema.aiTextCache.slots })
-        .from(schema.aiTextCache)
-        .where(
-          and(
-            eq(schema.aiTextCache.promptId, c.promptId ?? ''),
-            eq(schema.aiTextCache.promptVersion, p.version),
-            eq(schema.aiTextCache.cacheKey, key),
-            sql`${schema.aiTextCache.expiresAt} > now()`,
-          ),
-        );
-      return { ...base, model, person: { segments: names }, cache: { key, slots: hit?.slots } };
-    }
-    const trigger = (c.input as { trigger?: { name: string; properties: Record<string, unknown> } | null }).trigger ?? undefined;
-    const person = await personContext(tx, c.workspaceId, deps.kp, deps.events, personId, trigger);
-    if (!person) return { ...base, fallback: 'no_profile: the person does not exist (or was erased)' };
-    return { ...base, model, person: person as unknown as Record<string, unknown> };
-  } catch (err) {
-    if (err instanceof AiUnavailable) return { ...base, fallback: `${err.reason}: ${err.message}` };
-    throw err;
-  }
+  // that person into another profile since. The gate answers for the person the id names today, and
+  // the context and the segment cache read that same profile (#1281, #1300).
+  if (!c.profileId) return { ...base, fallback: 'no_profile: a decision or generate step needs a person' };
+  const prepared = await prepareForPerson<Pick<Prepared, 'model' | 'person' | 'cache'>>(
+    tx,
+    c.workspaceId,
+    c.profileId,
+    aiAllowed,
+    async (personId) => {
+      try {
+        const model = await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress);
+        if (p.def.kind === 'generate' && p.def.cache) {
+          const { key, names } = await segmentKey(tx, personId, p.def.cache.segments);
+          const [hit] = await tx
+            .select({ slots: schema.aiTextCache.slots })
+            .from(schema.aiTextCache)
+            .where(
+              and(
+                eq(schema.aiTextCache.promptId, c.promptId ?? ''),
+                eq(schema.aiTextCache.promptVersion, p.version),
+                eq(schema.aiTextCache.cacheKey, key),
+                sql`${schema.aiTextCache.expiresAt} > now()`,
+              ),
+            );
+          return { value: { model, person: { segments: names }, cache: { key, slots: hit?.slots } } };
+        }
+        const trigger = (c.input as { trigger?: { name: string; properties: Record<string, unknown> } | null }).trigger ?? undefined;
+        const person = await personContext(tx, c.workspaceId, deps.kp, deps.events, personId, trigger);
+        if (!person) return { refusal: 'no_profile: the person does not exist (or was erased)' };
+        return { value: { model, person: person as unknown as Record<string, unknown> } };
+      } catch (err) {
+        if (err instanceof AiUnavailable) return { refusal: `${err.reason}: ${err.message}` };
+        throw err;
+      }
+    },
+  );
+  if ('refusal' in prepared) return { ...base, fallback: prepared.refusal };
+  return { ...base, ...prepared.value };
 }
 
 type UsageFields = {
@@ -206,6 +221,12 @@ export async function finishIn(
   // held while the erasure's cascade waited for the `ai_calls` row the finalisation held, and
   // PostgreSQL aborted one of them (#1274). Every kind that names a person takes this order, not
   // only a score step.
+  //
+  // A score step writes consent-gated data, so it takes the workspace identity lock before the
+  // profile row: a standalone consent writer serialises on the identity lock, and the score's
+  // consent re-check under the profile lock must see a refusal that committed while it waited
+  // (#1300).
+  if (c.kind === 'score') await lockIdentity(tx, c.workspaceId);
   const lockedProfile = c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
   // A person who is gone has no participant row to wait at: the wakeup below finds nothing and a
   // done answer is recorded as late.
@@ -228,12 +249,11 @@ export async function finishIn(
     await addUsageOnly(tx, c, out);
     return;
   }
-  const outcome = {
-    seq: c.seq,
-    ...(out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
-    ...(out.probability !== undefined ? { probability: out.probability } : {}),
-    ...(out.status !== 'done' ? { fallback: out.error ?? 'failed' } : {}),
-  };
+  // A score withheld under the lock (the person objected or was erased meanwhile) turns the
+  // answer into a fallback, so the participant takes its fallback edge instead of being told a
+  // value that was not stored (#1300).
+  let status = out.status;
+  let error = out.error;
   // On a fallback the journey fills the slots with the prompt's fallback texts itself.
   const content = out.slots;
   // A decision call logs a state hash and a sanitised question set, never the person's state
@@ -265,9 +285,21 @@ export async function finishIn(
     // a merge (#1011). The shared helper follows a merge that commits while it waits.
     //
     // The score and the wakeup commit together: a worker cannot claim the participant and read a
-    // missing (or previous) value, and a failed score write leaves the step waiting to retry.
-    await insertProfileScore(tx, c.workspaceId, out.storeScore);
+    // missing (or previous) value, and a failed score write leaves the step waiting to retry. The
+    // write re-reads consent under the lock and withholds the score on a refusal (#1300), which
+    // turns this answer into a fallback so the participant takes its fallback edge.
+    const write = await insertProfileScoreChecked(tx, c.workspaceId, out.storeScore);
+    if ('refused' in write) {
+      status = 'fallback';
+      error = write.refused;
+    }
   }
+  const outcome = {
+    seq: c.seq,
+    ...(out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
+    ...(out.probability !== undefined ? { probability: out.probability } : {}),
+    ...(status !== 'done' ? { fallback: error ?? 'failed' } : {}),
+  };
   // Wake the participant only if it still waits at this step; otherwise the answer came too late.
   const woke = waiting
     ? await tx.execute(sql`
@@ -279,11 +311,11 @@ export async function finishIn(
         due_at = now(), updated_at = now()
       WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'`)
     : { rowCount: 0 };
-  const late = !woke.rowCount && out.status === 'done';
+  const late = !woke.rowCount && status === 'done';
   await tx
     .update(schema.aiCalls)
     .set({
-      status: late ? 'fallback' : out.status,
+      status: late ? 'fallback' : status,
       leaseUntil: null,
       promptVersion: prep?.version ?? null,
       providerId: prep?.model?.providerId ?? out.providerId ?? c.providerId ?? null,
@@ -291,7 +323,7 @@ export async function finishIn(
       input: { ...input, ...(c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
       output: out.output ?? null,
       rationale: out.rationale ?? null,
-      error: late ? 'too_late: the step had timed out and took its fallback' : (out.error ?? null),
+      error: late ? 'too_late: the step had timed out and took its fallback' : (error ?? null),
       // Accumulate in SQL rather than from the claim snapshot: a late attempt may already have
       // added its tokens, and both attempts were billed (#941 review).
       inputTokens: sql`${schema.aiCalls.inputTokens} + ${out.inputTokens ?? 0}`,
@@ -301,7 +333,7 @@ export async function finishIn(
       reservationId: null,
       latencyMs: out.latencyMs ?? null,
       cached: out.cached ?? false,
-      reviewStatus: !late && out.status === 'done' && sampled(prep?.def) ? 'pending' : null,
+      reviewStatus: !late && status === 'done' && sampled(prep?.def) ? 'pending' : null,
       finishedAt: new Date(),
     })
     .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
@@ -462,7 +494,7 @@ const usageFromErrorOrEstimate = (err: unknown, estimate: number, maxOutput: num
 
 async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
   c = await settleStaleReservation(db, c);
-  const prep = await db.withWorkspace(c.workspaceId, (tx) => prepare(tx, c, deps));
+  const prep = await db.withWorkspace(c.workspaceId, (tx) => prepareCall(tx, c, deps));
   if (!prep) return finish(db, c, null, { status: 'failed', error: 'no_prompt: the prompt has no published version' });
   if (prep.fallback || !prep.model || !prep.person) return finish(db, c, prep, { status: 'fallback', error: prep.fallback });
   if (prep.cache?.slots)
@@ -654,7 +686,10 @@ export async function storeClassifiedTrait(
   const def = plan?.traits.find((x) => x.name === trait);
   if (def && def.pii !== 'none') return null;
   // Follow a merge that landed since the consent check and lock the person today; an erased person
-  // has no row to lock, and a folded-away alias is never written (`merged_into IS NULL`).
+  // has no row to lock, and a folded-away alias is never written (`merged_into IS NULL`). The
+  // identity lock comes first: a standalone consent writer serialises on it, not on the profile
+  // row, so without it a refusal could commit between the gate and the update (#1300).
+  await lockIdentity(tx, workspaceId);
   const personId = await lockCanonicalProfile(tx, workspaceId, checkedProfileId);
   if (!personId) return null;
   const consent = await aiAllowed(tx, workspaceId, personId);
@@ -779,29 +814,19 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
   const questions = parsed.data as DecisionQuestion[];
   const scoreKey = typeof raw.scoreKey === 'string' ? raw.scoreKey : questions[0].key;
   const prepared = await db.withWorkspace(c.workspaceId, async (tx) => {
-    // A decision queued before a merge keeps the old profile id. The gate resolves it to the
-    // person today before the consent check, and the id it returns is the one the context and the
-    // stored score use (#1241 review). A merge that commits during the preparation is caught by
-    // re-resolving afterwards and preparing again (#1269 review).
-    return prepareWithCanonicalProfile<{ error: string } | { provider: DecisionProvider; state: unknown; profileId: string }>(
+    // A decision queued before a merge keeps the old profile id. The gate resolves it to the person
+    // today, and the state and the stored score use that id (#1241 review). The gate is read again
+    // after the state is built, so a merge that changes the survivor's consent (or moves the
+    // person) cannot leave the state in use under a stale answer (#1300).
+    if (!c.profileId) return { refusal: 'no_profile: a decision step needs a person' };
+    return prepareForPerson<{ provider: DecisionProvider; state: unknown }>(
       tx,
       c.workspaceId,
-      c.profileId ?? null,
-      async (given) => {
-        const reference = given === undefined ? (c.profileId ?? null) : given;
-        if (given !== undefined && reference === null)
-          return { profileId: null, result: { error: 'no_profile: the person does not exist (or was erased)' } };
-        let profileId: string | null = null;
-        if (reference) {
-          const consent = await aiAllowed(tx, c.workspaceId, reference);
-          // Keep the id the gate answered for on a refusal too: the wrapper retries only when the
-          // person moved, so a stable refusal must not re-run the gate.
-          if (!consent.ok) return { profileId: consent.profileId, result: { error: consent.reason } };
-          profileId = consent.profileId;
-        }
+      c.profileId,
+      aiAllowed,
+      async (profileId) => {
         try {
           const provider = await decisionProvider(tx, deps.kp);
-          if (!profileId) return { profileId, result: { error: 'no_profile: a decision step needs a person' } };
           const triggerName = typeof raw.trigger?.name === 'string' ? raw.trigger.name : undefined;
           const state = await nonPersonalState(
             tx,
@@ -810,17 +835,17 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
             profileId,
             triggerName ? { trigger: triggerName } : undefined,
           );
-          if (!state) return { profileId, result: { error: 'no_profile: the person does not exist (or was erased)' } };
-          return { profileId, result: { provider, state, profileId } };
+          if (!state) return { refusal: 'no_profile: the person does not exist (or was erased)' };
+          return { value: { provider, state } };
         } catch (err) {
-          if (err instanceof AiUnavailable || err instanceof DecisionError) return { profileId, result: { error: `${err.message}` } };
+          if (err instanceof AiUnavailable || err instanceof DecisionError) return { refusal: `${err.message}` };
           throw err;
         }
       },
     );
   });
-  const ready = prepared.result;
-  if ('error' in ready) return finish(db, c, null, { status: 'fallback', error: ready.error });
+  if ('refusal' in prepared) return finish(db, c, null, { status: 'fallback', error: prepared.refusal });
+  const ready = { ...prepared.value, profileId: prepared.profileId };
   // A choice routes on the probability of the configured label, not on whichever label won.
   const done = (r: Awaited<ReturnType<typeof decisionCall>>): Parameters<typeof finishIn>[3] => {
     const first = r.answers[0];

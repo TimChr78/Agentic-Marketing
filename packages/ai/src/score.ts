@@ -5,7 +5,7 @@ import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { canonicalProfile } from '@agentic-marketing/profiles';
 import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { aiAllowed, prepareWithCanonicalProfile, redact } from './context';
+import { aiAllowed, prepareForPerson, redact, refuseAi } from './context';
 import {
   assertStateAllowed,
   DecisionError,
@@ -38,7 +38,7 @@ declare module '@agentic-marketing/commands' {
 export async function consentCheckedScoreProfile(tx: Tx, workspaceId: string, profileId: string): Promise<string> {
   const consent = await aiAllowed(tx, workspaceId, profileId);
   if (consent.ok) return consent.profileId;
-  throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
+  return refuseAi('ai.score', consent.reason);
 }
 
 const ProfileId = z.string().regex(/^prf_[0-9a-f]{32}$/);
@@ -58,7 +58,8 @@ const Answer = z.object({
 const appError = (err: unknown): never => {
   if (err instanceof DecisionError) {
     // A DecisionError's message is written for the caller, and decision.ts already reduces a
-    // provider's answer to its own code and message (#885), so it can be copied as is.
+    // provider's answer to its own code and message (#885), so it can be copied as is. The
+    // executor stores a fixed diagnostic for this command instead (#1300).
     if (err.code === 'no_provider') throw new AppError('conflict', err.message);
     if (err.code === 'personal_data' || err.code === 'too_many_questions' || err.code === 'too_large' || err.code === 'invalid_request')
       throw new AppError('invalid_input', err.message);
@@ -117,41 +118,54 @@ export const score = defineCommand({
   effect: 'write',
   actionClass: 'spend',
   target: (i) => i.profileId,
+  // A provider's failure message may quote the person's state; both persisting stores keep this
+  // fixed diagnostic instead (#1300).
+  failureText: 'the AI provider refused or failed',
+  // A stored answer is about a person. Before it is replayed, the gate must still allow that person:
+  // a retry with the same key must not hand back a score for someone since erased (#1300).
+  replayCheck: async (replayInput, _replay, { tx, workspaceId }) => {
+    if (!replayInput.profileId) return;
+    const consent = await aiAllowed(tx, workspaceId, replayInput.profileId);
+    if (!consent.ok) refuseAi('ai.score', consent.reason);
+  },
   handler: async (input, ctx) => {
     if (input.store && !input.profileId) throw new AppError('invalid_input', 'store needs profileId: a score is stored for a person.');
     if (!ctx.services.db) throw new AppError('conflict', 'ai.score needs the database service.');
     const db = ctx.services.db;
     const ws = ctx.principal.workspaceId;
-    // A caller may pass an id a merge has folded away. Follow it before the consent check, the
-    // context read and the write, or the survivor's consent and data are missed (#1241 review), and
-    // resolve it in one statement so the merged_into check cannot disagree with the walk.
+    // A caller may pass an id a merge has folded away. Every read and the write resolve the person
+    // the id names today (#1241 review), and each person-derived read is guarded by a gate read
+    // under the same id (#1300). An unknown and an erased id answer the one refusal, like a person
+    // who refused: the refusal must not say whether a profile exists.
     const reference = input.profileId ?? null;
-    const initial = reference ? await canonicalProfileId(ctx.tx, ws, reference) : null;
-    if (reference && !initial) throw new AppError('not_found', `No profile ${input.profileId}.`);
-    // A merge that commits during the preparation is caught afterwards and the preparation is redone
-    // with the survivor, so its consent cannot look absent (#1269 review).
-    const prepared = await prepareWithCanonicalProfile(ctx.tx, ws, reference, async (given) => {
-      if (given === null) throw new AppError('not_found', `No profile ${input.profileId}.`);
-      // Both the first run (the id resolved above) and a retry go through the consent check, which
-      // re-resolves once more when a merge landed after that first read.
-      const candidate = given === undefined ? initial : given;
-      const profileId = candidate ? await consentCheckedScoreProfile(ctx.tx, ws, candidate) : null;
-      let provider: Awaited<ReturnType<typeof decisionProvider>>;
-      try {
-        provider = await decisionProvider(ctx.tx, ctx.services.keyProvider, input.providerId);
-      } catch (err) {
-        return appError(err);
-      }
-      let state = input.state;
-      if (state === undefined) {
-        if (!profileId) throw new AppError('invalid_input', 'Give a state, or profileId to build a non-personal state from the person.');
-        state = await nonPersonalState(ctx.tx, ws, ctx.services.events, profileId).catch(appError);
-        if (!state) throw new AppError('not_found', `No profile ${input.profileId}.`);
-      }
-      return { profileId: profileId ?? null, result: { provider, state } };
-    });
-    const profileId = prepared.profileId ?? undefined;
-    const { provider, state } = prepared.result;
+    if (reference) {
+      const initial = await canonicalProfileId(ctx.tx, ws, reference);
+      if (!initial) refuseAi('ai.score', 'no_profile: the person does not exist (or was erased)');
+    }
+    let profileId: string | null = null;
+    let state = input.state;
+    if (state === undefined) {
+      if (!reference) throw new AppError('invalid_input', 'Give a state, or profileId to build a non-personal state from the person.');
+      // The gate, the state built from the person and a second gate read are one preparation: a
+      // merge can change the survivor's consent (or move the person) while the state is built, and
+      // the state from before that change must not be sent (#1300).
+      const built = await prepareForPerson<Record<string, unknown>>(ctx.tx, ws, reference, aiAllowed, async (personId) => {
+        const nonPersonal = await nonPersonalState(ctx.tx, ws, ctx.services.events, personId).catch(appError);
+        return nonPersonal ? { value: nonPersonal } : { refusal: 'no_profile: the person does not exist (or was erased)' };
+      });
+      if ('refusal' in built) refuseAi('ai.score', built.refusal);
+      profileId = built.profileId;
+      state = built.value;
+    } else if (reference) {
+      // Caller-supplied state: no person-derived read follows, so one gate read is enough.
+      profileId = await consentCheckedScoreProfile(ctx.tx, ws, reference);
+    }
+    let provider: Awaited<ReturnType<typeof decisionProvider>>;
+    try {
+      provider = await decisionProvider(ctx.tx, ctx.services.keyProvider, input.providerId);
+    } catch (err) {
+      return appError(err);
+    }
     // The call row names the person the score is for today, so an erasure and the audit trail agree.
     const callInput = profileId ? { ...input, profileId } : input;
     const callId = newId('aic');
@@ -359,6 +373,11 @@ export const profileScores = defineCommand({
   effect: 'read',
   auditReads: true,
   target: (i) => i.profileId,
+  // A replay must not answer with an erased person's scores (#1300).
+  replayCheck: async (replayInput, _replay, { tx, workspaceId }) => {
+    const person = await canonicalProfile(tx, workspaceId, replayInput.profileId);
+    if (!person) throw new AppError('not_found', `No profile ${replayInput.profileId}.`);
+  },
   handler: async (input, ctx) => {
     // Scores follow the person on a merge (#1144), so an old id must read the survivor's rows.
     const person = await canonicalProfile(ctx.tx, ctx.principal.workspaceId, input.profileId);

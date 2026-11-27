@@ -1,9 +1,10 @@
 import { canonicalProfileId, DEFAULT_PURPOSES, mergeComponentCtes, publishedSingleton } from '@agentic-marketing/artifacts';
-import { redact } from '@agentic-marketing/core';
+import { AppError, redact } from '@agentic-marketing/core';
 import { type ConsentStatus, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { consentStatusSql, personCrypto, purposeAllowed } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
+import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, sql } from 'drizzle-orm';
 
 // The context builder (agents-and-mcp.md §5): what a model may know about a person. Only
@@ -37,6 +38,21 @@ export interface PersonContext {
 export type AiConsent = { ok: true; profileId: string } | { ok: false; reason: string; profileId: string | null };
 
 export const NO_PROFILE = 'no_profile: the person does not exist (or was erased)';
+
+/**
+ * The one refusal a caller sees for a person who does not exist, was erased, or refused AI
+ * processing (#1300). The three cases must read the same: a caller holding only `profiles:write`
+ * must not be able to learn from the refusal whether a profile exists. The detailed reason stays in
+ * {@link AiConsent.reason}, for the log line behind it.
+ */
+export const AI_REFUSAL = 'This person’s data may not be processed with AI.';
+
+/** Logs the internal reason and throws the one public refusal. */
+export function refuseAi(command: string, reason: string): never {
+  // Never the person's id or any of their data: a reason names the purpose and the status only.
+  logger.info({ command, reason }, 'AI processing refused');
+  throw new AppError('forbidden', AI_REFUSAL);
+}
 
 /**
  * Whether the person's data may be processed by AI (the ai_processing purpose and its basis).
@@ -102,6 +118,45 @@ export async function prepareWithCanonicalProfile<T>(
     prepared = await prepare(current);
   }
   return prepared;
+}
+
+/** The result of {@link prepareForPerson}: person-dependent input, or why it must not be used. */
+export type PreparedForPerson<T> = { profileId: string; value: T } | { refusal: string };
+
+/**
+ * Reads the gate, builds the input only that person may see (`build`), then reads the gate once
+ * more before the value is used (#1300). A merge can change the surviving person's effective
+ * consent without changing their id, and can replace their traits and segment memberships; a build
+ * that straddles either change would otherwise be used under an answer that no longer holds. The
+ * value is discarded and rebuilt for the survivor when the person moved, and refused when the gate
+ * no longer allows it. Bounded like every other merge walk: a family that keeps merging past the
+ * bound is refused rather than looped over.
+ */
+export async function prepareForPerson<T>(
+  tx: Tx,
+  workspaceId: string,
+  reference: string,
+  gateFn: (tx: Tx, workspaceId: string, profileId: string) => Promise<AiConsent>,
+  build: (profileId: string) => Promise<{ value: T } | { refusal: string }>,
+  attempts = 3,
+): Promise<PreparedForPerson<T>> {
+  let personId = reference;
+  let gate = await gateFn(tx, workspaceId, personId);
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (!gate.ok) return { refusal: gate.reason };
+    personId = gate.profileId;
+    const built = await build(personId);
+    if ('refusal' in built) return { refusal: built.refusal };
+    // The same read the next attempt starts from: the gate after the build is also the gate before
+    // the next build, so a retry costs one statement rather than two.
+    gate = await gateFn(tx, workspaceId, personId);
+    if (!gate.ok) return { refusal: gate.reason };
+    if (gate.profileId === personId) return { profileId: personId, value: built.value };
+    // A merge committed under the build: what it read belongs to a profile that is no longer the
+    // person. Drop it and build again for the survivor.
+    personId = gate.profileId;
+  }
+  return { refusal: 'no_profile: the person could not be resolved to one profile' };
 }
 
 export async function personContext(

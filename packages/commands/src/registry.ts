@@ -223,6 +223,19 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   sensitive?: readonly string[];
   /** Top-level output fields shown once (e.g. an invitation token): an idempotent replay returns them redacted. */
   sensitiveOutput?: readonly string[];
+  /**
+   * A fixed text stored in the audit log and the agent ledger instead of the error's own message
+   * when this command fails. For a command whose failure can quote the person it was about (a
+   * provider echoing the request): the caller still gets its own error, but the long-lived stores
+   * keep only this diagnostic. The code is prefixed, e.g. `conflict: <failureText>`.
+   */
+  failureText?: string;
+  /**
+   * An idempotent replay of this command's stored answer concerns a person, so the person is
+   * re-checked before the answer is returned. Runs in the replay's transaction; throwing refuses
+   * the replay (e.g. once the person has been erased). A command without it replays as stored.
+   */
+  replayCheck?: (input: z.output<I>, output: z.output<O>, ctx: { tx: Tx; workspaceId: string }) => Promise<void>;
   /** Audit successful calls of a read command too (e.g. reads of personal data). Writes and all failures are always audited. */
   auditReads?: boolean;
   /**
@@ -515,13 +528,16 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const unknown = findUnknownInputKeys(cmd.input, input);
       const unknownMessages = unknownKeyMessages(cmd.name, unknown);
 
-      const fail = async (err: AppError): Promise<never> => {
+      const fail = async (err: AppError, stored?: AuditedError): Promise<never> => {
         // Every AppError leaving the executor is redacted first (#885): the message may have been
         // assembled from a provider body or an exception, and it is about to be returned to the
-        // caller and written to the audit log.
+        // caller and written to the audit log. `stored` is the fixed diagnostic a command with
+        // `failureText` records instead of that message (#1300).
         const safe = sanitizeAppError(err);
         // The main transaction rolled back; record the failed attempt in its own.
-        await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, safe));
+        await db.withWorkspace(principal.workspaceId, (tx) =>
+          appendAudit(tx, principal, opts.surface, cmd, inputHash, target, stored ?? safe),
+        );
         report('error');
         span.setStatus({ code: SpanStatusCode.ERROR, message: safe.code });
         span.end();
@@ -684,6 +700,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     // and the reads' targets are plain ids, so redaction never removes them.
                     target = cmd.auditTarget?.(replay) ?? target;
                     if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(replay);
+                    // The stored answer may be about a person who no longer allows it (or no longer
+                    // exists): check them again before it is handed back (#1300).
+                    if (cmd.replayCheck) await cmd.replayCheck(parsed.data, replay, { tx, workspaceId: principal.workspaceId });
                     return replay;
                   }
                 }
@@ -834,14 +853,16 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         // log. The original exception stays on the span for diagnostics (#838). An AppError's own
         // message is redacted before it is stored (#885): it may name a credential a provider echoed.
         const safe = err instanceof AppError ? sanitizeAppError(err) : null;
-        const failure = safe ? safe.message : UNEXPECTED_FAILURE.message;
+        // A command whose failure can quote the person it was about stores a fixed diagnostic, not
+        // the message (#1300). The caller's own copy of the error is unchanged.
+        const failure = safe ? (cmd.failureText ? `${safe.code}: ${cmd.failureText}` : safe.message) : UNEXPECTED_FAILURE.message;
         if (agent && outcome)
           await db
             .withWorkspace(principal.workspaceId, (tx) =>
               recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure, intentOf(parsed.data)),
             )
             .catch((e) => span.recordException(e as Error));
-        if (safe) return fail(safe);
+        if (safe) return fail(safe, cmd.failureText ? { code: safe.code, message: cmd.failureText } : undefined);
         // An unexpected exception is audited too (as a sanitized internal failure): a write that
         // failed must leave a trace whatever the cause. Its own transaction; the original text stays
         // on the span only.

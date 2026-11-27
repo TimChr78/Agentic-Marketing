@@ -324,6 +324,11 @@ export const getProfile = defineCommand({
   effect: 'read',
   auditReads: true,
   target: (i) => i.profileId,
+  // A replay must not answer with an erased person's profile (#1300).
+  replayCheck: async (input, _out, { tx, workspaceId }) => {
+    const person = await canonicalProfile(tx, workspaceId, input.profileId);
+    if (!person) throw new AppError('not_found', `No profile ${input.profileId}.`);
+  },
   handler: async (input, ctx) => profileOut(ctx, await canonical(ctx, input.profileId)),
 });
 
