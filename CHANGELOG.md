@@ -2,6 +2,162 @@
 
 All notable changes to Agentic Marketing. Versions follow [semantic versioning](https://semver.org); while the version is 0.x, minor versions may change the commands API, the configuration and the artifact formats, and the notes say how to move.
 
+## [0.17.8] - 2026-11-27
+
+### Added
+
+- The sign-in page, the OAuth sign-in page and the invitation page now offer **Sign in with SSO**, so
+  a person whose domain enforces single sign-on can sign in, authorize an MCP client and accept an
+  invitation without a password. The admin sign-in page also shows the server's explanation when a
+  password is refused for an SSO-enforced domain.
+
+### Changed
+
+- **Breaking for a non-bypass database role:** `DATABASE_URL` must be a `SUPERUSER` or have
+  `BYPASSRLS`. The server's admin pool reads sessions, API tokens and workspaces without
+  `app.workspace_id`, and every tenant table is `FORCE ROW LEVEL SECURITY`, so a role that owns the
+  tables without the bypass saw no rows and refused everyone. Startup now stops with a message
+  naming `ALTER ROLE … BYPASSRLS`, `am doctor` reports it as `postgres.admin-role`, and the
+  deployment docs state the requirement. The Compose `am` role is a superuser already.
+
+### Fixed
+
+- A backup's `pg_dump` now announces `application_name = am-backup` instead of `am-restore`, so a running backup no longer makes a restore wait for the drain bound and refuse with "a previous restore's work is still running". A restore that starts during a backup waits for it and says "a backup is still running", because replacing the database under a dump would leave the backup incomplete.
+- A new migration (0122) repeats the 0117, 0118 and 0119 stranded-row repairs for an install whose
+  migration role owns the tables without `BYPASSRLS`. Those files read `workspaces` under `FORCE
+  ROW LEVEL SECURITY`, found none, and were recorded as applied without repairing the list
+  memberships, ad-conversion keys or profile scores they exist for. The replay takes the workspace
+  identity lock in the same order live ingestion does, so it cannot deadlock with a running merge.
+  It runs the repairs for a `SUPERUSER` or `BYPASSRLS` migrator too: an install can run 0117–0119 as
+  a non-bypass owner and then grant `BYPASSRLS` before upgrading, and the stranded rows must still
+  be repaired. Such a migrator needs no `FORCE` lift, so no `ALTER TABLE` and no `ACCESS EXCLUSIVE`
+  lock on `workspaces`. Its ad-conversion repair treats a row as a duplicate only when it is the
+  same event and destination (0118 compared keys only, so two legacy events such as `msg` and
+  `purchase:msg` could delete one delivery) and stages the rewrites so overlapping keys move
+  without losing a row.
+- An erasure cleanup job that failed after its exclusion was published is now re-opened when the scheduler starts, with a fresh retry budget, so the recovery `am doctor` and the operations guide describe actually happens: fix Valkey or ClickHouse, restart the scheduler, and the purge and hot-state cleanup finish. A job re-opened after a long outage also gets a whole budget instead of landing back in `failed` after one attempt.
+- `am backup` refuses a `DATABASE_URL` role that is not `SUPERUSER` and does not have `BYPASSRLS`
+  before it starts the dump, naming the role and the `ALTER ROLE … BYPASSRLS` fix. `pg_dump` reads
+  with `row_security = off`, which PostgreSQL refuses on every `FORCE ROW LEVEL SECURITY` table even
+  for its owner. The per-workspace ClickHouse export still lifts FORCE for its own workspace-id and
+  key reads; `am migrate` and `am restore` still run as the table owner.
+- The post-restore key check and `am doctor`'s `secrets.master-key-live` read `data_keys` with
+  `FORCE ROW LEVEL SECURITY` lifted when `DATABASE_URL` is the table owner. A populated database is
+  no longer reported as "no data keys", so a restore with the wrong `MASTER_KEY` fails before the
+  app starts as it should. `am doctor` also bounds that read with `statement_timeout` and
+  `lock_timeout`, so a locked `data_keys` cannot keep the CLI alive.
+- The connections that hold the restore interlock now use TCP keepalive and answer a periodic liveness query, so a connection lost without a close is noticed: the server logs it and exits instead of serving without the lock, and `am restore`/`am migrate` take the same lock-loss path instead of waiting forever on a peer that is gone.
+- `am restore` now reports a cleanup job whose snapshot row was still unfinished as queued for another sweep, instead of counting it among the "completed job(s) restored without another sweep" it just re-opened.
+- The browser SDK no longer disagrees with the gateway about a tracking purpose published on a legitimate-interest or contract basis: the consent banner records it on "Accept all", offers it as an objectable choice (so a refusal is sent), and the SDK keeps sending events for it unless the visitor refused. A workspace whose web purposes are all on a non-consent basis now shows the banner and tracks, instead of sending nothing forever.
+- A ClickHouse request that fails while the event store is still finding out whether the server accepts its `SQL_workspace` setting no longer poisons every later read. Only the server's own "unknown setting" answer is remembered as "not accepted"; a dropped connection or a timeout fails that one request, and the next one asks again. Where row policies are required, a server that stops accepting the setting now fails the read instead of silently returning an empty workspace.
+- The subject-key backfill now reads only the granules after its cursor instead of the workspace's whole event table for every batch, so the one-off pass after upgrading no longer turns into a sustained full-table read on a large history.
+- The daily agent digest tracks each sponsor's own window. A sponsor who can never be mailed (a
+  removed member, or an address the provider refuses) no longer stops every other sponsor's
+  digest, and the ledger read behind an open window stays bounded. A digest sent by the previous
+  release is read at the time it was sent, so the next digest still goes out after an upgrade.
+- `am bootstrap` checks the `DATABASE_URL` role before creating the user, so a role that is subject
+  to `FORCE ROW LEVEL SECURITY` fails with the role and the `ALTER ROLE … BYPASSRLS` fix instead of
+  leaving a user behind with "new row violates row-level security policy for table workspaces".
+- The server's own connection pools announce their `application_name` even when `DATABASE_URL`
+  carries a `?application_name=`, so `am restore` sees a running app's connections and refuses to
+  replace the database under it.
+- SCIM `PUT /scim/v2/Users/{id}` that changes a user's e-mail to one another account already holds
+  answers 409 `uniqueness`, as create does, instead of a 500 that the identity provider retries;
+  two concurrent replaces that both saw the address free answer the same way.
+- A hold, ask or refusal e-mailed to an agent's sponsor is no longer held back by a recipient who
+  cannot be mailed. A person who is not a workspace member stops holding the notification cursor,
+  and the sweep reads only the decisions it announces, so a burst of drafts or allowed actions no
+  longer hides later holds.
+- A SCIM group up to the 50,000 members its schema allows is accepted. The body limit for
+  `/scim/v2` was 1 MB, which refused a large group (about 4 MB with the member display names
+  Okta and Entra ID send) with 413 before the request ran.
+- The delivery worker leases each message only when it starts sending it, and takes the next due
+  message without waiting behind one another connection has locked. With the default two workers,
+  a slow provider no longer turns the rest of a claimed batch into `failed` / `unknown_outcome`
+  messages that were never handed to a provider; those messages are sent.
+- The delivery worker chooses the workspaces that have mail it can send now, oldest work first,
+  and continues after the last one on the next round. A workspace holding only mail for a quiet
+  hour or a send window no longer takes a place in the round, so workspaces beyond the first 100
+  keep getting their mail.
+- A broadcast message suppressed because the next send window opens beyond its maximum delay is
+  recorded as a `suppressed` decision in the message log and in ClickHouse, so
+  `broadcasts.status` and `messages.stats` count it instead of showing it as still queued.
+- A transient event-store failure during a journey sweep no longer fails the participant on the first error: the step is retried with a short backoff and the participant is failed only when its retry budget is spent. A broken condition still fails at once.
+- Scores written by `ai.score` with `store` and by journey decision steps after a profile merge now land on the surviving profile, where `profiles.scores`, segments and journeys can read them.
+- A journey AI or decision step whose recent-event read fails is no longer answered as if the person had no history: the failure leaves the call for its next attempt instead of calling the model blind and billing it.
+- `ai.calls` paging uses a full-precision cursor with an id tie-breaker, so a page boundary inside a group of rows written at the same instant no longer drops the rest of the group. The existing `before` input is still accepted.
+- Journey step, split and goal events are queued in the same transaction as the participant state and published from the outbox with retries, so a failed ClickHouse write no longer loses split takes, conversions or funnel steps.
+- The journey sweep serves the workspaces whose people have been due longest instead of the first 100 in plan order, so a workspace with more than 100 due workspaces ahead of it no longer starves.
+- A `POST /v1/<kind>` whose JSON body is `null`, an array or a scalar is answered `400 invalid_json` like the edge worker, instead of an unauthenticated request causing a 500 and an unhandled-error log line.
+- The `audiences.add`, `audiences.remove` and `audiences.import` descriptions no longer claim a snapshot segment can be edited; they say a static segment is required and point at `audiences.refreshSnapshot`.
+- Single sign-on now keeps an invitation's role, resumes an MCP authorization request after signing
+  in instead of sending the client back to the sign-in page, and keeps an invitation token out of
+  the callback URL stored by the identity layer.
+- Workspace settings keep a field the person is editing when an approval refreshes the session; a
+  save submits only the fields that changed.
+- A Copilot turn that changes an artifact now refreshes cached reads of that artifact too.
+- Approving a workspace settings proposal now re-reads the session's workspace immediately. The
+  shell name, the display time zone and the Workspace form use the approved values, so a later
+  Workspace save no longer sends the old time zone and reverts the approval.
+- The Imports page sends a large CSV in batches sized by both row count and encoded bytes, refuses a single oversized row up front with its CSV line number, and keeps the people already imported when a later batch fails.
+- A finished Copilot turn now announces the artifacts it created, edited or requested for
+  publishing, so a new draft appears in every picker and in the Segments, Forms and Experiences
+  lists without a reload.
+- "Approve N selected" in the Approvals queue now drops the shared picker rows for every change it
+  publishes, as the review drawer does. A batch-approved artifact shows as live in pickers and can
+  be used by a snapshot without a reload.
+- The Enter that confirms a Japanese, Chinese or Korean input-method composition no longer sends
+  the half-composed Copilot message, opens a command palette result or adds an unconfirmed form
+  trait. Chrome, Firefox and Safari's composition ordering are all handled.
+- The Approvals queue follows the server's cursor with Load more, shows a bundle once in the Pending decision count, keeps its loaded pages across the review drawer, and discards pages that arrive after a reload or tab switch.
+- AI usage can filter the decision log by the score kind the server already records.
+- Approvers can send a template test to their own address from the Template page, as they already could from the review drawer.
+- A failed consent-summary read shows an error with Retry and marks the counts unknown, instead of claiming that no choices were recorded.
+- Approvals, Hosted pages and Alerts show a failed read with Retry instead of the empty state, so an error no longer reads as "nothing pending" or "not set up".
+- AI decision-log rows open from the keyboard through a View detail button, instead of mouse clicks only.
+- AI usage and Messages name kinds, statuses, channels and event types in words instead of printing raw API keys, and translate known delivery reason codes while keeping their recovery guidance.
+- Erasing a person who has no e-mail address asks for their profile id to confirm, not the "No email available" placeholder.
+- The Topics page shows the backlog's real server-side total and follows a keyset cursor with Load more, so archiving between pages never skips or repeats a topic and one page is no longer presented as the whole backlog.
+- Segment previews and approval consequence summaries read topic and score conditions as sentences instead of raw JSON, naming topics from the purposes artifact rather than printing their keys.
+- The segment preview labels a message-rule size as live data with the refresh caveat, and names a snapshot's source segment and captured version without borrowing the source's live version or printing its id.
+- The journey report header says its counts describe the published version alone, matching what the numbers below it measure.
+- Approving a brand change refreshes the session's workspace, so the navigation rail shows the new
+  site name, logo and primary domain at once instead of keeping the previous brand until a reload.
+  Both the review drawer and the batch approve action do it.
+- `am doctor --env-file - < .env` no longer lets a piped `.env` replace the values Compose sets in the container. The template's development `DATABASE_URL` (`localhost:5432`) and the other Compose-supplied keys are ignored when the process already has them, so the documented pre-upgrade check reports the real database instead of failing with "Postgres is unreachable".
+- `scripts/preflight.sh` now derives the Playwright image tag from the pinned `@playwright/test` version, like `scripts/e2e-docker.sh` and CI, so a dependency bump no longer leaves the disk and port checks pointing at the previous image. `E2E_IMAGE` overrides it for a deliberate pin.
+- A `waitUntil` entered after a goal or `waitEvent` starts its own window instead of inheriting the previous goal's deadline, and every transition out of a waiting node carries only its own deadline.
+- A resolved `waitUntil` keeps its edge across a transient retry: a matched condition cannot turn into the timeout edge because a downstream read failed.
+- `ai.score` resolves the person before preparation in one statement and re-resolves once when the AI-consent lookup refuses, so a merge that commits between the first profile read and the consent read no longer produces a false `no_lawful_basis`.
+- The profile lock before a score write resolves the chain and checks `merged_into` in one statement, so a merge between the old two reads can no longer drop a score.
+- A participant's savepoint opens before its graph and consent reads, so one person's failed PostgreSQL read is retried instead of rolling back the whole workspace's sweep round.
+- The per-sponsor digest window is found again on a database whose collation is locale-aware
+  (glibc `en_US.utf8`, ICU): the lookup's key range ended on U+FFFF, which such a collation gives no
+  weight, so it matched nothing and a digest that failed for one sponsor was never retried.
+- Approvals keeps its loaded pages only for the signed-in person and workspace: a decision clears every status tab's pages, a request that moved between queues is shown once, and signing out or switching workspace forgets them.
+- Topics discards a Load more page that arrives after creating or archiving reset the list, so no topic appears twice or disappears.
+- Previews reread topic names after a workspace switch, so a condition never shows another workspace's topic name.
+- A segment review counts as viewed as soon as its rule is on screen: the live audience estimate no longer keeps the row on “Not yet viewed” when a reviewer closes the drawer before the count arrives.
+- A segment review counts as viewed as soon as its rule is on screen: the live audience estimate no longer keeps the row on “Not yet viewed” when a reviewer closes the drawer before the count arrives.
+
+### Security
+
+- `am rotate-keys` refuses a `DATABASE_URL` role that cannot see every data key instead of printing
+  "re-wrapped 0 data key(s)" and telling the operator to remove `MASTER_KEY_PREVIOUS` while every
+  key is still wrapped under it. The refusal names the role and the `ALTER ROLE … BYPASSRLS` fix.
+- An ingest-only pod no longer mounts the MCP endpoint, Better Auth's `/api/auth/*` routes, the sign-in, consent and invitation pages or the OAuth discovery documents. Like REST, SCIM and the copilot, they belong to the `api` role, so anything that reaches an ingest Service outside the chart's Ingress rules cannot run commands or sign people in there.
+- A brand hostname that is registered but not yet verified now serves only its verification challenge and the public paths. The admin UI, auth, MCP, SCIM, OpenAPI and admin REST answer 404 on it, just as they do once the hostname is verified, so a hostname waiting in `ingress.extraHosts` never exposes the admin surface.
+
+### Upgrading from 0.17.7
+
+- **Migrations:** `packages/db/migrations/0121_journey_participant_attempts.sql`, `packages/db/migrations/0122_replay_owner_repairs.sql`.
+- **Configuration:** no new environment variables.
+- **Breaking changes:** `DATABASE_URL` must be a `SUPERUSER` or have `BYPASSRLS` (the server refuses to start otherwise, and `am backup`, `am bootstrap` and `am rotate-keys` refuse such a role); an ingest-only pod no longer serves `/mcp`, the sign-in and consent pages, the OAuth discovery documents or the admin UI; a brand hostname that is registered but not yet verified serves only its verification challenge and the public pages.
+- **Manual steps:** Compose needs none (its `am` role is a superuser). With Helm or a managed PostgreSQL, run `am doctor` with the new version before upgrading; if `postgres.admin-role` fails, run `ALTER ROLE <role> BYPASSRLS` as a superuser for the `DATABASE_URL` role. Migrations 0121 and 0122 run automatically.
+- **Upgrade:** download `agentic-marketing-compose-0.17.8.tar.gz`, replace `docker-compose.yml` with its copy, check configuration with `AM_VERSION=0.17.8 docker compose run --rm --no-deps -T app am doctor --env-file - < .env`, set `AM_VERSION=0.17.8` in `.env`, then `docker compose pull && docker compose up -d` (Helm: chart 0.17.8). Run `docker compose exec app am doctor`.
+
+<!-- issues: 1214, 1218, 1219, 1220, 1221, 1222, 1223, 1224, 1225, 1226, 1227, 1228, 1229, 1230, 1231, 1232, 1233, 1234, 1235, 1236, 1237, 1238, 1239, 1240, 1241, 1242, 1243, 1244, 1245, 1246, 1247, 1248, 1249, 1250, 1251, 1252, 1253, 1254, 1255, 1256, 1257, 1258, 1259, 1260, 1261, 1262, 1263, 1264, 1265, 1266, 1267, 1268, 1269, 1272, 1273, 1277 -->
+
 ## [0.17.7] - 2026-11-23
 
 ### Fixed
