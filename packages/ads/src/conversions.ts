@@ -107,7 +107,9 @@ export function conversionHook(deps: { db: Db }) {
         const signal = consentOf(e.context);
         const ledger = await latestStatus(tx, workspaceId, canonicalId, 'ad_measurement');
         if (!purposeHolds(purposes, 'ad_measurement', signal?.ad_measurement, ledger?.status)) continue;
-        const page = e.context.page as { url?: string } | undefined;
+        const page = e.context.page as { url?: unknown } | undefined;
+        // A legacy record can carry a page URL of the wrong type; only a string is forwarded.
+        const sourceUrl = typeof page?.url === 'string' ? page.url : undefined;
         for (const r of rules) {
           const rawValue = r.value ? Number(get(e.properties, r.value)) : undefined;
           const currency =
@@ -118,7 +120,7 @@ export function conversionHook(deps: { db: Db }) {
             at: e.timestamp,
             ...(rawValue !== undefined && Number.isFinite(rawValue) ? { value: rawValue } : {}),
             ...(currency && /^[A-Z]{3}$/.test(currency) ? { currency } : {}),
-            ...(page?.url ? { sourceUrl: page.url } : {}),
+            ...(sourceUrl ? { sourceUrl } : {}),
             ...(typeof e.context.userAgent === 'string' ? { userAgent: e.context.userAgent } : {}),
             profileId: canonicalId,
             adTargeting: signal?.ad_targeting,

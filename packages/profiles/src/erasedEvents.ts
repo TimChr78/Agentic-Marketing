@@ -83,8 +83,10 @@ export function erasedEventFilter(opts: { db: Db; kp: KeyProvider; graceHours?: 
             const identifiers: Identifier[] = [];
             if (e.anonymousId) identifiers.push(await identifierOf('anonymous_id', e.anonymousId));
             if (e.userId) identifiers.push(await identifierOf('user_id', e.userId));
+            // An older queued record can lack the PII-traits map; it then names no e-mail or phone.
+            const traits = e.piiTraits && typeof e.piiTraits === 'object' ? (e.piiTraits as Record<string, unknown>) : {};
             for (const type of ['email', 'phone'] as const) {
-              const value = e.piiTraits[type];
+              const value = traits[type];
               if (typeof value === 'string' && value.trim()) identifiers.push(await identifierOf(type, value));
             }
             return identifiers;

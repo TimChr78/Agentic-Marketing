@@ -25,8 +25,9 @@ Rule: **Postgres and ClickHouse are sources of truth; Valkey is always rebuildab
   2. Validate against the **tracking plan** (optional strictness: `allow`, `warn`, `block` unknown events/properties).
   3. **Consent filter:** event carries consent state from the SDK/CMP; events for purposes the visitor has not allowed are dropped or reduced to strictly-necessary.
   4. **PII handling:** top-level event properties marked PII in the tracking plan, and reserved personal property names (`email`, `phone`, `name`, `address`, …), are removed before the event is stored — with or without a published plan. Arbitrary free text and nested objects cannot be detected this way; keep personal data out of event properties. IPs are truncated/geolocated then discarded by default.
-  5. Update **session state & real-time counters** in Valkey (so the decision API sees the event immediately).
-  6. Publish to NATS JetStream subject `events.<workspace>.<type>` and ack.
+  5. **Context shapes:** `context` is kept as the sender wrote it, except for the click-id fields the event store reads: a `context.page` that is not an object, a `page.url`/`page.search` that is not a string, and a `context.clickIds` that is not an object are removed, with a warning in the ingest response. The event itself is kept, so a server-side integration that sends a numeric page URL still records the event; it simply carries no click ids, exactly as if it had sent none. A page that survives with a valid query string still supplies its click ids from `page.url`/`page.search`, so a removed array is not a reason to drop the id the page names. A `context.ip` that is not a string is likewise treated as absent, and the request's own address is used.
+  6. Update **session state & real-time counters** in Valkey (so the decision API sees the event immediately).
+  7. Publish to NATS JetStream subject `events.<workspace>.<type>` and ack.
 - **Async (workers):** bot filtering, geo/UA enrichment, ClickHouse sink (batched inserts ~1 s / 10k rows), identity & profile updates, segment & journey evaluation.
 - **Other sources:** CSV/API bulk import, connector-based sources (Shopify, CRM), provider webhooks (bounces, opens, clicks) — all normalized into the same event shape and bus.
 

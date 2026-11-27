@@ -9,6 +9,9 @@ export type ClickIds = Partial<Record<ClickIdType, string>>;
 
 const VALUE = /^[A-Za-z0-9._~-]{4,500}$/;
 
+/** A JSON object, not an array or null: what `context.clickIds` and `context.page` must be. */
+const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+
 /**
  * Click ids from landing-page parameters (gclid, gbraid, wbraid, fbclid, msclkid, li_fat_id, ttclid,
  * epik) or already named ones (fbc, fbp, ttp, as the platforms' cookies hold them). `fbclid` becomes
@@ -22,11 +25,19 @@ export function clickIdsFrom(params: Record<string, unknown>, seenAt = Date.now(
   return out;
 }
 
-/** Click ids an event carries: `context.clickIds`, or the landing page's query string. */
-export function clickIdsOfEvent(context: Record<string, unknown>, seenAt: number): ClickIds {
-  const explicit = context.clickIds;
-  if (explicit && typeof explicit === 'object') return clickIdsFrom(explicit as Record<string, unknown>, seenAt);
-  const page = context.page as { url?: string; search?: string } | undefined;
-  const search = page?.search ?? (page?.url?.includes('?') ? page.url.slice(page.url.indexOf('?')) : '');
+/**
+ * Click ids an event carries: `context.clickIds`, or the landing page's query string. `context` is
+ * client-supplied JSON, validated as a record of unknown values, so every field is checked for its
+ * type: a value of the wrong shape reads as "no click id" instead of throwing, because the sink,
+ * the subject-key backfill and the ads hook all read click ids on write. Ingest removes a
+ * `clickIds` that is not an object of ids, so the page's own parameters still supply them here.
+ */
+export function clickIdsOfEvent(context: unknown, seenAt: number): ClickIds {
+  const fields = isRecord(context) ? context : {};
+  const explicit = fields.clickIds;
+  if (isRecord(explicit)) return clickIdsFrom(explicit, seenAt);
+  const page = isRecord(fields.page) ? fields.page : undefined;
+  const url = typeof page?.url === 'string' ? page.url : undefined;
+  const search = typeof page?.search === 'string' ? page.search : url?.includes('?') ? url.slice(url.indexOf('?')) : '';
   return search ? clickIdsFrom(Object.fromEntries(new URLSearchParams(search)), seenAt) : {};
 }

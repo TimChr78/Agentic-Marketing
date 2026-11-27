@@ -438,6 +438,69 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
     expect((await rs.json<{ key1: string }>()).map((row) => row.key1)).toEqual(['Aardvark', 'Zulu']);
   }, 60_000);
 
+  it('continues a pass past a historical row whose context cannot be read, to the next workspace', async () => {
+    const poisonedWs = newUuid();
+    const nextWs = newUuid();
+    const legacy = (workspaceId: string, name: string, context: Record<string, unknown>) => ({
+      workspace_id: workspaceId,
+      event_id: `legacy-${name}`,
+      source_id: 'src_legacy_context',
+      received_at: '2026-08-05 12:00:00',
+      timestamp: '2026-08-05 12:00:00',
+      type: 'track',
+      name,
+      anonymous_id: `legacy-anon-${name}`,
+      user_id: '',
+      profile_id: `prf-legacy-${name}`,
+      properties: {},
+      traits: {},
+      context,
+      consent: {},
+    });
+    await store.client.insert({
+      table: 'events',
+      values: [
+        legacy(poisonedWs, 'Poisoned', { page: { url: 5 } }),
+        legacy(nextWs, 'Next Workspace', { page: { url: 'https://shop.test/landing?gclid=abc123' } }),
+      ],
+      format: 'JSONEachRow',
+    });
+
+    let step = await store.backfillSubjectKeys({ workspaceIds: [poisonedWs, nextWs], batchSize: 10 });
+    for (let i = 0; i < 3 && !step.done; i++) step = await store.backfillSubjectKeys({ workspaceIds: [poisonedWs, nextWs], batchSize: 10 });
+    expect(step.done).toBe(true);
+    expect(await store.subjectKeyCoverage([poisonedWs, nextWs])).toMatchObject({ pending: 0 });
+
+    // The unreadable context costs that row its click ids only; the ids it stores are still keyed,
+    // and the workspace listed after it is reached.
+    const sideRow = async (workspaceId: string) => {
+      const rs = await store.client.query({
+        query: `SELECT key1, subject_profile, subject_anonymous, subject_gclid
+                FROM subject_key_backfill FINAL WHERE workspace_id = {ws:UUID} AND table_name = 'events'`,
+        query_params: { ws: workspaceId },
+        format: 'JSONEachRow',
+        clickhouse_settings: await store.settingsFor(workspaceId),
+      });
+      return await rs.json<Record<string, string>>();
+    };
+    expect(await sideRow(nextWs)).toEqual([
+      {
+        key1: 'Next Workspace',
+        subject_profile: hmac('profile', 'prf-legacy-Next Workspace'),
+        subject_anonymous: hmac('anonymous_id', 'legacy-anon-Next Workspace'),
+        subject_gclid: hmac('gclid', 'abc123'),
+      },
+    ]);
+    expect(await sideRow(poisonedWs)).toEqual([
+      {
+        key1: 'Poisoned',
+        subject_profile: hmac('profile', 'prf-legacy-Poisoned'),
+        subject_anonymous: hmac('anonymous_id', 'legacy-anon-Poisoned'),
+        subject_gclid: '',
+      },
+    ]);
+  }, 60_000);
+
   it('fails the write when the exclusion key cannot be resolved, and counts the failure', async () => {
     const before = subjectKeyFailureCount();
     const broken = clickHouseStore({

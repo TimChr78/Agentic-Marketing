@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import type {} from '@agentic-marketing/commands';
+import { logger } from '@agentic-marketing/telemetry';
 import { type ClickHouseClient, createClient, TupleParam } from '@clickhouse/client';
 import { messageEventsWithPending } from './pending';
 import { personReadSource } from './protected';
@@ -66,7 +67,11 @@ export interface JourneySplitArm {
 }
 
 export interface EventStore {
-  insert(events: BusEvent[]): Promise<void>;
+  /**
+   * Stores the readable events of a batch and returns how many rows it wrote. A record the store
+   * itself cannot turn into a row is dropped and logged, not counted as stored.
+   */
+  insert(events: BusEvent[]): Promise<number>;
   /**
    * Events of a person, by every anonymous id and user id they are known by. Newest first.
    * Pages with the full replacing key `(timestamp, name, anonymous_id, event_id)`. A cursor
@@ -1168,23 +1173,48 @@ export function clickHouseStore(opts: {
     settingsFor,
     hasErasures: protectedReadFor,
     async insert(events) {
-      if (!events.length) return;
+      if (!events.length) return 0;
       // Hashes are computed before the insert, while the event's PII traits and click ids are
       // still in memory. A key failure throws, so the sink redelivers instead of storing a row
-      // marked complete with missing keys.
+      // marked complete with missing keys. An event whose own fields cannot be read is dropped and
+      // logged instead: re-delivering it cannot make it readable, and failing the whole batch would
+      // hold back every other workspace's events until the stream's max age drops it. Only the
+      // workspace and event id are logged, never the payload.
+      const correlation = (event: BusEvent) => ({
+        workspaceId: typeof event?.workspaceId === 'string' ? event.workspaceId : undefined,
+        eventId: typeof event?.messageId === 'string' ? event.messageId : undefined,
+      });
+      const readable: { event: BusEvent; workspaceId: string; sources: [SubjectKeyKind, string][] }[] = [];
+      for (const event of events) {
+        try {
+          readable.push({ event, workspaceId: event.workspaceId, sources: eventSubjectSources(event) });
+        } catch (err) {
+          logger.error({ err, ...correlation(event) }, 'event dropped from the sink batch: its payload could not be read');
+        }
+      }
       let subject: (SubjectKeyHashes | null)[];
       try {
-        subject = await subjectHashesFor(events, opts.subjectKeys, eventSubjectSources);
+        subject = await subjectHashesFor(readable, opts.subjectKeys, (row) => row.sources);
       } catch (err) {
         noteSubjectKeyFailure();
         throw err;
       }
+      const rows: Record<string, unknown>[] = [];
+      for (const [index, row] of readable.entries()) {
+        try {
+          rows.push(toRow(row.event, subject[index] ?? null));
+        } catch (err) {
+          logger.error({ err, ...correlation(row.event) }, 'event dropped from the sink batch: its payload could not be read');
+        }
+      }
+      if (!rows.length) return 0;
       await client.insert({
         table: 'events',
-        values: events.map((event, index) => toRow(event, subject[index] ?? null)),
+        values: rows,
         format: 'JSONEachRow',
         clickhouse_settings: SYNC_INSERT,
       });
+      return rows.length;
     },
     async eventsOf(workspaceId, ids, o = {}) {
       if (!ids.anonymousIds.length && !ids.userIds.length) return [];
@@ -1751,9 +1781,19 @@ export function clickHouseStore(opts: {
                   if (typeof value === 'string' && value) hashes[source.kind] = await hasher.hash(source.kind, value);
                 }
                 if (spec.clickIds) {
-                  const context = (row.context ?? {}) as Record<string, unknown>;
-                  for (const [kind, value] of eventClickIds(context, String(row.timestamp ?? '')))
-                    hashes[kind] = await hasher.hash(kind, value);
+                  // A historical row whose own context cannot be read loses its click-id keys only:
+                  // the ids its columns store are still hashed below, and the pass reaches the rows
+                  // and workspaces after it instead of failing on this one on every retry.
+                  let clickIds: [SubjectKeyKind, string][] = [];
+                  try {
+                    clickIds = eventClickIds((row.context ?? {}) as Record<string, unknown>, String(row.timestamp ?? ''));
+                  } catch (err) {
+                    logger.error(
+                      { err, workspaceId, table: spec.table },
+                      'historical row click ids could not be read; recording the row without them',
+                    );
+                  }
+                  for (const [kind, value] of clickIds) hashes[kind] = await hasher.hash(kind, value);
                 }
                 const out: Record<string, unknown> = {
                   workspace_id: workspaceId,

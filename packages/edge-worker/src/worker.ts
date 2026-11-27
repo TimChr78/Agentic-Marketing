@@ -7,7 +7,7 @@ import {
   purposeOk,
   writeKeyHash,
 } from '@agentic-marketing/personalize/core';
-import { type DecideContext, deviceOf } from '@agentic-marketing/personalize/targeting';
+import { type DecideContext, deviceOf, userAgentOf } from '@agentic-marketing/personalize/targeting';
 
 // The decision API at the edge: the same POST /v1/decide contract as the server, answered by a
 // Cloudflare Worker from Workers KV, which the scheduler keeps in sync (edge.configure). Deploy
@@ -155,7 +155,7 @@ export async function decide(req: Request, env: Env): Promise<Response> {
     session: null,
     page,
     utmSource,
-    device: deviceOf((context?.userAgent as string | undefined) ?? req.headers.get('user-agent') ?? undefined),
+    device: deviceOf(userAgentOf(context, req.headers.get('user-agent') ?? undefined)),
   };
   const stableId = snapshot?.profileId ?? userId ?? anonymousId ?? '';
   const decisions: Decision[] = decideAll(wanted, placements, ctx, stableId, preview);

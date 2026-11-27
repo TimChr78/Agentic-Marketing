@@ -1,3 +1,4 @@
+import type { Db } from '@agentic-marketing/db';
 import {
   type BusEvent,
   CLICKHOUSE_SINK_CONSUMER,
@@ -274,5 +275,39 @@ describe('erasure and the ClickHouse sink (#978)', () => {
     });
     expect(await t.srv.events.journeyCounts(ws, journeyId)).toEqual([]);
     expect(await baseRows()).toEqual([]);
+  }, 60_000);
+
+  it('stores the readable events of a batch that also carries an older record without PII traits', async () => {
+    const api = t.api(owner);
+    const profileId = await identify(api, 'older-a', 'older@example.com');
+    await api.call('profiles.erase', { profileId, reason: 'Older queued record test' });
+    // The workspace now has an erasure tombstone, so the sink's filter reads every event of the
+    // batch. An older queued record without its PII-traits map must not fail that read.
+    const older = { ...busEvent('older-unrelated', 'older-1') } as Record<string, unknown>;
+    delete older.piiTraits;
+    const good = busEvent('older-good', 'older-2');
+
+    await runSink(sinkBus([[older as unknown as BusEvent, good]]), t.srv.events, new AbortController().signal, { filter });
+
+    expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['older-good'], userIds: [] })).toHaveLength(1);
+    expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['older-unrelated'], userIds: [] })).toEqual([]);
+  }, 60_000);
+
+  it('retries the batch when the erasure filter cannot reach its dependency', async () => {
+    // A database failure is not a bad record: the batch must be delivered again, not stored short.
+    const broken = erasedEventFilter({
+      db: {
+        admin: {
+          query: async () => {
+            throw new Error('database unavailable');
+          },
+        },
+      } as unknown as Db,
+      kp: t.srv.keyProvider,
+    });
+    await expect(
+      runSink(sinkBus([[busEvent('retry-a', 'retry-1')]]), t.srv.events, new AbortController().signal, { filter: broken }),
+    ).rejects.toThrow('database unavailable');
+    expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['retry-a'], userIds: [] })).toEqual([]);
   }, 60_000);
 });
