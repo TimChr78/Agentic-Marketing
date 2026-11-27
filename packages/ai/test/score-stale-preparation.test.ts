@@ -15,18 +15,27 @@ import { consentCheckedScoreProfile } from '../src/score';
 
 describe('the score lock resolves and locks through one canonical lookup (#1269 review)', () => {
   it('follows the survivor when a merge lands between the canonical read and the lock', async () => {
-    // The fake answers as a database would when a merge commits between the two statements of the
-    // old lookup: the walk still names the merged root, and the follow-up read rejects it.
+    // The fake answers each statement as the database would while a merge commits between the
+    // lookup and the lock: the first lock finds the root already merged and locks nothing, so the
+    // helper must resolve again and lock the survivor (#1283 re-check).
+    const answers = [
+      { rows: [{ origin: 'prf_alias', id: 'prf_root', merged_into: null }] }, // canonical lookup
+      { rows: [] }, // lock prf_root: merged meanwhile, nothing locked
+      { rows: [{ origin: 'prf_root', id: 'prf_survivor', merged_into: null }] }, // lookup again
+      { rows: [{ id: 'prf_survivor' }] }, // lock the survivor
+    ];
+    let calls = 0;
     const tx = {
-      execute: async () => ({ rows: [{ origin: 'prf_alias', id: 'prf_survivor', merged_into: null }] }),
-      select: () => ({
-        from: () => ({
-          where: async () => [{ id: 'prf_merged_root', mergedInto: 'prf_survivor' }],
-        }),
-      }),
+      execute: async () => {
+        const answer = answers[calls];
+        calls += 1;
+        if (!answer) throw new Error(`unexpected statement ${calls}`);
+        return answer;
+      },
     } as unknown as Tx;
 
     await expect(lockCanonicalProfile(tx, 'ws_test', 'prf_alias')).resolves.toBe('prf_survivor');
+    expect(calls).toBe(4);
   });
 });
 
