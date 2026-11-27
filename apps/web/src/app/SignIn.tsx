@@ -15,9 +15,12 @@ export function SignIn({ onDone }: { onDone: () => void }) {
 
   // The password endpoint refuses an enforced domain with the server's own message; show that
   // explanation instead of claiming the password was wrong (#1248).
+  // Only the enforced-domain refusal is shown verbatim: it names the method that works (#1248).
+  // Any other server text ("Invalid credentials") stays out of ordinary copy.
   const serverReason = async (r: Response, fallback: string) => {
     const body = await r.json().catch(() => null);
-    return typeof body?.message === 'string' && body.message ? body.message : fallback;
+    const message = typeof body?.message === 'string' ? body.message : '';
+    return /signs in with single sign-on/i.test(message) ? message : fallback;
   };
 
   const startSso = async () => {

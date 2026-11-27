@@ -42,7 +42,7 @@ test.describe('shared states', () => {
     await page.goto('/');
     await page.getByLabel('E-mail', { exact: true }).fill('sam@example.com');
     await page.getByLabel('Password', { exact: true }).fill('wrong-password');
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByRole('alert')).toContainText('Couldn’t sign in. Check your e-mail and password, then try again.');
     await expect(page.getByLabel('E-mail', { exact: true })).toHaveValue('sam@example.com');
     // The raw server exception never reaches ordinary copy.
@@ -61,7 +61,7 @@ test.describe('shared states', () => {
     await page.goto('/');
     await page.getByLabel('E-mail', { exact: true }).fill('sam@example.com');
     await page.getByLabel('Password', { exact: true }).fill('anything');
-    const button = page.getByRole('button', { name: 'Sign in' });
+    const button = page.getByRole('button', { name: 'Sign in', exact: true });
     await button.click();
     await expect(button).toHaveAttribute('aria-busy', 'true');
     await expect(button).toContainText('Sign in');
