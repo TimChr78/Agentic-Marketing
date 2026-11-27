@@ -29,13 +29,36 @@ export interface PersonContext {
   trigger?: { name: string; properties: Record<string, unknown> };
 }
 
-/** Whether the person's data may be processed by AI (the ai_processing purpose and its basis). */
-export async function aiAllowed(tx: Tx, workspaceId: string, profileId: string): Promise<{ ok: boolean; reason?: string }> {
+/** The gate's answer: allowed for the person `profileId` names today, or why not. */
+export type AiConsent = { ok: true; profileId: string } | { ok: false; reason: string };
+
+const NO_PROFILE = 'no_profile: the person does not exist (or was erased)';
+
+/**
+ * Whether the person's data may be processed by AI (the ai_processing purpose and its basis).
+ *
+ * A merge deletes the merged-away profile's consent_state rows, so an id a caller holds from
+ * before the merge reads "no record": allowed on a legitimate-interest purpose even when the
+ * person objected, and refused on a consent basis even when they granted. Answer for the person
+ * the id names today, and return that canonical id so the gate and the work it allows use the
+ * same profile.
+ */
+export async function aiAllowed(tx: Tx, workspaceId: string, profileId: string): Promise<AiConsent> {
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const p = purposes.find((x) => x.key === AI_PURPOSE);
   if (!p) return { ok: false, reason: `no_lawful_basis: the ${AI_PURPOSE} purpose is not configured` };
-  const state = currentConsent(await consentStateOf(tx, workspaceId, profileId), AI_PURPOSE);
-  if (purposeAllowed(p.basis, state?.status)) return { ok: true };
+  let canonical = await canonicalProfileId(tx, workspaceId, profileId);
+  if (!canonical) return { ok: false, reason: NO_PROFILE };
+  let state = currentConsent(await consentStateOf(tx, workspaceId, canonical), AI_PURPOSE);
+  // A merge can also commit between that read of the person and the consent read, which moves the
+  // consent rows to the survivor: re-resolve once and answer for the id's person then (#1269).
+  const moved = await canonicalProfileId(tx, workspaceId, canonical);
+  if (!moved) return { ok: false, reason: NO_PROFILE };
+  if (moved !== canonical) {
+    canonical = moved;
+    state = currentConsent(await consentStateOf(tx, workspaceId, canonical), AI_PURPOSE);
+  }
+  if (purposeAllowed(p.basis, state?.status)) return { ok: true, profileId: canonical };
   return {
     ok: false,
     reason: `no_lawful_basis: ${AI_PURPOSE} is based on ${p.basis.replace('_', ' ')} and the person's status is ${state?.status ?? 'unknown (no record)'}`,

@@ -95,12 +95,16 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
     .where(eq(schema.journeyParticipants.id, c.participantId ?? 0));
   if (part?.status !== 'waiting' || part.node !== c.node || part.seq !== c.seq)
     return { ...base, fallback: 'too_late: the step was no longer waiting' };
+  // The call row keeps the id it was queued with for the audit trail, but a merge may have folded
+  // that person into another profile since. The gate answers for the person the id names today and
+  // returns it, so consent, context and the segment cache all read the same profile (#1281).
   const consent = await aiAllowed(tx, c.workspaceId, c.profileId ?? '');
   if (!consent.ok) return { ...base, fallback: consent.reason };
+  const personId = consent.profileId;
   try {
     const model = await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress);
     if (p.def.kind === 'generate' && p.def.cache) {
-      const { key, names } = await segmentKey(tx, c.profileId ?? '', p.def.cache.segments);
+      const { key, names } = await segmentKey(tx, personId, p.def.cache.segments);
       const [hit] = await tx
         .select({ slots: schema.aiTextCache.slots })
         .from(schema.aiTextCache)
@@ -115,7 +119,7 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
       return { ...base, model, person: { segments: names }, cache: { key, slots: hit?.slots } };
     }
     const trigger = (c.input as { trigger?: { name: string; properties: Record<string, unknown> } | null }).trigger ?? undefined;
-    const person = await personContext(tx, c.workspaceId, deps.kp, deps.events, c.profileId ?? '', trigger);
+    const person = await personContext(tx, c.workspaceId, deps.kp, deps.events, personId, trigger);
     if (!person) return { ...base, fallback: 'no_profile: the person does not exist (or was erased)' };
     return { ...base, model, person: person as unknown as Record<string, unknown> };
   } catch (err) {
@@ -630,7 +634,7 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
     if (p?.def.kind !== 'classify') return { error: 'no_prompt: the classify prompt version is gone' };
     if (c.profileId) {
       const consent = await aiAllowed(tx, c.workspaceId, c.profileId);
-      if (!consent.ok) return { error: consent.reason ?? 'no_lawful_basis' };
+      if (!consent.ok) return { error: consent.reason };
     }
     try {
       return { def: p.def, model: await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress) };
@@ -741,31 +745,23 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
   const questions = parsed.data as DecisionQuestion[];
   const scoreKey = typeof raw.scoreKey === 'string' ? raw.scoreKey : questions[0].key;
   const prepared = await db.withWorkspace(c.workspaceId, async (tx) => {
-    // A decision queued before a merge keeps the old profile id. Resolve the person today before
-    // the consent check and the context, or a survivor's consent is missed and the step falls back
-    // with no_lawful_basis (#1241 review). A merge that commits during the preparation is caught by
+    // A decision queued before a merge keeps the old profile id. The gate resolves it to the
+    // person today before the consent check, and the id it returns is the one the context and the
+    // stored score use (#1241 review). A merge that commits during the preparation is caught by
     // re-resolving afterwards and preparing again (#1269 review).
     return prepareWithCanonicalProfile<{ error: string } | { provider: DecisionProvider; state: unknown; profileId: string }>(
       tx,
       c.workspaceId,
       c.profileId ?? null,
       async (given) => {
-        let profileId: string | null;
-        if (given === undefined) {
-          profileId = null;
-          if (c.profileId) {
-            const person = await canonicalProfile(tx, c.workspaceId, c.profileId);
-            if (!person) return { profileId: null, result: { error: 'no_profile: the person does not exist (or was erased)' } };
-            profileId = person.id;
-          }
-        } else if (given === null) {
+        const reference = given === undefined ? (c.profileId ?? null) : given;
+        if (given !== undefined && reference === null)
           return { profileId: null, result: { error: 'no_profile: the person does not exist (or was erased)' } };
-        } else {
-          profileId = given;
-        }
-        if (profileId) {
-          const consent = await aiAllowed(tx, c.workspaceId, profileId);
-          if (!consent.ok) return { profileId, result: { error: consent.reason ?? 'no_lawful_basis' } };
+        let profileId: string | null = null;
+        if (reference) {
+          const consent = await aiAllowed(tx, c.workspaceId, reference);
+          if (!consent.ok) return { profileId: null, result: { error: consent.reason } };
+          profileId = consent.profileId;
         }
         try {
           const provider = await decisionProvider(tx, deps.kp);

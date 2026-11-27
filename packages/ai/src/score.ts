@@ -30,19 +30,13 @@ declare module '@agentic-marketing/commands' {
 
 /**
  * The person a score may be computed for. A caller may pass an id a merge has folded away (#1241
- * review), and a merge can also commit between the id's first resolution and this consent read,
- * which moves the consent rows to the survivor. Refusing then would be a false `no_lawful_basis`,
- * so a refusal re-resolves the canonical id once and retries when it changed (#1269 review).
+ * review), and a merge can also commit between the id's first resolution and this consent read.
+ * `aiAllowed` resolves that once and answers for the person the id names today, so the consent
+ * check, the context read and the write all name the same profile (#1269 review).
  */
 export async function consentCheckedScoreProfile(tx: Tx, workspaceId: string, profileId: string): Promise<string> {
   const consent = await aiAllowed(tx, workspaceId, profileId);
-  if (consent.ok) return profileId;
-  const canonical = await canonicalProfileId(tx, workspaceId, profileId);
-  if (canonical && canonical !== profileId) {
-    const retried = await aiAllowed(tx, workspaceId, canonical);
-    if (retried.ok) return canonical;
-    throw new AppError('forbidden', `This person's data may not be processed with AI (${retried.reason}).`);
-  }
+  if (consent.ok) return consent.profileId;
   throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
 }
 
