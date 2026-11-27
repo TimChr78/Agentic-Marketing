@@ -46,6 +46,11 @@ const INTERPOLATED_ALLOWED: { file: string; expression: string; why: string }[] 
   { file: 'packages/analytics/src/compile.ts', expression: 'from', why: 'built by personReadSource / messageEventsWithPending' },
   { file: 'packages/events/src/clickhouse.ts', expression: 'source', why: 'built by personReadSource in the same function' },
   { file: 'packages/events/src/clickhouse.ts', expression: 'spec.table', why: 'subject-key backfill reads the table it is filling' },
+  {
+    file: 'packages/events/src/clickhouse.ts',
+    expression: 'PURGE_KEY_TABLE',
+    why: 'the physical purge’s per-run staging table; it holds exclusion keys, never a person row',
+  },
   { file: 'packages/events/src/pending.ts', expression: 'published', why: 'built by personReadSource' },
   { file: 'packages/analytics/src/query.ts', expression: 'table', why: 'built by personReadSource' },
   { file: 'packages/warehouse/src/datasets.ts', expression: 'source', why: 'built by personReadSource' },

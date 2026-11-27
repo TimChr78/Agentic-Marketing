@@ -890,6 +890,16 @@ function summaryRows(response: Response, table: string): number {
 }
 
 /**
+ * ClickHouse tables that hold transport state for one operation rather than data. A backup must not
+ * export them: the physical purge stages a sweep's key set in `erasure_purge_keys` and removes it
+ * with a lightweight delete, which only masks the rows until a merge. `system.tables.total_rows`
+ * therefore still counts them while a SELECT returns none, so the row-count check below sees a
+ * populated table whose export is empty and refuses to write the backup. The rows are also never
+ * read again: every sweep creates a fresh run id, so a restored copy would only linger until its TTL.
+ */
+const CLICKHOUSE_TRANSPORT_TABLES = new Set(['erasure_purge_keys']);
+
+/**
  * Streams every MergeTree-family table as Native. A table with a SELECT row policy returns only
  * the rows of the workspace in SQL_workspace, so it is exported once per workspace (ids from
  * Postgres) and the files are restored together; tables without a policy are one file.
@@ -914,7 +924,10 @@ export async function exportClickHouse(opts: {
   const tables = (await list.text())
     .split('\n')
     .filter((line) => line.trim())
-    .map((line) => JSON.parse(line) as { name: string; total_rows: string | number });
+    .map((line) => JSON.parse(line) as { name: string; total_rows: string | number })
+    // Transport state is neither exported nor recorded in the manifest, so restore and verify only
+    // walk the tables that carry data.
+    .filter((table) => !CLICKHOUSE_TRANSPORT_TABLES.has(table.name));
   // Ask ClickHouse which tables are filtered, rather than hard-coding the list from the events
   // package: an operator's extra policy must not silently produce an empty export.
   const policies = await clickhouseRequest(
