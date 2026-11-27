@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -789,6 +789,37 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
     expect(await clearRestoreFenceForUrl(databaseUrl)).toBe(true);
     expect(await startupBlock(databaseUrl)).toBeNull();
     expect(await clearRestoreFenceForUrl(databaseUrl)).toBe(false);
+  }, 120_000);
+
+  it('stops before raising the fence when the archive list cannot be read', async () => {
+    // The table of contents is read before the marker is written, so a TMPDIR that cannot hold the
+    // list, or an archive whose list pg_restore cannot produce, leaves the database untouched and
+    // unfenced: nothing has to be cleared and the same command can simply be retried.
+    const databaseUrl = testDatabaseUrl(t.dbName).toString();
+    if (!serverClosed) {
+      await t.close();
+      serverClosed = true;
+    }
+    const bin = await mkdtemp(join(tmpdir(), 'am-restore-list-fails-'));
+    const tempRoot = await mkdtemp(join(tmpdir(), 'am-restore-list-tmp-'));
+    // A stand-in pg_restore that fails the `--list` read.
+    await writeFile(join(bin, 'pg_restore'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const oldPath = process.env.PATH;
+    const oldTmp = process.env.TMPDIR;
+    process.env.PATH = `${bin}:${oldPath ?? ''}`;
+    process.env.TMPDIR = tempRoot;
+    try {
+      await expect(restoreBackup({ dir: backupPath, env: restoreEnv(databaseUrl), log: () => {} })).rejects.toThrow(/pg_restore failed/);
+      expect(await fenceRow(databaseUrl)).toBeNull();
+      // The prepared directory is removed on the failure path, so a retry starts from a clean TMPDIR.
+      expect(await readdir(tempRoot)).toEqual([]);
+    } finally {
+      process.env.PATH = oldPath;
+      if (oldTmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = oldTmp;
+      await rm(bin, { recursive: true, force: true });
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   }, 120_000);
 
   it('keeps the restore fence out of the Postgres dump', async () => {

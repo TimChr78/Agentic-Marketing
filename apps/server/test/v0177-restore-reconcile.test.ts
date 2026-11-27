@@ -552,6 +552,16 @@ describe.skipIf(!hasTestDatabase())('restore reconciliation of erasure exclusion
     }
   }, 120_000);
 
+  it('bounds the stdout it keeps and fails the run instead of returning a truncated list', async () => {
+    // A table of contents the filter cannot see in full must not be loaded: a truncated list would
+    // silently leave entries in. Once the bound trips, later chunks are discarded and the run fails
+    // even if the child exits 0 before the SIGTERM lands.
+    await expect(
+      runRestoreChild(process.execPath, ['-e', "process.stdout.write('x'.repeat(33 * 1024 * 1024))"], {}, { captureStdout: true }),
+    ).rejects.toThrow(/wrote more than \d+ bytes to stdout/);
+    expect(runningRestoreChildren()).toBe(0);
+  }, 60_000);
+
   it('stops a child that ignores SIGTERM before reporting the restore stopped (#1204 review)', async () => {
     // A `pg_restore` that ignores SIGTERM must still be gone before the process exits: the old
     // handler returned immediately after scheduling SIGKILL, so `process.exit` won the race and the

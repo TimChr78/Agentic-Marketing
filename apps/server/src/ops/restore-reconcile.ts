@@ -40,11 +40,10 @@ import { type ClickHouseEndpoint, clickhouseEndpoint, clickhouseUrl } from './cl
  * recurring purge handles restored rows physically.
  *
  * A crash anywhere between the Postgres replacement and this step leaves the fence row in
- * `public.restore_fence` (written before the replacement, kept out of the archive's table of
- * contents by the load, and raised again right after it, because a dump from an older build can
- * carry the table) and the session-level restore lock gone with the process. A server refuses to
- * start while the fence exists; rerunning the same restore clears it after reconciliation (#1194
- * review).
+ * `public.restore_fence` (written before the replacement, kept out of the list the load restores
+ * from, and raised again right after it, because a dump from an older build can carry the table)
+ * and the session-level restore lock gone with the process. A server refuses to start while the
+ * fence exists; rerunning the same restore clears it after reconciliation (#1194 review).
  */
 
 /** What one reconciliation did, for the restore log and its tests. */

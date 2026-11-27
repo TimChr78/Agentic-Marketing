@@ -70,11 +70,12 @@ older build still carries the table — such a build can run against a database 
 rollback or a staggered upgrade — so `am restore` reads the archive's table of contents, removes
 every entry that belongs to `public.restore_fence`, and loads with `pg_restore --use-list`. `--clean`
 only drops the objects its list names, so the fence cannot be dropped or refilled at any point
-during the load, even if the process dies before its next step. The load also raises this attempt's
-fence row again afterwards, and the row it clears at the end is the one it raised. A backup is also
-refused while the fence is raised, because
-that database is not a valid restore point: finish the restore (`am restore`) or abandon it
-deliberately (`am restore --clear-fence`) first. The scheduled service records the refused run as
+during the load, even if the process dies before its next step. The restore also raises this
+attempt's fence row again right after the load, and the row it clears at the end is the one it
+raised. The list is prepared before the fence is raised, so a missing or unwritable `TMPDIR` stops
+the restore before Postgres is touched. A backup is refused while the fence is raised, because that
+database is not a valid restore point: finish the restore (`am restore`) or abandon it deliberately
+(`am restore --clear-fence`) first. The scheduled service records the refused run as
 failed, so `am backup --health` reports it. A backup also refuses to start while a restore is running,
 and it holds the same restore lock **shared** for its whole capture (the fence read, the dump, the
 ClickHouse export and the manifest write), so a restore cannot start between the fence check and the
@@ -418,10 +419,10 @@ contents but does not create them.
 - creates or updates the `am_app` role before loading, so the dump's `GRANT`s to it apply;
 - **raises the restore fence before replacing Postgres.** The row lives in `public.restore_fence`.
   Dumps written by 0.17.7 or later exclude the table, so it is not part of the backup. A dump from an
-  older build can still name it, so the load removes every entry for the table from the archive's
-  table of contents and restores with `pg_restore --use-list`: `--clean` then drops only the objects
-  its list names, and the fence survives the whole load. The restore also raises the same row again
-  right after the load, so an archive can neither drop it nor replace it. A server that finds the
+  older build can still name it, so the restore removes every entry for the table from the list it
+  hands to `pg_restore` (`--use-list`): `--clean` then drops only the objects its list names, and the
+  fence survives the whole load. The restore also raises the same row again right after the load, so
+  an archive can neither drop it nor replace it. A server that finds the
   row refuses to start (`apps/server/src/main.ts`). It does
   that check while holding the shared restore lock, and it takes that lock **before** running
   Postgres or ClickHouse migrations, so a restore never overlaps a starting process. The process
@@ -431,7 +432,8 @@ contents but does not create them.
   time instead of never. If it drops, the server logs the reason and exits; a supervisor restarts
   it, which either re-acquires the lock or refuses on the fence. It is a dedicated connection, so it
   does not consume an app-pool slot;
-- runs `pg_restore --clean --if-exists --no-owner`, then unwraps a real data key from the restored
+- runs `pg_restore --clean --if-exists --no-owner --use-list` with the archive's table of contents
+  minus the fence entries, then unwraps a real data key from the restored
   database before reporting success (a second proof that provider, connector and profile secrets
   will be readable);
 - after the last ClickHouse load, reconciles the restored erasure ledger with `erased_subjects`
