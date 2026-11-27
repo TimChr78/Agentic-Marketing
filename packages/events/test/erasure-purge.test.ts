@@ -348,9 +348,10 @@ describe('recurring physical purge (#1037 part 3)', () => {
       maxBatches: 2,
       checkpoint: async () => {
         checks++;
-        // The second checkpoint is the side-table batch, after the base table reached zero. A late
-        // legacy row arrives now: it has no subject keys of its own and depends on `side-b`.
-        if (checks === 2)
+        // The first checkpoint is the staged load and the second the base-table delete. The third is
+        // the side-table batch, after the base table reached zero. A late legacy row arrives now: it
+        // has no subject keys of its own and depends on `side-b`.
+        if (checks === 3)
           await store.client.insert({ table: 'events', values: [legacy('Side race B', 'side-race-b')], format: 'JSONEachRow' });
         return true;
       },
@@ -702,6 +703,10 @@ describe('recurring physical purge (#1037 part 3)', () => {
       [{ n: -1 }],
       [{ n: null }],
       [{ n: undefined }],
+      // Long server output is scanned without a backtracking pattern, and a value past the safe
+      // integer range is still not a count.
+      [{ n: '9'.repeat(400) }],
+      [{ n: `1${'0'.repeat(400)}` }],
     ]) {
       const { workspaceId, error } = await attempt(answer);
       expect(error?.message).toMatch(/count .*for events/);
@@ -869,17 +874,57 @@ describe('recurring physical purge (#1037 part 3)', () => {
       maxBatches: 5,
       checkpoint: async () => {
         checks++;
-        // The first two batches hold the claim; another replica takes it before a third mutation.
-        return checks <= 2;
+        // The staged load and the first two deletes hold the claim; another replica takes it before
+        // a third mutation.
+        return checks <= 3;
       },
     });
-    expect(checks).toBe(3);
+    expect(checks).toBe(4);
     expect(result).toMatchObject({ deleted: 2, complete: false });
     expect(result.tables).toEqual([{ table: 'events', deleted: 2, remaining: true }]);
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, claimWs)).toEqual([
       { n: 3 },
     ]);
   }, 60_000);
+
+  it('renews its claim before each staging batch and stops without a delete when it is lost', async () => {
+    const stageWs = newUuid();
+    await store.insert([event(0, { workspaceId: stageWs, profileId: 'prf_stage_claim', anonymousId: 'stage-claim-anon' })]);
+    const key = hmac('profile', 'prf_stage_claim');
+    await publish(store, stageWs, [key]);
+    // The whole ledger is staged before the first delete, so loading it can outlast the lease. This
+    // one needs more than one staged insert.
+    const ledger = Array.from({ length: 2_500 }, (_, i) => hmac('anonymous_id', `stage-claim-${i}-${'s'.repeat(40)}`));
+    const originalInsert = store.client.insert.bind(store.client);
+    let stagedBatches = 0;
+    store.client.insert = (async (args) => {
+      if ((args as unknown as { table?: string }).table === 'erasure_purge_keys') stagedBatches += 1;
+      return originalInsert(args);
+    }) as typeof store.client.insert;
+    let checks = 0;
+    let result: Awaited<ReturnType<typeof store.purgeErasedSubjects>>;
+    try {
+      // The claim holds for the first batch and another replica takes it before the second.
+      result = await store.purgeErasedSubjects(stageWs, [key, ...ledger], {
+        checkpoint: async () => {
+          checks += 1;
+          return checks < 2;
+        },
+      });
+    } finally {
+      store.client.insert = originalInsert;
+    }
+    expect(checks).toBe(2);
+    expect(stagedBatches).toBe(1);
+    expect(result).toEqual({ deleted: 0, complete: false, tables: [] });
+    // No delete ran, and the partial run's rows are dropped rather than left for the next sweep.
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, stageWs)).toEqual([
+      { n: 1 },
+    ]);
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM erasure_purge_keys WHERE workspace_id = {ws:UUID}', {}, stageWs)).toEqual([
+      { n: 0 },
+    ]);
+  }, 120_000);
 
   it('does not confirm visibility after its caller aborts between chunks', async () => {
     const visibilityWs = newUuid();

@@ -1058,6 +1058,20 @@ function purgeKeyBatches(workspaceId: string, runId: string, keys: readonly stri
 }
 
 /**
+ * Whether `value` is a non-empty string of ASCII digits. A hand-written scan rather than an
+ * end-anchored regex: the count is server output the client does not control, and AGENTS.md forbids
+ * a backtracking pattern on such text.
+ */
+function isDecimalDigits(value: string): boolean {
+  if (!value.length) return false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code < 0x30 || code > 0x39) return false;
+  }
+  return true;
+}
+
+/**
  * The count a purge statement returned, or an error. A table may only be treated as empty when the
  * server answered with exactly one valid `n`: a missing row (an empty result where a count was
  * asked), more than one row, or a value that is not a non-negative integer is a broken answer,
@@ -1069,7 +1083,7 @@ function purgeCount(rows: readonly Record<string, string | number>[], table: str
   const n = rows[0]?.n;
   // ClickHouse sends UInt64 as a decimal string by default; a JSON number is the other legal shape.
   if (typeof n === 'string') {
-    if (!/^[0-9]+$/.test(n)) throw new Error(`ClickHouse returned an invalid count for ${table}`);
+    if (!isDecimalDigits(n)) throw new Error(`ClickHouse returned an invalid count for ${table}`);
     const value = Number(n);
     if (!Number.isSafeInteger(value)) throw new Error(`ClickHouse returned an invalid count for ${table}`);
     return value;
@@ -1231,10 +1245,21 @@ export function clickHouseStore(opts: {
    * Loads this sweep's committed key set into the staging table, in bounded batches. Nothing is
    * purged until every batch has been acknowledged, so a partial upload cannot make the sweep read
    * a narrower set than PostgreSQL committed.
+   *
+   * The whole ledger is staged before the first delete, and a ledger can be long enough that the load
+   * alone outlasts one 60 s lease. The caller's claim is therefore renewed before each batch, exactly
+   * as between deletes. A lost claim returns false with the load incomplete: the sweep must stop
+   * without a delete, because the staged rows are partial and another replica now owns the claim.
    */
-  const stagePurgeKeys = async (workspaceId: string, runId: string, keys: readonly string[]): Promise<void> => {
+  const stagePurgeKeys = async (
+    workspaceId: string,
+    runId: string,
+    keys: readonly string[],
+    keepClaim: () => Promise<boolean>,
+  ): Promise<boolean> => {
     const settings = await settingsFor(workspaceId);
     for (const chunk of purgeKeyBatches(workspaceId, runId, keys)) {
+      if (!(await keepClaim())) return false;
       assertStoreNotAborted(opts.signal);
       await withAbortReason(() =>
         client.insert({
@@ -1249,6 +1274,7 @@ export function clickHouseStore(opts: {
         }),
       );
     }
+    return true;
   };
 
   /**
@@ -1513,8 +1539,12 @@ export function clickHouseStore(opts: {
       // narrow or clear another sweep's set, and nothing is purged before every batch has landed.
       const runId = randomUUID();
       try {
-        if (unique.length) await stagePurgeKeys(workspaceId, runId, unique);
+        // The claim is renewed before every staged batch. A claim lost while the set is loading
+        // leaves it partial, so the sweep stops here rather than drive a delete from it.
+        const staged = unique.length ? await stagePurgeKeys(workspaceId, runId, unique, keepClaim) : true;
+        if (!staged) complete = false;
         for (const spec of SUBJECT_KEY_BACKFILL_TABLES) {
+          if (!staged) break;
           let tableDeleted = 0;
           let remaining = false;
           // No keys means there is nothing to match; do not issue a query whose predicate cannot be true.
