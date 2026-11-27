@@ -73,7 +73,7 @@ test.describe('approvals (#41)', () => {
     await expect(card).toContainText('Not yet viewed');
     await card.click();
     const drawer = page.getByRole('dialog', { name: 'Engaged readers' });
-    await expect(drawer).toContainText('Estimated size now');
+    await expect(drawer).toContainText('Estimated size from live data');
     await expect(drawer.getByRole('button', { name: 'Approve and publish' })).toBeInViewport();
     // #62: at 390 px the tab row either fits every tab, or shows a fade that says it scrolls.
     const tablist = drawer.getByRole('tablist', { name: 'Review' });
