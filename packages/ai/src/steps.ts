@@ -3,7 +3,6 @@ import { safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
-import { canonicalProfile } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
@@ -621,6 +620,35 @@ async function handleTest(db: Db, c: CallRow, deps: AiStepDeps) {
   );
 }
 
+/**
+ * Stores a classify label on the person's profile and returns the trait name, or null when no row
+ * was written. The person is resolved and locked again under the write and their AI consent is
+ * re-checked there, so a merge since the call was prepared cannot write the label onto a profile
+ * that did not allow it. The provider call stays outside this transaction.
+ */
+export async function storeClassifiedTrait(
+  tx: Tx,
+  workspaceId: string,
+  checkedProfileId: string,
+  trait: string,
+  label: string,
+): Promise<string | null> {
+  // Like a journey's updateProfile step: never into a trait the tracking plan marks personal.
+  const plan = await publishedSingleton(tx, 'tracking_plan');
+  const def = plan?.traits.find((x) => x.name === trait);
+  if (def && def.pii !== 'none') return null;
+  // Follow a merge that landed since the consent check and lock the person today; an erased person
+  // has no row to lock, and a folded-away alias is never written (`merged_into IS NULL`).
+  const personId = await lockCanonicalProfile(tx, workspaceId, checkedProfileId);
+  if (!personId) return null;
+  const consent = await aiAllowed(tx, workspaceId, personId);
+  if (!consent.ok) return null;
+  const written = await tx.execute(sql`
+    UPDATE profiles SET traits = jsonb_set(traits, ARRAY[${trait}], ${JSON.stringify(label)}::jsonb), updated_at = now()
+    WHERE workspace_id = ${workspaceId} AND id = ${personId} AND merged_into IS NULL`);
+  return written.rowCount ? trait : null;
+}
+
 /** One ai.classify call: label the text, store the label on the person if the prompt says so. */
 async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
   c = await settleStaleReservation(db, c);
@@ -629,12 +657,15 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
   // once, before any early failure path can record the call, so no failure leaves raw text behind.
   const text = String((c.input as { text?: string }).text ?? '');
   const storedInput = classifyInputForLog(c.input as Record<string, unknown>);
+  // The id the gate answered for, carried to the write so it does not resolve the person again.
+  let checkedProfileId: string | null = null;
   const ready = await db.withWorkspace(c.workspaceId, async (tx) => {
     const p = await promptVersion(tx, c.promptId ?? '', c.promptVersion ?? undefined);
     if (p?.def.kind !== 'classify') return { error: 'no_prompt: the classify prompt version is gone' };
     if (c.profileId) {
       const consent = await aiAllowed(tx, c.workspaceId, c.profileId);
       if (!consent.ok) return { error: consent.reason };
+      checkedProfileId = consent.profileId;
     }
     try {
       return { def: p.def, model: await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress) };
@@ -670,23 +701,10 @@ async function handleClassify(db: Db, c: CallRow, deps: AiStepDeps) {
   if (r) {
     try {
       let trait: string | null = null;
-      const calledFor = c.profileId;
-      if (ready.def.trait && calledFor)
-        trait = await db.withWorkspace(c.workspaceId, async (tx) => {
-          // Like a journey's updateProfile step: never into a trait the tracking plan marks personal.
-          const plan = await publishedSingleton(tx, 'tracking_plan');
-          const def = plan?.traits.find((x) => x.name === ready.def.trait);
-          if (def && def.pii !== 'none') return null;
-          // A merge can have moved the call's person since it was queued. Follow `merged_into` in
-          // SQL only, and never write a trait back onto a folded-away profile (`merged_into IS
-          // NULL`); an erased person has no row at all.
-          const person = await canonicalProfile(tx, c.workspaceId, calledFor);
-          if (!person) return null;
-          await tx.execute(sql`
-            UPDATE profiles SET traits = jsonb_set(traits, ARRAY[${ready.def.trait}], ${JSON.stringify(r!.label)}::jsonb), updated_at = now()
-            WHERE workspace_id = ${c.workspaceId} AND id = ${person.id} AND merged_into IS NULL`);
-          return ready.def.trait ?? null;
-        });
+      const traitName = ready.def.trait;
+      const checked = checkedProfileId;
+      if (traitName && checked)
+        trait = await db.withWorkspace(c.workspaceId, (tx) => storeClassifiedTrait(tx, c.workspaceId, checked, traitName, r!.label));
       out = {
         status: 'done',
         providerId: ready.model.providerId,
@@ -760,7 +778,9 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
         let profileId: string | null = null;
         if (reference) {
           const consent = await aiAllowed(tx, c.workspaceId, reference);
-          if (!consent.ok) return { profileId: null, result: { error: consent.reason } };
+          // Keep the id the gate answered for on a refusal too: the wrapper retries only when the
+          // person moved, so a stable refusal must not re-run the gate.
+          if (!consent.ok) return { profileId: consent.profileId, result: { error: consent.reason } };
           profileId = consent.profileId;
         }
         try {

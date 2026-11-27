@@ -1,10 +1,10 @@
-import { canonicalProfileId, DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
+import { canonicalProfileId, DEFAULT_PURPOSES, mergeComponentCtes, publishedSingleton } from '@agentic-marketing/artifacts';
 import { redact } from '@agentic-marketing/core';
-import { schema, type Tx } from '@agentic-marketing/db';
+import { type ConsentStatus, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
-import { consentStateOf, currentConsent, personCrypto, purposeAllowed } from '@agentic-marketing/profiles';
+import { consentStatusSql, personCrypto, purposeAllowed } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 // The context builder (agents-and-mcp.md §5): what a model may know about a person. Only
 // non-personal traits and personal traits the tracking plan marks agentVisible, the profile id
@@ -29,8 +29,12 @@ export interface PersonContext {
   trigger?: { name: string; properties: Record<string, unknown> };
 }
 
-/** The gate's answer: allowed for the person `profileId` names today, or why not. */
-export type AiConsent = { ok: true; profileId: string } | { ok: false; reason: string };
+/**
+ * The gate's answer: allowed for the person `profileId` names today, or why not. A refusal carries
+ * the canonical id it answered for (null when the id names no person), so a caller can tell a
+ * stable refusal from a person who moved and does not ask again.
+ */
+export type AiConsent = { ok: true; profileId: string } | { ok: false; reason: string; profileId: string | null };
 
 const NO_PROFILE = 'no_profile: the person does not exist (or was erased)';
 
@@ -42,26 +46,29 @@ const NO_PROFILE = 'no_profile: the person does not exist (or was erased)';
  * person objected, and refused on a consent basis even when they granted. Answer for the person
  * the id names today, and return that canonical id so the gate and the work it allows use the
  * same profile.
+ *
+ * The canonical id and the consent status come from one statement: a second read can straddle a
+ * merge that changes the survivor's effective consent while its id stays the same, which comparing
+ * the ids of two lookups cannot detect.
  */
 export async function aiAllowed(tx: Tx, workspaceId: string, profileId: string): Promise<AiConsent> {
+  const { rows } = await tx.execute<{ id: string | null; merged_into: string | null; status: ConsentStatus | null }>(sql`
+    WITH RECURSIVE ${mergeComponentCtes(workspaceId, { seeds: sql`SELECT ${profileId}::text AS id` })}
+    SELECT p.id, p.merged_into, ${consentStatusSql(sql`p.id`, AI_PURPOSE)} AS status
+    FROM merge_representative mr
+    LEFT JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = mr.representative COLLATE "default"
+    WHERE mr.origin = ${profileId}::text`);
+  const person = rows[0];
+  if (!person || person.id === null || person.merged_into !== null) return { ok: false, reason: NO_PROFILE, profileId: null };
+  const canonical = person.id;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const p = purposes.find((x) => x.key === AI_PURPOSE);
-  if (!p) return { ok: false, reason: `no_lawful_basis: the ${AI_PURPOSE} purpose is not configured` };
-  let canonical = await canonicalProfileId(tx, workspaceId, profileId);
-  if (!canonical) return { ok: false, reason: NO_PROFILE };
-  let state = currentConsent(await consentStateOf(tx, workspaceId, canonical), AI_PURPOSE);
-  // A merge can also commit between that read of the person and the consent read, which moves the
-  // consent rows to the survivor: re-resolve once and answer for the id's person then (#1269).
-  const moved = await canonicalProfileId(tx, workspaceId, canonical);
-  if (!moved) return { ok: false, reason: NO_PROFILE };
-  if (moved !== canonical) {
-    canonical = moved;
-    state = currentConsent(await consentStateOf(tx, workspaceId, canonical), AI_PURPOSE);
-  }
-  if (purposeAllowed(p.basis, state?.status)) return { ok: true, profileId: canonical };
+  if (!p) return { ok: false, reason: `no_lawful_basis: the ${AI_PURPOSE} purpose is not configured`, profileId: canonical };
+  if (purposeAllowed(p.basis, person.status ?? undefined)) return { ok: true, profileId: canonical };
   return {
     ok: false,
-    reason: `no_lawful_basis: ${AI_PURPOSE} is based on ${p.basis.replace('_', ' ')} and the person's status is ${state?.status ?? 'unknown (no record)'}`,
+    reason: `no_lawful_basis: ${AI_PURPOSE} is based on ${p.basis.replace('_', ' ')} and the person's status is ${person.status ?? 'unknown (no record)'}`,
+    profileId: canonical,
   };
 }
 
