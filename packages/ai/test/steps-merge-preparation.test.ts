@@ -1,6 +1,7 @@
 import { artifactTypes, DEFAULT_PURPOSES } from '@agentic-marketing/artifacts';
 import { newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 
@@ -17,6 +18,8 @@ const hooks = vi.hoisted(() => ({ afterGate: undefined as undefined | (() => Pro
 // The context build reads the profile's traits, then the tracking plan, then the identifiers. A
 // merge committed between the first and the last read (the window #1300 closes) leaves the
 // survivor's id unchanged, so only a revision of that row can tell the build it must start again.
+// The revision is the row's version (`xmin`), which changes on every write; the timestamps below
+// sit inside one millisecond on purpose, which a millisecond clock (or a JS Date) cannot tell apart.
 const planHook = vi.hoisted(() => ({ afterTraits: undefined as undefined | (() => Promise<void>) }));
 vi.mock('@agentic-marketing/artifacts', async (importOriginal) => {
   const original = await importOriginal<typeof import('@agentic-marketing/artifacts')>();
@@ -166,6 +169,9 @@ async function seedPair(traits: Record<string, unknown> = {}) {
       { workspaceId: ws, id: survivor, traits, createdAt: new Date(Date.UTC(2026, 9, 1)) },
       { workspaceId: ws, id: alias, createdAt: new Date(Date.UTC(2026, 9, 2)) },
     ]);
+    // Two revisions inside one millisecond: only a value that changes on every write of the row can
+    // tell them apart.
+    await tx.execute(sql`UPDATE profiles SET updated_at = '2026-10-01 00:00:00.000100+00'::timestamptz WHERE id = ${survivor}`);
     await tx.insert(schema.identifiers).values([
       { workspaceId: ws, profileId: survivor, type: 'user_id', value: `user-${survivor}` },
       { workspaceId: ws, profileId: alias, type: 'anonymous_id', value: `anon-${alias}` },
@@ -229,13 +235,12 @@ async function mergeOnAnotherConnection(alias: string, survivor: string, object:
   try {
     await conn.query('BEGIN');
     if (survivorTraits) {
-      // The survivor's trait snapshot is rewritten by a real merge; its updated_at is the revision
-      // a preparation compares before and after the context build.
-      await conn.query(`UPDATE profiles SET traits = traits || $3::jsonb, updated_at = now() WHERE workspace_id = $1 AND id = $2`, [
-        ws,
-        survivor,
-        JSON.stringify(survivorTraits),
-      ]);
+      // The survivor's trait snapshot is rewritten by a real merge, in the same millisecond as the
+      // revision the build started from.
+      await conn.query(
+        `UPDATE profiles SET traits = traits || $3::jsonb, updated_at = '2026-10-01 00:00:00.000900+00'::timestamptz WHERE workspace_id = $1 AND id = $2`,
+        [ws, survivor, JSON.stringify(survivorTraits)],
+      );
     }
     await conn.query(
       `UPDATE profiles SET merged_into = $3, traits = '{}'::jsonb, pii = NULL, updated_at = now()

@@ -68,26 +68,28 @@ export function refuseAi(command: string, reason: string): never {
  *
  * The canonical id and the consent status come from one statement: a second read can straddle a
  * merge that changes the survivor's effective consent while its id stays the same, which comparing
- * the ids of two lookups cannot detect. That statement also returns the person's `updated_at` as
- * the revision a preparation compares before and after its person-derived reads: a merge INTO the
- * survivor keeps its id, so the revision is what says the traits and identifiers changed together.
+ * the ids of two lookups cannot detect. That statement also returns the row's `xmin` as the revision
+ * a preparation compares before and after its person-derived reads: a merge INTO the survivor keeps
+ * its id, so the revision is what says the traits and identifiers changed together. `xmin` changes on
+ * every write of the row (it is the inserting or updating transaction), which a millisecond clock —
+ * or a JS `Date` built from `updated_at` — cannot promise (#1300 review).
  */
 export async function aiAllowed(tx: Tx, workspaceId: string, profileId: string): Promise<AiConsent> {
   const { rows } = await tx.execute<{
     id: string | null;
     merged_into: string | null;
     status: ConsentStatus | null;
-    updated_at: Date | string;
+    revision: string;
   }>(sql`
     WITH RECURSIVE ${mergeComponentCtes(workspaceId, { seeds: sql`SELECT ${profileId}::text AS id` })}
-    SELECT p.id, p.merged_into, p.updated_at, ${consentStatusSql(sql`p.id`, AI_PURPOSE)} AS status
+    SELECT p.id, p.merged_into, p.xmin::text AS revision, ${consentStatusSql(sql`p.id`, AI_PURPOSE)} AS status
     FROM merge_representative mr
     LEFT JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = mr.representative COLLATE "default"
     WHERE mr.origin = ${profileId}::text`);
   const person = rows[0];
   if (!person || person.id === null || person.merged_into !== null) return { ok: false, reason: NO_PROFILE, profileId: null };
   const canonical = person.id;
-  const revision = new Date(person.updated_at).toISOString();
+  const revision = person.revision;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const p = purposes.find((x) => x.key === AI_PURPOSE);
   if (!p) return { ok: false, reason: `no_lawful_basis: the ${AI_PURPOSE} purpose is not configured`, profileId: canonical };

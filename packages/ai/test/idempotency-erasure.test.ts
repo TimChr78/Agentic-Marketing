@@ -11,7 +11,7 @@ vi.mock('@agentic-marketing/secrets', async (importOriginal) => {
   return { ...original, openJson: async () => ({ apiKey: 'sk-test' }) };
 });
 
-import { classification } from '../src/classify';
+import { classification, listReviews } from '../src/classify';
 import { listAiCalls } from '../src/commands';
 import { profileScores, score } from '../src/score';
 import { fakeSystemOne } from '../src/testing';
@@ -99,7 +99,7 @@ async function erase(person: string) {
 }
 
 /** One settled AI call for the person, as the log commands read it. */
-async function seedCall(person: string, kind: 'decide' | 'classify', rationale: string) {
+async function seedCall(person: string, kind: 'decide' | 'classify', rationale: string, sampled = false) {
   const id = newId('aic');
   await d.db.withWorkspace(ws, (tx) =>
     tx.insert(schema.aiCalls).values({
@@ -111,6 +111,7 @@ async function seedCall(person: string, kind: 'decide' | 'classify', rationale: 
       input: { text: 'redacted' },
       output: kind === 'classify' ? { label: 'interested' } : { answers: [] },
       rationale,
+      reviewStatus: sampled ? 'pending' : null,
     }),
   );
   return id;
@@ -190,6 +191,34 @@ describe.skipIf(!hasTestDatabase())('an idempotent answer does not outlive the p
     const first = await executor().execute(listAiCalls, { profileId: person }, principal(), opts);
     const replay = await executor().execute(listAiCalls, { profileId: person }, principal(), opts);
     expect(replay.calls.map((c) => c.id)).toEqual([callId]);
+    expect(replay).toEqual(first);
+  }, 120_000);
+
+  it('refuses a replay of the review list after the sampled answer was erased', async () => {
+    const person = await seedPerson();
+    const callId = await seedCall(person, 'classify', 'Ada asks for a refund', true);
+    const opts = { surface: 'rest' as const, idempotencyKey: `reviews-${person}` };
+    const first = await executor().execute(listReviews, {}, principal(), opts);
+    expect(first.reviews.map((r) => r.callId)).toEqual([callId]);
+    expect(first.reviews[0]!.rationale).toContain('refund');
+
+    await erase(person);
+
+    // The cached review list answers with the erased person's input, output, rationale and note.
+    const replay = await executor()
+      .execute(listReviews, {}, principal(), opts)
+      .catch((err: { code?: string; message?: string }) => err);
+    expect(replay).toMatchObject({ code: 'not_found' });
+    expect(JSON.stringify(replay)).not.toContain('refund');
+  }, 120_000);
+
+  it('still replays the review list while the answer exists', async () => {
+    const person = await seedPerson();
+    const callId = await seedCall(person, 'classify', 'The reply asks for a refund', true);
+    const opts = { surface: 'rest' as const, idempotencyKey: `reviews-alive-${person}` };
+    const first = await executor().execute(listReviews, {}, principal(), opts);
+    const replay = await executor().execute(listReviews, {}, principal(), opts);
+    expect(replay.reviews.map((r) => r.callId)).toEqual([callId]);
     expect(replay).toEqual(first);
   }, 120_000);
 

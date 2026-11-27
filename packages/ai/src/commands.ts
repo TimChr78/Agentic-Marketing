@@ -1,13 +1,13 @@
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, decodeTimestampCursor, encodeTimestampCursor, isoDateTime } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
-import { canonicalProfile } from '@agentic-marketing/profiles';
-import { and, desc, eq, gte, inArray, lt, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, lt, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { classifyCommands, classifyInputForLog } from './classify';
 import { copilotCommands } from './copilot';
 import { listTestRuns, testPrompt, testRunResults } from './prompts';
 import { createAiProvider, deleteAiProvider, listAiProviders, updateAiProvider } from './providers';
+import { assertCallsReplayable } from './replay';
 import { calibration, profileScores, score } from './score';
 
 // The decision log and usage: every AI call (journey steps, prompt tests, copilot turns) with
@@ -61,18 +61,14 @@ export const listAiCalls = defineCommand({
   effect: 'read',
   // A cached list holds the calls' outputs and rationales, which are person data. Erasure deletes
   // the call rows with the person, so a stored answer may only be replayed while those rows (and
-  // the people they name) still exist (#1300).
+  // the people they name) still exist (#1300). `ai.reviews` shares the same batched check.
   replayCheck: async (_replayInput, replay, { tx, workspaceId }) => {
-    if (!replay.calls.length) return;
-    const stale = 'The AI calls this answer listed no longer exist; ask again.';
-    const ids = [...new Set(replay.calls.map((c) => c.id))];
-    const rows = await tx
-      .select({ id: schema.aiCalls.id })
-      .from(schema.aiCalls)
-      .where(and(eq(schema.aiCalls.workspaceId, workspaceId), inArray(schema.aiCalls.id, ids)));
-    if (rows.length !== ids.length) throw new AppError('not_found', stale);
-    const people = [...new Set(replay.calls.map((c) => c.profileId).filter((id): id is string => id !== null))];
-    for (const id of people) if (!(await canonicalProfile(tx, workspaceId, id))) throw new AppError('not_found', stale);
+    await assertCallsReplayable(
+      tx,
+      workspaceId,
+      replay.calls.map((c) => c.id),
+      'The AI calls this answer listed no longer exist; ask again.',
+    );
   },
   handler: async (input, ctx) => {
     const c = schema.aiCalls;

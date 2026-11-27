@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { aiAllowed, NO_PROFILE, redact, refuseAi } from './context';
 import { lockCanonicalProfile } from './decision';
 import { promptVersion } from './prompts';
+import { assertCallsReplayable } from './replay';
 
 // ai.classify: label a text (an inbound reply, a form message, a review) with one of a classify
 // prompt's labels, e.g. from n8n. The model call is a job for the AI worker, never inside the
@@ -179,6 +180,17 @@ export const listReviews = defineCommand({
   }),
   permission: 'artifacts:read',
   effect: 'read',
+  // A cached list holds the sampled answers: their input, output, rationale and the review note,
+  // which are person data. Erasure deletes the call rows with the person, so the stored answer is
+  // replayed only while those rows (and the people they name) still exist (#1300 review).
+  replayCheck: async (_replayInput, replay, { tx, workspaceId }) => {
+    await assertCallsReplayable(
+      tx,
+      workspaceId,
+      replay.reviews.map((r) => r.callId),
+      'The AI answers this list held no longer exist; ask again.',
+    );
+  },
   handler: async (input, ctx) => {
     const c = schema.aiCalls;
     const rows = await ctx.tx
