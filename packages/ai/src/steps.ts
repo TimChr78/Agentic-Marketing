@@ -199,6 +199,12 @@ export async function finishIn(
     };
   },
 ) {
+  // Lock the person before the attempt fence. Erasure locks the profile row first and its cascade
+  // then deletes the `ai_calls` row; fencing the attempt first made a score finalisation wait for a
+  // profile erasure held while erasure waited for the `ai_calls` row the finalisation held, and
+  // PostgreSQL aborted one of them (#1274). Only a score step writes a profile, so only it takes
+  // the profile lock here.
+  const lockedProfile = c.kind === 'score' && c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
   // Fence by attempt: a retry that took the lease over must keep the terminal outcome, while a
   // late original still adds the tokens the provider billed (#941 review).
   const owns = await ownsAttempt(tx, c);
@@ -230,19 +236,19 @@ export async function finishIn(
   // or the profile erased, is late and commits no score, so an erased person's scores cannot come
   // back.
   //
-  // Lock order: profile -> participant -> profile_scores, the shared row order (see
-  // `packages/profiles/src/identity.ts`): an SDK batch that merges this person locks the profile
-  // rows before it moves the participant rows, and the journey sweep locks the profile row before
-  // it claims the participant row. Locking the participant first deadlocked with a merge (#1011
-  // review). `removeProfiles` deletes the person's participants before the profile row and takes the
-  // same profile lock first, and the profile row's foreign key cascades the score deletion.
+  // Lock order: profile -> ai_calls (the attempt fence) -> participant -> profile_scores, the
+  // shared row order (see `packages/profiles/src/identity.ts`): an SDK batch that merges this
+  // person locks the profile rows before it moves the participant rows, and the journey sweep locks
+  // the profile row before it claims the participant row. Locking the participant first deadlocked
+  // with a merge (#1011 review). `removeProfiles` takes the same profile lock before it deletes the
+  // person's participants and their `ai_calls` rows (the cascade), so the attempt fence has to come
+  // after the profile lock (#1274) — it is taken at the top of this function.
   let waiting = true;
   if (c.kind === 'score') {
-    // The call keeps its own profile id even when a merge has folded it away, so resolve the
-    // person today before locking (#1241). Locking the stored alias and then its survivor would
-    // invert the shared ascending-id profile lock order of a merge (#1011); lock only the
-    // canonical row. The shared helper follows a merge that commits while this waits.
-    const lockedProfile = c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
+    // `lockedProfile` at the top of this function resolved the person today, even when a merge has
+    // folded the call's own profile id away (#1241), and locked only the canonical row: locking the
+    // stored alias and then its survivor would invert the shared ascending-id profile lock order of
+    // a merge (#1011). The shared helper follows a merge that commits while it waits.
     const lockedParticipant = await tx.execute<{ id: string }>(sql`
         SELECT id FROM journey_participants
         WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'
