@@ -119,6 +119,16 @@ const ALLOWED_CONTROLS: { file: string; control: RegExp; reason: string }[] = [
     reason: 'retries the asset list read',
   },
   {
+    file: 'pages/approvals/ApprovalsPage.tsx',
+    control: /<Button onClick=\{\(\) => void loadMore\(\)\} loading=\{loadingMoreNow\}>/,
+    reason: 'loads the next page of approval requests; a read (#1254)',
+  },
+  {
+    file: 'pages/build/TopicsPage.tsx',
+    control: /<Button onClick=\{\(\) => void loadMore\(\)\} loading=\{loadingMoreNow\}>/,
+    reason: 'loads the next page of topics; a read (#1262)',
+  },
+  {
     file: 'pages/insights/MessagesPage.tsx',
     control: /<Button onClick=\{\(\) => void loadMore\(\)\} loading=\{loadingMore\}>/,
     reason: 'pages forward; a read',
