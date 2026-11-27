@@ -496,6 +496,8 @@ A programme (#314) for web experiences: it follows `experiences.results` and eac
 
 A programme (#315): it checks segment sizes and overlaps, sizes inactive members and proposes sunset policies (an inactive segment plus a re-engagement journey or an exclusion) as drafts. Keep `audience.publish` at level 1 at first so a person decides each change; it never deletes profiles or changes consent.
 
+It sizes a published segment through the metric layer (`analytics.query` with the `segment.members` measure), which needs only `artifacts:read`, and skips a segment with no published version because a draft has no live audience. An unsaved condition has no members either, so the curator drafts the inactive segment and submits it, and the person reviewing it previews the size; `segments.preview` needs `profiles:read`, which the starter template does not grant. It keeps the counts in a memory note and compares the next run against it, so last week's sizes come from its own record.
+
 ```json
 {
   "agent": "agt_4f8c2d1e6b9a4c7d8e0f1a2b3c4d5e6f",

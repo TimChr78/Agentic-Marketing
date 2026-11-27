@@ -20,26 +20,41 @@ const paths = {
 };
 const read = (path: string) => readFile(path, 'utf8');
 
+const REAL_SEGMENT = 'seg_0123456789abcdef0123456789abcdef';
+
 /**
- * The first balanced `{…}` object in `text` at or after `from`, parsed as JSON. The docs write
- * segment ids as `seg_…`; substituting a real id lets the same condition run through the shipped
- * schema instead of pinning an exact string.
+ * Every balanced `{…}` object in `text` that parses as JSON, with the docs' `seg_…` placeholder
+ * replaced by a real id. Parsing the object keeps the checks independent of whitespace and key
+ * order; a brace in prose simply fails to parse and is skipped.
  */
-function conditionAt(text: string, from: string): unknown {
-  const start = text.indexOf(from);
-  if (start < 0) throw new Error(`${from} is missing`);
-  let depth = 0;
-  for (let i = start; i < text.length; i += 1) {
-    if (text[i] === '{') depth += 1;
-    else if (text[i] === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        const json = text.slice(start, i + 1).replaceAll('seg_…', 'seg_0123456789abcdef0123456789abcdef');
-        return JSON.parse(json);
+function jsonObjects(text: string): Record<string, unknown>[] {
+  const found: Record<string, unknown>[] = [];
+  for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
+    let depth = 0;
+    for (let i = start; i < text.length; i += 1) {
+      if (text[i] === '{') depth += 1;
+      else if (text[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          try {
+            const value: unknown = JSON.parse(text.slice(start, i + 1).replaceAll('seg_…', REAL_SEGMENT));
+            if (value && typeof value === 'object' && !Array.isArray(value)) found.push(value as Record<string, unknown>);
+          } catch {
+            // Not JSON: a brace in prose, or an example with placeholders of its own.
+          }
+          break;
+        }
       }
     }
   }
-  throw new Error(`${from} is not closed`);
+  return found;
+}
+
+/** The example sunset condition wherever the doc puts it: whitespace and key order do not matter. */
+function sunsetCondition(text: string): unknown {
+  const condition = jsonObjects(text).find((value) => Array.isArray(value.all));
+  if (!condition) throw new Error('the sunset example condition is missing');
+  return condition;
 }
 
 const COMMAND_FILES = new Set(['.md', '.sh', '.mjs', '.js']);
@@ -204,15 +219,41 @@ describe('architecture pages and skills name the shipped surface', () => {
     expect(line).toContain('decision-models.md');
   });
 
-  // People-only commands are never MCP tools for an agent, so the tool list must not name them.
-  it('keeps people-only commands out of the MCP tool list', async () => {
+  // People-only commands are never MCP tools for an agent, whatever its scopes: every command the
+  // tool list names must be a registered, agent-callable tool, and every command the people-only
+  // paragraph names must be people-only. Checked against the registry, not a fixed set.
+  it('classifies every command the MCP inventory names', async () => {
     const page = await read(join(root, 'docs/architecture/agents-and-mcp.md'));
-    const tools = page.slice(page.indexOf('**Tools** (grouped'), page.indexOf('- **People-only commands'));
+    const toolsAt = page.indexOf('**Tools** (grouped');
+    const peopleAt = page.indexOf('- **People-only commands');
+    const tools = page.slice(toolsAt, peopleAt);
+    const peopleOnlyText = page.slice(peopleAt, page.indexOf('- **Resources:**'));
     expect(tools.length).toBeGreaterThan(200);
-    for (const name of ['approvals.approve', 'learnings.retract', 'agents.pause', 'agents.undo']) {
-      expect(tools).not.toContain(name);
+
+    const named = (text: string) => [...text.matchAll(/`([a-z][A-Za-z0-9]*(?:\.[A-Za-z0-9]+)+)`/g)].map((match) => match[1]!);
+    const byName = new Map(commands.map((command) => [String(command.name), command] as const));
+
+    const toolsNamed = named(tools);
+    expect(toolsNamed.length).toBeGreaterThan(30);
+    for (const name of toolsNamed) {
+      const command = byName.get(name);
+      expect(command, `${name} is not a registered command`).toBeDefined();
+      expect(command!.humansOnly ?? false, `${name} is people-only, so not a tool`).toBe(false);
+      expect(command!.permission, `${name} has no permission, so it is not an MCP tool`).toBeTruthy();
     }
-    expect(page.slice(page.indexOf('- **People-only commands'))).toContain('approvals.approve');
+
+    const peopleNamed = named(peopleOnlyText);
+    expect(peopleNamed.length).toBeGreaterThan(8);
+    for (const name of peopleNamed) {
+      const command = byName.get(name);
+      expect(command, `${name} is not a registered command`).toBeDefined();
+      expect(command!.humansOnly ?? false, `${name} is not people-only`).toBe(true);
+    }
+    expect(peopleNamed).toContain('approvals.approve');
+    // #1293 review: this read returns everything held about a person, so it is people-only.
+    expect(peopleNamed).toContain('profiles.export');
+    // ...and a hosted agent may delete the notes its own runs wrote, so this one is a tool.
+    expect(toolsNamed).toContain('agents.memory.delete');
   });
 
   // #1294: only the remote target and a scaled ClickHouse backup remain open.
@@ -232,22 +273,34 @@ describe('architecture pages and skills name the shipped surface', () => {
     expect(audienceRow).toContain('people only');
     expect(recipes).not.toMatch(/email_opened|email_clicked/);
     const curator = recipes.slice(recipes.indexOf('## Audience curator'));
-    // Sizes read the published version: a pending edit must not look like a live change.
+
+    // Sizing a published segment is a metric-layer read: analytics.query with segment.members needs
+    // only artifacts:read, whereas segments.preview needs profiles:read and returns sample ids.
     expect(curator).toMatch(/1\. \*\*Sizes\.\*\* [^\n]*publishedVersion/);
+    expect(curator).toContain('analytics.query');
+    expect(curator).toContain('segment.members');
+    // A segment with no published version is a draft with no live audience.
+    expect(curator).toMatch(/publishedVersion`[^\n]*null[^\n]*skip|publishedVersion[^\n]*`null`[^\n]*skip/i);
+    // A condition that is not saved has no members: it is drafted and submitted, and the person
+    // reviewing it previews the size.
+    expect(curator).toMatch(/artifacts\.create/);
+    expect(curator).toMatch(/artifacts\.requestPublish/);
 
     // Parse the sunset condition against the shipped schema instead of pinning its JSON text: it
     // must intersect the intended segment and count e-mail clicks, not clicks on every channel.
-    const condition = segmentCondition.parse(conditionAt(curator, '{"all":[{"segment"'));
+    const condition = segmentCondition.parse(sunsetCondition(curator));
     expect(condition).toEqual({
-      all: [{ segment: 'seg_0123456789abcdef0123456789abcdef' }, { not: { message: 'clicked', within: 'P180D', channel: 'email' } }],
+      all: [{ segment: REAL_SEGMENT }, { not: { message: 'clicked', within: 'P180D', channel: 'email' } }],
     });
 
-    // The hosted curator template must carry the same rule, and the scopes its calls need.
+    // The hosted curator template must carry the same workflow without person-level scopes.
     const template = hostedAgentTemplate('audience_curator')!;
-    expect(template.instructions).toContain('segments.preview');
+    expect(template.scopes).not.toContain('profiles:read');
+    expect(template.instructions).toContain('analytics.query');
     expect(template.instructions).toContain('publishedVersion');
-    expect(segmentCondition.parse(conditionAt(template.instructions, '{"all":[{"segment"'))).toEqual(condition);
-    for (const name of ['segments.preview', 'artifacts.get']) {
+    expect(template.instructions).toMatch(/publishedVersion[^\n]*null[^\n]*skip/i);
+    expect(segmentCondition.parse(sunsetCondition(template.instructions))).toEqual(condition);
+    for (const name of ['analytics.query', 'artifacts.get', 'artifacts.create']) {
       expect(template.scopes, name).toContain(commands.find((command) => command.name === name)?.permission);
     }
   });
