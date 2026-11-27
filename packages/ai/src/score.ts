@@ -272,7 +272,8 @@ async function insertCall(
   const profileId = input.profileId ? await lockCanonicalProfile(tx, principal.workspaceId, input.profileId) : null;
   // An erasure that committed while the call was in flight leaves no person for the row to name,
   // and the decision log is erased with the person (ADR-0012). Such a settlement keeps only what
-  // billing needs: workspace, kind, provider and model, tokens and cost, timestamps and status.
+  // billing needs: workspace, kind, provider and configured model, tokens and cost, timestamps and
+  // status.
   // The state hash, the questions and the answers describe the decision, and a provider error may
   // quote the input, so none of them may outlive the person they were asked about.
   const erased = input.profileId !== undefined && profileId === null;
@@ -298,15 +299,17 @@ async function insertCall(
       kind: 'score',
       status: out.status,
       providerId: provider.providerId,
-      model: out.modelVersion ?? provider.model,
+      // The provider reports its model version freely; an erased person's row keeps the configured
+      // model, so nothing the provider echoed about the request outlives them.
+      model: erased ? provider.model : (out.modelVersion ?? provider.model),
       profileId,
       ...decision,
       inputTokens: out.inputTokens ?? 0,
       outputTokens: out.outputTokens ?? 0,
       billedAt: new Date(),
       usageEstimated: out.usageEstimated ?? false,
-      latencyMs: out.latencyMs ?? null,
-      principalId: principal.userId,
+      latencyMs: erased ? null : (out.latencyMs ?? null),
+      principalId: erased ? null : principal.userId,
       finishedAt: new Date(),
     })
     // The settling transaction may have committed the row already; a last-resort retry of the

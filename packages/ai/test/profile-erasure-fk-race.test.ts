@@ -389,8 +389,10 @@ describe.skipIf(!hasTestDatabase())('a score settled after its person was erased
       input_tokens: number;
       provider_id: string | null;
       model: string | null;
+      latency_ms: number | null;
+      principal_id: string | null;
     }>(
-      'SELECT profile_id, status, input, output, error, rationale, input_tokens, provider_id, model FROM ai_calls WHERE workspace_id = $1 AND id = $2',
+      'SELECT profile_id, status, input, output, error, rationale, input_tokens, provider_id, model, latency_ms, principal_id FROM ai_calls WHERE workspace_id = $1 AND id = $2',
       [ws, scored!.callId],
     );
     expect(calls.rowCount).toBe(1);
@@ -400,11 +402,14 @@ describe.skipIf(!hasTestDatabase())('a score settled after its person was erased
     expect(row.output).toBeNull();
     expect(row.error).toBeNull();
     expect(row.rationale).toBeNull();
+    expect(row.latency_ms).toBeNull();
+    expect(row.principal_id).toBeNull();
     // What billing needs is kept.
     expect(row.status).toBe('done');
     expect(row.input_tokens).toBeGreaterThan(0);
     expect(row.provider_id).toBe(providerId);
-    expect(row.model).toBeTruthy();
+    // The configured model, never the version string the provider reported for this request.
+    expect(row.model).toBe('jev-test-1.0.0');
     expect(scored!.inputTokens).toBeGreaterThan(0);
   }, 120_000);
 });
