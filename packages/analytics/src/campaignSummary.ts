@@ -2,7 +2,7 @@ import { planComplementarySuppression, publishedSingleton, suppressHoldout } fro
 import { campaignIdentityMap, type IdentityMap, identityUnresolvedNote } from '@agentic-marketing/campaigns';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime } from '@agentic-marketing/core';
-import { schema, type Tx } from '@agentic-marketing/db';
+import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { personReadSource } from '@agentic-marketing/events';
 import { computeJourneyHoldout } from '@agentic-marketing/journeys';
@@ -24,6 +24,8 @@ const CampaignId = z.string().regex(/^cmp_[0-9a-f]{32}$/, 'A campaign id (cmp_â€
 
 interface Deps {
   tx: Tx;
+  /** The pool, when the caller has it: the journey holdout's second barrier read gets its own transaction. */
+  db?: Db;
   events: EventStore;
   workspaceId: string;
 }
@@ -537,7 +539,12 @@ export const analyticsCampaignSummary = defineCommand({
   effect: 'read',
   target: (i) => i.campaignId,
   handler: async (input, ctx) => {
-    const deps: Deps = { tx: ctx.tx, events: ctx.services.events, workspaceId: ctx.principal.workspaceId };
+    const deps: Deps = {
+      tx: ctx.tx,
+      events: ctx.services.events,
+      workspaceId: ctx.principal.workspaceId,
+      ...(ctx.services.db ? { db: ctx.services.db } : {}),
+    };
     const protectedRead = (await deps.events.hasErasures?.(deps.workspaceId)) ?? true;
     const record = await loadCampaignRecord(ctx.tx, input.campaignId);
     const timeZone = await workspaceTimeZone(ctx.tx, deps.workspaceId);

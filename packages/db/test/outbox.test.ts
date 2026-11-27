@@ -258,6 +258,44 @@ describe.skipIf(!hasTestDatabase())('transactional outbox (#978 part 2)', () => 
     });
   });
 
+  it('scopes the barrier to a report window and marks a delivery between two reads (#1269 review)', async () => {
+    const insert = (id: string, state: 'pending' | 'failed', at: string) =>
+      d.db.admin.query(
+        `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, subject_ref, state)
+         VALUES ($1, $2, 'journey_event', $3, $4, 'jrn_window', $5)`,
+        [d.workspace, id, { events: [{ journeyId: 'jrn_window', at }] }, `window:${id}`, state],
+      );
+    await insert('obx_window_failed', 'failed', '2025-01-01T00:00:00.000Z');
+    await insert('obx_window_pending', 'pending', '2026-11-05T00:00:00.000Z');
+    await d.db.withWorkspace(d.workspace, async (tx) => {
+      const from = new Date('2026-10-01T00:00:00.000Z');
+      // The failed row is a year before the window and cannot change it; the pending row is inside.
+      const wide = await outboxPublicationBarrier(tx, d.workspace, 'jrn_window', { window: { from }, revision: true });
+      expect(wide).toMatchObject({ outstanding: 1, failed: 0, outsideWindowFailed: true });
+      expect(wide.revision).toEqual(expect.any(String));
+
+      // Before `from`: the pending row is outside too, and the failed row is inside.
+      const early = await outboxPublicationBarrier(tx, d.workspace, 'jrn_window', {
+        window: { to: new Date('2025-12-31T00:00:00.000Z') },
+      });
+      expect(early).toMatchObject({ outstanding: 0, failed: 1 });
+
+      // A row queued and delivered between the two reads is in neither state count; the delivery
+      // after the mark is what catches it.
+      const mark = (await outboxPublicationBarrier(tx, d.workspace, 'jrn_window', { revision: true })).revision!;
+      await d.db.admin.query(
+        `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, subject_ref, state, delivered_at)
+         VALUES ($1, 'obx_window_delivered', 'journey_event', $2, 'window:delivered', 'jrn_window', 'delivered', now())`,
+        [d.workspace, { events: [{ journeyId: 'jrn_window', at: '2026-11-06T00:00:00.000Z' }] }],
+      );
+      const after = await outboxPublicationBarrier(tx, d.workspace, 'jrn_window', {
+        window: { from },
+        since: new Date(mark),
+      });
+      expect(after).toMatchObject({ outstanding: 1, failed: 0, changedSince: true });
+    });
+  });
+
   it('bounds and flattens the stored error text', () => {
     expect(sanitiseOutboxError(new Error('a\n\tb'))).toBe('a b');
     expect(sanitiseOutboxError('x'.repeat(900))).toHaveLength(500);

@@ -264,8 +264,8 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     activeMandates: (tx, agentIds) => activeMandates(tx, agentIds),
     mandateGuardrails: (tx, workspaceId, agentId, mandate) => mandateGuardrailCheck({ tx, events, workspaceId }, agentId, mandate),
     // What an agent's actions led to, for agents.report (#310).
-    agentOutcomes: (tx, workspaceId, agentId, range, goals) => agentOutcomes({ tx, events, workspaceId }, agentId, range, goals),
-    agentOutcomesMany: (tx, workspaceId, agents, range) => agentOutcomesMany({ tx, events, workspaceId }, agents, range),
+    agentOutcomes: (tx, workspaceId, agentId, range, goals) => agentOutcomes({ tx, db, events, workspaceId }, agentId, range, goals),
+    agentOutcomesMany: (tx, workspaceId, agents, range) => agentOutcomesMany({ tx, db, events, workspaceId }, agents, range),
     // A second model check before an autonomous or held action (ADR-0016 §4.5, #231).
     // The check also sees what is published (#261): the version content and its diff, or the
     // template a direct send uses, loaded here so packages/commands stays generic.

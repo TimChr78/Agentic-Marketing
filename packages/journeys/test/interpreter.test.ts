@@ -34,6 +34,28 @@ const fresh: ParticipantState = {
 const t0 = new Date('2026-10-22T10:00:00Z');
 const env = { key: '1', branch: async () => false, condition: async () => false };
 
+const afterGoal = compile({
+  purpose: 'onboarding',
+  nodes: [
+    { id: 't', kind: 'trigger', label: 'Signed up', config: { event: 'Signed Up' } },
+    {
+      id: 'g',
+      kind: 'goal',
+      label: 'Ordered in a minute',
+      config: { event: 'Order Completed', within: 'PT1M' },
+      next: [{ to: 'u' }, { to: 'u' }],
+    },
+    {
+      id: 'u',
+      kind: 'waitUntil',
+      label: 'Until activated',
+      config: { condition: { event: 'Activated' }, timeout: 'PT1H', recheck: 'PT5M' },
+      next: [{ to: 'x' }],
+    },
+    { id: 'x', kind: 'exit', label: 'Done', config: {} },
+  ],
+});
+
 describe('journey interpreter', () => {
   it('runs until a wait, with keyed side effects', async () => {
     const out = await advance(welcome, fresh, t0, env);
@@ -58,6 +80,36 @@ describe('journey interpreter', () => {
     const a = await advance(welcome, fresh, t0, env);
     const b = await advance(welcome, fresh, t0, env);
     expect(a.effects).toEqual(b.effects);
+  });
+
+  it('gives a waitUntil entered after an expired goal its own deadline (#1269 review)', async () => {
+    const goal = (await advance(afterGoal, fresh, t0, env)).state;
+    expect(goal).toMatchObject({ node: 'g', status: 'waiting', waitingUntil: new Date('2026-10-22T10:01:00Z') });
+    // The goal times out five minutes later: the waitUntil below it starts a one-hour window from
+    // now, not the goal's expired minute.
+    const now = new Date('2026-10-22T10:05:00Z');
+    const out = await advance(afterGoal, goal, now, env);
+    expect(out.state).toMatchObject({
+      node: 'u',
+      status: 'waiting',
+      waitingUntil: new Date('2026-10-22T11:05:00Z'),
+      dueAt: new Date('2026-10-22T10:10:00Z'),
+    });
+  });
+
+  it('reports a wait-until resolution so a failed retry cannot take the timeout edge (#1269 review)', async () => {
+    // The condition matches mid-advance; the caller's downstream read then fails. The callback must
+    // have told the caller which edge was taken before it did.
+    const seen: { node: string; matched: boolean }[] = [];
+    const waiting = (await advance(afterGoal, fresh, t0, env)).state;
+    // A goal that timed out hands off to the waitUntil; the condition matches on entry.
+    const out = await advance(afterGoal, waiting, new Date('2026-10-22T10:05:00Z'), {
+      ...env,
+      condition: async () => true,
+      resolved: (node, outcome) => seen.push({ node, ...outcome }),
+    });
+    expect(seen).toEqual([{ node: 'u', matched: true }]);
+    expect(out.state).toMatchObject({ status: 'completed', node: 'x' });
   });
 
   it('splits deterministically by participant', () => {

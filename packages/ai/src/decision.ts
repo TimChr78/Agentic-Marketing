@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
-import { type DecisionQuestion, decisionQuestions, publishedSingleton } from '@agentic-marketing/artifacts';
+import { canonicalProfileId, type DecisionQuestion, decisionQuestions, publishedSingleton } from '@agentic-marketing/artifacts';
 import { providerDiagnostic, redactCredentials, safeErrorText } from '@agentic-marketing/core';
 import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
-import { canonicalProfile, lockProfileRows } from '@agentic-marketing/profiles';
+import { lockProfileRows } from '@agentic-marketing/profiles';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
@@ -453,11 +453,17 @@ export interface StoredProfileScore {
  * standalone scoring and for decision finalisation, so both writers follow a merge identically.
  */
 export async function lockCanonicalProfile(tx: Tx, workspaceId: string, profileId: string): Promise<string | null> {
-  let person = await canonicalProfile(tx, workspaceId, profileId);
-  for (let follow = 0; person && follow < 4; follow++) {
-    const locked = await lockProfileRows(tx, workspaceId, [person.id]);
-    if (locked.length) return person.id;
-    person = await canonicalProfile(tx, workspaceId, person.id);
+  // `canonicalProfileId` resolves the chain and checks `merged_into` in one statement. Two
+  // statements could disagree: a merge committing between the walk and the check made the check
+  // reject a root that already had a survivor, so the lookup returned null and the lock retry loop
+  // never ran — the score was dropped instead of stored on the survivor (#1269 review).
+  let personId = await canonicalProfileId(tx, workspaceId, profileId);
+  for (let follow = 0; personId && follow < 4; follow++) {
+    const locked = await lockProfileRows(tx, workspaceId, [personId]);
+    if (locked.length) return personId;
+    // The merge committed between the lookup and the lock. Follow the chain again: the lock
+    // statement locks nothing for a merged row, and the successor is the person to lock.
+    personId = await canonicalProfileId(tx, workspaceId, personId);
   }
   return null;
 }

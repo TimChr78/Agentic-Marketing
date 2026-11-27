@@ -1,14 +1,17 @@
 import { randomBytes } from 'node:crypto';
 import { analyseHoldout, anyArmBelowK, artifactTypes, K } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
-import { outboxPublicationBarrier, schema, type Tx } from '@agentic-marketing/db';
+import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { and, eq, sql } from 'drizzle-orm';
 import {
   incompletePublicationNote,
   JOURNEY_HOLDOUT_PAGE_PROFILE_LIMIT,
+  outsideWindowFailedNote,
   type PageUnresolved,
   pageOutcomeScope,
+  publicationChangedNote,
+  readPublicationBarrier,
   unresolvedOutcomeNote,
 } from './holdout';
 import { attributeSplitOutcomes, type SplitCounts, type SplitEntry } from './split';
@@ -83,6 +86,8 @@ export interface JourneySplitInput {
 export async function computeJourneySplit(
   deps: {
     tx: Tx;
+    /** The pool, when the caller has it: the second barrier read then gets its own transaction. */
+    db?: Db;
     events: EventStore;
     workspaceId: string;
     /**
@@ -116,8 +121,11 @@ export async function computeJourneySplit(
   // Snapshot the outbox before the ClickHouse reads: an event still queued here is not in what
   // follows, and one published afterwards must not make this report look complete. A verdict is
   // actionable (the lifecycle optimiser promotes or retires an arm), so it waits for publication.
-  const publication = await outboxPublicationBarrier(deps.tx, ws, input.journeyId);
-  const publicationIncomplete = publication.outstanding > 0 || publication.failed > 0;
+  // Read it again after the reads, because a conversion queued between the snapshot and the reads is
+  // in neither; the revision catches one queued and published in between (#1269 review).
+  const window = { ...(from ? { from } : {}), ...(to ? { to } : {}) };
+  const publicationBefore = await readPublicationBarrier(deps, input.journeyId, { window, revision: true });
+  const beforeIncomplete = publicationBefore.outstanding > 0 || publicationBefore.failed > 0;
 
   // The split's takes land in a transaction-scoped temporary table, the way the holdout's winners
   // do (#1108). The ClickHouse read is a bounded keyset page and the report then pages the takes by
@@ -254,6 +262,24 @@ export async function computeJourneySplit(
     if (rows.length < journeySplitPageSize) break;
   }
 
+  const publicationAfter = await readPublicationBarrier(
+    deps,
+    input.journeyId,
+    {
+      window,
+      ...(publicationBefore.revision ? { since: new Date(publicationBefore.revision) } : {}),
+    },
+    true,
+  );
+  const afterIncomplete = publicationAfter.outstanding > 0 || publicationAfter.failed > 0;
+  const publicationChanged = publicationAfter.changedSince === true;
+  const publicationIncomplete = beforeIncomplete || afterIncomplete || publicationChanged;
+  // The counts are existence flags per snapshot; the largest one is what the note can honestly say.
+  const publication = {
+    outstanding: Math.max(publicationBefore.outstanding, publicationAfter.outstanding),
+    failed: Math.max(publicationBefore.failed, publicationAfter.failed),
+  };
+
   const rate = (n: number, of: number) => (of ? n / of : 0);
   // The same k floor the holdout read applies, per arm (#757): an arm below k never reports a
   // count or rate, and no comparison or verdict is computed from a hidden baseline. The floor
@@ -297,7 +323,9 @@ export async function computeJourneySplit(
         });
   const better = comparisons.filter((c) => c.verdict === 'treatment_better').map((c) => `arm ${c.arm}`);
   const baseNote = publicationIncomplete
-    ? `${incompletePublicationNote(publication, 'every comparison is withheld')}${belowK ? ` An arm has fewer than k=${K} people, so its counts and rates are withheld.` : ''}`
+    ? beforeIncomplete || afterIncomplete
+      ? `${incompletePublicationNote(publication, 'every comparison is withheld')}${belowK ? ` An arm has fewer than k=${K} people, so its counts and rates are withheld.` : ''}`
+      : publicationChangedNote('every comparison is withheld')
     : !takeCount
       ? 'Nobody has reached this split yet.'
       : belowK
@@ -307,9 +335,7 @@ export async function computeJourneySplit(
           : comparisons.every((c) => c.verdict === 'not_enough_data')
             ? `Not enough people yet: each arm needs ${input.minSampleSize}.`
             : 'No arm is clearly better than arm 0 yet.';
-  const note =
-    unresolved.size === 0
-      ? baseNote
-      : `${baseNote} ${[...unresolved].map((reason) => unresolvedOutcomeNote(reason, pageProfileLimit)).join(' ')}`;
+  const windowNote = publicationBefore.outsideWindowFailed || publicationAfter.outsideWindowFailed ? ` ${outsideWindowFailedNote()}` : '';
+  const note = `${unresolved.size === 0 ? baseNote : `${baseNote} ${[...unresolved].map((reason) => unresolvedOutcomeNote(reason, pageProfileLimit)).join(' ')}`}${windowNote}`;
   return { journeyId: input.journeyId, node: input.node, k: K, suppressed: belowK, arms, comparisons, note };
 }

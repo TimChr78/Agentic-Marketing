@@ -5,7 +5,7 @@ import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { canonicalProfile } from '@agentic-marketing/profiles';
 import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { aiAllowed, redact } from './context';
+import { aiAllowed, prepareWithCanonicalProfile, redact } from './context';
 import {
   assertStateAllowed,
   DecisionError,
@@ -20,13 +20,6 @@ import { AiUnavailable } from './providers';
 // ai.score (#194): one metered call to a decision provider. It returns typed answers, never a
 // rationale, and stores a named score for a person when asked. ai.calibration compares stored
 // predictions with a later event, so a score can be shown to be calibrated before it routes.
-
-declare module '@agentic-marketing/commands' {
-  interface Services {
-    /** The pool itself, for the budget reservation and score storage (their own transactions). */
-    db?: Db;
-  }
-}
 
 const ProfileId = z.string().regex(/^prf_[0-9a-f]{32}$/);
 const ProviderId = z.string().regex(/^aip_[0-9a-f]{32}$/);
@@ -106,30 +99,45 @@ export const score = defineCommand({
   target: (i) => i.profileId,
   handler: async (input, ctx) => {
     if (input.store && !input.profileId) throw new AppError('invalid_input', 'store needs profileId: a score is stored for a person.');
-    // A caller may pass an id a merge has folded away. Follow it before the consent check, the
-    // context read and the write, or the survivor's consent and data are missed (#1241 review).
-    const profileId = input.profileId ? (await canonicalProfile(ctx.tx, ctx.principal.workspaceId, input.profileId))?.id : undefined;
-    if (input.profileId && !profileId) throw new AppError('not_found', `No profile ${input.profileId}.`);
-    if (profileId) {
-      const consent = await aiAllowed(ctx.tx, ctx.principal.workspaceId, profileId);
-      if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
-    }
     if (!ctx.services.db) throw new AppError('conflict', 'ai.score needs the database service.');
     const db = ctx.services.db;
+    const ws = ctx.principal.workspaceId;
+    // A caller may pass an id a merge has folded away. Follow it before the consent check, the
+    // context read and the write, or the survivor's consent and data are missed (#1241 review). A
+    // merge that commits during the preparation is caught afterwards and the preparation is redone
+    // with the survivor, so its consent cannot look absent (#1269 review).
+    const prepared = await prepareWithCanonicalProfile(ctx.tx, ws, input.profileId ?? null, async (given) => {
+      let profileId: string | undefined;
+      if (given === undefined) {
+        profileId = input.profileId ? (await canonicalProfile(ctx.tx, ws, input.profileId))?.id : undefined;
+        if (input.profileId && !profileId) throw new AppError('not_found', `No profile ${input.profileId}.`);
+      } else if (given === null) {
+        throw new AppError('not_found', `No profile ${input.profileId}.`);
+      } else {
+        profileId = given;
+      }
+      if (profileId) {
+        const consent = await aiAllowed(ctx.tx, ws, profileId);
+        if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
+      }
+      let provider: Awaited<ReturnType<typeof decisionProvider>>;
+      try {
+        provider = await decisionProvider(ctx.tx, ctx.services.keyProvider, input.providerId);
+      } catch (err) {
+        return appError(err);
+      }
+      let state = input.state;
+      if (state === undefined) {
+        if (!profileId) throw new AppError('invalid_input', 'Give a state, or profileId to build a non-personal state from the person.');
+        state = await nonPersonalState(ctx.tx, ws, ctx.services.events, profileId).catch(appError);
+        if (!state) throw new AppError('not_found', `No profile ${input.profileId}.`);
+      }
+      return { profileId: profileId ?? null, result: { provider, state } };
+    });
+    const profileId = prepared.profileId ?? undefined;
+    const { provider, state } = prepared.result;
     // The call row names the person the score is for today, so an erasure and the audit trail agree.
     const callInput = profileId ? { ...input, profileId } : input;
-    let provider: Awaited<ReturnType<typeof decisionProvider>>;
-    try {
-      provider = await decisionProvider(ctx.tx, ctx.services.keyProvider, input.providerId);
-    } catch (err) {
-      return appError(err);
-    }
-    let state = input.state;
-    if (state === undefined) {
-      if (!profileId) throw new AppError('invalid_input', 'Give a state, or profileId to build a non-personal state from the person.');
-      state = await nonPersonalState(ctx.tx, ctx.principal.workspaceId, ctx.services.events, profileId).catch(appError);
-      if (!state) throw new AppError('not_found', `No profile ${input.profileId}.`);
-    }
     const callId = newId('aic');
     try {
       assertStateAllowed(state, provider, input.questions);

@@ -54,6 +54,12 @@ export interface PublicRequest {
 export interface Services {
   /** Public URL of the server, e.g. for admin UI deep links in command output. */
   publicUrl?: string;
+  /**
+   * The pool itself, for reads and writes that need their own transaction outside the command's
+   * repeatable-read snapshot (a budget reservation, a score write, or a publication-barrier read
+   * taken again while the report runs).
+   */
+  db?: Db;
   /** Links host (PUBLIC_LINKS_URL), for shareable unsubscribe, form, web-version and archive URLs. */
   linksUrl?: string;
   /**

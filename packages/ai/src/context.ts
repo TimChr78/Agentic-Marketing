@@ -1,4 +1,4 @@
-import { DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
+import { canonicalProfileId, DEFAULT_PURPOSES, publishedSingleton } from '@agentic-marketing/artifacts';
 import { redact } from '@agentic-marketing/core';
 import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
@@ -40,6 +40,38 @@ export async function aiAllowed(tx: Tx, workspaceId: string, profileId: string):
     ok: false,
     reason: `no_lawful_basis: ${AI_PURPOSE} is based on ${p.basis.replace('_', ' ')} and the person's status is ${state?.status ?? 'unknown (no record)'}`,
   };
+}
+
+export interface ProfilePreparation<T> {
+  /** The canonical person the preparation ran for; null when the reference has no person. */
+  profileId: string | null;
+  result: T;
+}
+
+/**
+ * Runs `prepare` for the person `reference` points at today, then re-resolves the person and runs it
+ * again when a merge moved them during preparation (#1269 review). The consent lookup and the state
+ * are read under one canonical id, so a merge that commits just before the consent lookup cannot
+ * make the survivor's consent look absent (`no_lawful_basis`). `prepare` receives `undefined` on the
+ * first run (resolve the reference itself), the new canonical id on a retry, and `null` when the
+ * person disappeared. Preparation is bounded: a family that keeps merging past the bound returns
+ * the last result rather than looping.
+ */
+export async function prepareWithCanonicalProfile<T>(
+  tx: Tx,
+  workspaceId: string,
+  reference: string | null,
+  prepare: (profileId: string | null | undefined) => Promise<ProfilePreparation<T>>,
+  attempts = 3,
+): Promise<ProfilePreparation<T>> {
+  let prepared = await prepare(undefined);
+  if (!reference) return prepared;
+  for (let attempt = 1; attempt < attempts; attempt++) {
+    const current = await canonicalProfileId(tx, workspaceId, reference);
+    if (current === prepared.profileId) return prepared;
+    prepared = await prepare(current);
+  }
+  return prepared;
 }
 
 export async function personContext(

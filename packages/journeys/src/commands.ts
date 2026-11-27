@@ -234,10 +234,19 @@ export const journeyHoldoutResult = defineCommand({
   effect: 'read',
   target: (i) => i.journeyId,
   handler: async (input, ctx) =>
-    computeJourneyHoldout({ tx: ctx.tx, events: ctx.services.events, workspaceId: ctx.principal.workspaceId }, input.journeyId, {
-      ...(input.from ? { from: input.from } : {}),
-      ...(input.to ? { to: input.to } : {}),
-    }),
+    computeJourneyHoldout(
+      {
+        tx: ctx.tx,
+        events: ctx.services.events,
+        workspaceId: ctx.principal.workspaceId,
+        ...(ctx.services.db ? { db: ctx.services.db } : {}),
+      },
+      input.journeyId,
+      {
+        ...(input.from ? { from: input.from } : {}),
+        ...(input.to ? { to: input.to } : {}),
+      },
+    ),
 });
 
 const ArmOut = z.object({
@@ -288,7 +297,15 @@ export const journeySplitResult = defineCommand({
   effect: 'read',
   target: (i) => i.journeyId,
   handler: async (input, ctx) =>
-    computeJourneySplit({ tx: ctx.tx, events: ctx.services.events, workspaceId: ctx.principal.workspaceId }, input),
+    computeJourneySplit(
+      {
+        tx: ctx.tx,
+        events: ctx.services.events,
+        workspaceId: ctx.principal.workspaceId,
+        ...(ctx.services.db ? { db: ctx.services.db } : {}),
+      },
+      input,
+    ),
 });
 
 export const enrollProfiles = defineCommand({
