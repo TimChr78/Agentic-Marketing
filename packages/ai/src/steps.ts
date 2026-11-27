@@ -8,7 +8,7 @@ import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { classifyInputForLog } from './classify';
-import { aiAllowed, personContext, prepareForPerson, redact } from './context';
+import { aiAllowed, NO_PROFILE, personContext, prepareForPerson, redact } from './context';
 import {
   type DecisionAnswer,
   DecisionError,
@@ -207,46 +207,69 @@ function clearPersonDerived(input: Record<string, unknown>, kind: CallRow['kind'
   input.trigger = typeof name === 'string' ? { name } : null;
 }
 
-export async function finishIn(
-  tx: Tx,
-  c: CallRow,
-  prep: (Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>) | null,
-  out: {
-    status: 'done' | 'fallback' | 'failed';
-    option?: string;
-    rationale?: string;
-    slots?: Record<string, string>;
-    /** A decision step's routing probability (0–1). */
-    probability?: number;
-    output?: unknown;
-    error?: string;
-    inputTokens?: number;
-    outputTokens?: number;
-    /** The provider usage was unknown and the reserved estimate was recorded (#941). */
-    usageEstimated?: boolean;
-    latencyMs?: number;
-    cached?: boolean;
-    providerId?: string;
-    model?: string;
-    /** The model id the workspace configured, kept in place of a provider's own version on refusal. */
-    configuredModel?: string;
-    /** Preparation already refused the person: finalisation clears person-derived input too. */
-    refusal?: PreparationRefusal;
-    /**
-     * A decision score to commit in the same transaction as the wakeup, before the participant
-     * can be claimed again (#350, #351).
-     */
-    storeScore?: {
-      profileId: string;
-      key: string;
-      answer: DecisionAnswer;
-      model: string;
-      modelVersion: string;
-      callId: string | null;
-      ttlHours: number;
-    };
-  },
-) {
+type FinishPrep = Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>;
+
+type FinishOut = {
+  status: 'done' | 'fallback' | 'failed';
+  option?: string;
+  rationale?: string;
+  slots?: Record<string, string>;
+  /** A decision step's routing probability (0–1). */
+  probability?: number;
+  output?: unknown;
+  error?: string;
+  /**
+   * The error is the provider's own text (a failed call, not a refusal this codebase wrote). It may
+   * quote the person the call was about, so it is person data like an answer (#1300 review).
+   */
+  providerText?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  /** The provider usage was unknown and the reserved estimate was recorded (#941). */
+  usageEstimated?: boolean;
+  latencyMs?: number;
+  cached?: boolean;
+  providerId?: string;
+  model?: string;
+  /** The model id the workspace configured, kept in place of a provider's own version on refusal. */
+  configuredModel?: string;
+  /** Preparation already refused the person: finalisation clears person-derived input too. */
+  refusal?: PreparationRefusal;
+  /**
+   * A decision score to commit in the same transaction as the wakeup, before the participant
+   * can be claimed again (#350, #351).
+   */
+  storeScore?: {
+    profileId: string;
+    key: string;
+    answer: DecisionAnswer;
+    model: string;
+    modelVersion: string;
+    callId: string | null;
+    ttlHours: number;
+  };
+};
+
+/**
+ * Whether storing this outcome would keep anything derived from the person (#1300 review): a
+ * score's answer or the value it stores, a decision's choice, a generated text, the prepared person
+ * context, a decision's state fingerprint, or a provider failure whose text may quote the person.
+ * One helper answers for every outcome — done, late, fallback or failure — so no branch can skip the
+ * gate. A budget or configuration fallback that carries none of it needs no gate read and no
+ * workspace-wide identity lock.
+ */
+function persistsPersonData(c: CallRow, prep: FinishPrep | null, out: FinishOut): boolean {
+  // Preparation already refused the person: nothing person-derived may be written, and the refusal
+  // path below clears what the call row held.
+  if (!c.profileId || out.refusal !== undefined) return false;
+  if (out.status === 'done' || out.output !== undefined || out.rationale !== undefined || out.slots !== undefined) return true;
+  if (out.storeScore !== undefined || prep?.person !== undefined || out.providerText === true) return true;
+  // A score call records the state's hash and estimated size once the decision state was built.
+  const input = c.input as { stateHash?: unknown; stateTokens?: unknown };
+  return input.stateHash !== undefined || input.stateTokens !== undefined;
+}
+
+export async function finishIn(tx: Tx, c: CallRow, prep: FinishPrep | null, out: FinishOut) {
   // Lock the person before the participant and the attempt fence: profile -> participant ->
   // `ai_calls`, the order erasure uses. Erasure locks the profile, deletes (and holds) the
   // participant rows and only then deletes the profile, whose cascade removes the `ai_calls` row.
@@ -255,17 +278,14 @@ export async function finishIn(
   // PostgreSQL aborted one of them (#1274). Every kind that names a person takes this order, not
   // only a score step.
   //
-  // A score step writes consent-gated data, and a finished decision or generated text is person
-  // data too. Take the workspace identity lock before the profile row: a standalone consent writer
-  // serialises on that lock, not on the profile row, so a refusal that commits while this waits is
-  // visible to the re-check under the lock (#1300). Only an outcome that can write a score or commit
-  // a person's answer needs it: a step taking its fallback for a budget, configuration or prompt
-  // reason writes no person data, and holding the workspace-wide lock there would only queue other
-  // consent writers (#1300 review).
-  const commitsPersonData =
-    (c.kind === 'score' && out.storeScore !== undefined) ||
-    (c.profileId !== null && (c.kind === 'decide' || c.kind === 'generate') && out.status === 'done');
-  if (commitsPersonData) await lockIdentity(tx, c.workspaceId);
+  // An outcome that keeps person-derived data is consent-gated. Take the workspace identity lock
+  // before the profile row: a standalone consent writer serialises on that lock, not on the profile
+  // row, so a refusal that commits while this waits is visible to the re-check under the lock
+  // (#1300). One helper decides that for every outcome: a step taking its fallback for a budget,
+  // configuration or prompt reason writes no person data, and holding the workspace-wide lock there
+  // would only queue other consent writers (#1300 review).
+  const persists = persistsPersonData(c, prep, out);
+  if (persists) await lockIdentity(tx, c.workspaceId);
   const lockedProfile = c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
   // A person who is gone has no participant row to wait at: the wakeup below finds nothing and a
   // done answer is recorded as late.
@@ -296,9 +316,10 @@ export async function finishIn(
   // On a fallback the journey fills the slots with the prompt's fallback texts itself.
   let content = out.slots;
   // A consent refusal may carry everything the model answered about the person: the answer, its
-  // rationale, the generated text, the predicted probability and the prepared context. None of it
-  // may be persisted for a person who no longer allows AI processing (#1300 review); billing metadata
-  // stays. A preparation refusal arrives typed from the step, so this applies there too (#1300).
+  // rationale, the generated text, the predicted probability, the prepared context and a provider
+  // failure's text. None of it may be persisted for a person who no longer allows AI processing
+  // (#1300 review); billing metadata stays. A preparation refusal arrives typed from the step, so
+  // this applies there too (#1300).
   let refused = out.refusal !== undefined;
   if (out.refusal) error = out.refusal.reason;
   // A decision call logs a state hash and a sanitised question set, never the person's state
@@ -310,6 +331,20 @@ export async function finishIn(
     const trigger = input.trigger as { name?: unknown } | string | null | undefined;
     const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
     input.trigger = typeof name === 'string' ? { name } : null;
+  }
+  // The gate that admitted the call can be stale by the time its outcome is committed, and a step
+  // that already timed out has no participant left to wake: re-check consent whenever this outcome
+  // would keep person-derived data, under the identity lock and the profile row taken above. A
+  // refusal takes the fallback path — the participant gets the fallback edge, nothing about the
+  // person is stored, and the usage below is still settled (#1300, #1300 review).
+  if (persists && !refused) {
+    const consent = lockedProfile ? await aiAllowed(tx, c.workspaceId, lockedProfile) : { ok: false as const, reason: NO_PROFILE };
+    if (!consent.ok) {
+      status = 'fallback';
+      error = consent.reason;
+      content = undefined;
+      refused = true;
+    }
   }
   // A decision step verifies the still-waiting participant and the profile it belongs to before
   // writing anything (#351, #359 interplay). A step that finds the participant gone or not waiting,
@@ -323,7 +358,7 @@ export async function finishIn(
   // with a merge (#1011 review). `removeProfiles` takes the same profile lock before it deletes the
   // person's participants and their `ai_calls` rows (the cascade), so the profile lock and the
   // participant row are taken at the top of this function, before the fence (#1274).
-  if (c.kind === 'score' && waiting && out.storeScore) {
+  if (!refused && c.kind === 'score' && waiting && out.storeScore) {
     // `lockedProfile` at the top of this function resolved the person today, even when a merge has
     // folded the call's own profile id away (#1241), and locked only the canonical row: locking the
     // stored alias and then its survivor would invert the shared ascending-id profile lock order of
@@ -331,26 +366,12 @@ export async function finishIn(
     //
     // The score and the wakeup commit together: a worker cannot claim the participant and read a
     // missing (or previous) value, and a failed score write leaves the step waiting to retry. The
-    // write re-reads consent under the lock and withholds the score on a refusal (#1300), which
-    // turns this answer into a fallback so the participant takes its fallback edge.
+    // write re-checks consent under the same locks and withholds the score on a refusal (#1300),
+    // which turns this answer into a fallback so the participant takes its fallback edge.
     const write = await insertProfileScoreChecked(tx, c.workspaceId, out.storeScore);
     if ('refused' in write) {
       status = 'fallback';
       error = write.refused;
-      refused = true;
-    }
-  }
-  // A decision or a generated text is person data: the consent check that admitted the model call
-  // can be stale by the time the answer is committed. The profile row this transaction holds was
-  // taken after the identity lock, so a refusal that committed meanwhile is visible here. A refusal
-  // takes the fallback path: the participant gets the fallback edge and no decision or text, and
-  // the usage below is still settled (#1300).
-  if (status === 'done' && (c.kind === 'decide' || c.kind === 'generate') && lockedProfile) {
-    const consent = await aiAllowed(tx, c.workspaceId, lockedProfile);
-    if (!consent.ok) {
-      status = 'fallback';
-      error = consent.reason;
-      content = undefined;
       refused = true;
     }
   }
@@ -659,6 +680,9 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
     out = {
       status: 'fallback',
       error: modelErrorText(err),
+      // The provider's text may quote the person it was asked about: finalisation clears it on a
+      // consent refusal (#1300 review).
+      providerText: true,
       latencyMs: Date.now() - started,
       ...usageFromErrorOrEstimate(err, estimate, prep.def.maxOutputTokens),
     };
@@ -1019,6 +1043,8 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
         finishIn(tx, call, null, {
           status: 'fallback',
           error,
+          // The exception's text is the provider's own and may quote the person (#1300 review).
+          providerText: true,
           ...usage,
           usageEstimated: estimated,
           providerId: ready.provider.providerId,
@@ -1028,7 +1054,7 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
         }),
     });
   } catch (err) {
-    return failureRecorded ? undefined : finish(db, c, null, { status: 'fallback', error: modelErrorText(err) });
+    return failureRecorded ? undefined : finish(db, c, null, { status: 'fallback', error: modelErrorText(err), providerText: true });
   }
 }
 

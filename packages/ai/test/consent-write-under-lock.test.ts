@@ -439,6 +439,204 @@ describe.skipIf(!hasTestDatabase())('a score step takes the identity lock only w
   }, 60_000);
 });
 
+// A step that already timed out has no participant left to wake, so the score write is skipped and
+// nothing re-read the gate: the answer, the state fingerprint and the provider's model version were
+// stored on the call row after the person had withdrawn. Finalisation now re-checks consent under
+// the locks it already holds whatever the outcome, and a refusal takes the same allowlist.
+describe.skipIf(!hasTestDatabase())('a late score re-checks consent before storing the answer (#1300 review)', () => {
+  it('withholds the answer when the participant already timed out and consent was withdrawn', async () => {
+    const person = newId('prf');
+    await seedProfile(person);
+    await grantAi(person);
+    const [participant] = await d.db.withWorkspace(ws, (tx) =>
+      tx
+        .insert(schema.journeyParticipants)
+        .values({
+          workspaceId: ws,
+          journeyId: newId('jrn'),
+          version: 1,
+          profileId: person,
+          entryKey: `test:${person}`,
+          node: 'decide',
+          seq: 1,
+          // The node timed out while the model ran: the step is no longer waiting for an answer.
+          status: 'completed',
+          dueAt: new Date(Date.UTC(2026, 9, 2)),
+        })
+        .returning({ id: schema.journeyParticipants.id }),
+    );
+    const callId = newId('aic');
+    await d.db.withWorkspace(ws, (tx) =>
+      tx.insert(schema.aiCalls).values({
+        workspaceId: ws,
+        id: callId,
+        kind: 'score',
+        status: 'running',
+        attempts: 1,
+        participantId: participant!.id,
+        node: 'decide',
+        seq: 1,
+        profileId: person,
+        input: {
+          questions: [{ key: 'propensity', type: 'noul', instructions: 'Will this person convert?' }],
+          stateHash: 'hash-of-the-person-state',
+          stateTokens: 1234,
+          trigger: { name: 'Order Completed', properties: { email: 'ada@example.com' } },
+        },
+      }),
+    );
+    const [call] = await d.db.withWorkspace(ws, (tx) => tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, callId)));
+    // A consent writer holds the workspace identity lock, not the profile row.
+    const held = await withheldConsentChange(person, 'identity');
+    try {
+      const pending = d.db.withWorkspace(ws, (tx) =>
+        finishIn(tx, call!, null, {
+          status: 'done',
+          probability: answer.probability,
+          output: { answers: [answer] },
+          // What the provider answered with, which must not survive a refusal.
+          model: 'provider-reported-9.1',
+          configuredModel: 'test-model',
+          storeScore: {
+            profileId: person,
+            key: 'late_answer',
+            answer,
+            model: 'test-model',
+            modelVersion: 'v1',
+            callId: call!.id,
+            ttlHours: 168,
+          },
+        }),
+      );
+      const first = await Promise.race([
+        pending.then(() => 'settled' as const),
+        waitFor('the late answer to wait for the identity lock', async () => (await blockedBy(held.conn, held.pid)).length > 0).then(
+          () => 'blocked' as const,
+        ),
+      ]);
+      expect(first).toBe('blocked');
+      await held.commit();
+      await pending;
+    } finally {
+      await held.drop();
+    }
+    expect(await scoreRows('late_answer')).toEqual([]);
+    const settled = (
+      await d.db.admin.query<{
+        status: string;
+        error: string | null;
+        model: string | null;
+        input: Record<string, unknown>;
+        output: unknown;
+      }>('SELECT status, error, model, input, output FROM ai_calls WHERE workspace_id = $1 AND id = $2', [ws, callId])
+    ).rows[0]!;
+    // The row keeps only the fallback reason and the billing fields: the answer, the state fingerprint
+    // and its size, and the provider's own model version are dropped.
+    expect(settled).toMatchObject({ status: 'fallback', output: null, model: 'test-model' });
+    expect(settled.error).toContain('no_lawful_basis');
+    expect(settled.input.stateHash).toBeUndefined();
+    expect(settled.input.stateTokens).toBeUndefined();
+    expect(JSON.stringify(settled.input)).not.toContain('ada@example.com');
+    expect(settled.input.trigger).toEqual({ name: 'Order Completed' });
+  }, 60_000);
+});
+
+describe.skipIf(!hasTestDatabase())('a failure fallback re-checks consent before storing person data (#1300 review)', () => {
+  async function seedCall(kind: 'score' | 'generate', input: Record<string, unknown>) {
+    const person = newId('prf');
+    await seedProfile(person);
+    await grantAi(person);
+    const callId = newId('aic');
+    await d.db.withWorkspace(ws, (tx) =>
+      tx
+        .insert(schema.aiCalls)
+        .values({ workspaceId: ws, id: callId, kind, status: 'running', attempts: 1, node: kind, seq: 1, profileId: person, input }),
+    );
+    const [call] = await d.db.withWorkspace(ws, (tx) => tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, callId)));
+    const settled = async () =>
+      (
+        await d.db.admin.query<{ status: string; error: string | null; input_tokens: number; input: Record<string, unknown> }>(
+          'SELECT status, error, input_tokens, input FROM ai_calls WHERE workspace_id = $1 AND id = $2',
+          [ws, callId],
+        )
+      ).rows[0]!;
+    return { person, call: call!, settled };
+  }
+
+  it('replaces a provider’s failure text with the refusal', async () => {
+    // The provider failed after seeing the call; its text may quote the person it was asked about.
+    const { person, call, settled } = await seedCall('score', { questions: [] });
+    const held = await withheldConsentChange(person, 'identity');
+    try {
+      const pending = d.db.withWorkspace(ws, (tx) =>
+        finishIn(tx, call, null, {
+          status: 'fallback',
+          error: 'model_error: Ada Lovelace <ada@example.com>',
+          providerText: true,
+          inputTokens: 12,
+          outputTokens: 0,
+        }),
+      );
+      const first = await Promise.race([
+        pending.then(() => 'settled' as const),
+        waitFor('the failure fallback to wait for the identity lock', async () => (await blockedBy(held.conn, held.pid)).length > 0).then(
+          () => 'blocked' as const,
+        ),
+      ]);
+      expect(first).toBe('blocked');
+      await held.commit();
+      await pending;
+    } finally {
+      await held.drop();
+    }
+    const row = await settled();
+    // The tokens the provider billed are kept; its text is not.
+    expect(row).toMatchObject({ status: 'fallback', input_tokens: 12 });
+    expect(row.error).toContain('no_lawful_basis');
+    expect(JSON.stringify(row)).not.toContain('ada@example.com');
+  }, 60_000);
+
+  it('clears the prepared context of a budget fallback', async () => {
+    // Preparation succeeded, so the step carries the person's context even though the model never ran.
+    const { person, call, settled } = await seedCall('generate', {
+      trigger: { name: 'Order Completed', properties: { email: 'ada@example.com' } },
+    });
+    const held = await withheldConsentChange(person, 'identity');
+    try {
+      const pending = d.db.withWorkspace(ws, (tx) =>
+        finishIn(
+          tx,
+          call,
+          { person: { id: person, traits: { plan: 'pro' } } },
+          {
+            status: 'fallback',
+            error: 'budget: the monthly tokens are used up',
+            inputTokens: 40,
+            outputTokens: 0,
+          },
+        ),
+      );
+      const first = await Promise.race([
+        pending.then(() => 'settled' as const),
+        waitFor('the budget fallback to wait for the identity lock', async () => (await blockedBy(held.conn, held.pid)).length > 0).then(
+          () => 'blocked' as const,
+        ),
+      ]);
+      expect(first).toBe('blocked');
+      await held.commit();
+      await pending;
+    } finally {
+      await held.drop();
+    }
+    const row = await settled();
+    expect(row).toMatchObject({ status: 'fallback', input_tokens: 40 });
+    expect(row.error).toContain('no_lawful_basis');
+    expect(row.input.person).toBeUndefined();
+    expect(JSON.stringify(row.input)).not.toContain('ada@example.com');
+    expect(row.input.trigger).toEqual({ name: 'Order Completed' });
+  }, 60_000);
+});
+
 describe.skipIf(!hasTestDatabase())('the classify trait write serialises with a consent change (#1300)', () => {
   it('takes the identity lock before the profile lock, so it reads the committed objection', async () => {
     const person = newId('prf');

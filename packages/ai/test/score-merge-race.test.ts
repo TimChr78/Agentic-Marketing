@@ -81,6 +81,29 @@ async function seedProfile(id: string, idents: { anonymous?: string; user?: stri
     if (idents.anonymous) rows.push({ workspaceId: ws, profileId: id, type: 'anonymous_id' as const, value: idents.anonymous });
     if (idents.user) rows.push({ workspaceId: ws, profileId: id, type: 'user_id' as const, value: idents.user });
     if (rows.length) await tx.insert(schema.identifiers).values(rows);
+    // A score step only exists for a person the gate admitted; finalisation reads the gate again
+    // under its locks before it commits the answer (#1300 review). Both the ledger record and the
+    // derived state: a merge rebuilds the state from the records.
+    await tx.insert(schema.consentRecords).values({
+      workspaceId: ws,
+      profileId: id,
+      purpose: 'ai_processing',
+      channel: '',
+      status: 'granted',
+      basis: 'consent',
+      source: 'form',
+      recordedAt: createdAt,
+    });
+    await tx.insert(schema.consentState).values({
+      workspaceId: ws,
+      profileId: id,
+      purpose: 'ai_processing',
+      channel: '',
+      status: 'granted',
+      basis: 'consent',
+      source: 'form',
+      updatedAt: createdAt,
+    });
   });
 }
 
