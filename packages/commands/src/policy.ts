@@ -244,6 +244,12 @@ export interface PolicyOutcome {
   decision: PolicyDecision;
   actionClass: ActionClass;
   reasons: string[];
+  /**
+   * The reasons whose text came from an AI provider rather than this codebase (the independent
+   * check's failure). The caller sees them, but the long-lived stores replace them with the
+   * command's fixed `failureText`: a provider may quote the person's data back (#1300 review).
+   */
+  providerReasons?: string[];
   impact: Impact;
   /** The level the mandate grants for this action after every cap (0–4); undefined without a mandate. */
   level?: number;

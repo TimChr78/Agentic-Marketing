@@ -398,7 +398,11 @@ export class ProviderError extends AppError {}
  */
 export function storedFailure(cmd: { failureText?: string }, err: AppError | null): AuditedError {
   if (!err) return UNEXPECTED_FAILURE;
-  if (cmd.failureText !== undefined && err instanceof ProviderError) return { code: err.code, message: cmd.failureText };
+  // A policy denial is the executor's own decision, so it keeps its reasons — unless one of them is
+  // the independent check's provider text, which must not be stored either (#1300 review).
+  const providerReason = err instanceof PolicyDeniedError && (err.outcome.providerReasons?.length ?? 0) > 0;
+  if (cmd.failureText !== undefined && (err instanceof ProviderError || providerReason))
+    return { code: err.code, message: cmd.failureText };
   return { code: err.code, message: err.message };
 }
 
@@ -456,11 +460,23 @@ export function sanitizeAppError(err: AppError): AppError {
   const details = err.details === undefined ? undefined : redactErrorDetails(err.details);
   if (err instanceof PolicyDeniedError) {
     const reasons = err.outcome.reasons.map(redactCredentials);
-    const changed = message !== err.message || reasons.some((r, i) => r !== err.outcome.reasons[i]);
-    return changed ? new PolicyDeniedError({ ...err.outcome, reasons }) : err;
+    const providerReasons = err.outcome.providerReasons?.map(redactCredentials);
+    const reasonsChanged = message !== err.message || reasons.some((r, i) => r !== err.outcome.reasons[i]);
+    // The reasons whose text came from a provider are a second copy: redact them with the same rule,
+    // so a stored copy can never keep what the visible reason dropped (#1300 review).
+    const providerChanged = providerReasons !== undefined && providerReasons.some((r, i) => r !== err.outcome.providerReasons![i]);
+    if (!reasonsChanged && !providerChanged) return err;
+    return new PolicyDeniedError({
+      ...err.outcome,
+      reasons,
+      ...(providerReasons ? { providerReasons } : {}),
+    });
   }
-  // Redaction rebuilds the error, so the provider provenance has to be carried over with it.
-  if (err instanceof ProviderError) return message === err.message ? err : new ProviderError(err.code, message, details);
+  // Redaction rebuilds the error, so the provider provenance has to be carried over with it. Reuse
+  // the instance only when both the message and the details are unchanged: details alone can carry
+  // a credential (#1300 review).
+  if (err instanceof ProviderError)
+    return message === err.message && details === err.details ? err : new ProviderError(err.code, message, details);
   return message === err.message && details === err.details ? err : new AppError(err.code, message, details);
 }
 
@@ -1128,8 +1144,16 @@ export function redactPolicyReasons(policy: PolicyOutcome): PolicyOutcome {
   };
   const reasons = clean(policy.reasons);
   const shadowReasons = policy.shadow ? clean(policy.shadow.reasons) : undefined;
-  if (reasons === policy.reasons && shadowReasons === policy.shadow?.reasons) return policy;
-  return { ...policy, reasons, ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}) };
+  // The provider's reasons are the same text as the visible ones: redact both the same way so a
+  // stored copy stays recognisably a provider reason (#1300 review).
+  const providerReasons = policy.providerReasons ? clean(policy.providerReasons) : undefined;
+  if (reasons === policy.reasons && shadowReasons === policy.shadow?.reasons && providerReasons === policy.providerReasons) return policy;
+  return {
+    ...policy,
+    reasons,
+    ...(providerReasons ? { providerReasons } : {}),
+    ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}),
+  };
 }
 
 /**
@@ -1144,7 +1168,7 @@ const ledgerActionsByTx = new WeakMap<object, number[]>();
 export async function recordAgentAction(
   tx: Tx,
   agentId: string,
-  cmd: Pick<AnyCommand, 'name'>,
+  cmd: Pick<AnyCommand, 'name' | 'failureText'>,
   policy: PolicyOutcome,
   surface: Surface,
   target: string | undefined,
@@ -1152,6 +1176,13 @@ export async function recordAgentAction(
   intent: string | null,
   undo?: AgentUndo | null,
 ): Promise<number | undefined> {
+  // Reasons may quote an exception (the independent check's failure does), so they are redacted
+  // before they are stored (#885), exactly like the error text beside them. A reason that came from
+  // a provider is replaced with the command's fixed diagnostic, the same copy the error keeps: the
+  // visible reason stays for the caller, the ledger must not hold the provider's text (#1300 review).
+  const storedReasons = policy.reasons.map((reason) =>
+    cmd.failureText !== undefined && policy.providerReasons?.includes(reason) ? cmd.failureText : redactCredentials(reason),
+  );
   const [row] = await tx
     .insert(schema.agentActions)
     .values({
@@ -1160,9 +1191,7 @@ export async function recordAgentAction(
       command: cmd.name,
       actionClass: policy.actionClass,
       decision: policy.decision,
-      // Reasons may quote an exception (the independent check's failure does), so they are redacted
-      // before they are stored (#885), exactly like the error text beside them.
-      reasons: policy.reasons.map(redactCredentials),
+      reasons: storedReasons,
       impact: policy.impact as Record<string, unknown>,
       ok: error === null,
       // Redacted before it is cut (#885): a caller may pass raw text (a policy reason quoting an
@@ -1194,13 +1223,18 @@ async function withIndependentCheck(
   req: { principal: Principal; command: string; input: unknown; intent: string | null; mandate: MandateView; approvable: boolean },
 ): Promise<PolicyOutcome> {
   let verdict: { ok: boolean; reason: string };
+  /** The check failed with a provider's own text, which must not be stored beside the person (#1300). */
+  let providerText = false;
   if (!services.independentCheck)
     verdict = { ok: false, reason: 'The mandate asks for an independent check, but no AI provider is set up.' };
   else
-    verdict = await services
-      .independentCheck(tx, { ...req, policy })
-      .catch((err: Error) => ({ ok: false, reason: `The independent check failed: ${safeErrorText(err.message, 500)}` }));
-  return applyVerdict(policy, verdict, req);
+    verdict = await services.independentCheck(tx, { ...req, policy }).catch((err: Error) => {
+      // The check's provider failures are marked where they happen; an executor-owned failure
+      // (a missing provider, a budget or database problem) keeps its own reason.
+      providerText = err instanceof ProviderError;
+      return { ok: false, reason: `The independent check failed: ${safeErrorText(err.message, 500)}` };
+    });
+  return applyVerdict(policy, verdict, req, providerText);
 }
 
 /**
@@ -1213,13 +1247,18 @@ export function applyVerdict(
   policy: PolicyOutcome,
   verdict: { ok: boolean; reason: string },
   req: { approvable: boolean; command: string },
+  providerText = false,
 ): PolicyOutcome {
   const reason = `Independent check: ${redactedText(verdict.reason, 500)}`;
-  if (verdict.ok) return { ...policy, reasons: [...policy.reasons, reason] };
+  const providerReasons = providerText && !verdict.ok ? [...(policy.providerReasons ?? []), reason] : policy.providerReasons;
+  const withProviderReasons = (out: PolicyOutcome): PolicyOutcome => (providerReasons ? { ...out, providerReasons } : out);
+  if (verdict.ok) return withProviderReasons({ ...policy, reasons: [...policy.reasons, reason] });
   const reasons = [...policy.reasons, reason];
-  return req.approvable
-    ? { ...policy, decision: 'ask', level: 1, autonomous: false, reasons }
-    : { ...policy, decision: 'deny', level: 1, autonomous: false, reasons: [...reasons, `${req.command} cannot wait for an approval.`] };
+  return withProviderReasons(
+    req.approvable
+      ? { ...policy, decision: 'ask', level: 1, autonomous: false, reasons }
+      : { ...policy, decision: 'deny', level: 1, autonomous: false, reasons: [...reasons, `${req.command} cannot wait for an approval.`] },
+  );
 }
 
 /** What the agent said it is doing: an explicit intent, else the reviewer note or reason most commands take. */
