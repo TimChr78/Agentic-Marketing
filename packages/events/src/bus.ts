@@ -82,6 +82,9 @@ export interface PullConsumer {
 }
 export interface FetchedMessage {
   data: Uint8Array;
+  /** The stream subject and sequence, for logging a message that cannot be decoded; never its payload. */
+  subject?: string;
+  seq?: number;
   ack(): void;
   nak(delayMs?: number): void;
 }
@@ -253,13 +256,30 @@ export async function consumeLoop(
       // A shutdown does not start new work: whatever was pulled but not acked is re-delivered.
       if (signal.aborted) return;
       if (!msgs.length) continue;
+      // Decode each message on its own: a payload that is not readable JSON fails the same way on
+      // every delivery, so it is acked (with its subject and sequence, never its payload) instead
+      // of failing the batch and holding every other event back. What decoded is handled together,
+      // and only that part is re-delivered when the handler fails.
+      const decoded: { message: FetchedMessage; event: BusEvent }[] = [];
+      for (const message of msgs) {
+        try {
+          decoded.push({ message, event: decode(message.data) });
+        } catch {
+          logger.error(
+            { subject: message.subject, seq: message.seq, reason: 'undecodable' },
+            'event message could not be decoded; acking it',
+          );
+          message.ack();
+        }
+      }
+      if (!decoded.length) continue;
       try {
         setPhase(o.name, 'handling');
-        await handler(msgs.map((m) => decode(m.data)));
-        for (const m of msgs) m.ack();
+        await handler(decoded.map((d) => d.event));
+        for (const { message } of decoded) message.ack();
       } catch (err) {
-        logger.error({ err, consumer: o.name, events: msgs.length }, 'event handler failed; batch will be re-delivered');
-        for (const m of msgs) m.nak(2_000);
+        logger.error({ err, consumer: o.name, events: decoded.length }, 'event handler failed; batch will be re-delivered');
+        for (const { message } of decoded) message.nak(2_000);
       }
     }
   } finally {

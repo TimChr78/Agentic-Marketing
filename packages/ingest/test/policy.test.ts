@@ -426,3 +426,83 @@ describe('platform-owned events', () => {
     expect(acceptItems([item], { ...server, platform: true }, strict).rejected).toHaveLength(1);
   });
 });
+
+// `context` is client-supplied JSON. The click-id fields are the ones the sink, the backfill and
+// the ads hook read by type, so a value of the wrong shape is removed at ingest instead of being
+// stored: the event itself is kept, because a server-side integration that sends a numeric page
+// URL still has a valid event.
+describe('client context shapes', () => {
+  const accepted = (context: Record<string, unknown>) => {
+    const out = run({ type: 'track', event: 'Page seen', anonymousId: 'a', context: { ...yes, ...context } });
+    if (out.kind !== 'accepted') throw new Error(out.kind);
+    return out;
+  };
+
+  it('keeps a well-formed page and click ids unchanged, without a warning', () => {
+    const out = accepted({
+      page: { url: 'https://shop.test/landing?gclid=abc123', path: '/landing', referrer: 'https://ads.test/' },
+      clickIds: { gclid: 'abc123' },
+    });
+    expect(out.event.context.page).toEqual({
+      url: 'https://shop.test/landing?gclid=abc123',
+      path: '/landing',
+      referrer: 'https://ads.test/',
+    });
+    expect(out.event.context.clickIds).toEqual({ gclid: 'abc123' });
+    expect(out.warnings).toEqual([]);
+  });
+
+  it('removes a page that is not an object, and warns', () => {
+    for (const page of [5, true, 'https://shop.test/landing?gclid=abc123', ['https://shop.test/landing']]) {
+      const out = accepted({ page, pageName: 'kept' });
+      expect(out.event.context.page).toBeUndefined();
+      expect(out.event.context.pageName).toBe('kept');
+      expect(out.warnings).toEqual(['context.page must be an object; it was removed.']);
+    }
+  });
+
+  it('removes a non-string page url or search and keeps the rest of the page', () => {
+    const out = accepted({ page: { url: 5, path: '/landing', referrer: 'https://ads.test/' } });
+    expect(out.event.context.page).toEqual({ path: '/landing', referrer: 'https://ads.test/' });
+    expect(out.warnings).toEqual(['context.page.url must be a string; it was removed.']);
+
+    const search = accepted({ page: { url: 'https://shop.test/landing', search: { gclid: 'abc123' } } });
+    expect(search.event.context.page).toEqual({ url: 'https://shop.test/landing' });
+    expect(search.warnings).toEqual(['context.page.search must be a string; it was removed.']);
+  });
+
+  it('removes click ids that are not an object, and warns', () => {
+    for (const clickIds of ['gclid=abc123', 5, true, ['gclid=abc123']]) {
+      const out = accepted({ clickIds });
+      expect(out.event.context.clickIds).toBeUndefined();
+      expect(out.warnings).toEqual(['context.clickIds must be an object; it was removed.']);
+    }
+  });
+
+  it('does not change a batch-level context shared by several items', () => {
+    // The gateway merges one batch context into every item. A malformed page must be copied
+    // before its fields are removed, or the first item strips it for the later ones.
+    const batchContext = { ...yes, page: { url: 5, path: '/landing' } };
+    const out = acceptItems(
+      [
+        { type: 'track', event: 'Page seen', anonymousId: 'a' },
+        { type: 'track', event: 'Page seen', anonymousId: 'b' },
+      ],
+      browser,
+      defaultPolicy,
+      { context: batchContext, receivedAt: now, messageId: (index) => `m${index}` },
+    );
+    expect(out.warnings).toEqual([
+      { index: 0, warning: 'context.page.url must be a string; it was removed.' },
+      { index: 1, warning: 'context.page.url must be a string; it was removed.' },
+    ]);
+    expect(out.accepted.map((e) => e.context.page)).toEqual([{ path: '/landing' }, { path: '/landing' }]);
+    expect(batchContext.page).toEqual({ url: 5, path: '/landing' });
+  });
+
+  it('treats a non-string context ip as absent and uses the request ip', () => {
+    const out = accepted({ ip: 5 });
+    expect(out.event.context.ip).toBe('203.0.113.0');
+    expect(out.warnings).toEqual([]);
+  });
+});

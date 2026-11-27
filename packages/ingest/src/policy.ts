@@ -106,6 +106,40 @@ function redactReservedProperties(properties: Record<string, unknown>, nonPerson
   for (const key of Object.keys(properties)) if (PERSONAL_PROPERTIES.has(key) && !nonPersonal.has(key)) delete properties[key];
 }
 
+/**
+ * Removes the parts of a client `context` whose shape the event store and its readers cannot use:
+ * `page` must be an object, `page.url`/`page.search` strings, and `clickIds` an object. The event is
+ * kept — a server-side integration that sends a numeric page URL still has a valid event — and the
+ * sender gets a warning naming what was removed. `null` reads as absent. Click ids come from these
+ * fields, so a malformed one carries no ids rather than failing a later write.
+ */
+function removeMalformedContext(context: Record<string, unknown>, warnings: string[]) {
+  const page = context.page;
+  if (page !== undefined && page !== null) {
+    if (typeof page !== 'object' || Array.isArray(page)) {
+      delete context.page;
+      warnings.push('context.page must be an object; it was removed.');
+    } else {
+      // Copy the page: the gateway merges one batch-level context into every item, so deleting a
+      // field here must not strip it from the items that follow.
+      const fields = { ...(page as Record<string, unknown>) };
+      context.page = fields;
+      for (const key of ['url', 'search'] as const) {
+        const value = fields[key];
+        if (value !== undefined && value !== null && typeof value !== 'string') {
+          delete fields[key];
+          warnings.push(`context.page.${key} must be a string; it was removed.`);
+        }
+      }
+    }
+  }
+  const clickIds = context.clickIds;
+  if (clickIds !== undefined && clickIds !== null && (typeof clickIds !== 'object' || Array.isArray(clickIds))) {
+    delete context.clickIds;
+    warnings.push('context.clickIds must be an object; it was removed.');
+  }
+}
+
 export function traitClass(plan: TrackingPlan | null, name: string): TraitClass {
   const t = plan?.traits.find((x) => x.name === name);
   if (t) return t.pii;
@@ -225,6 +259,7 @@ export function processEvent(
   if (!isConsentChange) redactReservedProperties(properties, nonPersonal);
 
   const context: Record<string, unknown> = { ...(e.context ?? {}) };
+  removeMalformedContext(context, warnings);
   // Identify and group carry their traits at the top level. A group is a company, not the person
   // (#1141): its traits still follow the plan, but personal data is dropped rather than sealed on
   // the individual, because there is no encrypted per-group store to keep it in.
@@ -232,7 +267,9 @@ export function processEvent(
   delete context.traits;
   const split = splitTraits(plan, traitSource);
   const pii = e.type === 'group' ? {} : split.pii;
-  const ip = (context.ip as string | undefined) ?? opts.ip;
+  const ip = typeof context.ip === 'string' ? context.ip : opts.ip;
+  // `context.ip` is client-supplied JSON too: a value of the wrong type is not an address, so the
+  // request's own address is used instead.
   if (ip) context.ip = truncateIp(ip);
   else delete context.ip;
   if (isConsentChange) properties = {};

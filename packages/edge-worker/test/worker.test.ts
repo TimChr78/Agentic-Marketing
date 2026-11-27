@@ -70,6 +70,40 @@ describe('edge worker', () => {
     expect(no).toMatchObject({ personalized: false, decisions: [{ experienceId: 'exp_generic', variantId: 'a' }] });
   });
 
+  it('falls back to the request header when the context user agent is not a string', async () => {
+    // A client context can carry any JSON value; only a string names a device.
+    const base = env();
+    const get = (base.AM_KV as { get: (key: string) => Promise<unknown> }).get;
+    const mobile: Env = {
+      ...base,
+      AM_KV: {
+        get: async (key: string) =>
+          key === `am:exp:${ws}`
+            ? {
+                purposes: [{ key: 'web_personalization', basis: 'consent' }],
+                experiences: [
+                  {
+                    id: 'exp_mobile',
+                    version: 1,
+                    def: def({
+                      priority: 300,
+                      targeting: { device: 'mobile' },
+                      variants: [{ id: 'm', name: 'Mobile', weight: 100, content: { html: '<p>Mobile</p>' } }],
+                    }),
+                  },
+                ],
+              }
+            : get(key),
+      },
+    };
+    const res = await decide(
+      { userId: 'u-1', context: { ...consent, userAgent: 5 } },
+      { origin: 'https://shop.example.com', 'user-agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)' },
+      mobile,
+    );
+    expect(await res.json()).toMatchObject({ decisions: [{ experienceId: 'exp_mobile', variantId: 'm' }] });
+  });
+
   it('keeps variants sticky per person and honours preview links', async () => {
     const first = (await (await decide({ userId: 'u-1', context: consent })).json()) as { decisions: { variantId: string }[] };
     const again = (await (await decide({ userId: 'u-1', context: consent })).json()) as { decisions: { variantId: string }[] };

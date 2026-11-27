@@ -115,6 +115,29 @@ describe.skipIf(!hasTestDatabase())('ads conversionHook (#1155)', () => {
     expect(rows.every((r) => r.profile_id === profileId)).toBe(true);
   }, 60_000);
 
+  it('forwards a page URL only when it is a string', async () => {
+    const connection = newId('con');
+    await publishMap([{ event: 'Order Completed', meta: { connection, eventName: 'Purchase' } }]);
+    const profileId = newId('prf');
+    await seedProfile(profileId);
+    const payloads = async () =>
+      (
+        await d.db.admin.query<{ payload: { sourceUrl?: unknown } }>('SELECT payload FROM deliveries WHERE workspace_id = $1', [ws])
+      ).rows.map((row) => row.payload);
+
+    // A legacy record can carry a page URL of the wrong type; it is not forwarded.
+    const consent = { categoryPreferences: { ad_measurement: true } };
+    await conversionHook({ db: d.db })(ws, [{ event: event({ context: { consent, page: { url: 42 } } }), profileId }]);
+    expect(await payloads()).toEqual([expect.not.objectContaining({ sourceUrl: expect.anything() })]);
+
+    // A string URL still reaches the destination.
+    await publishMap([{ event: 'Order Completed', meta: { connection, eventName: 'Purchase' } }]);
+    await conversionHook({ db: d.db })(ws, [
+      { event: event({ context: { consent, page: { url: 'https://shop.test/checkout' } } }), profileId },
+    ]);
+    expect(await payloads()).toEqual([expect.objectContaining({ sourceUrl: 'https://shop.test/checkout' })]);
+  });
+
   it('checks consent and records the canonical survivor for a merged-away id', async () => {
     const connection = newId('con');
     await publishMap([{ event: 'Order Completed', meta: { connection, eventName: 'Purchase' } }]);

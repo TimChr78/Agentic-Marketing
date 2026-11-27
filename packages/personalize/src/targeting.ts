@@ -94,3 +94,12 @@ export function allocate(experienceId: string, stableId: string, e: Pick<Experie
 export function deviceOf(userAgent: string | undefined): 'mobile' | 'desktop' {
   return /Mobi|Android|iPhone|iPad/i.test(userAgent ?? '') ? 'mobile' : 'desktop';
 }
+
+/**
+ * The user agent a request carries: a client context is unvalidated JSON, so only a string names
+ * one; anything else falls back to the request header.
+ */
+export function userAgentOf(context: Record<string, unknown> | undefined, fallback: string | undefined): string | undefined {
+  const value = context?.userAgent;
+  return typeof value === 'string' ? value : fallback;
+}

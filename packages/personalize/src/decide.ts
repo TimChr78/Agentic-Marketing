@@ -8,7 +8,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { decideAll, type PublishedExperience } from './core';
 import { loadPublishedExperiences } from './edge';
-import { type DecideContext, deviceOf } from './targeting';
+import { type DecideContext, deviceOf, userAgentOf } from './targeting';
 
 // The decision API (channels-and-personalization.md §3.3): POST /v1/decide with a write key.
 // Reads only hot state (Valkey) and cached experience definitions, never Postgres or ClickHouse
@@ -122,7 +122,7 @@ export function decideApi(deps: { db: Db; hot: HotState }) {
         session,
         page: req.page,
         utmSource,
-        device: deviceOf((req.context?.userAgent as string | undefined) ?? c.req.header('user-agent')),
+        device: deviceOf(userAgentOf(req.context, c.req.header('user-agent'))),
       };
       const stableId = snapshot?.profileId ?? req.userId ?? req.anonymousId ?? '';
 

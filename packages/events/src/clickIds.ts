@@ -9,6 +9,9 @@ export type ClickIds = Partial<Record<ClickIdType, string>>;
 
 const VALUE = /^[A-Za-z0-9._~-]{4,500}$/;
 
+/** A JSON object, not an array or null: what `context.clickIds` and `context.page` must be. */
+const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+
 /**
  * Click ids from landing-page parameters (gclid, gbraid, wbraid, fbclid, msclkid, li_fat_id, ttclid,
  * epik) or already named ones (fbc, fbp, ttp, as the platforms' cookies hold them). `fbclid` becomes
@@ -22,11 +25,46 @@ export function clickIdsFrom(params: Record<string, unknown>, seenAt = Date.now(
   return out;
 }
 
-/** Click ids an event carries: `context.clickIds`, or the landing page's query string. */
-export function clickIdsOfEvent(context: Record<string, unknown>, seenAt: number): ClickIds {
-  const explicit = context.clickIds;
-  if (explicit && typeof explicit === 'object') return clickIdsFrom(explicit as Record<string, unknown>, seenAt);
-  const page = context.page as { url?: string; search?: string } | undefined;
-  const search = page?.search ?? (page?.url?.includes('?') ? page.url.slice(page.url.indexOf('?')) : '');
-  return search ? clickIdsFrom(Object.fromEntries(new URLSearchParams(search)), seenAt) : {};
+/**
+ * The query parameters a stored `page.search` holds. Earlier releases passed it straight to
+ * `URLSearchParams`, so a stored row may hold the parsed map or `[name, value]` pairs rather than
+ * the query string ingest keeps today. A shape the parser cannot read names no parameters, never
+ * an error: this runs on stored context.
+ */
+function searchParams(search: unknown): Record<string, unknown> {
+  try {
+    if (typeof search === 'string') return Object.fromEntries(new URLSearchParams(search));
+    if (Array.isArray(search)) {
+      const pairs = search.every((item) => Array.isArray(item));
+      return Object.fromEntries(new URLSearchParams(pairs ? (search as string[][]) : search.map((item) => String(item)).join('&')));
+    }
+    if (isRecord(search)) return Object.fromEntries(new URLSearchParams(search as Record<string, string>));
+  } catch {
+    // A value the query-string parser rejects carries no click ids.
+  }
+  return {};
+}
+
+/**
+ * Click ids an event carries: `context.clickIds`, or the landing page's query string. `context` is
+ * client-supplied JSON, validated as a record of unknown values, so every field is checked for its
+ * type: a value of the wrong shape reads as "no click id" instead of throwing, because the sink,
+ * the subject-key backfill and the ads hook all read click ids on write. Ingest removes a
+ * `clickIds` that is not an object of ids, so the page's own parameters still supply them here.
+ *
+ * The same reader serves stored rows (the backfill and the ads hook), so it also accepts the shapes
+ * earlier releases stored: `page.search` as the parsed parameter map or as `[name, value]` pairs.
+ * Their click ids must stay readable, or a row linked to an erased person only by such an id would
+ * escape the backfill's exclusion keys and the physical purge.
+ */
+export function clickIdsOfEvent(context: unknown, seenAt: number): ClickIds {
+  const fields = isRecord(context) ? context : {};
+  const explicit = fields.clickIds;
+  if (isRecord(explicit)) return clickIdsFrom(explicit, seenAt);
+  const page = isRecord(fields.page) ? fields.page : undefined;
+  const search = page?.search;
+  if (search !== undefined && search !== null) return clickIdsFrom(searchParams(search), seenAt);
+  const url = typeof page?.url === 'string' ? page.url : undefined;
+  const query = url?.includes('?') ? url.slice(url.indexOf('?')) : undefined;
+  return query ? clickIdsFrom(searchParams(query), seenAt) : {};
 }

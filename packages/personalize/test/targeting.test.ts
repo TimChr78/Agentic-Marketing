@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { allocate, type DecideContext, deviceOf, matches } from '../src/targeting';
+import { allocate, type DecideContext, deviceOf, matches, userAgentOf } from '../src/targeting';
 
 const seg = `seg_${'1'.repeat(32)}`;
 const base: DecideContext = {
@@ -56,5 +56,13 @@ describe('decide targeting', () => {
     expect(Math.abs(counts.a - counts.b) / 4000).toBeLessThan(0.06);
     expect(allocate('exp_1', 'same', e)?.id).toBe(allocate('exp_1', 'same', e)?.id);
     expect(deviceOf('Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)')).toBe('mobile');
+  });
+
+  it('reads a user agent from client context only when it is a string', () => {
+    const header = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)';
+    expect(userAgentOf({ userAgent: 'Mozilla/5.0 (Linux)' }, header)).toBe('Mozilla/5.0 (Linux)');
+    expect(userAgentOf({ userAgent: 5 }, header)).toBe(header);
+    expect(userAgentOf({ userAgent: { value: 'Mozilla/5.0' } }, undefined)).toBeUndefined();
+    expect(userAgentOf(undefined, header)).toBe(header);
   });
 });

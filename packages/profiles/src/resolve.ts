@@ -21,6 +21,10 @@ const UNIQUE: IdentifierType[] = ['user_id', 'email', 'phone'];
 /** Don't rewrite last_seen more often than this. */
 const SEEN_GRANULARITY_MS = 5 * 60_000;
 
+/** The event's PII traits. An older queued record may lack the map, and then names none. */
+const piiTraitsOf = (e: BusEvent): Record<string, unknown> =>
+  e.piiTraits && typeof e.piiTraits === 'object' ? (e.piiTraits as Record<string, unknown>) : {};
+
 interface Ident {
   type: IdentifierType;
   value: string;
@@ -32,8 +36,9 @@ async function identsOf(e: BusEvent, crypto: PersonCrypto): Promise<Ident[]> {
   const out: Ident[] = [];
   if (e.anonymousId) out.push({ type: 'anonymous_id', value: e.anonymousId });
   if (e.userId) out.push({ type: 'user_id', value: e.userId });
+  const pii = piiTraitsOf(e);
   for (const type of ['email', 'phone'] as const) {
-    const v = e.piiTraits[type];
+    const v = pii[type];
     if (typeof v === 'string' && v.trim()) out.push({ type, value: await crypto.matchHash(type, v), plain: v.trim() });
   }
   return out;
@@ -43,7 +48,7 @@ async function identsOf(e: BusEvent, crypto: PersonCrypto): Promise<Ident[]> {
 // nor make the fast path write a profile row.
 const hasProfileData = (e: BusEvent) =>
   (e.type !== 'group' && Object.keys(e.traits).length > 0) ||
-  Object.keys(e.piiTraits).length > 0 ||
+  Object.keys(piiTraitsOf(e)).length > 0 ||
   e.name === CONSENT_EVENT ||
   e.type === 'alias';
 
@@ -385,7 +390,7 @@ async function updateProfile(tx: Tx, workspaceId: string, profileId: string, e: 
   const changes: Partial<typeof schema.profiles.$inferInsert> = {};
   // Group traits describe a company (#1141); merging them would overwrite the person's own traits.
   if (e.type !== 'group' && Object.keys(e.traits).length) changes.traits = { ...p.traits, ...e.traits };
-  const pii = Object.fromEntries(Object.entries(e.piiTraits).filter(([k]) => k !== 'email' && k !== 'phone'));
+  const pii = Object.fromEntries(Object.entries(piiTraitsOf(e)).filter(([k]) => k !== 'email' && k !== 'phone'));
   // E-mail and phone are kept (sealed) on the identifiers; other personal traits in the profile.
   if (Object.keys(pii).length) {
     const current = (await crypto.open<Record<string, unknown>>(profileId, p.pii)) ?? {};

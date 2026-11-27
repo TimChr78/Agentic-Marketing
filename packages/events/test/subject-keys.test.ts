@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { newUuid } from '@agentic-marketing/core';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { logger } from '@agentic-marketing/telemetry';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runScoped } from '../../db/test/run';
 import {
   type BusEvent,
@@ -436,6 +437,102 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
       clickhouse_settings: settings,
     });
     expect((await rs.json<{ key1: string }>()).map((row) => row.key1)).toEqual(['Aardvark', 'Zulu']);
+  }, 60_000);
+
+  it('continues a pass past a historical row whose context cannot be read, to the next workspace', async () => {
+    const poisonedWs = newUuid();
+    const nextWs = newUuid();
+    const legacy = (workspaceId: string, name: string, context: Record<string, unknown>) => ({
+      workspace_id: workspaceId,
+      event_id: `legacy-${name}`,
+      source_id: 'src_legacy_context',
+      received_at: '2026-08-05 12:00:00',
+      timestamp: '2026-08-05 12:00:00',
+      type: 'track',
+      name,
+      anonymous_id: `legacy-anon-${name}`,
+      user_id: '',
+      profile_id: `prf-legacy-${name}`,
+      properties: {},
+      traits: {},
+      context,
+      consent: {},
+    });
+    await store.client.insert({
+      table: 'events',
+      values: [
+        legacy(poisonedWs, 'Poisoned', { page: { url: 5 } }),
+        legacy(nextWs, 'Next Workspace', { page: { url: 'https://shop.test/landing?gclid=abc123' } }),
+      ],
+      format: 'JSONEachRow',
+    });
+
+    let step = await store.backfillSubjectKeys({ workspaceIds: [poisonedWs, nextWs], batchSize: 10 });
+    for (let i = 0; i < 3 && !step.done; i++) step = await store.backfillSubjectKeys({ workspaceIds: [poisonedWs, nextWs], batchSize: 10 });
+    expect(step.done).toBe(true);
+    expect(await store.subjectKeyCoverage([poisonedWs, nextWs])).toMatchObject({ pending: 0 });
+
+    // The unreadable context costs that row its click ids only; the ids it stores are still keyed,
+    // and the workspace listed after it is reached.
+    const sideRow = async (workspaceId: string) => {
+      const rs = await store.client.query({
+        query: `SELECT key1, subject_profile, subject_anonymous, subject_gclid
+                FROM subject_key_backfill FINAL WHERE workspace_id = {ws:UUID} AND table_name = 'events'`,
+        query_params: { ws: workspaceId },
+        format: 'JSONEachRow',
+        clickhouse_settings: await store.settingsFor(workspaceId),
+      });
+      return await rs.json<Record<string, string>>();
+    };
+    expect(await sideRow(nextWs)).toEqual([
+      {
+        key1: 'Next Workspace',
+        subject_profile: hmac('profile', 'prf-legacy-Next Workspace'),
+        subject_anonymous: hmac('anonymous_id', 'legacy-anon-Next Workspace'),
+        subject_gclid: hmac('gclid', 'abc123'),
+      },
+    ]);
+    expect(await sideRow(poisonedWs)).toEqual([
+      {
+        key1: 'Poisoned',
+        subject_profile: hmac('profile', 'prf-legacy-Poisoned'),
+        subject_anonymous: hmac('anonymous_id', 'legacy-anon-Poisoned'),
+        subject_gclid: '',
+      },
+    ]);
+  }, 60_000);
+
+  it('drops a record it cannot write with a fixed reason and stores the rest of the batch', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation((() => {}) as never);
+    try {
+      const unreadable = { ...event(70), timestamp: 5 } as unknown as BusEvent;
+      const written = await store.insert([unreadable, event(71)]);
+      expect(written).toBe(1);
+      // Only the reason and correlation fields: never the exception or the payload.
+      expect(error.mock.calls[0]?.[0]).toEqual({ workspaceId: ws, eventId: 'subject-70', field: 'timestamp' });
+      const stored = await rows<{ event_id: string }>(
+        `SELECT event_id FROM events FINAL WHERE workspace_id = {ws:UUID} AND event_id = 'subject-71'`,
+      );
+      expect(stored).toEqual([{ event_id: 'subject-71' }]);
+    } finally {
+      error.mockRestore();
+    }
+  }, 60_000);
+
+  it('writes a legacy record whose profile id is null with the writer’s default', async () => {
+    // The writer already stores `''` for a missing profile id, so a queued `null` is recovered
+    // rather than dropped.
+    const legacy = { ...event(72), profileId: null } as unknown as BusEvent;
+    expect(await store.insert([legacy])).toBe(1);
+    const [row] = await rows<{ profile_id: string; subject_profile: string; subject_anonymous: string }>(
+      `SELECT profile_id, subject_profile, subject_anonymous FROM events FINAL
+        WHERE workspace_id = {ws:UUID} AND event_id = 'subject-72'`,
+    );
+    expect(row).toEqual({
+      profile_id: '',
+      subject_profile: '',
+      subject_anonymous: hmac('anonymous_id', 'anon-72'),
+    });
   }, 60_000);
 
   it('fails the write when the exclusion key cannot be resolved, and counts the failure', async () => {
