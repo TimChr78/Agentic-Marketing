@@ -107,7 +107,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     // the Approvals page groups it. Pending requests only, never “assigned to you”.
     api
       .call('approvals.list', { status: 'pending', limit: 200 })
-      .then((r) => pendingDecisionCount(r.approvals))
+      // The server's decision total counts a bundle once across every page; the loaded rows are
+      // only the fallback for a server that predates it (#1254 review).
+      .then((r) => r.decisionTotal ?? pendingDecisionCount(r.approvals))
       .catch(() => 0)
       .then(setPending);
   }, [status]);
@@ -164,6 +166,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setUser(null);
         setThemeUser(null);
         clearRecentsMemory();
+        // Pages remembered by lazily loaded screens (the Approvals queue) listen for this, so the
+        // signed-out bundle does not carry their modules (phase 28 budget).
+        window.dispatchEvent(new Event('am:signed-out'));
         setStatus('signed-out');
         return true;
       },

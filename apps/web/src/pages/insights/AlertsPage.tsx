@@ -391,7 +391,13 @@ export default function AlertsPage() {
           <AlertForm
             rule={editing === 'new' ? null : editing}
             endpoints={endpoints.data?.endpoints ?? []}
+            endpointsError={endpoints.error}
+            endpointsLoading={endpoints.loading}
+            onRetryEndpoints={endpoints.reload}
             members={members.data?.members ?? []}
+            membersError={members.error}
+            membersLoading={members.loading}
+            onRetryMembers={members.reload}
             journeys={journeyRows}
             onSaved={() => {
               setEditing(null);
@@ -457,7 +463,13 @@ export default function AlertsPage() {
 function AlertForm({
   rule,
   endpoints,
+  endpointsError,
+  endpointsLoading,
+  onRetryEndpoints,
   members,
+  membersError,
+  membersLoading,
+  onRetryMembers,
   journeys,
   onSaved,
   onCancel,
@@ -465,7 +477,13 @@ function AlertForm({
 }: {
   rule: Rule | null;
   endpoints: Out<'webhooks.list'>['endpoints'];
+  endpointsError?: string | null;
+  endpointsLoading?: boolean;
+  onRetryEndpoints?: () => void;
   members: Out<'members.list'>['members'];
+  membersError?: string | null;
+  membersLoading?: boolean;
+  onRetryMembers?: () => void;
   journeys: Out<'artifacts.list'>['artifacts'];
   onSaved: () => void;
   onCancel: () => void;
@@ -645,7 +663,13 @@ function AlertForm({
       <div className="rounded-md border border-line p-3">
         <div className="text-[13px] font-semibold">Notify</div>
         <p className="mb-1 text-[12px] text-muted">Webhooks use the existing signed delivery, retry and egress rules.</p>
-        {endpoints.length ? (
+        {endpointsError ? (
+          <Alert tone="bad" title="Couldn't load webhook endpoints" onRetry={onRetryEndpoints}>
+            {endpointsError}
+          </Alert>
+        ) : endpointsLoading ? (
+          <ListSkeleton label="Loading webhook endpoints" columns={2} rows={2} />
+        ) : endpoints.length ? (
           <div className="space-y-1.5">
             {endpoints.map((endpoint) => (
               <Checkbox
@@ -662,7 +686,13 @@ function AlertForm({
         )}
         <div className="mt-3 text-[13px] font-semibold">E-mail workspace members</div>
         <p className="mb-1 text-[12px] text-muted">A short transactional message with the metric and a link; aggregates only.</p>
-        {members.length ? (
+        {membersError ? (
+          <Alert tone="bad" title="Couldn't load workspace members" onRetry={onRetryMembers}>
+            {membersError}
+          </Alert>
+        ) : membersLoading ? (
+          <ListSkeleton label="Loading workspace members" columns={2} rows={2} />
+        ) : members.length ? (
           <div className="space-y-1.5">
             {members.map((member) => (
               <Checkbox

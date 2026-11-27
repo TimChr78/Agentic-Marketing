@@ -21,21 +21,25 @@ export interface FormContent {
   hostedPages?: Record<string, unknown>;
 }
 
-export function RefName({ id }: { id?: string | null }) {
+export function RefName({ id, nameOnly = false }: { id?: string | null; nameOnly?: boolean }) {
   const { artifact, error } = useArtifactRef(id);
   if (!id) return <span className="text-muted">None</span>;
-  if (error) return <span className="text-bad">{id} (not found)</span>;
-  if (!artifact) return <Mono>{id}</Mono>;
+  // A captured snapshot's source is named, never printed as its id, and never labelled with the
+  // source's live version: the snapshot is pinned to its own captured version (#1264 review).
+  if (error)
+    return nameOnly ? <span className="text-muted">an unavailable segment</span> : <span className="text-bad">{id} (not found)</span>;
+  if (!artifact) return nameOnly ? <span className="text-muted">a segment</span> : <Mono>{id}</Mono>;
   return (
     <span className="inline-flex flex-wrap items-center gap-1.5">
       <Link to={artifactPath(artifact.type, artifact.id)} className="font-medium text-accent hover:underline">
         {artifact.name}
       </Link>
-      {artifact.publishedVersion ? (
-        <StatusPill tone="good">Live v{artifact.publishedVersion}</StatusPill>
-      ) : (
-        <StatusPill tone="warn">Not published</StatusPill>
-      )}
+      {!nameOnly &&
+        (artifact.publishedVersion ? (
+          <StatusPill tone="good">Live v{artifact.publishedVersion}</StatusPill>
+        ) : (
+          <StatusPill tone="warn">Not published</StatusPill>
+        ))}
     </span>
   );
 }

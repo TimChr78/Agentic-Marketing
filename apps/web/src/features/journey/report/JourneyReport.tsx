@@ -137,7 +137,7 @@ function ReportBody({ journeyId, artifact, topology }: { journeyId: string; arti
       <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="text-[12px] leading-[18px] text-muted">
           {artifact.publishedVersion !== null
-            ? `Published v${artifact.publishedVersion} · counts across all versions`
+            ? `Published v${artifact.publishedVersion} · counts for this version`
             : 'Draft · no published topology'}
         </p>
         <div className="flex flex-wrap items-end gap-2">

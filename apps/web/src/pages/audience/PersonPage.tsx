@@ -189,7 +189,7 @@ export default function PersonPage({ params }: { params: Record<string, string> 
   // The erasure dialog is its own modal, not `useConfirm`: a confirm dialog snapshots its body
   // element, so the reason field there kept its first value and `profiles.erase` read a stale
   // closure (#1165). Here the input and the submit share this render's state.
-  const eraseTarget = identity.hidden ? p.id : identity.email;
+  const eraseTarget = identity.hidden || !identity.hasEmail ? p.id : identity.email;
   const openErase = () => {
     setTyped('');
     setReason('');

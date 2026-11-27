@@ -5,7 +5,7 @@ import { useCrumbs } from '../../app/page';
 import { useSession } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { PurposeName } from '../../features/audience/consent';
-import { guessMapping, type Mapping, parseCsv, toImportRows } from '../../lib/csvImport';
+import { batchImportRows, guessMapping, type Mapping, oversizedImportRow, parseCsv, toImportRows } from '../../lib/csvImport';
 import {
   Alert,
   Button,
@@ -29,7 +29,6 @@ import { pageWidth } from '../../ui/layout';
 type ConsentStatus = 'granted' | 'denied' | 'withdrawn' | 'objected';
 type Result = { accepted: number; rejected: { email: string; error: string }[] };
 
-const BATCH = 5000;
 const CONSENT_LABEL: Record<ConsentStatus, string> = {
   granted: 'Granted',
   denied: 'Denied',
@@ -108,25 +107,41 @@ export default function ImportsPage() {
       setError('Use the purpose key from the purposes in force, in lowercase.');
       return;
     }
+    // Refuse before the first request: a row over the 1 MB body limit would 413 on its own and
+    // lose the batches that were already imported (#1250 review).
+    const tooLarge = oversizedImportRow(payload, label.trim());
+    if (tooLarge) {
+      setError(
+        `CSV row ${prepared.rowNumbers[tooLarge.index] ?? tooLarge.index + 2} is too large to import in one request. Remove or shorten its longest field, then try again; nothing was sent.`,
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     setResult(null);
     const rejected: Result['rejected'] = [];
     let accepted = 0;
-    try {
-      for (let i = 0; i < payload.length; i += BATCH) {
-        const r = await api.call('profiles.import', { label: label.trim(), rows: payload.slice(i, i + BATCH) });
+    let failed: string | null = null;
+    // The command caps rows at 5,000; the route caps the body at 1 MB. Cut on both (#1250).
+    for (const batch of batchImportRows(payload)) {
+      try {
+        const r = await api.call('profiles.import', { label: label.trim(), rows: batch });
         accepted += r.accepted;
-        for (const x of r.rejected) rejected.push({ email: payload[i + x.index]?.email ?? 'row', error: x.error });
+        for (const x of r.rejected) rejected.push({ email: batch[x.index]?.email ?? 'row', error: x.error });
+      } catch (e) {
+        failed = errText(e);
+        break;
       }
-      setResult({ accepted, rejected });
-      if (accepted > 0)
+    }
+    try {
+      // Show what already reached the server even when a later batch failed.
+      if (accepted > 0 || rejected.length > 0) setResult({ accepted, rejected });
+      if (failed) setError(`The import stopped after ${accepted.toLocaleString()} ${accepted === 1 ? 'person' : 'people'}: ${failed}`);
+      else if (accepted > 0)
         toast.success(
           `Imported ${accepted.toLocaleString()} ${accepted === 1 ? 'person' : 'people'}. Profiles and consent appear within seconds.`,
         );
       else toast.error('Nothing was imported. Fix the rejected rows and try again.');
-    } catch (e) {
-      setError(errText(e));
     } finally {
       setBusy(false);
     }

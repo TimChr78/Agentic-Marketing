@@ -3,6 +3,8 @@ import { api } from '../../app/api';
 import { useSession } from '../../app/session';
 import { Alert, Card, Skeleton } from '../../ui';
 import { ConditionView } from './ConditionView';
+import { containsMessage } from './conditionMessage';
+import { RefName } from './FormPreview';
 import { PreviewLabel } from './PreviewLabel';
 import { useSharedRead } from './previewRead';
 import { type PreviewSource, resolvePreviewSource } from './previewSource';
@@ -50,6 +52,8 @@ export function SegmentPreview({
   // journey (#498), the estimate must not keep the exact version "Not yet viewed" — a person who
   // opened the segment and read the rule would otherwise have to open it again.
   useReportPreviewStatus(reportId, 'ready');
+  // A message rule's count is live data, but membership moves only at the scheduled refresh (#1078).
+  const messageRule = containsMessage(content.condition);
   return (
     <div className="space-y-4">
       {resolved && <PreviewLabel source={resolved} suffix={sourceSuffix} />}
@@ -57,7 +61,10 @@ export function SegmentPreview({
       <div className="flex items-center gap-3 rounded-md border border-line bg-surface-2 px-3.5 py-3">
         <Users size={18} className="text-muted" aria-hidden />
         <div className="min-w-0 flex-1">
-          <p className="text-[12px] text-muted">Estimated size now</p>
+          <p className="text-[12px] text-muted">Estimated size from live data</p>
+          {messageRule && (
+            <p className="text-[12px] text-muted">Membership updates at the next scheduled refresh, not as messages arrive.</p>
+          )}
           {unsaved ? (
             <p className="text-[13px] text-muted">
               This preview shows the saved version. For unsaved rules, use Content → Estimate audience.
@@ -85,9 +92,15 @@ export function SegmentPreview({
             )
           ) : (
             <p className="text-[13px] text-fg-2">
-              {mode === 'snapshot'
-                ? `A frozen snapshot of ${content.sourceSegment ?? 'another segment'}${content.snapshotVersion ? ` at v${content.snapshotVersion}` : ''}. Its members stay fixed until it is refreshed.`
-                : 'A static list: an explicit set of people, changed by hand, CSV or API. A refresh never changes it.'}
+              {mode === 'snapshot' ? (
+                <>
+                  A frozen snapshot of {content.sourceSegment ? <RefName id={content.sourceSegment} nameOnly /> : 'another segment'}
+                  {content.snapshotVersion ? `, captured at v${content.snapshotVersion}` : ''}. Its members stay fixed until it is
+                  refreshed.
+                </>
+              ) : (
+                'A static list: an explicit set of people, changed by hand, CSV or API. A refresh never changes it.'
+              )}
             </p>
           )}
         </div>

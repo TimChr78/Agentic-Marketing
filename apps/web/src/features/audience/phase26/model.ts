@@ -44,21 +44,28 @@ export function displayNameFromProfile(profile: PersonProfile): string | null {
   return displayNameFromTraits(profile.traits);
 }
 
-export type Identity = { email: string; name: string | null; hidden: boolean };
+export type Identity = { email: string; name: string | null; hidden: boolean; hasEmail: boolean };
 
 /** One primary e-mail and its visible name. PII absence is its own honest state, not anonymity. */
 export function listIdentity(row: ProfileRow, canSeePii: boolean): Identity {
-  if (!canSeePii) return { email: 'Email hidden', name: 'Name hidden', hidden: true };
-  return { email: row.email ?? 'No email available', name: displayNameFromTraits(row.traits), hidden: false };
+  if (!canSeePii) return { email: 'Email hidden', name: 'Name hidden', hidden: true, hasEmail: false };
+  return {
+    email: row.email ?? 'No email available',
+    name: displayNameFromTraits(row.traits),
+    hidden: false,
+    hasEmail: !!row.email,
+  };
 }
 
 export function personIdentity(profile: PersonProfile, canSeePii: boolean): Identity {
   const email = profile.personal?.email;
-  if (!canSeePii || email === HIDDEN) return { email: 'Email hidden', name: 'Name hidden', hidden: true };
+  if (!canSeePii || email === HIDDEN) return { email: 'Email hidden', name: 'Name hidden', hidden: true, hasEmail: false };
   return {
     email: typeof email === 'string' && email ? email : 'No email available',
     name: displayNameFromProfile(profile),
     hidden: false,
+    // "No email available" is display copy, not an identifier to confirm an erasure with (#1261).
+    hasEmail: typeof email === 'string' && email !== '',
   };
 }
 

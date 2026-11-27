@@ -1150,7 +1150,7 @@ export const DEMO_WORKSPACE_ID_VALUE = DEMO_WORKSPACE_ID;
 export const DEMO_WORKSPACE_VALUE = DEMO_WORKSPACE;
 
 /** Content topics (Consent → Topics) — empty is a real, honest state for the sample. */
-export const DEMO_TOPICS: Out<'content.topics.list'> = { topics: [], count: 0 };
+export const DEMO_TOPICS: Out<'content.topics.list'> = { topics: [], count: 0, total: 0, nextCursor: null };
 
 export const DEMO_AUDIT: Out<'audit.list'> = { entries: [] };
 export const DEMO_CAMPAIGNS_OF: Out<'campaigns.of'> = { campaigns: [] };

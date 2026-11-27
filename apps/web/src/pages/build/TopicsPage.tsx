@@ -1,11 +1,11 @@
 import { FileText, Plus, Search } from 'lucide-react';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { navigate } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useKeyedApi } from '../../app/useApi';
 import { type TopicRow, TopicsTable, topicStatus } from '../../features/content/TopicsTable';
-import { Button, Field, Input, Modal, Select, TableFrame, Textarea, useToast } from '../../ui';
+import { Alert, Button, Field, Input, Modal, Select, TableFrame, Textarea, useToast } from '../../ui';
 
 // Build → Topics (#141): the editorial backlog. A queue, not a calendar: the target date is stored
 // so #78 can show it later, but this page groups by status and score. Briefs open in the normal
@@ -40,15 +40,56 @@ export default function TopicsPage() {
   const [saving, setSaving] = useState(false);
 
   const filterKey = `${status}|${owner.trim()}|${tag.trim()}|${minScore}`;
-  const list = useKeyedApi(filterKey, () =>
-    api.call('content.topics.list', {
-      status: status ? (status as TopicRow['status']) : undefined,
-      owner: owner.trim() || undefined,
-      tag: tag.trim() || undefined,
-      minScore: minScore ? Number(minScore) : undefined,
-    }),
-  );
-  const topics = list.data?.topics ?? [];
+  const query = {
+    status: status ? (status as TopicRow['status']) : undefined,
+    owner: owner.trim() || undefined,
+    tag: tag.trim() || undefined,
+    minScore: minScore ? Number(minScore) : undefined,
+  };
+  const list = useKeyedApi(filterKey, () => api.call('content.topics.list', query));
+  // Further pages carry the filter and cursor they were requested for (#1262).
+  const [more, setMore] = useState<{ key: string; rows: TopicRow[]; cursor: string | null; loaded: boolean }>({
+    key: '',
+    rows: [],
+    cursor: null,
+    loaded: false,
+  });
+  const [loadingMore, setLoadingMore] = useState<{ key: string; value: boolean }>({ key: '', value: false });
+  const [moreError, setMoreError] = useState<{ key: string; message: string | null }>({ key: '', message: null });
+  // A create or archive resets the pages and reloads the first one; a Load more still in flight
+  // belongs to the old list and must not append itself afterwards (#1262 review).
+  const generation = useRef(0);
+  const currentMore = more.key === filterKey ? more : { key: filterKey, rows: [], cursor: null, loaded: false };
+  const topics = [...(list.data?.topics ?? []), ...currentMore.rows];
+  // `total` is every matching topic; `count` is only the rows on one page (#1262).
+  const total = list.data?.total ?? topics.length;
+  const cursor = currentMore.loaded ? currentMore.cursor : (list.data?.nextCursor ?? null);
+  const loadingMoreNow = loadingMore.key === filterKey && loadingMore.value;
+  const moreErrorNow = moreError.key === filterKey ? moreError.message : null;
+
+  const loadMore = async () => {
+    if (loadingMoreNow || !cursor) return;
+    const requestKey = filterKey;
+    const requestGeneration = generation.current;
+    setLoadingMore({ key: requestKey, value: true });
+    setMoreError({ key: requestKey, message: null });
+    try {
+      const r = await api.call('content.topics.list', { ...query, cursor });
+      // A create or archive while this page was in flight owns a newer generation; drop it.
+      if (generation.current !== requestGeneration) return;
+      setMore((current) =>
+        current.key === requestKey
+          ? { key: requestKey, rows: [...current.rows, ...r.topics], cursor: r.nextCursor, loaded: true }
+          : { key: requestKey, rows: r.topics, cursor: r.nextCursor, loaded: true },
+      );
+    } catch (e) {
+      if (generation.current !== requestGeneration) return;
+      setMoreError({ key: requestKey, message: errText(e) });
+    } finally {
+      if (generation.current === requestGeneration)
+        setLoadingMore((current) => (current.key === requestKey ? { key: requestKey, value: false } : current));
+    }
+  };
 
   const set = (key: keyof Draft) => (event: { target: { value: string } }) => setDraft((d) => ({ ...d, [key]: event.target.value }));
 
@@ -76,6 +117,10 @@ export default function TopicsPage() {
       else toast.success(`Added “${result.topic.title}” to the backlog.`);
       setCreating(false);
       setDraft(EMPTY);
+      generation.current += 1;
+      setMore({ key: filterKey, rows: [], cursor: null, loaded: false });
+      setLoadingMore({ key: filterKey, value: false });
+      setMoreError({ key: filterKey, message: null });
       void list.reload();
     } catch (e) {
       toast.error(errText(e));
@@ -98,6 +143,10 @@ export default function TopicsPage() {
     try {
       await api.call('content.topics.archive', { topicId: topic.id });
       toast.success(`Archived “${topic.title}”. Its brief and published URL stay.`);
+      generation.current += 1;
+      setMore({ key: filterKey, rows: [], cursor: null, loaded: false });
+      setLoadingMore({ key: filterKey, value: false });
+      setMoreError({ key: filterKey, message: null });
       void list.reload();
     } catch (e) {
       toast.error(errText(e));
@@ -166,13 +215,26 @@ export default function TopicsPage() {
               ))}
             </Select>
             <span className="ml-auto text-[12px] text-muted">
-              {topics.length} topic{topics.length === 1 ? '' : 's'}
+              {total.toLocaleString()} topic{total === 1 ? '' : 's'}
             </span>
           </>
         }
       >
         <TopicsTable topics={topics} onCreateBrief={brief} onArchive={archive} canWrite={canWrite} canArchive={canWrite} />
       </TableFrame>
+
+      {moreErrorNow && (
+        <Alert tone="bad" className="mt-3">
+          {moreErrorNow}
+        </Alert>
+      )}
+      {cursor && (
+        <div className="mt-3 flex justify-center">
+          <Button onClick={() => void loadMore()} loading={loadingMoreNow}>
+            Load more
+          </Button>
+        </div>
+      )}
 
       <p className="mt-3 text-[12px] text-muted">
         <FileText size={12} className="mr-1 inline" aria-hidden />

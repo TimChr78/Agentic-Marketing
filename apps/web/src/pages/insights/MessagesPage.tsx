@@ -8,7 +8,7 @@ import { useSession } from '../../app/session';
 import { useKeyedApi } from '../../app/useApi';
 import { usePurposes } from '../../features/audience/phase26/usePurposes';
 import { StatCard, StatGrid, StatGridSkeleton } from '../../features/insights/Stats';
-import { purposeLabel } from '../../lib/labels';
+import { eventTypeLabel, messageChannelLabel, messageReasonLabel, messageStatusLabel, purposeLabel } from '../../lib/labels';
 import {
   Alert,
   Button,
@@ -185,7 +185,7 @@ export default function MessagesPage() {
               <option value="">All channels</option>
               {CHANNELS.map((c) => (
                 <option key={c} value={c}>
-                  {c}
+                  {messageChannelLabel(c)}
                 </option>
               ))}
             </Select>
@@ -193,7 +193,7 @@ export default function MessagesPage() {
               <option value="">All statuses</option>
               {STATUSES.map((s) => (
                 <option key={s} value={s}>
-                  {s}
+                  {messageStatusLabel(s)}
                 </option>
               ))}
             </Select>
@@ -244,9 +244,9 @@ export default function MessagesPage() {
             {all.map((m) => (
               <Tr key={m.id}>
                 <Td>
-                  <StatusPill tone={tone[m.status] ?? 'neutral'}>{m.status}</StatusPill>
+                  <StatusPill tone={tone[m.status] ?? 'neutral'}>{messageStatusLabel(m.status)}</StatusPill>
                 </Td>
-                <Td className="hidden sm:table-cell">{m.channel}</Td>
+                <Td className="hidden sm:table-cell">{messageChannelLabel(m.channel)}</Td>
                 <Td>
                   {m.profileId ? (
                     <Link to={`/audience/people/${m.profileId}`} className="font-medium text-accent hover:underline">
@@ -268,12 +268,12 @@ export default function MessagesPage() {
                       {m.lastError ? ` · ${m.lastError}` : ''}
                     </span>
                   ) : m.reason ? (
-                    <span className="line-clamp-2">{m.reason}</span>
+                    <span className="line-clamp-2">{messageReasonLabel(m.reason)}</span>
                   ) : m.events.length ? (
                     <span className="line-clamp-2">
                       {m.events
                         .slice(-2)
-                        .map((e) => `${e.type}${e.reason ? ` (${e.reason})` : ''}`)
+                        .map((e) => `${eventTypeLabel(e.type)}${e.reason ? ` (${e.reason})` : ''}`)
                         .join(' · ')}
                     </span>
                   ) : (

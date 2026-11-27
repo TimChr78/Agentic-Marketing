@@ -1462,7 +1462,7 @@ export const listApprovals = defineCommand({
   name: 'approvals.list',
   title: 'List approval requests',
   description:
-    'Approval requests in this workspace (default: pending), oldest first, optionally for one artifact. `total` counts the requests matching the filter, including held ones, across every page; `nextCursor` continues the same list.',
+    'Approval requests in this workspace (default: pending), oldest first, optionally for one artifact. `total` counts the requests matching the filter, including held ones, across every page; `decisionTotal` counts a bundle once, like the queue groups it; `nextCursor` continues the same list.',
   input: z.object({
     status: z.enum(['pending', 'approved', 'rejected', 'withdrawn']).default('pending'),
     limit: z.number().int().min(1).max(200).default(50),
@@ -1472,6 +1472,7 @@ export const listApprovals = defineCommand({
   output: z.object({
     approvals: z.array(Approval),
     total: z.number().int().describe('All requests matching the status and artifact filter, independent of the cursor'),
+    decisionTotal: z.number().int().describe('Decisions matching the filter, counting a bundle once however many members it has'),
     nextCursor: z.string().nullable().describe('Pass as `cursor` for the next page; null on the last page'),
   }),
   permission: 'artifacts:read',
@@ -1515,6 +1516,14 @@ export const listApprovals = defineCommand({
       .from(schema.approvalRequests)
       .innerJoin(schema.artifacts, artifactJoin)
       .where(and(...filters));
+    // The queue groups a bundle's members into one row, so its count has to group the same way.
+    const [{ decisions }] = await ctx.tx
+      .select({
+        decisions: sql<number>`count(distinct coalesce(${schema.approvalRequests.bundleId}, ${schema.approvalRequests.id}))`,
+      })
+      .from(schema.approvalRequests)
+      .innerJoin(schema.artifacts, artifactJoin)
+      .where(and(...filters));
     const page = rows.slice(0, input.limit);
     const requesters = await resolveRequesters(
       ctx,
@@ -1528,6 +1537,7 @@ export const listApprovals = defineCommand({
     return {
       approvals: page.map(({ r, a }) => approvalOut(ctx, r, a, requesters.get(r.id)!, bundles)),
       total: Number(n),
+      decisionTotal: Number(decisions),
       nextCursor: rows.length > input.limit && last ? encodeTimestampCursor({ at: last.cursorAt, id: last.r.id }) : null,
     };
   },

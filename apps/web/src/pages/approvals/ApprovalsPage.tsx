@@ -6,9 +6,18 @@ import { useCrumbs } from '../../app/page';
 import { Link, navigate, routerPath, useLocation } from '../../app/router';
 import { useSession } from '../../app/session';
 import { useApi, useKeyedApi } from '../../app/useApi';
-import { approvalDecisions } from '../../features/approvals/decisions';
+import { approvalDecisions, pendingDecisionCount } from '../../features/approvals/decisions';
 import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
 import { useNow } from '../../features/approvals/holds';
+import {
+  approvalsQueueKey,
+  clearApprovalsQueueCache,
+  dropApprovalsQueueScope,
+  readApprovalsQueuePage,
+  resetApprovalsQueueCache,
+  setApprovalsQueueScope,
+  writeApprovalsQueuePage,
+} from '../../features/approvals/queueCache';
 import { RequesterView } from '../../features/approvals/requester';
 import { decisionWasViewed, useViewedTick } from '../../features/approvals/viewed';
 import { invalidateArtifact } from '../../features/artifactCache';
@@ -19,6 +28,7 @@ import {
   cx,
   EmptyState,
   Field,
+  ListSkeleton,
   LoadingBlock,
   PageHeader,
   StatusPill,
@@ -45,6 +55,19 @@ type Status = 'pending' | 'approved' | 'rejected';
 const changesWorkspaceBrand = (a: Approval) =>
   a.artifactType === 'brand' || (a.bundle?.members ?? []).some((m) => m.artifactType === 'brand');
 
+/**
+ * One row per approval. The fresh first page comes first, so it wins over a cached extra page that
+ * still holds a request which has since moved into the list (#1273 review).
+ */
+function uniqueApprovals(approvals: Approval[]) {
+  const seen = new Set<string>();
+  return approvals.filter((a) => {
+    if (seen.has(a.id)) return false;
+    seen.add(a.id);
+    return true;
+  });
+}
+
 // The route table keys each page by path (routes.tsx), so opening /approvals/:id remounts this
 // page. The invoking row therefore has to be remembered outside the component instance; a deep
 // link has never set it and falls back to the queue heading.
@@ -52,6 +75,13 @@ let lastApprovalInvokerId: string | null = null;
 let returnFocusPending = false;
 let returnFocusApprovalId: string | null = null;
 let approvalsPageSeq = 0;
+
+// The route table remounts this page when a drawer opens (`/approvals/:id`). The pages loaded past
+// the first one live in a module cache scoped to the person and workspace, so closing the drawer
+// keeps them and the invoking row is still there for focus (#1254 review).
+
+/** Drop every remembered page; tests use this between cases. */
+export { resetApprovalsQueueCache };
 
 const FOCUS_RETURN_LIMIT_MS = 10_000;
 const FOCUS_RETURN_POLL_MS = 50;
@@ -189,11 +219,42 @@ const ApprovalDrawer = lazy(() => import('../../features/approvals/ApprovalDrawe
 /** Approvals (#41): the queue of changes waiting for a person, each opened in a review drawer. */
 export default function ApprovalsPage({ params }: { params: Record<string, string> }) {
   useCrumbs([{ label: 'Approvals', to: '/approvals' }, ...(params.id ? [{ label: 'Review' }] : [])]);
-  const { can, user, refresh, refreshPending } = useSession();
+  const { can, user, refresh, refreshPending, workspace } = useSession();
   const { search } = useLocation();
   const status = (search.get('status') as Status) || 'pending';
   const list = useKeyedApi(status, () => api.call('approvals.list', { status, limit: 200 }));
   const proposals = useApi(() => api.call('workspace.proposals', { status: 'pending', limit: 50 }), []);
+  setApprovalsQueueScope(user?.id ?? null, workspace?.id ?? null);
+  const cacheKey = approvalsQueueKey(user?.id, workspace?.id, status);
+  // One generation owns the extra pages, the cursor, the loading flag and the error. A reload, a
+  // tab switch or a second Load more makes every late result from the old generation stale (#1254).
+  const generation = useRef(0);
+  const lastStatus = useRef(status);
+  if (lastStatus.current !== status) {
+    lastStatus.current = status;
+    generation.current += 1;
+  }
+  // Extra pages carry the status they were requested for, so switching tabs never mixes them (#1254).
+  const [more, setMore] = useState<{
+    key: string;
+    generation: number;
+    rows: Approval[];
+    cursor: string | null;
+    loaded: boolean;
+  }>(() => {
+    const cached = readApprovalsQueuePage(cacheKey);
+    return { key: status, generation: generation.current, rows: cached?.rows ?? [], cursor: cached?.cursor ?? null, loaded: !!cached };
+  });
+  const [loadingMore, setLoadingMore] = useState<{ key: string; generation: number; value: boolean }>({
+    key: '',
+    generation: 0,
+    value: false,
+  });
+  const [moreError, setMoreError] = useState<{ key: string; generation: number; message: string | null }>({
+    key: '',
+    generation: 0,
+    message: null,
+  });
   const highlightedProposal = search.get('proposal');
   // Highlighted proposals are brought into view immediately; motion.md forbids smooth auto-scroll
   // (the CSS reduced-motion override cannot reach JS `behavior: 'smooth'`, #555 review).
@@ -226,7 +287,12 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
       }
       cancelApprovalFocusReturn();
       if (routerPath(window.location.pathname).replace(/\/+$/, '').startsWith('/approvals')) expireReturnFocusIntent();
-      else clearReturnFocusIntent();
+      else {
+        clearReturnFocusIntent();
+        // Leaving Approvals altogether is not a drawer remount; do not carry its pages into a
+        // later visit or into another workspace.
+        clearApprovalsQueueCache();
+      }
     },
     [],
   );
@@ -255,7 +321,17 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const now = useNow();
   useViewedTick();
 
-  const all = list.data?.approvals ?? [];
+  const currentMore =
+    more.key === status && more.generation === generation.current
+      ? more
+      : { key: status, generation: generation.current, rows: [], cursor: null, loaded: false };
+  const loadingMoreNow = loadingMore.key === status && loadingMore.generation === generation.current && loadingMore.value;
+  const moreErrorNow = moreError.key === status && moreError.generation === generation.current ? moreError.message : null;
+  const cursor = currentMore.loaded ? currentMore.cursor : (list.data?.nextCursor ?? null);
+  const all = uniqueApprovals([...(list.data?.approvals ?? []), ...currentMore.rows]);
+  // `decisionTotal` counts a bundle once, like the queue groups it; `total` counts request rows
+  // (#1254 review). Older servers only send `total`, so fall back to the loaded grouping.
+  const total = list.data?.decisionTotal ?? (list.data ? pendingDecisionCount(all) : all.length);
   // A bundle (#107) is one decision, so it is one row: the member the others exist for (the
   // broadcast, the form) stands for it, and counts as viewed once every member's preview was opened.
   // The nav badge uses the same grouping (#483).
@@ -267,9 +343,41 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const notViewed = items.filter((a) => a.status === 'pending' && !viewed(a)).length;
 
   const reload = () => {
+    // A decision changes the queue itself, so none of the workspace's remembered pages describe it:
+    // the same request moves out of Pending into the decided tab (#1273 review).
+    generation.current += 1;
+    dropApprovalsQueueScope(user?.id, workspace?.id);
+    setMore({ key: status, generation: generation.current, rows: [], cursor: null, loaded: false });
+    setLoadingMore({ key: status, generation: generation.current, value: false });
+    setMoreError({ key: status, generation: generation.current, message: null });
     void list.reload();
     void proposals.reload();
     refreshPending();
+  };
+  const loadMore = async () => {
+    if (!cursor || loadingMoreNow) return;
+    const requestKey = status;
+    const requestGeneration = generation.current;
+    setLoadingMore({ key: requestKey, generation: requestGeneration, value: true });
+    setMoreError({ key: requestKey, generation: requestGeneration, message: null });
+    try {
+      const r = await api.call('approvals.list', { status: requestKey, limit: 200, cursor });
+      // A reload or tab switch while this page was in flight owns a newer generation; drop it.
+      if (generation.current !== requestGeneration) return;
+      const rows = uniqueApprovals([...currentMore.rows, ...r.approvals]);
+      setMore({ key: requestKey, generation: requestGeneration, rows, cursor: r.nextCursor, loaded: true });
+      writeApprovalsQueuePage(cacheKey, { rows, cursor: r.nextCursor });
+    } catch (e) {
+      if (generation.current !== requestGeneration) return;
+      setMoreError({ key: requestKey, generation: requestGeneration, message: errText(e) });
+    } finally {
+      if (generation.current === requestGeneration)
+        setLoadingMore((current) =>
+          current.key === requestKey && current.generation === requestGeneration
+            ? { key: requestKey, generation: requestGeneration, value: false }
+            : current,
+        );
+    }
   };
   const batchApprove = async () => {
     const ok = await confirm({
@@ -329,11 +437,11 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
 
   const tabs = useMemo(
     () => [
-      { key: 'pending' as const, label: 'Pending', count: status === 'pending' ? items.length : undefined },
+      { key: 'pending' as const, label: 'Pending', count: status === 'pending' ? total : undefined },
       { key: 'approved' as const, label: 'Approved' },
       { key: 'rejected' as const, label: 'Rejected' },
     ],
-    [status, items.length],
+    [status, total],
   );
 
   return (
@@ -370,6 +478,9 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
       {status === 'pending' && (
         <WorkspaceSettings
           proposals={proposals.data?.proposals ?? []}
+          readError={proposals.error}
+          readLoading={proposals.loading}
+          onRetry={proposals.reload}
           canApprove={can('workspace:admin')}
           highlighted={highlightedProposal}
           onDecided={reload}
@@ -527,6 +638,18 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
           </Table>
         </TableFrame>
       </div>
+      {moreErrorNow && (
+        <Alert tone="bad" className="mt-3">
+          {moreErrorNow}
+        </Alert>
+      )}
+      {cursor && (
+        <div className="mt-3 flex justify-center">
+          <Button onClick={() => void loadMore()} loading={loadingMoreNow}>
+            Load more
+          </Button>
+        </div>
+      )}
       {confirmDialog}
       {params.id && (
         <Suspense fallback={<LoadingBlock geometry="detail" label="Opening the review" />}>
@@ -548,12 +671,18 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
  */
 function WorkspaceSettings({
   proposals,
+  readError,
+  readLoading,
+  onRetry,
   canApprove,
   highlighted,
   onDecided,
   onWorkspaceChanged,
 }: {
   proposals: Proposal[];
+  readError: string | null;
+  readLoading: boolean;
+  onRetry: () => void;
   canApprove: boolean;
   highlighted: string | null;
   onDecided: () => void;
@@ -565,7 +694,8 @@ function WorkspaceSettings({
   const [reasonError, setReasonError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  if (!proposals.length) return null;
+  // A failed read is not "no proposals"; keep the section so the error and Retry stay visible (#1258).
+  if (!proposals.length && !readError && !readLoading) return null;
 
   const approve = async (p: Proposal) => {
     setBusy(p.id);
@@ -615,97 +745,113 @@ function WorkspaceSettings({
           <Alert tone="bad">{error}</Alert>
         </div>
       )}
-      <ul className="mt-2 divide-y divide-line">
-        {proposals.map((p) => (
-          <li
-            key={p.id}
-            id={`proposal-${p.id}`}
-            className={cx('py-3 first:pt-0 last:pb-0', highlighted === p.id && 'rounded-md bg-surface-2 px-2 ring-2 ring-[var(--accent)]')}
-          >
-            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-muted">
-              <RequesterView r={p.requester} />
-              <span>proposed {timeAgo(p.createdAt)}</span>
-            </div>
-            <p className="mt-1.5 text-[13px] text-fg-2">
-              <strong className="font-medium text-fg">If approved:</strong> Applies workspace settings immediately on approval.
-            </p>
-            <ul className="mt-1 space-y-0.5 text-[14px] text-fg">
-              {p.changes.name && (
-                <li>
-                  Name: <span className="text-muted">{p.changes.name.from}</span> → <span className="font-medium">{p.changes.name.to}</span>
-                </li>
+      {readError ? (
+        <div className="mt-2">
+          <Alert tone="bad" title="Couldn't load workspace settings proposals" onRetry={onRetry}>
+            {readError}
+          </Alert>
+        </div>
+      ) : readLoading ? (
+        <div className="mt-2">
+          <ListSkeleton label="Loading workspace settings proposals" columns={3} rows={1} />
+        </div>
+      ) : (
+        <ul className="mt-2 divide-y divide-line">
+          {proposals.map((p) => (
+            <li
+              key={p.id}
+              id={`proposal-${p.id}`}
+              className={cx(
+                'py-3 first:pt-0 last:pb-0',
+                highlighted === p.id && 'rounded-md bg-surface-2 px-2 ring-2 ring-[var(--accent)]',
               )}
+            >
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-muted">
+                <RequesterView r={p.requester} />
+                <span>proposed {timeAgo(p.createdAt)}</span>
+              </div>
+              <p className="mt-1.5 text-[13px] text-fg-2">
+                <strong className="font-medium text-fg">If approved:</strong> Applies workspace settings immediately on approval.
+              </p>
+              <ul className="mt-1 space-y-0.5 text-[14px] text-fg">
+                {p.changes.name && (
+                  <li>
+                    Name: <span className="text-muted">{p.changes.name.from}</span> →{' '}
+                    <span className="font-medium">{p.changes.name.to}</span>
+                  </li>
+                )}
+                {p.changes.timeZone && (
+                  <li>
+                    Time zone: <span className="text-muted">{p.changes.timeZone.from}</span> →{' '}
+                    <span className="font-medium">{p.changes.timeZone.to}</span>
+                  </li>
+                )}
+              </ul>
               {p.changes.timeZone && (
-                <li>
-                  Time zone: <span className="text-muted">{p.changes.timeZone.from}</span> →{' '}
-                  <span className="font-medium">{p.changes.timeZone.to}</span>
-                </li>
+                <p className="mt-1 text-[12px] text-muted">Changes display time zone; stored send instants stay the same.</p>
               )}
-            </ul>
-            {p.changes.timeZone && (
-              <p className="mt-1 text-[12px] text-muted">Changes display time zone; stored send instants stay the same.</p>
-            )}
-            <p className="mt-1.5 text-[13px] whitespace-pre-wrap text-fg-2">{p.note}</p>
-            {canApprove ? (
-              rejecting === p.id ? (
-                <div className="mt-2 space-y-2">
-                  <Field
-                    label="Why are you rejecting it?"
-                    hint="The requester sees this and can propose a different value."
-                    error={reasonError}
-                    required
-                  >
-                    <Textarea
-                      rows={2}
-                      value={reason}
-                      autoFocus
-                      onChange={(e) => {
-                        setReason(e.target.value);
+              <p className="mt-1.5 text-[13px] whitespace-pre-wrap text-fg-2">{p.note}</p>
+              {canApprove ? (
+                rejecting === p.id ? (
+                  <div className="mt-2 space-y-2">
+                    <Field
+                      label="Why are you rejecting it?"
+                      hint="The requester sees this and can propose a different value."
+                      error={reasonError}
+                      required
+                    >
+                      <Textarea
+                        rows={2}
+                        value={reason}
+                        autoFocus
+                        onChange={(e) => {
+                          setReason(e.target.value);
+                          setReasonError(null);
+                        }}
+                        onBlur={() => !reason.trim() && setReasonError('Say what to change, so the requester can try again.')}
+                      />
+                    </Field>
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          setRejecting(null);
+                          setReason('');
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                      <Button variant="danger" icon={<X size={14} />} mutation loading={busy === p.id} onClick={() => reject(p)}>
+                        Reject with reason
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button
+                      variant="danger"
+                      icon={<X size={14} />}
+                      mutation
+                      onClick={() => {
+                        setRejecting(p.id);
+                        setReason('');
                         setReasonError(null);
                       }}
-                      onBlur={() => !reason.trim() && setReasonError('Say what to change, so the requester can try again.')}
-                    />
-                  </Field>
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <Button
-                      variant="ghost"
-                      onClick={() => {
-                        setRejecting(null);
-                        setReason('');
-                      }}
                     >
-                      Cancel
+                      Reject
                     </Button>
-                    <Button variant="danger" icon={<X size={14} />} mutation loading={busy === p.id} onClick={() => reject(p)}>
-                      Reject with reason
+                    <Button variant="primary" icon={<Check size={14} />} mutation loading={busy === p.id} onClick={() => approve(p)}>
+                      Approve
                     </Button>
                   </div>
-                </div>
+                )
               ) : (
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <Button
-                    variant="danger"
-                    icon={<X size={14} />}
-                    mutation
-                    onClick={() => {
-                      setRejecting(p.id);
-                      setReason('');
-                      setReasonError(null);
-                    }}
-                  >
-                    Reject
-                  </Button>
-                  <Button variant="primary" icon={<Check size={14} />} mutation loading={busy === p.id} onClick={() => approve(p)}>
-                    Approve
-                  </Button>
-                </div>
-              )
-            ) : (
-              <p className="mt-2 text-[12px] text-muted">An admin decides workspace settings.</p>
-            )}
-          </li>
-        ))}
-      </ul>
+                <p className="mt-2 text-[12px] text-muted">An admin decides workspace settings.</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

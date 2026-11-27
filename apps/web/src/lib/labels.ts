@@ -192,6 +192,12 @@ const humanise = (key: string) =>
     .replace(/\b\w/g, (c) => c.toUpperCase())
     .replace(/\bSms\b/g, 'SMS');
 
+/** A sentence-case fallback for event labels: "provider_accepted" reads as "Provider accepted". */
+const humaniseSentence = (key: string) => {
+  const text = key.replace(/[._]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+  return (text.charAt(0).toUpperCase() + text.slice(1)).replace(/\bsms\b/g, 'SMS').replace(/\bapi\b/g, 'API');
+};
+
 /** Only a fallback for a key added to the API before this registry; the coverage test blocks that. */
 export function measureLabel(id: string): string {
   return ANALYTICS_MEASURES[id]?.label ?? humanise(id);
@@ -261,7 +267,91 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
 };
 
 export function eventTypeLabel(type: string): string {
-  return EVENT_TYPE_LABEL[type] ?? humanise(type);
+  return EVENT_TYPE_LABEL[type] ?? humaniseSentence(type);
+}
+
+/**
+ * Known message reason codes, kept before their `: guidance` so the recovery text survives
+ * (#1260 review). An unknown code is returned unchanged rather than being silently rewritten.
+ */
+export const MESSAGE_REASON_LABEL: Record<string, string> = {
+  unknown_outcome: 'Outcome unknown',
+  delivery_error: 'Delivery failed',
+  provider_error: 'Provider error',
+  no_template: 'Template unavailable',
+  not_published: 'Template not published',
+  no_profile: 'Person not found',
+  no_address: 'No e-mail address',
+  unknown_purpose: 'Purpose not configured',
+  no_lawful_basis: 'No lawful basis',
+  suppressed: 'Suppressed',
+};
+
+export function messageReasonLabel(reason: string): string {
+  const separator = reason.indexOf(':');
+  const code = separator < 0 ? reason : reason.slice(0, separator);
+  const label = MESSAGE_REASON_LABEL[code];
+  if (!label) return reason;
+  const guidance = separator < 0 ? '' : reason.slice(separator + 1).trim();
+  return guidance ? `${label}: ${guidance}` : label;
+}
+
+/**
+ * AI call kinds, in the order the "Filter by kind" picker offers them (#1255, #1260). The page
+ * derives its options from this map, so a new kind gains a picker entry only with its label.
+ */
+export const AI_CALL_KIND_LABEL: Record<string, string> = {
+  decide: 'Journey decision',
+  generate: 'Text generation',
+  copilot: 'Copilot',
+  test: 'Prompt test',
+  classify: 'Classification',
+  check: 'Independent check',
+  hosted: 'Hosted agent',
+  score: 'Scoring',
+};
+
+export function aiCallKindLabel(kind: string): string {
+  return AI_CALL_KIND_LABEL[kind] ?? humanise(kind);
+}
+
+/** AI call statuses in the decision log. */
+export const AI_CALL_STATUS_LABEL: Record<string, string> = {
+  pending: 'Pending',
+  running: 'Running',
+  done: 'Done',
+  fallback: 'Fallback',
+  failed: 'Failed',
+};
+
+export function aiCallStatusLabel(status: string): string {
+  return AI_CALL_STATUS_LABEL[status] ?? humanise(status);
+}
+
+/** Delivery channels, then message statuses, for the Messages page (#1260). */
+export const MESSAGE_CHANNEL_LABEL: Record<string, string> = {
+  email: 'E-mail',
+  sms: 'SMS',
+  push: 'Push',
+};
+
+export function messageChannelLabel(channel: string): string {
+  return MESSAGE_CHANNEL_LABEL[channel] ?? humanise(channel);
+}
+
+export const MESSAGE_STATUS_LABEL: Record<string, string> = {
+  queued: 'Queued',
+  sending: 'Sending',
+  sent: 'Sent',
+  suppressed: 'Suppressed',
+  failed: 'Failed',
+  delivered: 'Delivered',
+  bounced: 'Bounced',
+  complained: 'Complained',
+};
+
+export function messageStatusLabel(status: string): string {
+  return MESSAGE_STATUS_LABEL[status] ?? humanise(status);
 }
 
 /** Default purpose names; a workspace's published purposes replace these where they exist. */

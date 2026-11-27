@@ -5,7 +5,7 @@ import { useCrumbs } from '../../app/page';
 import { useApi } from '../../app/useApi';
 import { useAllArtifacts } from '../../features/artifacts/artifactList';
 import { HostedPreview } from '../../features/brand/HostedPreview';
-import { Card, Field, Meta, Mono, PageHeader, Select } from '../../ui';
+import { Alert, Card, Field, Meta, Mono, PageHeader, Select, Skeleton } from '../../ui';
 import { pageWidth } from '../../ui/layout';
 
 /** Design → Hosted pages (#37): what subscribers see on your links address, per form. */
@@ -47,7 +47,17 @@ export default function HostedPagesPage() {
             </Field>
           </Card>
           <Card title="Newsletter archive" padded>
-            {archiveSettings?.enabled && archiveSettings.indexUrl ? (
+            {archive.error ? (
+              <Alert tone="bad" title="Couldn't load the newsletter archive" onRetry={archive.reload}>
+                {archive.error}
+              </Alert>
+            ) : archive.loading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-4 w-56" />
+                <Skeleton className="h-4 w-32" />
+                <span className="sr-only">Loading the newsletter archive</span>
+              </div>
+            ) : archiveSettings?.enabled && archiveSettings.indexUrl ? (
               <>
                 <p className="text-[13px] text-fg-2">
                   Sent issues marked “Publish to the archive” appear here, with an RSS feed and a sitemap for readers and search engines.
