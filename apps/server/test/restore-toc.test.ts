@@ -20,6 +20,9 @@ const FENCE_LINES = [
   '3465; 0 0 ACL public TABLE restore_fence am',
   '3305; 2604 18765649 DEFAULT public restore_fence id am',
   '3302; 2606 18765643 CONSTRAINT public restore_fence restore_fence_pkey am',
+  // A constraint name with a space keeps the entry the fence's own: the table token is still the
+  // fence, and the rest is the constraint's name.
+  '3303; 2606 18765644 CONSTRAINT public restore_fence restore_fence pkey am',
   '3481; 0 0 COMMENT public CONSTRAINT restore_fence_pkey ON restore_fence am',
   '3446; 0 18765636 TABLE DATA public restore_fence am',
 ];
@@ -64,5 +67,31 @@ describe('the archive table of contents a restore loads', () => {
       '9996; 1259 2 TABLE public restore_fence_copy am',
     ];
     expect(filterRestoreFenceEntries(toc(misleading))).toBe(toc(misleading));
+  });
+
+  it('splits the fields by position, so a space in a schema or table name is not the fence', () => {
+    // pg_restore prints the namespace and the tag unquoted, so a space that belongs to either one
+    // is indistinguishable from the separator. Splitting by position keeps that space as its own
+    // (empty) field, where a scheme that collapses spaces would read these as `public.restore_fence`.
+    const nearMisses = [
+      // A schema named `public ` with the fence's table name, or a table named ` restore_fence`:
+      // both print exactly like this.
+      '218; 1259 18765636 TABLE public  restore_fence am',
+      '223; 1259 18765660 TABLE public  restore_fence am',
+      // A table named `restore_fence `.
+      '219; 1259 18765640 TABLE public restore_fence  am',
+      // A different table whose name starts with the fence's. Its trigger, FK, constraint and
+      // comment are named after that table, not after the fence.
+      '220; 1259 18765642 TABLE public restore_fence legacy am',
+      '3336; 2620 18765644 TRIGGER public restore_fence legacy trig on legacy am',
+      '3335; 2606 18765646 FK CONSTRAINT public restore_fence legacy legacy fk am',
+      '3337; 2606 18765648 CONSTRAINT public restore_fence legacy restore_fence legacy_pkey am',
+      '3497; 0 0 COMMENT public TABLE "restore_fence legacy" am',
+      // A constraint on the table named `restore_fence `.
+      '3331; 2606 18765650 CONSTRAINT public restore_fence  pk sp am',
+      // A comment on a table in the schema named `public `.
+      '3508; 0 0 COMMENT public  TABLE restore_fence am',
+    ];
+    expect(filterRestoreFenceEntries(toc(nearMisses))).toBe(toc(nearMisses));
   });
 });
