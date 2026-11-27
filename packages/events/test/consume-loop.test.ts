@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { logger } from '@agentic-marketing/telemetry';
+import { describe, expect, it, vi } from 'vitest';
 import {
   classifyFetchError,
   consumeLoop,
@@ -117,6 +118,81 @@ describe('consumeLoop (#307)', () => {
     );
     expect(created).toBe(2);
     expect(seen).toEqual([3]);
+  });
+
+  it('acks a message it cannot decode and still handles the rest of the batch', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation((() => {}) as never);
+    try {
+      const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+      const acked: number[] = [];
+      const naked: number[] = [];
+      const bad: FetchedMessage = {
+        data: new TextEncoder().encode('{not json'),
+        subject: 'events.00000000-0000-4000-8000-000000000001.1',
+        seq: 42,
+        ack: () => acked.push(1),
+        nak: () => naked.push(1),
+      };
+      const good: FetchedMessage = {
+        data: encode({ n: 2 }),
+        subject: 'events.00000000-0000-4000-8000-000000000001.1',
+        seq: 43,
+        ack: () => acked.push(2),
+        nak: () => naked.push(2),
+      };
+      const seen: number[] = [];
+      const stop = new AbortController();
+      const consumer = scripted([[bad, good]], () => stop.abort());
+      await consumeLoop(
+        async () => consumer,
+        opts,
+        (data) => JSON.parse(new TextDecoder().decode(data)) as unknown as BusEvent,
+        async (events) => {
+          seen.push(...events.map((e) => (e as unknown as { n: number }).n));
+        },
+        stop.signal,
+        { retryMs: 1 },
+      );
+      // The bad payload is deterministic, so it is acked rather than re-delivered for a day; the
+      // good message of the same batch still reaches the handler.
+      expect(seen).toEqual([2]);
+      expect(acked).toEqual([1, 2]);
+      expect(naked).toEqual([]);
+      expect(error.mock.calls[0]?.[0]).toEqual({
+        subject: 'events.00000000-0000-4000-8000-000000000001.1',
+        seq: 42,
+        reason: 'undecodable',
+      });
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('naks only the messages it handed to a handler that failed', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation((() => {}) as never);
+    try {
+      const acked: number[] = [];
+      const naked: number[] = [];
+      const bad: FetchedMessage = { data: new TextEncoder().encode('{not json'), ack: () => acked.push(1), nak: () => naked.push(1) };
+      const good: FetchedMessage = { data: new TextEncoder().encode('{"n":2}'), ack: () => acked.push(2), nak: () => naked.push(2) };
+      const stop = new AbortController();
+      const consumer = scripted([[bad, good]], () => stop.abort());
+      await consumeLoop(
+        async () => consumer,
+        opts,
+        (data) => JSON.parse(new TextDecoder().decode(data)) as unknown as BusEvent,
+        async () => {
+          throw new Error('store unavailable');
+        },
+        stop.signal,
+        { retryMs: 1 },
+      );
+      // A dependency failure is retried, but the already-acked bad message is not part of it.
+      expect(naked).toEqual([2]);
+      expect(acked).toEqual([1]);
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it('rejects on a fatal error instead of retrying', async () => {

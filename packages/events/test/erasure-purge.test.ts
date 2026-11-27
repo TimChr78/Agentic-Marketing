@@ -215,6 +215,67 @@ describe('recurring physical purge (#1037 part 3)', () => {
     ).toEqual([]);
   }, 60_000);
 
+  it('purges a row whose only link is a click id in a legacy context shape', async () => {
+    const legacyWs = newUuid();
+    const gclid = 'legacy-click-id-1';
+    // An earlier release wrote `page.search` as the parsed parameters; the backfill must still read
+    // the click id, or the row is neither excluded nor purged when that id is erased.
+    const legacy = (name: string, search: Record<string, string>) => ({
+      workspace_id: legacyWs,
+      event_id: `legacy-click-${name}`,
+      source_id: 'src_legacy_click',
+      received_at: '2026-08-03 12:00:00',
+      timestamp: '2026-08-03 12:00:00',
+      type: 'track',
+      name,
+      anonymous_id: '',
+      user_id: '',
+      profile_id: '',
+      properties: {},
+      traits: {},
+      context: { page: { search } },
+      consent: {},
+    });
+    await store.client.insert({
+      table: 'events',
+      values: [legacy('Erased', { gclid }), legacy('Live', { gclid: 'legacy-click-id-live' })],
+      format: 'JSONEachRow',
+    });
+    let step = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 10 });
+    for (let i = 0; i < 4 && !step.done; i++) step = await store.backfillSubjectKeys({ workspaceIds: [legacyWs], batchSize: 10 });
+    expect(step.done).toBe(true);
+    expect((await store.subjectKeyCoverage([legacyWs])).pending).toBe(0);
+
+    const key = hmac('gclid', gclid);
+    await store.publishErasedSubjects([
+      {
+        workspaceId: legacyWs,
+        kind: 'gclid',
+        key,
+        keyVersion: VERSION,
+        erasureId: 'era_legacy_click',
+        generation: 1,
+        recordedAt: new Date().toISOString(),
+      },
+    ]);
+    // The backfilled click id hides the row from a protected read before the purge runs.
+    expect(
+      await rows<{ event_id: string }>('SELECT event_id FROM events_protected(ws={ws:UUID}) FINAL ORDER BY event_id', {}, legacyWs),
+    ).toEqual([{ event_id: 'legacy-click-Live' }]);
+
+    const result = await store.purgeErasedSubjects(legacyWs, [key], { batchSize: 10 });
+    expect(result).toMatchObject({ complete: true, deleted: 2 });
+    expect(await rows<{ name: string }>('SELECT name FROM events FINAL ORDER BY name', {}, legacyWs)).toEqual([{ name: 'Live' }]);
+    // The side entry goes with the base row it covers.
+    expect(
+      await rows<{ key4: string }>(
+        `SELECT key4 FROM subject_key_backfill FINAL WHERE workspace_id = {ws:UUID} AND table_name = 'events' ORDER BY key4`,
+        {},
+        legacyWs,
+      ),
+    ).toEqual([{ key4: 'legacy-click-Live' }]);
+  }, 60_000);
+
   it('keeps a side entry until its base row is gone when the batch bound stops the sweep', async () => {
     const boundedWs = newUuid();
     const legacy = (id: string) => ({

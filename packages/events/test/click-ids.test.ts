@@ -18,6 +18,16 @@ describe('clickIdsOfEvent on client-supplied context', () => {
     expect(clickIdsOfEvent({ clickIds: { gclid: 'abcd', msclkid: 'efgh' } }, seenAt)).toEqual({ gclid: 'abcd', msclkid: 'efgh' });
   });
 
+  it('reads the legacy page.search shapes a stored row can carry', () => {
+    // Earlier releases passed `page.search` to URLSearchParams, so a stored row may hold the parsed
+    // parameters itself. The backfill and every other reader of stored rows must still find them.
+    expect(clickIdsOfEvent({ page: { search: { gclid: 'abc123' } } }, seenAt)).toEqual({ gclid: 'abc123' });
+    expect(clickIdsOfEvent({ page: { search: [['gclid', 'abc123']] } }, seenAt)).toEqual({ gclid: 'abc123' });
+    expect(clickIdsOfEvent({ page: { search: ['gclid=abc123'] } }, seenAt)).toEqual({ gclid: 'abc123' });
+    // A parameter map of a value the old parser coerced still reads as the ids it names.
+    expect(clickIdsOfEvent({ page: { search: { gclid: 123456 } } }, seenAt)).toEqual({ gclid: '123456' });
+  });
+
   it.each([
     ['a number', 5],
     ['a boolean', true],
@@ -30,7 +40,8 @@ describe('clickIdsOfEvent on client-supplied context', () => {
     ['an object url', { url: { href: 'https://shop.test/?gclid=abc123' } }],
     ['an array url', { url: ['https://shop.test/?gclid=abc123'] }],
     ['a numeric search', { url: 'https://shop.test/landing', search: 5 }],
-    ['an object search', { search: { gclid: 'abc123' } }],
+    ['an array of non-pairs', { search: [5] }],
+    ['a map of unusable values', { search: { gclid: { href: 'https://shop.test/' } } }],
   ])('returns no click ids for %s in context.page', (_label, page) => {
     expect(clickIdsOfEvent({ page }, seenAt)).toEqual({});
   });

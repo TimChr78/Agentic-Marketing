@@ -72,13 +72,16 @@ describe('sink batch drops', () => {
     }
   });
 
-  it('drops a record that lost a required map instead of passing it to the filter', async () => {
+  it('stores a legacy record whose ids and maps have the writer’s defaults', async () => {
+    // Neither the filter nor the writer reads a group id, and the writer already defaults a missing
+    // profile id and an empty PII-traits map. A record that carries the legacy `null` shapes is
+    // recovered, not dropped.
     const error = vi.spyOn(logger, 'error').mockImplementation((() => {}) as never);
     try {
-      const older = { ...event('no-traits') } as Record<string, unknown>;
+      const older = { ...event('recovered'), groupId: null, profileId: null } as Record<string, unknown>;
       delete older.piiTraits;
       const seen: BusEvent[][] = [];
-      const { store } = storeOf();
+      const { store, inserted } = storeOf();
 
       await runSink(bus([[older as unknown as BusEvent, event('kept')]]), store, new AbortController().signal, {
         filter: async (events) => {
@@ -87,9 +90,33 @@ describe('sink batch drops', () => {
         },
       });
 
-      // The filter never sees the unreadable record, so a missing map cannot fail its read.
-      expect(seen).toEqual([[expect.objectContaining({ messageId: 'kept' })]]);
-      expect(error.mock.calls[0]?.[0]).toEqual({ workspaceId: ws, eventId: 'no-traits', field: 'piiTraits' });
+      expect(seen.map((events) => events.map((e) => e.messageId))).toEqual([['recovered', 'kept']]);
+      expect(inserted.map((events) => events.map((e) => e.messageId))).toEqual([['recovered', 'kept']]);
+      expect(inserted[0]?.[0]).toMatchObject({ messageId: 'recovered', piiTraits: {}, groupId: null });
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('drops a workspace id the erasure filter cannot cast to a uuid', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation((() => {}) as never);
+    try {
+      // A filter's `uuid[]` cast would fail for the whole batch on every delivery.
+      const bad = { ...event('bad-ws'), workspaceId: 'not-a-uuid' } as unknown as BusEvent;
+      const seen: BusEvent[][] = [];
+      const { store, inserted } = storeOf();
+
+      await runSink(bus([[bad, event('kept')]]), store, new AbortController().signal, {
+        filter: async (events) => {
+          seen.push(events);
+          return events;
+        },
+      });
+
+      expect(seen.map((events) => events.map((e) => e.messageId))).toEqual([['kept']]);
+      expect(inserted.map((events) => events.map((e) => e.messageId))).toEqual([['kept']]);
+      expect(error.mock.calls[0]?.[0]).toEqual({ workspaceId: 'not-a-uuid', eventId: 'bad-ws', field: 'workspaceId' });
     } finally {
       error.mockRestore();
     }

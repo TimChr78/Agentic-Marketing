@@ -277,12 +277,13 @@ describe('erasure and the ClickHouse sink (#978)', () => {
     expect(await baseRows()).toEqual([]);
   }, 60_000);
 
-  it('stores the readable events of a batch that also carries an older record without PII traits', async () => {
+  it('stores an older record without its PII-traits map next to the rest of the batch', async () => {
     const api = t.api(owner);
     const profileId = await identify(api, 'older-a', 'older@example.com');
     await api.call('profiles.erase', { profileId, reason: 'Older queued record test' });
     // The workspace now has an erasure tombstone, so the sink's filter reads every event of the
-    // batch. An older queued record without its PII-traits map must not fail that read.
+    // batch. An older queued record without its PII-traits map names no e-mail or phone, which is
+    // the same read the filter already tolerates: the record is stored, not dropped.
     const older = { ...busEvent('older-unrelated', 'older-1') } as Record<string, unknown>;
     delete older.piiTraits;
     const good = busEvent('older-good', 'older-2');
@@ -290,7 +291,7 @@ describe('erasure and the ClickHouse sink (#978)', () => {
     await runSink(sinkBus([[older as unknown as BusEvent, good]]), t.srv.events, new AbortController().signal, { filter });
 
     expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['older-good'], userIds: [] })).toHaveLength(1);
-    expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['older-unrelated'], userIds: [] })).toEqual([]);
+    expect(await t.srv.events.eventsOf(ws, { anonymousIds: ['older-unrelated'], userIds: [] })).toHaveLength(1);
   }, 60_000);
 
   it('retries the batch when the erasure filter cannot reach its dependency', async () => {

@@ -110,4 +110,14 @@ describe.skipIf(!hasTestDatabase())('identity resolution', () => {
     expect(resolved?.profileId).toBe(person?.profileId);
     expect(await identifiersOf(person!.profileId)).toContainEqual({ type: 'user_id', value: 'user-self' });
   });
+
+  it('resolves a queued event that arrived without its PII-traits map', async () => {
+    // An older queued record can lack the map; it then names no e-mail or phone, rather than
+    // failing the whole profile batch.
+    const legacy = { ...event({ anonymousId: 'anon-no-pii' }) } as Record<string, unknown>;
+    delete legacy.piiTraits;
+    const [resolved] = await runBatch([legacy as unknown as BusEvent]);
+    expect(resolved?.profileId).toMatch(/^prf_/);
+    expect(await identifiersOf(resolved!.profileId)).toEqual([{ type: 'anonymous_id', value: 'anon-no-pii' }]);
+  });
 });

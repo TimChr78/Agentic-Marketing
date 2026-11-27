@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { newUuid } from '@agentic-marketing/core';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { logger } from '@agentic-marketing/telemetry';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { runScoped } from '../../db/test/run';
 import {
   type BusEvent,
@@ -499,6 +500,23 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
         subject_gclid: '',
       },
     ]);
+  }, 60_000);
+
+  it('drops a record it cannot write with a fixed reason and stores the rest of the batch', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation((() => {}) as never);
+    try {
+      const unreadable = { ...event(70), timestamp: 5 } as unknown as BusEvent;
+      const written = await store.insert([unreadable, event(71)]);
+      expect(written).toBe(1);
+      // Only the reason and correlation fields: never the exception or the payload.
+      expect(error.mock.calls[0]?.[0]).toEqual({ workspaceId: ws, eventId: 'subject-70', field: 'timestamp' });
+      const stored = await rows<{ event_id: string }>(
+        `SELECT event_id FROM events FINAL WHERE workspace_id = {ws:UUID} AND event_id = 'subject-71'`,
+      );
+      expect(stored).toEqual([{ event_id: 'subject-71' }]);
+    } finally {
+      error.mockRestore();
+    }
   }, 60_000);
 
   it('fails the write when the exclusion key cannot be resolved, and counts the failure', async () => {

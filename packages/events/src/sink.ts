@@ -1,6 +1,7 @@
 import { logger } from '@agentic-marketing/telemetry';
 import type { EventBus } from './bus';
 import type { EventStore } from './clickhouse';
+import { eventCorrelation, normalizeEvent, unreadableEventReason } from './readable';
 import type { BusEvent } from './schema';
 
 /** The durable consumer a worker-side sink reads with. */
@@ -17,46 +18,17 @@ export interface SinkOptions {
   filter?: (events: BusEvent[]) => Promise<BusEvent[]>;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
-
-/**
- * Why the store and the erasure filter cannot read this event, or `null` when every field they read
- * has a type they can use. A record like this cannot become readable on another delivery, so the
- * sink drops it rather than failing the batch (which would hold back every other tenant's events
- * until the stream's max age). The reason is a field name, never its value.
- */
-export function unreadableEventReason(event: unknown): string | null {
-  if (!isRecord(event)) return 'event';
-  for (const field of ['workspaceId', 'sourceId', 'messageId', 'type', 'name', 'anonymousId', 'userId', 'timestamp', 'receivedAt'])
-    if (typeof event[field] !== 'string') return field;
-  for (const field of ['properties', 'traits', 'piiTraits', 'context']) if (!isRecord(event[field])) return field;
-  if (!isRecord(event.consent) || Object.values(event.consent).some((value) => typeof value !== 'boolean')) return 'consent';
-  for (const field of ['profileId', 'previousId', 'groupId'])
-    if (event[field] !== undefined && typeof event[field] !== 'string') return field;
-  // A timestamp ClickHouse cannot parse would make it reject the whole insert on every retry.
-  if (Number.isNaN(Date.parse(event.timestamp as string))) return 'timestamp';
-  if (Number.isNaN(Date.parse(event.receivedAt as string))) return 'receivedAt';
-  return null;
-}
-
-/** The safe correlation fields of an event: its workspace and id, never its payload. */
-const correlation = (event: unknown) => {
-  const fields = isRecord(event) ? event : {};
-  return {
-    workspaceId: typeof fields.workspaceId === 'string' ? fields.workspaceId : undefined,
-    eventId: typeof fields.messageId === 'string' ? fields.messageId : undefined,
-  };
-};
-
 /**
  * ClickHouse sink (worker role): micro-batches of up to 10k events or 1 s, inserted, then acked.
  * A crash between insert and ack re-delivers the batch; ReplacingMergeTree collapses the copies.
  * The optional filter blocks events eligible for an erasure before they are inserted; it is a
  * mitigation, not proof that a later write cannot land (#1037).
  *
- * A record whose own fields cannot be read is dropped and logged before the filter runs, so a
- * missing map cannot make the filter throw for the whole batch. A dependency failure (the filter's
- * database, a key, ClickHouse) still rejects, so the batch is delivered again.
+ * A queued record is checked against the fields the filter and the store read before either sees
+ * it, so a record of the wrong shape cannot fail the batch. Values the writer already defaults (an
+ * absent map, a `null` profile id) are recovered; only a record that can never become readable is
+ * dropped, and it is logged with its workspace and event id only. A dependency failure (the
+ * filter's database, a key, ClickHouse) still rejects, so the batch is delivered again.
  */
 export function runSink(bus: EventBus, store: EventStore, signal: AbortSignal, opts: SinkOptions = {}) {
   return bus.consume(
@@ -64,9 +36,10 @@ export function runSink(bus: EventBus, store: EventStore, signal: AbortSignal, o
     async (events) => {
       const readable: BusEvent[] = [];
       for (const event of events) {
+        normalizeEvent(event);
         const field = unreadableEventReason(event);
         if (field) {
-          logger.error({ ...correlation(event), field }, 'event dropped from the sink batch: its payload could not be read');
+          logger.error({ ...eventCorrelation(event), field }, 'event dropped from the sink batch: its payload could not be read');
           continue;
         }
         readable.push(event);
