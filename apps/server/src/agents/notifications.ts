@@ -393,6 +393,13 @@ async function digestWindows(tx: Tx, workspaceId: string): Promise<Map<string, D
  */
 export function digestWindowsQuery(workspaceId: string) {
   const prefix = `agent-digest:${workspaceId}:`;
+  // The upper end is a real window start, never a sentinel character: a locale-aware collation
+  // (glibc en_US.utf8, ICU) ignores punctuation and gives U+FFFF no weight, so a
+  // `key < prefix || sponsor || U+FFFF` range was empty outside the C collation and the window of a
+  // failed digest was never found (#1272 review). Every suffix is an ISO-8601 window start or a UTC
+  // day of this century, so it begins with a digit below '9' and `:9999-…` is above all of them.
+  // Sponsor ids all have the same width, so no sponsor's range can reach another sponsor's keys.
+  const after = ':9999-12-31T23:59:59.999Z';
   return sql`
     SELECT m.idempotency_key AS key, m.status, m.data, m.sent_at, m.created_at
     FROM (SELECT DISTINCT sponsor_user_id AS sponsor FROM agents WHERE workspace_id = ${workspaceId}) s
@@ -401,7 +408,7 @@ export function digestWindowsQuery(workspaceId: string) {
       FROM messages
       WHERE workspace_id = ${workspaceId}
         AND idempotency_key >= ${prefix} || s.sponsor || ':'
-        AND idempotency_key < ${prefix} || s.sponsor || ${'\uffff'}
+        AND idempotency_key < ${prefix} || s.sponsor || ${after}
       ORDER BY idempotency_key DESC
       LIMIT 1
     ) m`;

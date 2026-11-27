@@ -796,6 +796,35 @@ interface PlanNode {
 const planNodes = (node: PlanNode): PlanNode[] => [node, ...(node.Plans ?? []).flatMap(planNodes)];
 
 describe('the digest window lookup (#1227 review)', () => {
+  it('finds each sponsor’s newest digest row under the database’s own collation (#1272 review)', async () => {
+    // The range used to close on a U+FFFF sentinel. A locale-aware collation (glibc en_US.utf8) gives
+    // that character no weight, so the range was empty, the lookup returned nothing, and a digest
+    // that failed for one sponsor was never retried outside the C collation.
+    const s = await setup({ level: 3 });
+    const other = await t.signUp(`window-other-${Date.now()}@example.com`);
+    const second = await addAgent(s, { name: 'Other window agent', level: 3 });
+    await t.srv.db.admin.query('UPDATE agents SET sponsor_user_id = $2 WHERE workspace_id = $1 AND id = $3', [
+      s.ws,
+      other.id,
+      second.agentId,
+    ]);
+    const day = (n: number) => new Date(Date.UTC(2026, 0, n)).toISOString();
+    const insert = (sponsor: string, at: string, status: string) =>
+      t.srv.db.admin.query(
+        `INSERT INTO messages (workspace_id, id, idempotency_key, purpose, status, created_at, updated_at)
+         VALUES ($1, $2, $3, 'onboarding', $4, now(), now())`,
+        [s.ws, `msg_window_${sponsor}_${at.replaceAll(/[^0-9]/g, '')}`, `agent-digest:${s.ws}:${sponsor}:${at}`, status],
+      );
+    await insert(s.owner.id, day(1), 'sent');
+    await insert(s.owner.id, day(2), 'failed');
+    await insert(other.id, day(3), 'sent');
+
+    const rows = await t.srv.db.withWorkspace(s.ws, (tx) => tx.execute<{ key: string; status: string }>(digestWindowsQuery(s.ws)));
+    const newest = new Map(rows.rows.map((row) => [row.key.split(':')[2], row]));
+    expect(newest.get(s.owner.id)).toMatchObject({ key: `agent-digest:${s.ws}:${s.owner.id}:${day(2)}`, status: 'failed' });
+    expect(newest.get(other.id)).toMatchObject({ key: `agent-digest:${s.ws}:${other.id}:${day(3)}`, status: 'sent' });
+  }, 40_000);
+
   it('reads each sponsor’s newest digest through the message key index, not the whole history', async () => {
     // A sponsor accumulates one digest row per day. The sweep runs every five minutes, so a
     // DISTINCT ON over every historical row would grow with the workspace's age. The newest row
