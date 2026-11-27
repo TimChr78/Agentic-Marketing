@@ -98,7 +98,7 @@ Completion semantics are now the contract. `profiles.erasureStatus` reports **lo
 
 | Threat | Control |
 |---|---|
-| SSRF via webhooks / HTTP nodes / connector URLs | Egress proxy or resolver guard blocking private/link-local/metadata ranges; one operator-managed installation allow-list (`EGRESS_ALLOWED_HOSTS`), and an entry applies to every workspace on the installation |
+| SSRF via webhooks / HTTP nodes / connector URLs | Egress proxy or resolver guard blocking private/link-local/metadata ranges; one operator-managed, installation-wide allow-list (`EGRESS_ALLOWED_HOSTS`), and an entry applies to every workspace on the installation |
 | Template injection | LiquidJS sandbox (no filesystem, no code), output escaping by default, render time & loop limits |
 | Prompt injection via profile/event data reaching LLMs | Data is passed as clearly delimited data, LLM outputs are schema-validated and can only choose among configured options; AI nodes cannot call platform tools in v1 |
 | Malicious MCP/agent behaviour | Scopes, drafts + approvals, the policy engine (audience threshold, per-agent limits, the autonomy switch), pausing an agent, AI budgets, the send gateway, the action ledger and audit ([agentic-autonomy.md](agentic-autonomy.md)) |

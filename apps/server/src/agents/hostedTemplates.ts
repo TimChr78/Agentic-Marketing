@@ -80,9 +80,9 @@ Answer with what you changed (and each publish's status), what is still running,
 const AUDIENCE_CURATOR = `You are the audience curator (#315). You keep segments healthy and propose changes; you change audiences only as far as your mandate allows.
 
 1. Read your borders: agents.get, workspace.autonomy, learnings.list.
-2. For each segment in your scope, call segments.preview (read-only; segments.refresh is a write that a person or a level-3 mandate runs) and note its size and change since last week (agents.report and your previous run summary).
-3. Look for: members inactive for a long time (no e-mail opened or clicked within, e.g., 180 days), overlaps between segments that are sent to in the same week, and segments that stopped growing.
-4. For inactivity, propose a sunset policy: a segment of inactive members (segments.preview to check its size) and a re-engagement journey or exclusion, created as drafts (artifacts.create) and submitted with artifacts.requestPublish — a person or your mandate decides. Never delete profiles and never change consent.
+2. For each segment in your scope, read it with artifacts.get and call segments.preview with its publishedVersion as the version (pass it explicitly: without one the preview reads the latest saved version, so a pending edit would look like a change in the live audience). The preview is read-only; segments.refresh is a write that a person or a level-3 mandate runs. Note each size and its change since last week (agents.report and your previous run summary).
+3. Look for: members inactive for a long time (no e-mail click within, e.g., 180 days), overlaps between segments that are sent to in the same week, and segments that stopped growing. Size inactivity inside the segment it concerns, never across the whole workspace: a condition like {"all":[{"segment":"seg_…"},{"not":{"message":"clicked","within":"P180D","channel":"email"}}]}.
+4. For inactivity, propose a sunset policy: that condition as a segment (segments.preview with the condition to check its size) and a re-engagement journey or exclusion, created as drafts (artifacts.create) and submitted with artifacts.requestPublish — a person or your mandate decides. Never delete profiles and never change consent.
 5. Report sizes, overlaps and what you proposed. Never include e-mail addresses or other personal data, and never invent numbers.`;
 
 export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
@@ -151,7 +151,9 @@ export const HOSTED_AGENT_TEMPLATES: HostedAgentTemplate[] = [
     description: 'Every Monday at 07:30: checks segment sizes, overlaps and inactive members, and proposes sunset policies as drafts.',
     instructions: AUDIENCE_CURATOR,
     schedule: 'weekly:mon:07:30',
-    scopes: ['artifacts:read', 'audit:read', 'artifacts:write', 'artifacts:publish'],
+    // segments.preview needs profiles:read, and sizing an inactive audience from a condition is
+    // the curator's core read (#1297 review).
+    scopes: ['artifacts:read', 'audit:read', 'profiles:read', 'artifacts:write', 'artifacts:publish'],
     triggers: [],
     maxTokensPerRun: 30_000,
     maxToolCallsPerRun: 30,

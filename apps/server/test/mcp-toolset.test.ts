@@ -2,6 +2,7 @@ import { agentPrincipal, type Principal } from '@agentic-marketing/commands';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { describe, expect, it } from 'vitest';
+import { hostedAgentTemplate } from '../src/agents/hostedTemplates';
 import { mcpServerFor } from '../src/http/mcp';
 import { commands } from '../src/registry';
 
@@ -85,6 +86,17 @@ describe('hosted MCP toolset (#364)', () => {
     } finally {
       await client.close().catch(() => {});
     }
+  });
+
+  // #1297: a template's default scopes must offer the tool its instructions open with, or the
+  // hosted run is told to call something its catalogue does not contain.
+  it('offers the audience curator template the tools its instructions use', async () => {
+    const template = hostedAgentTemplate('audience_curator')!;
+    expect(template.instructions).toContain('segments.preview');
+    const curator = agentPrincipal('usr_curator', 'client_curator', 'ws_1', 'owner', template.scopes, record('curator'));
+    const names = (await toolsOf(curator, false)).map((t) => t.name);
+    expect(names).toContain('segments.preview');
+    expect(names).toContain('artifacts.get');
   });
 
   it('keeps the OAuth step-up listing, which a hosted run deliberately does not use', async () => {

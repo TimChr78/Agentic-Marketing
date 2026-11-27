@@ -1,7 +1,9 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { segmentCondition } from '@agentic-marketing/artifacts';
 import { describe, expect, it } from 'vitest';
+import { hostedAgentTemplate } from '../src/agents/hostedTemplates';
 import { commands } from '../src/registry';
 
 // Pure documentation checks: the pilot pages must agree on retention, on the two public-path
@@ -17,6 +19,28 @@ const paths = {
   pilot: join(root, 'docs/pilots/martechsignal.md'),
 };
 const read = (path: string) => readFile(path, 'utf8');
+
+/**
+ * The first balanced `{…}` object in `text` at or after `from`, parsed as JSON. The docs write
+ * segment ids as `seg_…`; substituting a real id lets the same condition run through the shipped
+ * schema instead of pinning an exact string.
+ */
+function conditionAt(text: string, from: string): unknown {
+  const start = text.indexOf(from);
+  if (start < 0) throw new Error(`${from} is missing`);
+  let depth = 0;
+  for (let i = start; i < text.length; i += 1) {
+    if (text[i] === '{') depth += 1;
+    else if (text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        const json = text.slice(start, i + 1).replaceAll('seg_…', 'seg_0123456789abcdef0123456789abcdef');
+        return JSON.parse(json);
+      }
+    }
+  }
+  throw new Error(`${from} is not closed`);
+}
 
 const COMMAND_FILES = new Set(['.md', '.sh', '.mjs', '.js']);
 
@@ -137,10 +161,15 @@ describe('architecture pages and skills name the shipped surface', () => {
     }
   });
 
-  // #1292: one installation-wide allow-list, not one per workspace.
+  // #1292: one installation-wide allow-list, not one per workspace. The operator has to learn the
+  // scope from the row, so naming the variable is not enough.
   it('describes the egress allow-list as installation-wide', async () => {
     const doc = await read(join(root, 'docs/architecture/security-and-privacy.md'));
-    expect(doc).toContain('EGRESS_ALLOWED_HOSTS');
+    const row = doc.split('\n').find((line) => line.startsWith('| SSRF '));
+    expect(row).toBeDefined();
+    expect(row).toContain('EGRESS_ALLOWED_HOSTS');
+    expect(row).toMatch(/installation[- ]wide/);
+    expect(row).toMatch(/every workspace/);
     expect(doc).not.toMatch(/per-workspace allow/i);
   });
 
@@ -159,6 +188,31 @@ describe('architecture pages and skills name the shipped surface', () => {
     for (const uri of ['agentic-marketing://guide', 'business-context://current', 'learnings://current']) {
       expect(page).toContain(uri);
     }
+    // The two workspace resources come from artifacts:read commands; the guide does not.
+    expect(page).toMatch(/Business context and learnings[^\n]*artifacts:read/);
+  });
+
+  // A provider configured only for `decisions` serves the journey `decision` node and `ai.score`;
+  // an `aiDecide` step needs a `journeys` provider and falls back without one.
+  it('names the surfaces a decision provider serves', async () => {
+    const page = await read(join(root, 'docs/architecture/agents-and-mcp.md'));
+    const line = page.split('\n').find((l) => l.includes('**Decision providers**')) ?? '';
+    expect(line).toContain('`decision` node');
+    expect(line).toContain('`ai.score`');
+    expect(line).toContain('`aiDecide`');
+    expect(line).toContain('"journeys"');
+    expect(line).toContain('decision-models.md');
+  });
+
+  // People-only commands are never MCP tools for an agent, so the tool list must not name them.
+  it('keeps people-only commands out of the MCP tool list', async () => {
+    const page = await read(join(root, 'docs/architecture/agents-and-mcp.md'));
+    const tools = page.slice(page.indexOf('**Tools** (grouped'), page.indexOf('- **People-only commands'));
+    expect(tools.length).toBeGreaterThan(200);
+    for (const name of ['approvals.approve', 'learnings.retract', 'agents.pause', 'agents.undo']) {
+      expect(tools).not.toContain(name);
+    }
+    expect(page.slice(page.indexOf('- **People-only commands'))).toContain('approvals.approve');
   });
 
   // #1294: only the remote target and a scaled ClickHouse backup remain open.
@@ -178,8 +232,24 @@ describe('architecture pages and skills name the shipped surface', () => {
     expect(audienceRow).toContain('people only');
     expect(recipes).not.toMatch(/email_opened|email_clicked/);
     const curator = recipes.slice(recipes.indexOf('## Audience curator'));
-    expect(curator).toMatch(/1\. \*\*Sizes\.\*\* `segments\.preview/);
-    expect(curator).toContain('{"not":{"message":"clicked","within":"P180D"}}');
+    // Sizes read the published version: a pending edit must not look like a live change.
+    expect(curator).toMatch(/1\. \*\*Sizes\.\*\* [^\n]*publishedVersion/);
+
+    // Parse the sunset condition against the shipped schema instead of pinning its JSON text: it
+    // must intersect the intended segment and count e-mail clicks, not clicks on every channel.
+    const condition = segmentCondition.parse(conditionAt(curator, '{"all":[{"segment"'));
+    expect(condition).toEqual({
+      all: [{ segment: 'seg_0123456789abcdef0123456789abcdef' }, { not: { message: 'clicked', within: 'P180D', channel: 'email' } }],
+    });
+
+    // The hosted curator template must carry the same rule, and the scopes its calls need.
+    const template = hostedAgentTemplate('audience_curator')!;
+    expect(template.instructions).toContain('segments.preview');
+    expect(template.instructions).toContain('publishedVersion');
+    expect(segmentCondition.parse(conditionAt(template.instructions, '{"all":[{"segment"'))).toEqual(condition);
+    for (const name of ['segments.preview', 'artifacts.get']) {
+      expect(template.scopes, name).toContain(commands.find((command) => command.name === name)?.permission);
+    }
   });
 });
 

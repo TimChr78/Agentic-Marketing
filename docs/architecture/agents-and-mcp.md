@@ -40,11 +40,11 @@ The command layer is the only place that does authorization, validation, idempot
   - `templates.*` (preview, check, sendTest), `blocks.*` (preview, usage)
   - `experiences.results`
   - `consent.summary`, `consent.history`, `messages.list` (each message's delivery decision)
-  - `approvals.approve` (people only)
-  - `agents.*` (list, get, activity, report, pause, undo, events and hosted-run commands; a person manages mandates, pause and undo)
-  - `learnings.*` (list, add, retract — retraction is people-only), `content.*` (sources, items, topics, briefs), `recipes.*` (list, get, preview, install)
+  - `agents.*` reads: `list`, `get`, `activity`, `report`, `compare`, `events`, `subscriptions`, `hostedRuns`, `runFailures` and `memory.list`/`memory.add`
+  - `learnings.*` (list, add), `content.*` (sources, items, topics, briefs), `recipes.*` (list, get, preview, install)
   - `analytics.*` (predefined, safe queries — no raw SQL for agents in v1): `query`, `metrics.list`, `emailPerformance`, `journeyFunnel`, `campaignSummary`
-- **Resources:** exactly three: `agentic-marketing://guide` (the agent guide, also sent as `initialize` instructions), `business-context://current` (the published brief) and `learnings://current` (active conclusions with their evidence) — so an agent can read the "manual" of this workspace and what its predecessors learned.
+- **People-only commands are not MCP tools for an agent**, whatever its scopes: approving (`approvals.approve`), undo (`agents.undo`), pausing, resuming or revoking an agent (`agents.pause`, `.resume`, `.revoke`), hosted-agent administration (`agents.createHosted`, `.updateHosted`, `.deleteHosted`, `.runHostedNow`, `agents.memory.update`/`.delete`), retracting a learning (`learnings.retract`), the static/snapshot audience writers (`audiences.add`, `.remove`, `.import`, `.snapshot`, `.refreshSnapshot`), and member, secret, provider and connection management or consent import and profile erasure. They answer `forbidden` to an agent principal; a person runs them in the UI or over the same command as `POST /v1/<command>`.
+- **Resources:** exactly three: `agentic-marketing://guide` (the agent guide, also sent as `initialize` instructions), `business-context://current` (the published brief) and `learnings://current` (active conclusions with their evidence) — so an agent can read the "manual" of this workspace and what its predecessors learned. Business context and learnings are served from `artifacts:read` commands, so an agent without that scope gets only the guide.
 - **Prompts:** none are registered; the guide is served as instructions and as the `agentic-marketing://guide` resource.
 - **Discoverability for LLMs:** `artifacts.types` returns each artifact type's JSON Schema with examples (pass a type to keep it small); validation errors are written to be actionable for an LLM ("node n3: `timeout` must be ISO-8601 duration, got '2 days'").
 
@@ -73,7 +73,7 @@ All of these are enforced in the command layer at 0.6.1; the status says when ea
 - **Provider configs per workspace:** `aiProviders.create` takes `name`, `kind` (`openai-compatible`, `anthropic-compatible` or `decision`), `baseUrl`, an `apiKey`, `models: { default, fast }`, `useFor` (`journeys`, `copilot`, `decisions`), `region`, `monthlyTokenBudget`, `structuredOutputs` and `allowPersonalData` (decision providers only).
   `openai-compatible` covers OpenAI, Azure OpenAI, Mistral, Ollama, vLLM, LiteLLM, OpenRouter, etc.; `anthropic-compatible` covers Anthropic, Amazon Bedrock/Vertex proxies exposing the Anthropic API, and compatible gateways.
 - Implemented with the **Vercel AI SDK** (Apache-2.0) — `@ai-sdk/openai-compatible` and `@ai-sdk/anthropic` with a custom `baseURL` — giving one interface for structured output (zod), tool calling and streaming.
-- **Decision providers** (`kind: "decision"`, `useFor: ["decisions"]`) answer `aiDecide` steps; `allowPersonalData` is people only and is set only when the provider is covered by a no-retention agreement.
+- **Decision providers** (`kind: "decision"`, `useFor: ["decisions"]`) serve the journey `decision` node and `ai.score`. An `aiDecide` step is an LLM step, so it needs a provider with `useFor: ["journeys"]` and takes its fallback branch when there is none. `allowPersonalData` is people only and is set only when the provider is covered by a no-retention agreement; [decision-models.md](../decision-models.md) is the guide.
 - There is no OAuth credential flow for AI providers: a provider is an API key sealed with the workspace key, never returned by any API and never logged.
 - Metering: tokens & cost per workspace, per purpose, per journey → budgets and alerts.
 
