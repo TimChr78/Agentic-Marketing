@@ -448,6 +448,22 @@ describe('am doctor brand-domain checks', () => {
     expect(check?.hint).toContain('workspace.domains.remove {id: "wdo_takeover"}');
     expect(check?.hint).toContain('DELETE FROM workspace_domains');
   });
+
+  it('warns that a loopback PUBLIC_URL hides the admin from other names (#1279)', async () => {
+    const loopback = { publicUrl: 'http://localhost:3000', linksUrl: 'https://fallback.example.com' };
+    const checks = await checkBrandDomains([domain()], [], loopback, { lookup: okLookup, probe: async () => 200 });
+    const check = checks.find((entry) => entry.id === 'brand-domains.admin-host');
+    expect(check).toMatchObject({ status: 'warn' });
+    expect(check?.message).toContain('PUBLIC_URL');
+    expect(check?.message).toContain('loopback');
+    expect(check?.hint).toContain('sign in through');
+
+    // A pending domain does not activate Host checking, and a public admin host needs no warning.
+    const pending = await checkBrandDomains([domain({ status: 'pending' })], [], loopback, { lookup: okLookup });
+    expect(pending.find((entry) => entry.id === 'brand-domains.admin-host')).toBeUndefined();
+    const publicAdmin = await checkBrandDomains([domain()], [], config, { lookup: okLookup, probe: async () => 200 });
+    expect(publicAdmin.find((entry) => entry.id === 'brand-domains.admin-host')).toBeUndefined();
+  });
 });
 
 describe('am doctor Postgres version check', () => {

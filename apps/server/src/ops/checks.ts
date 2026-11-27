@@ -11,6 +11,7 @@ import {
   createDb,
   type Db,
   ERASURE_PURGE_INTERVAL_SECONDS,
+  isLoopbackHost,
   JOURNEY_EVENT_MAX_AGE_DAYS,
   normalizeHost,
   RowsHiddenByRlsError,
@@ -1285,6 +1286,16 @@ export async function checkBrandDomains(
   const lookup = deps.lookup ?? ((host: string) => dnsLookup(host));
   const probe = deps.probe ?? probeHttp;
   const adminHost = new URL(config.publicUrl).hostname.toLowerCase();
+  // A loopback admin host is a valid local install, but once a brand domain is verified Host
+  // checking is active and only loopback names reach the admin (#1279). Operators who sign in
+  // through a LAN name or an internal alias would get 404 after upgrading.
+  const adminHostIsLoopback = (() => {
+    try {
+      return isLoopbackHost(normalizeHost(new URL(config.publicUrl).hostname));
+    } catch {
+      return false;
+    }
+  })();
   // The admin and fallback hosts belong to the installation, so the resolver quarantines any row
   // on them. A 0.10.0 install could still have verified one; report it so an operator can remove it.
   const reservedHosts = new Set(deps.reservedHosts ?? []);
@@ -1409,6 +1420,15 @@ export async function checkBrandDomains(
       status: 'warn',
       message: `${reserved.map((domain) => domain.host).join(', ')} use a reserved or private suffix`,
       hint: 'Use a public hostname for brand links; localhost and test suffixes work only on this machine.',
+    });
+
+  const verified = domains.filter((domain) => domain.status === 'verified');
+  if (verified.length && adminHostIsLoopback)
+    checks.push({
+      id: 'brand-domains.admin-host',
+      status: 'warn',
+      message: `PUBLIC_URL's host is loopback while ${verified.length === 1 ? 'a brand domain is' : `${verified.length} brand domains are`} verified; Host checking is active, so the admin answers only on loopback and any other name gets a 404`,
+      hint: 'Set PUBLIC_URL to the name you sign in through (a LAN name, an internal alias or the public host) and restart. Until then, reach the admin on localhost.',
     });
 
   return checks;

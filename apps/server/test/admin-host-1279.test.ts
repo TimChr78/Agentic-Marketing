@@ -9,9 +9,11 @@ import { startTestServer, testPort, type User } from './harness';
 // surface: the UI, auth, MCP, SCIM and admin REST. Any other Host that is neither a verified brand
 // domain nor the fallback links host gets 404, so a name that resolves to this installation cannot
 // reach the admin routes. Health probes answer on every Host (Kubernetes sends the pod IP, Docker
-// and Compose send 127.0.0.1), and the metrics scrape on the pod IP or Service name Prometheus uses.
+// and Compose send 127.0.0.1), and the metrics scrape on every non-brand Host: the pod IP or
+// Service name Prometheus uses and the fallback links host.
 
 const PORT = testPort(4700);
+const PUBLIC_PORT = testPort(4710);
 const ADMIN_HOST = `localhost:${PORT}`;
 const BRAND = 'brand-1279.example';
 const UNKNOWN = 'unregistered-1279.example';
@@ -22,12 +24,15 @@ const METRICS_TOKEN = 'metrics-token-1279';
 
 type Reply = { status: number; body: string; headers: http.IncomingHttpHeaders };
 
-const request = (path: string, options: { method?: string; host?: string; body?: string; headers?: Record<string, string> } = {}) =>
+const request = (
+  path: string,
+  options: { method?: string; host?: string; body?: string; headers?: Record<string, string>; port?: number } = {},
+) =>
   new Promise<Reply>((resolve, reject) => {
     const req = http.request(
       {
         host: '127.0.0.1',
-        port: PORT,
+        port: options.port ?? PORT,
         path,
         method: options.method ?? 'GET',
         headers: { host: options.host ?? ADMIN_HOST, ...(options.headers ?? {}) },
@@ -131,6 +136,13 @@ describe('the admin surface is PUBLIC_URL’s host alone (#1279)', () => {
     expect((await restCall(UNKNOWN)).status).toBe(404);
   });
 
+  it('treats 127.0.0.1 as the admin host when PUBLIC_URL is loopback', async () => {
+    // A development install configured on localhost is reached as localhost, 127.0.0.1 or ::1.
+    const loopback = await request('/', { host: '127.0.0.1' });
+    expect(loopback.status).toBe(200);
+    expect(loopback.body).toContain('admin shell');
+  });
+
   it('serves a verified brand host its public surface only', async () => {
     expect((await request('/', { host: BRAND })).status).toBe(404);
     expect((await request('/openapi.json', { host: BRAND })).status).toBe(404);
@@ -168,5 +180,51 @@ describe('the admin surface is PUBLIC_URL’s host alone (#1279)', () => {
     const scrape = await request('/metrics', { host: POD, headers: { authorization: `Bearer ${METRICS_TOKEN}` } });
     expect(scrape.status).toBe(200);
     expect(scrape.headers['content-type']).toContain('text/plain');
+  });
+
+  it('keeps the metrics scrape reachable on the fallback links host', async () => {
+    // The fallback host is public, so the admin gate must not hide /metrics there either: the
+    // token is the guard, and a resolver may send the scrape through the links name.
+    const anonymous = await request('/metrics', { host: LINKS });
+    expect(anonymous.status).toBe(401);
+    expect(JSON.parse(anonymous.body)).toMatchObject({ error: 'unauthorized' });
+    const scrape = await request('/metrics', { host: LINKS, headers: { authorization: `Bearer ${METRICS_TOKEN}` } });
+    expect(scrape.status).toBe(200);
+    expect(scrape.headers['content-type']).toContain('text/plain');
+  });
+});
+
+describe('a loopback Host is not the admin host when PUBLIC_URL is a public name (#1279)', () => {
+  const NON_LOOPBACK_ADMIN = 'real-1279.example';
+  let publicServer: Awaited<ReturnType<typeof startTestServer>> | undefined;
+  let publicWebDist = '';
+
+  beforeAll(async () => {
+    publicWebDist = mkdtempSync(join(tmpdir(), 'am-admin-host-public-'));
+    writeFileSync(join(publicWebDist, 'index.html'), '<!doctype html><html><body>admin shell</body></html>');
+    publicServer = await startTestServer('test_admin_host_1279_public', PUBLIC_PORT, {
+      WEB_DIST: publicWebDist,
+      METRICS_TOKEN,
+      PUBLIC_URL: `https://${NON_LOOPBACK_ADMIN}`,
+      PUBLIC_LINKS_URL: `https://${LINKS}`,
+    });
+    // Checking is installation policy and stays on once it has been switched on (#463); activate it
+    // directly so the test needs no domain verification.
+    await publicServer.srv.domains.activateHostChecking();
+  }, 120_000);
+
+  afterAll(async () => {
+    await publicServer?.close();
+    rmSync(publicWebDist, { recursive: true, force: true });
+  }, 120_000);
+
+  it('404s a loopback Host on an admin route once checking is active', async () => {
+    const loopback = await request('/', { host: '127.0.0.1', port: PUBLIC_PORT });
+    expect(loopback.status).toBe(404);
+    expect(JSON.parse(loopback.body)).toMatchObject({ error: 'not_found', message: 'Not found.' });
+    // The configured admin host still serves the UI, so the 404 is the host gate, not a missing build.
+    const admin = await request('/', { host: NON_LOOPBACK_ADMIN, port: PUBLIC_PORT });
+    expect(admin.status).toBe(200);
+    expect(admin.body).toContain('admin shell');
   });
 });
