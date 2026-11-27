@@ -77,10 +77,12 @@ describe.skipIf(!hasTestDatabase())('erasure of a profile with a large identifie
   it('records the whole ledger and every tombstone across several insert batches', async () => {
     const profile = 'prf_0000000000000000000000000000c103';
     const anon = 'bind-limit-';
-    // The same family covers both batched writes in the stage: 2,203 ledger rows (one per
-    // identifier value, two per anonymous id) and 1,101 tombstones, each past the 1,000-row batch.
-    // The separate test below pins the largest list the stage binds at once.
-    const anonymousIds = 1_100;
+    // Both original insert limits are crossed by this one family: the ledger gets 1 + 2 + 2 × 21,846
+    // rows, past PostgreSQL's 65,535-parameter wall at 10,922 ledger rows, and the tombstones get
+    // 21,847 rows, past the same wall at 21,845 identifiers. Each was a deterministic 08P01 on every
+    // erasure attempt until the writes were batched. The separate test below pins the largest
+    // identifier list the stage binds at once.
+    const anonymousIds = 21_846;
     await seedPerson(profile, anon, anonymousIds);
 
     const result = await erase(profile);

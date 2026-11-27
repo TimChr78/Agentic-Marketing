@@ -250,7 +250,10 @@ describe.skipIf(!chUp)('ClickHouse export and restore', () => {
       await clickhouse(`CREATE DATABASE ${database}`);
       await migrateClickHouse(chUrl, database, () => {}, { rowPolicies: 'off' });
       const workspace = randomUUID();
-      const keys = Array.from({ length: 2_400 }, (_, i) => `purge-key-${i}-${'p'.repeat(40)}`);
+      // One staging insert, so the key set lives in a single part: with no second part there is
+      // nothing for a background merge to combine, and the masked rows cannot be rewritten away
+      // before the metadata assertion below. A multi-part load makes that assertion racy.
+      const keys = Array.from({ length: 240 }, (_, i) => `purge-key-${i}`);
       // A completed sweep stages the key set and removes it with a lightweight delete, which only
       // masks the rows until a merge: metadata still counts them while a SELECT returns none. The
       // backup's row-count check used to read that as lost data and refuse to write the backup.
