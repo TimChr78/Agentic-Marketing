@@ -3,18 +3,19 @@ import { safeErrorText, sleep } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
+import { lockIdentity } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { classifyInputForLog } from './classify';
-import { aiAllowed, personContext, prepareWithCanonicalProfile, redact } from './context';
+import { aiAllowed, NO_PROFILE, personContext, prepareForPerson, redact } from './context';
 import {
   type DecisionAnswer,
   DecisionError,
   type DecisionProvider,
   decisionCall,
   decisionProvider,
-  insertProfileScore,
+  insertProfileScoreChecked,
   lockCanonicalProfile,
   nonPersonalState,
   stateHash,
@@ -49,12 +50,23 @@ export interface AiStepDeps {
 type CallRow = typeof schema.aiCalls.$inferSelect;
 const LEASE_MS = 120_000;
 
+/**
+ * A preparation refusal: the person's gate (or the person-bound build) refused before any model
+ * ran. It is more than a fallback reason: the call's person-derived input must be cleared when the
+ * outcome is stored (#1300 review).
+ */
+export interface PreparationRefusal {
+  reason: string;
+}
+
 interface Prepared {
   def: PromptDefinition;
   version: number;
   model?: ReadyModel;
   person?: Record<string, unknown>;
   fallback?: string;
+  /** Set when preparation refused the person, so finalisation clears person-derived input. */
+  refusal?: PreparationRefusal;
   /** Per-segment text cache (generate prompts with `cache`): the key, and the slots when cached. */
   cache?: { key: string; slots?: Record<string, string> };
 }
@@ -83,7 +95,13 @@ async function segmentKey(tx: Tx, profileId: string, segments: string[]) {
   return { key: inside.map((r) => r.id).join('+') || 'none', names: inside.map((r) => r.name) };
 }
 
-async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared | null> {
+/**
+ * What a step may send, and why it must take its fallback instead. Consent and the
+ * person-dependent input are prepared together (#1300): the gate is read again after the build, so
+ * a merge that committed in between cannot make the step use the merged-away profile's cleared
+ * traits (decide) or its empty segment list (cached generate). Exported for the merge-window test.
+ */
+export async function prepareCall(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared | null> {
   const p = await promptVersion(tx, c.promptId ?? '');
   if (!p) return null;
   const base = { def: p.def, version: p.version };
@@ -95,36 +113,44 @@ async function prepare(tx: Tx, c: CallRow, deps: AiStepDeps): Promise<Prepared |
   if (part?.status !== 'waiting' || part.node !== c.node || part.seq !== c.seq)
     return { ...base, fallback: 'too_late: the step was no longer waiting' };
   // The call row keeps the id it was queued with for the audit trail, but a merge may have folded
-  // that person into another profile since. The gate answers for the person the id names today and
-  // returns it, so consent, context and the segment cache all read the same profile (#1281).
-  const consent = await aiAllowed(tx, c.workspaceId, c.profileId ?? '');
-  if (!consent.ok) return { ...base, fallback: consent.reason };
-  const personId = consent.profileId;
-  try {
-    const model = await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress);
-    if (p.def.kind === 'generate' && p.def.cache) {
-      const { key, names } = await segmentKey(tx, personId, p.def.cache.segments);
-      const [hit] = await tx
-        .select({ slots: schema.aiTextCache.slots })
-        .from(schema.aiTextCache)
-        .where(
-          and(
-            eq(schema.aiTextCache.promptId, c.promptId ?? ''),
-            eq(schema.aiTextCache.promptVersion, p.version),
-            eq(schema.aiTextCache.cacheKey, key),
-            sql`${schema.aiTextCache.expiresAt} > now()`,
-          ),
-        );
-      return { ...base, model, person: { segments: names }, cache: { key, slots: hit?.slots } };
-    }
-    const trigger = (c.input as { trigger?: { name: string; properties: Record<string, unknown> } | null }).trigger ?? undefined;
-    const person = await personContext(tx, c.workspaceId, deps.kp, deps.events, personId, trigger);
-    if (!person) return { ...base, fallback: 'no_profile: the person does not exist (or was erased)' };
-    return { ...base, model, person: person as unknown as Record<string, unknown> };
-  } catch (err) {
-    if (err instanceof AiUnavailable) return { ...base, fallback: `${err.reason}: ${err.message}` };
-    throw err;
-  }
+  // that person into another profile since. The gate answers for the person the id names today, and
+  // the context and the segment cache read that same profile (#1281, #1300).
+  if (!c.profileId) return { ...base, fallback: 'no_profile: a decision or generate step needs a person' };
+  const prepared = await prepareForPerson<Pick<Prepared, 'model' | 'person' | 'cache'>>(
+    tx,
+    c.workspaceId,
+    c.profileId,
+    aiAllowed,
+    async (personId) => {
+      try {
+        const model = await modelFor(tx, deps.kp, 'journeys', p.def.model, deps.egress);
+        if (p.def.kind === 'generate' && p.def.cache) {
+          const { key, names } = await segmentKey(tx, personId, p.def.cache.segments);
+          const [hit] = await tx
+            .select({ slots: schema.aiTextCache.slots })
+            .from(schema.aiTextCache)
+            .where(
+              and(
+                eq(schema.aiTextCache.promptId, c.promptId ?? ''),
+                eq(schema.aiTextCache.promptVersion, p.version),
+                eq(schema.aiTextCache.cacheKey, key),
+                sql`${schema.aiTextCache.expiresAt} > now()`,
+              ),
+            );
+          return { value: { model, person: { segments: names }, cache: { key, slots: hit?.slots } } };
+        }
+        const trigger = (c.input as { trigger?: { name: string; properties: Record<string, unknown> } | null }).trigger ?? undefined;
+        const person = await personContext(tx, c.workspaceId, deps.kp, deps.events, personId, trigger);
+        if (!person) return { refusal: 'no_profile: the person does not exist (or was erased)' };
+        return { value: { model, person: person as unknown as Record<string, unknown> } };
+      } catch (err) {
+        if (err instanceof AiUnavailable) return { refusal: `${err.reason}: ${err.message}` };
+        throw err;
+      }
+    },
+  );
+  if ('refusal' in prepared) return { ...base, fallback: prepared.refusal, refusal: { reason: prepared.refusal } };
+  return { ...base, ...prepared.value };
 }
 
 type UsageFields = {
@@ -163,42 +189,106 @@ async function ownsAttempt(tx: Tx, c: CallRow): Promise<boolean | null> {
   return row.attempts === c.attempts;
 }
 
-export async function finishIn(
-  tx: Tx,
-  c: CallRow,
-  prep: (Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>) | null,
-  out: {
-    status: 'done' | 'fallback' | 'failed';
-    option?: string;
-    rationale?: string;
-    slots?: Record<string, string>;
-    /** A decision step's routing probability (0–1). */
-    probability?: number;
-    output?: unknown;
-    error?: string;
-    inputTokens?: number;
-    outputTokens?: number;
-    /** The provider usage was unknown and the reserved estimate was recorded (#941). */
-    usageEstimated?: boolean;
-    latencyMs?: number;
-    cached?: boolean;
-    providerId?: string;
-    model?: string;
-    /**
-     * A decision score to commit in the same transaction as the wakeup, before the participant
-     * can be claimed again (#350, #351).
-     */
-    storeScore?: {
-      profileId: string;
-      key: string;
-      answer: DecisionAnswer;
-      model: string;
-      modelVersion: string;
-      callId: string | null;
-      ttlHours: number;
-    };
-  },
-) {
+/** Keeps only the trigger event's name; its properties describe the person (#1300 review). */
+function stripTriggerProperties(input: Record<string, unknown>) {
+  if (!('trigger' in input)) return;
+  const trigger = input.trigger as { name?: unknown } | string | null | undefined;
+  const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
+  input.trigger = typeof name === 'string' ? { name } : null;
+}
+
+/**
+ * Drops the person-derived parts of a call's stored input after a consent refusal (#1300 review):
+ * the prepared person context, the properties of the trigger event that started the step, and a
+ * decision's state hash and size. The step's own configuration (its questions, threshold and
+ * prompt) and the trigger's name stay.
+ */
+function clearPersonDerived(input: Record<string, unknown>, kind: CallRow['kind']) {
+  delete input.person;
+  if (kind === 'score') {
+    delete input.stateHash;
+    delete input.stateTokens;
+  }
+  stripTriggerProperties(input);
+}
+
+type FinishPrep = Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>;
+
+type FinishOut = {
+  status: 'done' | 'fallback' | 'failed';
+  option?: string;
+  rationale?: string;
+  slots?: Record<string, string>;
+  /** A decision step's routing probability (0–1). */
+  probability?: number;
+  output?: unknown;
+  error?: string;
+  /**
+   * The error is the provider's own text (a failed call, not a refusal this codebase wrote). It may
+   * quote the person the call was about, so it is person data like an answer (#1300 review).
+   */
+  providerText?: boolean;
+  inputTokens?: number;
+  outputTokens?: number;
+  /** The provider usage was unknown and the reserved estimate was recorded (#941). */
+  usageEstimated?: boolean;
+  latencyMs?: number;
+  cached?: boolean;
+  providerId?: string;
+  model?: string;
+  /** The model id the workspace configured, kept in place of a provider's own version on refusal. */
+  configuredModel?: string;
+  /** Preparation already refused the person: finalisation clears person-derived input too. */
+  refusal?: PreparationRefusal;
+  /**
+   * A decision score to commit in the same transaction as the wakeup, before the participant
+   * can be claimed again (#350, #351).
+   */
+  storeScore?: {
+    profileId: string;
+    key: string;
+    answer: DecisionAnswer;
+    model: string;
+    modelVersion: string;
+    callId: string | null;
+    ttlHours: number;
+  };
+};
+
+/**
+ * Whether this exit used a person context at all. Preparation builds it, and only then is the
+ * trigger event's properties read (into the context) and kept on the call row. Every other exit —
+ * a missing prompt, a participant that timed out before preparation, the attempt limit — strips
+ * them. This is deliberately the same condition that `persistsPersonData` treats as person data:
+ * an exit that keeps those properties is one that keeps the prepared context beside them.
+ */
+function usedPersonContext(prep: FinishPrep | null): boolean {
+  return prep?.person !== undefined;
+}
+
+/**
+ * Whether storing this outcome would keep anything derived from the person (#1300 review): a
+ * score's answer or the value it stores, a decision's choice, a generated text, the prepared person
+ * context (and the trigger event's properties kept beside it), a decision's state fingerprint, or a
+ * provider failure whose text may quote the person. One helper answers for every outcome — done,
+ * late, fallback or failure — so no branch can skip the gate. A budget or configuration fallback
+ * that carries none of it needs no gate read and no workspace-wide identity lock.
+ */
+function persistsPersonData(c: CallRow, prep: FinishPrep | null, out: FinishOut): boolean {
+  // Preparation already refused the person: nothing person-derived may be written, and the refusal
+  // path below clears what the call row held.
+  if (!c.profileId || out.refusal !== undefined) return false;
+  if (out.status === 'done' || out.output !== undefined || out.rationale !== undefined || out.slots !== undefined) return true;
+  if (out.storeScore !== undefined || out.providerText === true) return true;
+  // The prepared context, which carries the trigger event's properties: an exit that keeps it is
+  // the only kind that keeps them (`usedPersonContext`).
+  if (usedPersonContext(prep)) return true;
+  // A score call records the state's hash and estimated size once the decision state was built.
+  const input = c.input as { stateHash?: unknown; stateTokens?: unknown };
+  return input.stateHash !== undefined || input.stateTokens !== undefined;
+}
+
+export async function finishIn(tx: Tx, c: CallRow, prep: FinishPrep | null, out: FinishOut) {
   // Lock the person before the participant and the attempt fence: profile -> participant ->
   // `ai_calls`, the order erasure uses. Erasure locks the profile, deletes (and holds) the
   // participant rows and only then deletes the profile, whose cascade removes the `ai_calls` row.
@@ -206,6 +296,15 @@ export async function finishIn(
   // held while the erasure's cascade waited for the `ai_calls` row the finalisation held, and
   // PostgreSQL aborted one of them (#1274). Every kind that names a person takes this order, not
   // only a score step.
+  //
+  // An outcome that keeps person-derived data is consent-gated. Take the workspace identity lock
+  // before the profile row: a standalone consent writer serialises on that lock, not on the profile
+  // row, so a refusal that commits while this waits is visible to the re-check under the lock
+  // (#1300). One helper decides that for every outcome: a step taking its fallback for a budget,
+  // configuration or prompt reason writes no person data, and holding the workspace-wide lock there
+  // would only queue other consent writers (#1300 review).
+  const persists = persistsPersonData(c, prep, out);
+  if (persists) await lockIdentity(tx, c.workspaceId);
   const lockedProfile = c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
   // A person who is gone has no participant row to wait at: the wakeup below finds nothing and a
   // done answer is recorded as late.
@@ -228,14 +327,20 @@ export async function finishIn(
     await addUsageOnly(tx, c, out);
     return;
   }
-  const outcome = {
-    seq: c.seq,
-    ...(out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
-    ...(out.probability !== undefined ? { probability: out.probability } : {}),
-    ...(out.status !== 'done' ? { fallback: out.error ?? 'failed' } : {}),
-  };
+  // A score withheld under the lock (the person objected or was erased meanwhile) turns the
+  // answer into a fallback, so the participant takes its fallback edge instead of being told a
+  // value that was not stored (#1300).
+  let status = out.status;
+  let error = out.error;
   // On a fallback the journey fills the slots with the prompt's fallback texts itself.
-  const content = out.slots;
+  let content = out.slots;
+  // A consent refusal may carry everything the model answered about the person: the answer, its
+  // rationale, the generated text, the predicted probability, the prepared context and a provider
+  // failure's text. None of it may be persisted for a person who no longer allows AI processing
+  // (#1300 review); billing metadata stays. A preparation refusal arrives typed from the step, so
+  // this applies there too (#1300).
+  let refused = out.refusal !== undefined;
+  if (out.refusal) error = out.refusal.reason;
   // A decision call logs a state hash and a sanitised question set, never the person's state
   // or a trigger event with its properties (#358). Redacting the questions also keeps contact
   // details out of a refused call's audit row (#352).
@@ -245,6 +350,20 @@ export async function finishIn(
     const trigger = input.trigger as { name?: unknown } | string | null | undefined;
     const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
     input.trigger = typeof name === 'string' ? { name } : null;
+  }
+  // The gate that admitted the call can be stale by the time its outcome is committed, and a step
+  // that already timed out has no participant left to wake: re-check consent whenever this outcome
+  // would keep person-derived data, under the identity lock and the profile row taken above. A
+  // refusal takes the fallback path — the participant gets the fallback edge, nothing about the
+  // person is stored, and the usage below is still settled (#1300, #1300 review).
+  if (persists && !refused) {
+    const consent = lockedProfile ? await aiAllowed(tx, c.workspaceId, lockedProfile) : { ok: false as const, reason: NO_PROFILE };
+    if (!consent.ok) {
+      status = 'fallback';
+      error = consent.reason;
+      content = undefined;
+      refused = true;
+    }
   }
   // A decision step verifies the still-waiting participant and the profile it belongs to before
   // writing anything (#351, #359 interplay). A step that finds the participant gone or not waiting,
@@ -258,16 +377,39 @@ export async function finishIn(
   // with a merge (#1011 review). `removeProfiles` takes the same profile lock before it deletes the
   // person's participants and their `ai_calls` rows (the cascade), so the profile lock and the
   // participant row are taken at the top of this function, before the fence (#1274).
-  if (c.kind === 'score' && waiting && out.storeScore) {
+  if (!refused && c.kind === 'score' && waiting && out.storeScore) {
     // `lockedProfile` at the top of this function resolved the person today, even when a merge has
     // folded the call's own profile id away (#1241), and locked only the canonical row: locking the
     // stored alias and then its survivor would invert the shared ascending-id profile lock order of
     // a merge (#1011). The shared helper follows a merge that commits while it waits.
     //
     // The score and the wakeup commit together: a worker cannot claim the participant and read a
-    // missing (or previous) value, and a failed score write leaves the step waiting to retry.
-    await insertProfileScore(tx, c.workspaceId, out.storeScore);
+    // missing (or previous) value, and a failed score write leaves the step waiting to retry. The
+    // write re-checks consent under the same locks and withholds the score on a refusal (#1300),
+    // which turns this answer into a fallback so the participant takes its fallback edge.
+    const write = await insertProfileScoreChecked(tx, c.workspaceId, out.storeScore);
+    if ('refused' in write) {
+      status = 'fallback';
+      error = write.refused;
+      refused = true;
+    }
   }
+  if (refused) clearPersonDerived(input, c.kind);
+  // An exit that never built the person context never read the trigger's properties either, so it
+  // has nothing to consent-gate and cannot keep them: drop them, keeping only the trigger's name.
+  // An exit that did build the context is the only one that keeps them, and `persistsPersonData`
+  // has already gated that above (#1300 review).
+  else if (!usedPersonContext(prep)) stripTriggerProperties(input);
+  // A refusal's outcome is an explicit allowlist too: the fallback reason and the step's seq. The
+  // model's option, rationale and probability, and the generated slots, are dropped (#1300 review).
+  const outcome = refused
+    ? { seq: c.seq, fallback: error ?? 'failed' }
+    : {
+        seq: c.seq,
+        ...(status === 'done' && out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
+        ...(out.probability !== undefined ? { probability: out.probability } : {}),
+        ...(status !== 'done' ? { fallback: error ?? 'failed' } : {}),
+      };
   // Wake the participant only if it still waits at this step; otherwise the answer came too late.
   const woke = waiting
     ? await tx.execute(sql`
@@ -279,11 +421,38 @@ export async function finishIn(
         due_at = now(), updated_at = now()
       WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'`)
     : { rowCount: 0 };
-  const late = !woke.rowCount && out.status === 'done';
+  const late = !woke.rowCount && status === 'done';
+  if (refused) {
+    // The refused call row is built from an explicit allowlist: the fallback reason, the tokens, the
+    // configured model, the provider and the billing fields. Everything else is dropped — the
+    // model's output and rationale, a decision's state hash and estimated state size, the prepared
+    // person context, and the provider's own model version (#1300 review).
+    await tx
+      .update(schema.aiCalls)
+      .set({
+        status,
+        leaseUntil: null,
+        providerId: prep?.model?.providerId ?? out.providerId ?? c.providerId ?? null,
+        model: prep?.model?.modelId ?? out.configuredModel ?? null,
+        input,
+        output: null,
+        rationale: null,
+        error: late ? 'too_late: the step had timed out and took its fallback' : (error ?? null),
+        inputTokens: sql`${schema.aiCalls.inputTokens} + ${out.inputTokens ?? 0}`,
+        outputTokens: sql`${schema.aiCalls.outputTokens} + ${out.outputTokens ?? 0}`,
+        billedAt: sql`coalesce(${schema.aiCalls.billedAt}, now())`,
+        usageEstimated: sql`${schema.aiCalls.usageEstimated} OR ${out.usageEstimated === true || c.usageEstimated}`,
+        reservationId: null,
+        reviewStatus: null,
+        finishedAt: new Date(),
+      })
+      .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
+    return;
+  }
   await tx
     .update(schema.aiCalls)
     .set({
-      status: late ? 'fallback' : out.status,
+      status: late ? 'fallback' : status,
       leaseUntil: null,
       promptVersion: prep?.version ?? null,
       providerId: prep?.model?.providerId ?? out.providerId ?? c.providerId ?? null,
@@ -291,7 +460,7 @@ export async function finishIn(
       input: { ...input, ...(c.kind !== 'score' && prep?.person ? { person: prep.person } : {}) },
       output: out.output ?? null,
       rationale: out.rationale ?? null,
-      error: late ? 'too_late: the step had timed out and took its fallback' : (out.error ?? null),
+      error: late ? 'too_late: the step had timed out and took its fallback' : (error ?? null),
       // Accumulate in SQL rather than from the claim snapshot: a late attempt may already have
       // added its tokens, and both attempts were billed (#941 review).
       inputTokens: sql`${schema.aiCalls.inputTokens} + ${out.inputTokens ?? 0}`,
@@ -301,7 +470,7 @@ export async function finishIn(
       reservationId: null,
       latencyMs: out.latencyMs ?? null,
       cached: out.cached ?? false,
-      reviewStatus: !late && out.status === 'done' && sampled(prep?.def) ? 'pending' : null,
+      reviewStatus: !late && status === 'done' && sampled(prep?.def) ? 'pending' : null,
       finishedAt: new Date(),
     })
     .where(and(eq(schema.aiCalls.workspaceId, c.workspaceId), eq(schema.aiCalls.id, c.id)));
@@ -462,9 +631,10 @@ const usageFromErrorOrEstimate = (err: unknown, estimate: number, maxOutput: num
 
 async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
   c = await settleStaleReservation(db, c);
-  const prep = await db.withWorkspace(c.workspaceId, (tx) => prepare(tx, c, deps));
+  const prep = await db.withWorkspace(c.workspaceId, (tx) => prepareCall(tx, c, deps));
   if (!prep) return finish(db, c, null, { status: 'failed', error: 'no_prompt: the prompt has no published version' });
-  if (prep.fallback || !prep.model || !prep.person) return finish(db, c, prep, { status: 'fallback', error: prep.fallback });
+  if (prep.fallback || !prep.model || !prep.person)
+    return finish(db, c, prep, { status: 'fallback', error: prep.fallback, refusal: prep.refusal });
   if (prep.cache?.slots)
     return finish(db, c, prep, {
       status: 'done',
@@ -534,6 +704,9 @@ async function handle(db: Db, c: CallRow, deps: AiStepDeps) {
     out = {
       status: 'fallback',
       error: modelErrorText(err),
+      // The provider's text may quote the person it was asked about: finalisation clears it on a
+      // consent refusal (#1300 review).
+      providerText: true,
       latencyMs: Date.now() - started,
       ...usageFromErrorOrEstimate(err, estimate, prep.def.maxOutputTokens),
     };
@@ -654,7 +827,10 @@ export async function storeClassifiedTrait(
   const def = plan?.traits.find((x) => x.name === trait);
   if (def && def.pii !== 'none') return null;
   // Follow a merge that landed since the consent check and lock the person today; an erased person
-  // has no row to lock, and a folded-away alias is never written (`merged_into IS NULL`).
+  // has no row to lock, and a folded-away alias is never written (`merged_into IS NULL`). The
+  // identity lock comes first: a standalone consent writer serialises on it, not on the profile
+  // row, so without it a refusal could commit between the gate and the update (#1300).
+  await lockIdentity(tx, workspaceId);
   const personId = await lockCanonicalProfile(tx, workspaceId, checkedProfileId);
   if (!personId) return null;
   const consent = await aiAllowed(tx, workspaceId, personId);
@@ -779,29 +955,19 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
   const questions = parsed.data as DecisionQuestion[];
   const scoreKey = typeof raw.scoreKey === 'string' ? raw.scoreKey : questions[0].key;
   const prepared = await db.withWorkspace(c.workspaceId, async (tx) => {
-    // A decision queued before a merge keeps the old profile id. The gate resolves it to the
-    // person today before the consent check, and the id it returns is the one the context and the
-    // stored score use (#1241 review). A merge that commits during the preparation is caught by
-    // re-resolving afterwards and preparing again (#1269 review).
-    return prepareWithCanonicalProfile<{ error: string } | { provider: DecisionProvider; state: unknown; profileId: string }>(
+    // A decision queued before a merge keeps the old profile id. The gate resolves it to the person
+    // today, and the state and the stored score use that id (#1241 review). The gate is read again
+    // after the state is built, so a merge that changes the survivor's consent (or moves the
+    // person) cannot leave the state in use under a stale answer (#1300).
+    if (!c.profileId) return { refusal: 'no_profile: a decision step needs a person' };
+    return prepareForPerson<{ provider: DecisionProvider; state: unknown }>(
       tx,
       c.workspaceId,
-      c.profileId ?? null,
-      async (given) => {
-        const reference = given === undefined ? (c.profileId ?? null) : given;
-        if (given !== undefined && reference === null)
-          return { profileId: null, result: { error: 'no_profile: the person does not exist (or was erased)' } };
-        let profileId: string | null = null;
-        if (reference) {
-          const consent = await aiAllowed(tx, c.workspaceId, reference);
-          // Keep the id the gate answered for on a refusal too: the wrapper retries only when the
-          // person moved, so a stable refusal must not re-run the gate.
-          if (!consent.ok) return { profileId: consent.profileId, result: { error: consent.reason } };
-          profileId = consent.profileId;
-        }
+      c.profileId,
+      aiAllowed,
+      async (profileId) => {
         try {
           const provider = await decisionProvider(tx, deps.kp);
-          if (!profileId) return { profileId, result: { error: 'no_profile: a decision step needs a person' } };
           const triggerName = typeof raw.trigger?.name === 'string' ? raw.trigger.name : undefined;
           const state = await nonPersonalState(
             tx,
@@ -810,17 +976,22 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
             profileId,
             triggerName ? { trigger: triggerName } : undefined,
           );
-          if (!state) return { profileId, result: { error: 'no_profile: the person does not exist (or was erased)' } };
-          return { profileId, result: { provider, state, profileId } };
+          if (!state) return { refusal: 'no_profile: the person does not exist (or was erased)' };
+          return { value: { provider, state } };
         } catch (err) {
-          if (err instanceof AiUnavailable || err instanceof DecisionError) return { profileId, result: { error: `${err.message}` } };
+          if (err instanceof AiUnavailable || err instanceof DecisionError) return { refusal: `${err.message}` };
           throw err;
         }
       },
     );
   });
-  const ready = prepared.result;
-  if ('error' in ready) return finish(db, c, null, { status: 'fallback', error: ready.error });
+  if ('refusal' in prepared)
+    return finish(db, c, null, {
+      status: 'fallback',
+      error: prepared.refusal,
+      refusal: { reason: prepared.refusal },
+    });
+  const ready = { ...prepared.value, profileId: prepared.profileId };
   // A choice routes on the probability of the configured label, not on whichever label won.
   const done = (r: Awaited<ReturnType<typeof decisionCall>>): Parameters<typeof finishIn>[3] => {
     const first = r.answers[0];
@@ -840,6 +1011,8 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
       latencyMs: r.latencyMs,
       providerId: ready.provider.providerId,
       model: r.modelVersion,
+      // Kept in place of the provider's own version if finalisation finds a refusal (#1300 review).
+      configuredModel: ready.provider.model,
       // Committed before the participant is woken, in the same transaction (#351).
       ...(ready.profileId && routed
         ? {
@@ -894,6 +1067,8 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
         finishIn(tx, call, null, {
           status: 'fallback',
           error,
+          // The exception's text is the provider's own and may quote the person (#1300 review).
+          providerText: true,
           ...usage,
           usageEstimated: estimated,
           providerId: ready.provider.providerId,
@@ -903,7 +1078,7 @@ async function handleScore(db: Db, c: CallRow, deps: AiStepDeps) {
         }),
     });
   } catch (err) {
-    return failureRecorded ? undefined : finish(db, c, null, { status: 'fallback', error: modelErrorText(err) });
+    return failureRecorded ? undefined : finish(db, c, null, { status: 'fallback', error: modelErrorText(err), providerText: true });
   }
 }
 

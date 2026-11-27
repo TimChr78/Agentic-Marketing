@@ -779,6 +779,9 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
         // not spend the batch, and due time — not the profile id — decides who moves first (#1011
         // review).
         const claimable: string[] = [];
+        // The canonical person each claimable participant was locked for: every person-dependent
+        // read and effect below uses it, not the id the row was stored with (#1300).
+        const canonicalOf = new Map<string, string>();
         const scanLimit = Math.max(1, batch * SCAN_LIMIT_FACTOR);
         let after = scanCursors.get(ws);
         let scanned = 0;
@@ -809,7 +812,10 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
           const locked = new Set(await lockProfileRows(tx, ws, roots, { skipLocked: true }));
           for (const row of page.rows) {
             const root = canonical.get(row.profile_id) ?? row.profile_id;
-            if (locked.has(root)) claimable.push(row.id);
+            if (locked.has(root)) {
+              claimable.push(row.id);
+              canonicalOf.set(String(row.id), root);
+            }
           }
           if (page.rows.length < want) {
             reachedEnd = true;
@@ -842,8 +848,11 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
         const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
         for (const p of list) {
           // The row can sit on an id a merge folded away (a participant the hook inserted before
-          // #1011). The trait step follows the `merged_into` chain itself; the other reads stay on the
-          // stored id, which a merge moves along with the person.
+          // #1011). The profile row locked above is the person today, and every person-dependent read
+          // and effect below uses that id: consent, segment branches, conditions and send/webhook
+          // scopes must not answer for the tombstone (#1300). The participant row itself keeps its id.
+          const personId = canonicalOf.get(String(p.id)) ?? p.profileId;
+          const person = personId === p.profileId ? p : { ...p, profileId: personId };
           const t = now();
           // One savepoint per participant: a PostgreSQL error inside a read (a graph version, the
           // consent lookup, an effect, the advance) aborts the transaction (25P02), and the retry
@@ -862,7 +871,7 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
             // Someone who refused the journey's purpose leaves before the next step (#108). Consent
             // changes exit them at once (exitRefusedJourneys); this catches whatever got past that.
             const purpose = graph.purpose;
-            if (purpose && refusedPurposes(await consentStateOf(tx, ws, p.profileId), purposes).includes(purpose)) {
+            if (purpose && refusedPurposes(await consentStateOf(tx, ws, personId), purposes).includes(purpose)) {
               const detail = `consent_withdrawn: ${purpose}`;
               await tx
                 .update(schema.journeyParticipants)
@@ -908,13 +917,13 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
                   const [m] = await tx
                     .select()
                     .from(schema.segmentMemberships)
-                    .where(and(eq(schema.segmentMemberships.segmentId, n.segment), eq(schema.segmentMemberships.profileId, p.profileId)));
+                    .where(and(eq(schema.segmentMemberships.segmentId, n.segment), eq(schema.segmentMemberships.profileId, personId)));
                   return !!m;
                 }
-                const ids = await evaluate(n.condition!, contextFor(tx, ws, deps.events, segments, { scope: [p.profileId] }));
-                return ids.has(p.profileId);
+                const ids = await evaluate(n.condition!, contextFor(tx, ws, deps.events, segments, { scope: [personId] }));
+                return ids.has(personId);
               },
-              condition: async (n) => matchesCondition(tx, ws, deps.events, segments, p.profileId, n.condition),
+              condition: async (n) => matchesCondition(tx, ws, deps.events, segments, personId, n.condition),
               resolved: (node, outcome) => {
                 resolvedWait = { node, matched: outcome.matched };
               },
@@ -923,7 +932,7 @@ export async function sweep(db: Db, deps: JourneyDeps, opts: { batch?: number; n
             const held = (p.context as { holdout?: { arm?: string } }).holdout;
             const flags = { wakeNow: false, control: held?.arm === 'control' };
             for (const eff of result.effects) {
-              const d = await applyEffect(tx, ws, p, eff, deps, graph, flags);
+              const d = await applyEffect(tx, ws, person, eff, deps, graph, flags);
               if (d !== null) details.set(`${eff.node}:${eff.seq}`, d);
             }
             await tx

@@ -1,11 +1,13 @@
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
+import { canonicalProfile } from '@agentic-marketing/profiles';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { aiAllowed, NO_PROFILE, redact } from './context';
+import { aiAllowed, NO_PROFILE, redact, refuseAi } from './context';
 import { lockCanonicalProfile } from './decision';
 import { promptVersion } from './prompts';
+import { assertCallsReplayable } from './replay';
 
 // ai.classify: label a text (an inbound reply, a form message, a review) with one of a classify
 // prompt's labels, e.g. from n8n. The model call is a job for the AI worker, never inside the
@@ -49,6 +51,16 @@ export const classify = defineCommand({
   effect: 'write',
   actionClass: 'spend',
   target: (i) => i.artifactId,
+  // A provider's failure message may quote the person's text; the persisting stores keep a fixed
+  // diagnostic instead (#1300).
+  failureText: 'the AI provider refused or failed',
+  // A queued classification names a person; a replay must not answer for someone since erased
+  // (#1300).
+  replayCheck: async (replayInput, _replay, { tx, workspaceId }) => {
+    if (!replayInput.profileId) return;
+    const consent = await aiAllowed(tx, workspaceId, replayInput.profileId);
+    if (!consent.ok) refuseAi('ai.classify', consent.reason);
+  },
   handler: async (input, ctx) => {
     const p = await promptVersion(ctx.tx, input.artifactId);
     if (!p) throw new AppError('not_found', `${input.artifactId} is not a published prompt.`);
@@ -59,14 +71,15 @@ export const classify = defineCommand({
     let profileId = input.profileId ?? null;
     if (input.profileId) {
       const consent = await aiAllowed(ctx.tx, ctx.principal.workspaceId, input.profileId);
-      if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
+      // The one public refusal: an unknown, an erased and a refusing person read the same (#1300).
+      if (!consent.ok) refuseAi('ai.classify', consent.reason);
       // Lock the person before the call row names them, the order erasure takes: it locks the
       // profile and then deletes it, and the cascade removes the person's `ai_calls` rows. Without
       // the lock an erasure committing between the consent read and this insert left the foreign
       // key pointing at a deleted profile and the caller saw a raw 23503. The lock also follows a
       // merge that lands after the gate, so the call still names the person the gate answered for.
       const locked = await lockCanonicalProfile(ctx.tx, ctx.principal.workspaceId, consent.profileId);
-      if (!locked) throw new AppError('forbidden', `This person's data may not be processed with AI (${NO_PROFILE}).`);
+      if (!locked) refuseAi('ai.classify', NO_PROFILE);
       // The worker stores the label on the person the gate answered for, so queue the call under
       // the canonical id a merge leaves rather than the id the caller happened to hold.
       profileId = locked;
@@ -104,6 +117,19 @@ export const classification = defineCommand({
   }),
   permission: 'artifacts:read',
   effect: 'read',
+  // The stored answer holds the label, the rationale and the stored trait, which are person data.
+  // Erasure deletes the call row with the person, so replay it only while the row (and its person)
+  // still exist (#1300).
+  replayCheck: async (replayInput, _replay, { tx, workspaceId }) => {
+    const [c] = await tx
+      .select({ profileId: schema.aiCalls.profileId })
+      .from(schema.aiCalls)
+      .where(
+        and(eq(schema.aiCalls.workspaceId, workspaceId), eq(schema.aiCalls.id, replayInput.callId), eq(schema.aiCalls.kind, 'classify')),
+      );
+    if (!c || (c.profileId !== null && !(await canonicalProfile(tx, workspaceId, c.profileId))))
+      throw new AppError('not_found', `No classification ${replayInput.callId}.`);
+  },
   handler: async (input, ctx) => {
     const [c] = await ctx.tx
       .select()
@@ -154,6 +180,17 @@ export const listReviews = defineCommand({
   }),
   permission: 'artifacts:read',
   effect: 'read',
+  // A cached list holds the sampled answers: their input, output, rationale and the review note,
+  // which are person data. Erasure deletes the call rows with the person, so the stored answer is
+  // replayed only while those rows (and the people they name) still exist (#1300 review).
+  replayCheck: async (_replayInput, replay, { tx, workspaceId }) => {
+    await assertCallsReplayable(
+      tx,
+      workspaceId,
+      replay.reviews.map((r) => r.callId),
+      'The AI answers this list held no longer exist; ask again.',
+    );
+  },
   handler: async (input, ctx) => {
     const c = schema.aiCalls;
     const rows = await ctx.tx

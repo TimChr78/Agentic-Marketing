@@ -5,11 +5,11 @@ import type { Db, Tx } from '@agentic-marketing/db';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { type EgressPolicy, safeRequest } from '@agentic-marketing/integrations';
-import { lockProfileRows } from '@agentic-marketing/profiles';
+import { lockIdentity, lockProfileRows } from '@agentic-marketing/profiles';
 import { type KeyProvider, openJson } from '@agentic-marketing/secrets';
 import { logger } from '@agentic-marketing/telemetry';
 import { and, eq } from 'drizzle-orm';
-import { personalDataIn } from './context';
+import { aiAllowed, personalDataIn } from './context';
 import {
   AiUnavailable,
   billingReservationTtlMs,
@@ -442,6 +442,9 @@ export interface StoredProfileScore {
   expiresAt: Date;
 }
 
+/** Whether a score write stored anything, or why it was withheld. */
+export type ScoreWrite = { stored: StoredProfileScore } | { refused: string };
+
 /**
  * Locks the person a profile id belongs to today and returns its canonical id, or null when the
  * person no longer exists.
@@ -482,11 +485,43 @@ export async function insertProfileScore(
     ttlHours: number;
   },
 ): Promise<StoredProfileScore | null> {
+  const write = await insertProfileScoreChecked(tx, workspaceId, score);
+  return 'stored' in write ? write.stored : null;
+}
+
+/**
+ * The consent-checked score write (#1300): the person's AI consent is read again under the lock
+ * the score is written behind, so a consent change that committed while the write waited cannot
+ * leave a score on a person who objected. The workspace identity lock is taken first — the lock
+ * every consent writer serialises on — and the profile row after it, the shared order
+ * (packages/profiles/src/identity.ts): a consent write that holds the identity lock cannot slip
+ * between the gate and the insert.
+ *
+ * A refusal is reported rather than thrown: ai.score answers with its own refusal, and a journey
+ * step records the answer as a fallback and takes that edge.
+ */
+export async function insertProfileScoreChecked(
+  tx: Tx,
+  workspaceId: string,
+  score: {
+    profileId: string;
+    key: string;
+    answer: DecisionAnswer;
+    model: string;
+    modelVersion: string;
+    callId: string | null;
+    ttlHours: number;
+  },
+): Promise<ScoreWrite> {
   // Follow a merge that happened before this write (#1144, #1241), and lock the person the merge
   // leaves. A merge that commits between the lookup and the lock leaves no unmerged row to lock;
   // the helper follows the new survivor instead of returning null.
+  await lockIdentity(tx, workspaceId);
   const personId = await lockCanonicalProfile(tx, workspaceId, score.profileId);
-  if (!personId) return null;
+  if (!personId) return { refused: 'no_profile: the person does not exist (or was erased)' };
+  // The gate under the lock: a consent writer that committed while this waited is now visible.
+  const consent = await aiAllowed(tx, workspaceId, personId);
+  if (!consent.ok) return { refused: consent.reason };
   const expiresAt = new Date(Date.now() + score.ttlHours * 3_600_000);
   await tx
     .insert(schema.profileScores)
@@ -515,7 +550,7 @@ export async function insertProfileScore(
         expiresAt,
       },
     });
-  return { profileId: personId, expiresAt };
+  return { stored: { profileId: personId, expiresAt } };
 }
 
 /** Writes the newest value of a named score for a person, with its TTL. */

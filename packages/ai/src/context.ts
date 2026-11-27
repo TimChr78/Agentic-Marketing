@@ -1,9 +1,10 @@
 import { canonicalProfileId, DEFAULT_PURPOSES, mergeComponentCtes, publishedSingleton } from '@agentic-marketing/artifacts';
-import { redact } from '@agentic-marketing/core';
+import { AppError, redact } from '@agentic-marketing/core';
 import { type ConsentStatus, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { consentStatusSql, personCrypto, purposeAllowed } from '@agentic-marketing/profiles';
 import type { KeyProvider } from '@agentic-marketing/secrets';
+import { logger } from '@agentic-marketing/telemetry';
 import { and, eq, sql } from 'drizzle-orm';
 
 // The context builder (agents-and-mcp.md §5): what a model may know about a person. Only
@@ -32,11 +33,29 @@ export interface PersonContext {
 /**
  * The gate's answer: allowed for the person `profileId` names today, or why not. A refusal carries
  * the canonical id it answered for (null when the id names no person), so a caller can tell a
- * stable refusal from a person who moved and does not ask again.
+ * stable refusal from a person who moved and does not ask again. An allowed answer also carries
+ * the person's `revision`: a merge that folds another profile into this one keeps the survivor's
+ * id but rewrites its traits and identifiers, so a snapshot read across that commit has to be
+ * discarded even though both gate answers name the same person (#1300).
  */
-export type AiConsent = { ok: true; profileId: string } | { ok: false; reason: string; profileId: string | null };
+export type AiConsent = { ok: true; profileId: string; revision: string } | { ok: false; reason: string; profileId: string | null };
 
 export const NO_PROFILE = 'no_profile: the person does not exist (or was erased)';
+
+/**
+ * The one refusal a caller sees for a person who does not exist, was erased, or refused AI
+ * processing (#1300). The three cases must read the same: a caller holding only `profiles:write`
+ * must not be able to learn from the refusal whether a profile exists. The detailed reason stays in
+ * {@link AiConsent.reason}, for the log line behind it.
+ */
+export const AI_REFUSAL = 'This person’s data may not be processed with AI.';
+
+/** Logs the internal reason and throws the one public refusal. */
+export function refuseAi(command: string, reason: string): never {
+  // Never the person's id or any of their data: a reason names the purpose and the status only.
+  logger.info({ command, reason }, 'AI processing refused');
+  throw new AppError('forbidden', AI_REFUSAL);
+}
 
 /**
  * Whether the person's data may be processed by AI (the ai_processing purpose and its basis).
@@ -49,22 +68,32 @@ export const NO_PROFILE = 'no_profile: the person does not exist (or was erased)
  *
  * The canonical id and the consent status come from one statement: a second read can straddle a
  * merge that changes the survivor's effective consent while its id stays the same, which comparing
- * the ids of two lookups cannot detect.
+ * the ids of two lookups cannot detect. That statement also returns the row's `xmin` as the revision
+ * a preparation compares before and after its person-derived reads: a merge INTO the survivor keeps
+ * its id, so the revision is what says the traits and identifiers changed together. `xmin` changes on
+ * every write of the row (it is the inserting or updating transaction), which a millisecond clock —
+ * or a JS `Date` built from `updated_at` — cannot promise (#1300 review).
  */
 export async function aiAllowed(tx: Tx, workspaceId: string, profileId: string): Promise<AiConsent> {
-  const { rows } = await tx.execute<{ id: string | null; merged_into: string | null; status: ConsentStatus | null }>(sql`
+  const { rows } = await tx.execute<{
+    id: string | null;
+    merged_into: string | null;
+    status: ConsentStatus | null;
+    revision: string;
+  }>(sql`
     WITH RECURSIVE ${mergeComponentCtes(workspaceId, { seeds: sql`SELECT ${profileId}::text AS id` })}
-    SELECT p.id, p.merged_into, ${consentStatusSql(sql`p.id`, AI_PURPOSE)} AS status
+    SELECT p.id, p.merged_into, p.xmin::text AS revision, ${consentStatusSql(sql`p.id`, AI_PURPOSE)} AS status
     FROM merge_representative mr
     LEFT JOIN profiles p ON p.workspace_id = ${workspaceId} AND p.id = mr.representative COLLATE "default"
     WHERE mr.origin = ${profileId}::text`);
   const person = rows[0];
   if (!person || person.id === null || person.merged_into !== null) return { ok: false, reason: NO_PROFILE, profileId: null };
   const canonical = person.id;
+  const revision = person.revision;
   const purposes = (await publishedSingleton(tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
   const p = purposes.find((x) => x.key === AI_PURPOSE);
   if (!p) return { ok: false, reason: `no_lawful_basis: the ${AI_PURPOSE} purpose is not configured`, profileId: canonical };
-  if (purposeAllowed(p.basis, person.status ?? undefined)) return { ok: true, profileId: canonical };
+  if (purposeAllowed(p.basis, person.status ?? undefined)) return { ok: true, profileId: canonical, revision };
   return {
     ok: false,
     reason: `no_lawful_basis: ${AI_PURPOSE} is based on ${p.basis.replace('_', ' ')} and the person's status is ${person.status ?? 'unknown (no record)'}`,
@@ -102,6 +131,50 @@ export async function prepareWithCanonicalProfile<T>(
     prepared = await prepare(current);
   }
   return prepared;
+}
+
+/** The result of {@link prepareForPerson}: person-dependent input, or why it must not be used. */
+export type PreparedForPerson<T> = { profileId: string; value: T } | { refusal: string };
+
+/**
+ * Reads the gate, builds the input only that person may see (`build`), then reads the gate once
+ * more before the value is used (#1300). A merge can change the surviving person's effective
+ * consent without changing their id, and it rewrites the survivor's traits and moves the merged
+ * profile's identifiers onto it. Either way a build that straddles the commit has to be discarded:
+ * a changed revision means the traits and the event identifiers a later read sees belong to
+ * different snapshots, even when both gate reads name the same id. The value is discarded and
+ * rebuilt for the survivor when the person moved or the revision changed, and refused when the
+ * gate no longer allows it. Bounded like every other merge walk: a family that keeps changing past
+ * the bound is refused rather than looped over.
+ */
+export async function prepareForPerson<T>(
+  tx: Tx,
+  workspaceId: string,
+  reference: string,
+  gateFn: (tx: Tx, workspaceId: string, profileId: string) => Promise<AiConsent>,
+  build: (profileId: string) => Promise<{ value: T } | { refusal: string }>,
+  attempts = 3,
+): Promise<PreparedForPerson<T>> {
+  let personId = reference;
+  let gate = await gateFn(tx, workspaceId, personId);
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (!gate.ok) return { refusal: gate.reason };
+    // The revision this build starts from. `revision` is absent only on a hand-written gate (tests):
+    // there the id comparison below is the whole check, as it was before the revision existed.
+    const revision = gate.revision;
+    personId = gate.profileId;
+    const built = await build(personId);
+    if ('refusal' in built) return { refusal: built.refusal };
+    // The same read the next attempt starts from: the gate after the build is also the gate before
+    // the next build, so a retry costs one statement rather than two.
+    gate = await gateFn(tx, workspaceId, personId);
+    if (!gate.ok) return { refusal: gate.reason };
+    if (gate.profileId === personId && gate.revision === revision) return { profileId: personId, value: built.value };
+    // A merge committed under the build: what it read belongs to a profile that is no longer the
+    // person (or to a revision the survivor has left). Drop it and build again for the survivor.
+    personId = gate.profileId;
+  }
+  return { refusal: 'no_profile: the person could not be resolved to one profile' };
 }
 
 export async function personContext(

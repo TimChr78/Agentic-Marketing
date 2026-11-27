@@ -158,6 +158,19 @@ describe.skipIf(!hasTestDatabase())('score boundary review', () => {
     const survivor = newId('prf');
     await seedProfile(oldRoot, {}, new Date());
     await seedProfile(survivor, {}, new Date());
+    // The write re-reads consent under its lock (#1300).
+    await d.db.withWorkspace(ws, (tx) =>
+      tx.insert(schema.consentState).values({
+        workspaceId: ws,
+        profileId: survivor,
+        purpose: 'ai_processing',
+        channel: '',
+        status: 'granted',
+        basis: 'consent',
+        source: 'form',
+        updatedAt: new Date(),
+      }),
+    );
     let pending: ReturnType<typeof storeProfileScore> | undefined;
     await d.db.withWorkspace(ws, async (tx) => {
       await lockProfileRows(tx, ws, [oldRoot, survivor]);

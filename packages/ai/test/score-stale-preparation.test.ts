@@ -48,8 +48,14 @@ describe('the AI consent gate reads the person and their consent in one snapshot
     // here the single read already carries the changed status, while the stale consent read the old
     // code would do still says granted.
     const answers = [
-      { rows: [{ origin: 'prf_alias', id: 'prf_survivor', merged_into: null, status: 'objected' }] },
-      { rows: [{ origin: 'prf_survivor', id: 'prf_survivor', merged_into: null, status: 'objected' }] },
+      {
+        rows: [{ origin: 'prf_alias', id: 'prf_survivor', merged_into: null, status: 'objected', updated_at: '2026-01-01T00:00:00.000Z' }],
+      },
+      {
+        rows: [
+          { origin: 'prf_survivor', id: 'prf_survivor', merged_into: null, status: 'objected', updated_at: '2026-01-01T00:00:00.000Z' },
+        ],
+      },
     ];
     let executes = 0;
     const tx = {

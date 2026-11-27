@@ -223,6 +223,21 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   sensitive?: readonly string[];
   /** Top-level output fields shown once (e.g. an invitation token): an idempotent replay returns them redacted. */
   sensitiveOutput?: readonly string[];
+  /**
+   * A fixed text stored in the audit log and the agent ledger instead of a provider's own error
+   * message. For a command whose failure can quote the person it was about (a provider echoing the
+   * request): the caller still gets its own error, but the long-lived stores keep only this
+   * diagnostic in place of a {@link ProviderError}. Any other failure — a policy denial, a
+   * validation refusal, an executor conflict — keeps its own reason. The audit log prefixes the
+   * code (`conflict: <failureText>`); the agent ledger keeps the message alone.
+   */
+  failureText?: string;
+  /**
+   * An idempotent replay of this command's stored answer concerns a person, so the person is
+   * re-checked before the answer is returned. Runs in the replay's transaction; throwing refuses
+   * the replay (e.g. once the person has been erased). A command without it replays as stored.
+   */
+  replayCheck?: (input: z.output<I>, output: z.output<O>, ctx: { tx: Tx; workspaceId: string }) => Promise<void>;
   /** Audit successful calls of a read command too (e.g. reads of personal data). Writes and all failures are always audited. */
   auditReads?: boolean;
   /**
@@ -366,6 +381,39 @@ export type AuditedError = { code: string; message: string };
 export const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
 
 /**
+ * What the ledger stores in place of an independent check's reason when the check passed but the
+ * reason is the provider's own text (#1300 review). The caller still sees the reason; the stored
+ * copy only needs to say the check happened, because the provider may quote the person in it.
+ */
+export const INDEPENDENT_CHECK_PASSED = 'Independent check passed';
+
+/**
+ * An AppError whose message came from an AI provider (or another external model service) rather
+ * than from this codebase. The caller still gets the provider's redacted text, but only this
+ * provenance gets a command's fixed `failureText` in the long-lived stores: a provider may quote the
+ * person's data back. An executor-owned failure (an idempotency-key reuse, a missing service, a
+ * budget or configuration refusal) is a plain AppError and keeps its own reason (#1300 review).
+ */
+export class ProviderError extends AppError {}
+
+/**
+ * The diagnostic a failure leaves in the long-lived stores (the audit log and the agent ledger),
+ * chosen in one place so a preflight refusal, a policy denial and a handler failure agree. A
+ * command's `failureText` replaces the message only of a failure that may carry a provider's own
+ * text; an expected refusal keeps its own reason, and an unexpected exception keeps the one fixed
+ * marker. The audit log writes it as `code: message`; the agent ledger keeps the message alone.
+ */
+export function storedFailure(cmd: { failureText?: string }, err: AppError | null): AuditedError {
+  if (!err) return UNEXPECTED_FAILURE;
+  // A policy denial is the executor's own decision, so it keeps its reasons — unless one of them is
+  // the independent check's provider text, which must not be stored either (#1300 review).
+  const providerReason = err instanceof PolicyDeniedError && (err.outcome.providerReasons?.length ?? 0) > 0;
+  if (cmd.failureText !== undefined && (err instanceof ProviderError || providerReason))
+    return { code: err.code, message: cmd.failureText };
+  return { code: err.code, message: err.message };
+}
+
+/**
  * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for
  * every command; a command that records several items itself (agents.renewMandates, one per
  * mandate) calls it directly and declares `auditsItself`.
@@ -419,9 +467,23 @@ export function sanitizeAppError(err: AppError): AppError {
   const details = err.details === undefined ? undefined : redactErrorDetails(err.details);
   if (err instanceof PolicyDeniedError) {
     const reasons = err.outcome.reasons.map(redactCredentials);
-    const changed = message !== err.message || reasons.some((r, i) => r !== err.outcome.reasons[i]);
-    return changed ? new PolicyDeniedError({ ...err.outcome, reasons }) : err;
+    const providerReasons = err.outcome.providerReasons?.map(redactCredentials);
+    const reasonsChanged = message !== err.message || reasons.some((r, i) => r !== err.outcome.reasons[i]);
+    // The reasons whose text came from a provider are a second copy: redact them with the same rule,
+    // so a stored copy can never keep what the visible reason dropped (#1300 review).
+    const providerChanged = providerReasons !== undefined && providerReasons.some((r, i) => r !== err.outcome.providerReasons![i]);
+    if (!reasonsChanged && !providerChanged) return err;
+    return new PolicyDeniedError({
+      ...err.outcome,
+      reasons,
+      ...(providerReasons ? { providerReasons } : {}),
+    });
   }
+  // Redaction rebuilds the error, so the provider provenance has to be carried over with it. Reuse
+  // the instance only when both the message and the details are unchanged: details alone can carry
+  // a credential (#1300 review).
+  if (err instanceof ProviderError)
+    return message === err.message && details === err.details ? err : new ProviderError(err.code, message, details);
   return message === err.message && details === err.details ? err : new AppError(err.code, message, details);
 }
 
@@ -518,10 +580,13 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
       const fail = async (err: AppError): Promise<never> => {
         // Every AppError leaving the executor is redacted first (#885): the message may have been
         // assembled from a provider body or an exception, and it is about to be returned to the
-        // caller and written to the audit log.
+        // caller and written to the audit log. `storedFailure` picks the copy the audit log keeps
+        // (a command's fixed `failureText`, or the refusal's own reason) (#1300).
         const safe = sanitizeAppError(err);
         // The main transaction rolled back; record the failed attempt in its own.
-        await db.withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, safe));
+        await db.withWorkspace(principal.workspaceId, (tx) =>
+          appendAudit(tx, principal, opts.surface, cmd, inputHash, target, storedFailure(cmd, safe)),
+        );
         report('error');
         span.setStatus({ code: SpanStatusCode.ERROR, message: safe.code });
         span.end();
@@ -540,7 +605,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
           `${cmd.name} changes data, but this connection acts as an agent without an agent record. Sign in again or create a new agent credential; only reads are allowed.`,
         );
         await db
-          .withWorkspace(principal.workspaceId, (tx) => appendAudit(tx, principal, opts.surface, cmd, inputHash, target, refused))
+          .withWorkspace(principal.workspaceId, (tx) =>
+            appendAudit(tx, principal, opts.surface, cmd, inputHash, target, storedFailure(cmd, refused)),
+          )
           .catch(() => {});
         report('error');
         span.setStatus({ code: SpanStatusCode.ERROR, message: refused.code });
@@ -684,6 +751,9 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
                     // and the reads' targets are plain ids, so redaction never removes them.
                     target = cmd.auditTarget?.(replay) ?? target;
                     if (cmd.effect === 'read' && cmd.auditTargets) extraTargets = cmd.auditTargets(replay);
+                    // The stored answer may be about a person who no longer allows it (or no longer
+                    // exists): check them again before it is handed back (#1300).
+                    if (cmd.replayCheck) await cmd.replayCheck(parsed.data, replay, { tx, workspaceId: principal.workspaceId });
                     return replay;
                   }
                 }
@@ -834,11 +904,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         // log. The original exception stays on the span for diagnostics (#838). An AppError's own
         // message is redacted before it is stored (#885): it may name a credential a provider echoed.
         const safe = err instanceof AppError ? sanitizeAppError(err) : null;
-        const failure = safe ? safe.message : UNEXPECTED_FAILURE.message;
+        // One rule picks the stored diagnostic for the audit log and the agent ledger alike; each
+        // store then keeps its established format for it (#1300 review). The ledger records the
+        // message alone (agents.activity shows it beside the command), the audit log `code: message`.
+        const failure = storedFailure(cmd, safe);
         if (agent && outcome)
           await db
             .withWorkspace(principal.workspaceId, (tx) =>
-              recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure, intentOf(parsed.data)),
+              recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure.message, intentOf(parsed.data)),
             )
             .catch((e) => span.recordException(e as Error));
         if (safe) return fail(safe);
@@ -1078,8 +1151,24 @@ export function redactPolicyReasons(policy: PolicyOutcome): PolicyOutcome {
   };
   const reasons = clean(policy.reasons);
   const shadowReasons = policy.shadow ? clean(policy.shadow.reasons) : undefined;
-  if (reasons === policy.reasons && shadowReasons === policy.shadow?.reasons) return policy;
-  return { ...policy, reasons, ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}) };
+  // The provider's reasons are the same text as the visible ones: redact both the same way so a
+  // stored copy stays recognisably a provider reason (#1300 review).
+  const providerReasons = policy.providerReasons ? clean(policy.providerReasons) : undefined;
+  const passedCheckReasons = policy.passedCheckReasons ? clean(policy.passedCheckReasons) : undefined;
+  if (
+    reasons === policy.reasons &&
+    shadowReasons === policy.shadow?.reasons &&
+    providerReasons === policy.providerReasons &&
+    passedCheckReasons === policy.passedCheckReasons
+  )
+    return policy;
+  return {
+    ...policy,
+    reasons,
+    ...(providerReasons ? { providerReasons } : {}),
+    ...(passedCheckReasons ? { passedCheckReasons } : {}),
+    ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}),
+  };
 }
 
 /**
@@ -1094,7 +1183,7 @@ const ledgerActionsByTx = new WeakMap<object, number[]>();
 export async function recordAgentAction(
   tx: Tx,
   agentId: string,
-  cmd: Pick<AnyCommand, 'name'>,
+  cmd: Pick<AnyCommand, 'name' | 'failureText'>,
   policy: PolicyOutcome,
   surface: Surface,
   target: string | undefined,
@@ -1102,6 +1191,17 @@ export async function recordAgentAction(
   intent: string | null,
   undo?: AgentUndo | null,
 ): Promise<number | undefined> {
+  // Reasons may quote an exception (the independent check's failure does), so they are redacted
+  // before they are stored (#885), exactly like the error text beside them. A reason that came from
+  // a provider is replaced with the command's fixed diagnostic, the same copy the error keeps: the
+  // visible reason stays for the caller, the ledger must not hold the provider's text (#1300
+  // review). An allowing check's provider reason is stored as the fixed passed line instead.
+  const storedReasons = policy.reasons.map((reason) => {
+    if (cmd.failureText === undefined) return redactCredentials(reason);
+    if (policy.providerReasons?.includes(reason)) return cmd.failureText;
+    if (policy.passedCheckReasons?.includes(reason)) return INDEPENDENT_CHECK_PASSED;
+    return redactCredentials(reason);
+  });
   const [row] = await tx
     .insert(schema.agentActions)
     .values({
@@ -1110,9 +1210,7 @@ export async function recordAgentAction(
       command: cmd.name,
       actionClass: policy.actionClass,
       decision: policy.decision,
-      // Reasons may quote an exception (the independent check's failure does), so they are redacted
-      // before they are stored (#885), exactly like the error text beside them.
-      reasons: policy.reasons.map(redactCredentials),
+      reasons: storedReasons,
       impact: policy.impact as Record<string, unknown>,
       ok: error === null,
       // Redacted before it is cut (#885): a caller may pass raw text (a policy reason quoting an
@@ -1144,32 +1242,60 @@ async function withIndependentCheck(
   req: { principal: Principal; command: string; input: unknown; intent: string | null; mandate: MandateView; approvable: boolean },
 ): Promise<PolicyOutcome> {
   let verdict: { ok: boolean; reason: string };
+  /** The check's reason is a provider's own text, which must not be stored beside the person (#1300). */
+  let providerText = false;
   if (!services.independentCheck)
     verdict = { ok: false, reason: 'The mandate asks for an independent check, but no AI provider is set up.' };
   else
-    verdict = await services
-      .independentCheck(tx, { ...req, policy })
-      .catch((err: Error) => ({ ok: false, reason: `The independent check failed: ${safeErrorText(err.message, 500)}` }));
-  return applyVerdict(policy, verdict, req);
+    verdict = await services.independentCheck(tx, { ...req, policy }).then(
+      (answered) => {
+        // A valid verdict is the model's own answer, whether it allows the action or denies it: its
+        // reason may quote the person and needs the same provenance as a provider exception
+        // (#1300 review).
+        providerText = true;
+        return answered;
+      },
+      (err: Error) => {
+        // The check's provider failures are marked where they happen; an executor-owned failure
+        // (a missing provider, a budget or database problem) keeps its own reason.
+        providerText = err instanceof ProviderError;
+        return { ok: false, reason: `The independent check failed: ${safeErrorText(err.message, 500)}` };
+      },
+    );
+  return applyVerdict(policy, verdict, req, providerText);
 }
 
 /**
  * The policy after an independent check's verdict. The verdict's reason is the model's own text (or
  * an exception's): it reaches a successful response (`heldBecause`), the agent ledger and an
  * idempotent replay as well as a denial, none of which pass through the executor's AppError
- * sanitising, so it is redacted here, whole and before its length cut (#885 round 7).
+ * sanitising, so it is redacted here, whole and before its length cut (#885 round 7). The reason is
+ * also recorded as provider text for either verdict, so the ledger can store a fixed line in its
+ * place (#1300 review).
  */
 export function applyVerdict(
   policy: PolicyOutcome,
   verdict: { ok: boolean; reason: string },
   req: { approvable: boolean; command: string },
+  providerText = false,
 ): PolicyOutcome {
   const reason = `Independent check: ${redactedText(verdict.reason, 500)}`;
-  if (verdict.ok) return { ...policy, reasons: [...policy.reasons, reason] };
+  // Both verdicts can carry the provider's words, so both are tracked. Only the negative one is
+  // stored as the command's fixed failure diagnostic; the allowing one is stored as the fixed
+  // passed line (#1300 review).
+  const providerReasons = providerText && !verdict.ok ? [...(policy.providerReasons ?? []), reason] : policy.providerReasons;
+  const passedCheckReasons = providerText && verdict.ok ? [...(policy.passedCheckReasons ?? []), reason] : policy.passedCheckReasons;
+  const withProvenance = (out: PolicyOutcome): PolicyOutcome => {
+    const withProvider = providerReasons ? { ...out, providerReasons } : out;
+    return passedCheckReasons ? { ...withProvider, passedCheckReasons } : withProvider;
+  };
+  if (verdict.ok) return withProvenance({ ...policy, reasons: [...policy.reasons, reason] });
   const reasons = [...policy.reasons, reason];
-  return req.approvable
-    ? { ...policy, decision: 'ask', level: 1, autonomous: false, reasons }
-    : { ...policy, decision: 'deny', level: 1, autonomous: false, reasons: [...reasons, `${req.command} cannot wait for an approval.`] };
+  return withProvenance(
+    req.approvable
+      ? { ...policy, decision: 'ask', level: 1, autonomous: false, reasons }
+      : { ...policy, decision: 'deny', level: 1, autonomous: false, reasons: [...reasons, `${req.command} cannot wait for an approval.`] },
+  );
 }
 
 /** What the agent said it is doing: an explicit intent, else the reviewer note or reason most commands take. */

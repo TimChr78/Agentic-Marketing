@@ -1,4 +1,4 @@
-import type { MandateView, PolicyOutcome, Principal } from '@agentic-marketing/commands';
+import { type MandateView, type PolicyOutcome, type Principal, ProviderError } from '@agentic-marketing/commands';
 import { newId, redactedText, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import type { EgressPolicy } from '@agentic-marketing/integrations';
@@ -241,9 +241,10 @@ export async function independentCheck(
       (logTx) => record(logTx, { status: 'failed', error: message, ...usage, usageEstimated: !known }),
       { providerId: model.providerId, label: 'independent check failure' },
     );
-    // Rethrow the sanitized text: the executor interpolates it into the policy reasons and the
-    // caller's message, which end up in the agent ledger (#885).
-    throw new Error(message, { cause: err });
+    // Rethrow the sanitized text as a provider failure: the executor interpolates it into the
+    // policy reasons and the caller's message, but only this provenance lets the long-lived stores
+    // replace it with the command's fixed diagnostic (#1300 review).
+    throw new ProviderError('precondition_failed', message);
   }
   const usage = { inputTokens: answer.usage.inputTokens ?? 0, outputTokens: answer.usage.outputTokens ?? 0 };
   let verdict: z.infer<typeof Verdict>;
@@ -257,7 +258,8 @@ export async function independentCheck(
       providerId: model.providerId,
       label: 'independent check',
     });
-    throw new Error(message, { cause: err });
+    // The model's unusable answer is the provider's text too, so the same provenance applies.
+    throw new ProviderError('precondition_failed', message);
   }
   // A model's reason is stored, shown to the reviewer and put into policy reasons: redact it whole,
   // then cut it (#885 round 7).

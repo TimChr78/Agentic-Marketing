@@ -9,6 +9,7 @@ import {
   createExecutor,
   defineCommand,
   PolicyDeniedError,
+  ProviderError,
   ROLE_PERMISSIONS,
   redactPolicyReasons,
   sanitizeAppError,
@@ -119,6 +120,24 @@ describe('a policy denial’s reasons (#885)', () => {
 
   it('returns the same error when its details have nothing to redact', () => {
     const clean = new AppError('conflict', 'Use a new key.', { reason: 'idempotency_key_reused' });
+    expect(sanitizeAppError(clean)).toBe(clean);
+  });
+
+  it('redacts a ProviderError’s details and keeps its provenance (#1300 review)', () => {
+    // Only `details` needed redacting: reusing the instance because the message matched would keep
+    // the credential, and the provider provenance must survive the rebuilt error.
+    const error = new ProviderError('conflict', 'The provider refused the state.', {
+      problems: [`token=${SECRET}`],
+    });
+    const safe = sanitizeAppError(error);
+    expect(safe).toBeInstanceOf(ProviderError);
+    expect(safe).not.toBe(error);
+    expect(JSON.stringify(safe.details)).not.toContain(SECRET);
+    expect((safe.details as { problems: string[] }).problems[0]).toContain('token=');
+  });
+
+  it('keeps a ProviderError with nothing to redact untouched', () => {
+    const clean = new ProviderError('conflict', 'The provider refused the state.', { reason: 'model_refused' });
     expect(sanitizeAppError(clean)).toBe(clean);
   });
 });

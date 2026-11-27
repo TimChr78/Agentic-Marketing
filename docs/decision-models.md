@@ -111,7 +111,7 @@ POST /v1/ai.score
 
 - `providerId` is optional; the provider used for decisions is the default.
 - `state` is optional. With `profileId` and no state, the server builds a **non-personal** state from the person: segment ids, event counts, agent-visible non-personal traits and contextual fields.
-- `profileId` checks the `ai_processing` consent exactly like `ai.classify` and journey AI steps.
+- `profileId` checks the `ai_processing` consent exactly like `ai.classify` and journey AI steps. An unknown profile id, an erased person and a person who refuses AI processing all answer `403 forbidden` with the same message, so the refusal does not say whether the profile exists. (An unknown id used to answer `404`.)
 - `store` saves the first answer as a named score for the person (needs `profileId`); the default TTL is 7 days.
 - The answer is `{ answer, answers, model, modelVersion, callId, inputTokens, outputTokens, latencyMs, stored }`. There is no rationale.
 
