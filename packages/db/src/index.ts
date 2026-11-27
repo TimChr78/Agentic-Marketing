@@ -8,6 +8,7 @@ export * from './migrate';
 export * from './outbox';
 export * from './pool';
 export * from './restoreFence';
+export * from './roles';
 export type {
   AgentCredentialKind,
   AgentEventType,

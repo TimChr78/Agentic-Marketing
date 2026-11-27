@@ -5,12 +5,16 @@ import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 import {
+  adminRoleBypassProblem,
+  adminRoleStatus,
   appRoleReach,
   createDb,
   type Db,
   ERASURE_PURGE_INTERVAL_SECONDS,
   JOURNEY_EVENT_MAX_AGE_DAYS,
   normalizeHost,
+  RowsHiddenByRlsError,
+  readDataKeySample,
 } from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore } from '@agentic-marketing/events';
 import { valkeyHotState } from '@agentic-marketing/hotstate';
@@ -37,6 +41,10 @@ export type Env = Record<string, string | undefined>;
 
 const TIMEOUT_MS = 3000;
 const SECONDS = TIMEOUT_MS / 1000;
+// The server-side budget is a little shorter than the check's own race, so a locked `data_keys`
+// aborts and closes its client before `am doctor` gives up: the CLI must not stay alive behind a
+// statement that is still waiting for a lock (#1221 review).
+const KEY_SAMPLE_TIMEOUT_MS = TIMEOUT_MS - 500;
 /** New installs run PostgreSQL 18; 16 is the oldest major the migrations and `am doctor` support. */
 const MIN_POSTGRES_MAJOR = 16;
 const RECOMMENDED_POSTGRES_MAJOR = 18;
@@ -675,30 +683,56 @@ async function postgresChecks(db: Db): Promise<{ checks: Check[]; reachable: boo
 export async function checkDataKeyProvider(config: Config, db: Db): Promise<Check> {
   const id = 'secrets.master-key-live';
   try {
-    const { rows } = await withTimeout(
-      db.admin.query<{ id: string; kek_id: string; wrapped_key: Buffer }>(
-        'SELECT id, kek_id, wrapped_key FROM data_keys ORDER BY created_at, id LIMIT 1',
-      ),
-      'reading a data key',
+    const present = await withTimeout(
+      db.admin.query<{ present: boolean }>("SELECT to_regclass('public.data_keys') IS NOT NULL AS present"),
+      'reading the schema',
     );
-    if (!rows.length) return { id, status: 'info', message: 'no data keys yet; the key is checked when the first secret is stored' };
-    const provider = keyProviderFor(config);
-    const key = await withTimeout(provider.unwrap(rows[0].wrapped_key, rows[0].kek_id), 'unwrapping a data key');
-    if (key.length !== 32)
-      return {
-        id,
-        status: 'fail',
-        message: `unwrapped data key ${rows[0].id} is ${key.length} bytes instead of 32`,
-        hint: 'The stored key is corrupt or was wrapped by something other than this key provider.',
-      };
-    return { id, status: 'ok', message: `${provider.id} unwraps the workspace data keys` };
-  } catch (err) {
-    if ((err as { code?: string }).code === '42P01')
+    if (!present.rows[0]?.present)
       return {
         id,
         status: 'warn',
         message: 'data_keys is missing; start the app to migrate',
         hint: 'Run `docker compose up -d` (or `am migrate`) and run `am doctor` again.',
+      };
+    // `data_keys` is under FORCE RLS; `readDataKeySample` lifts FORCE for an owner that does not
+    // bypass and refuses a role that can see neither, so a null sample really means "no keys"
+    // (#1221). A plain admin-pool SELECT used to report a populated database as an empty one.
+    const sample = await withTimeout(
+      readDataKeySample(config.adminDatabaseUrl, {
+        connectionTimeoutMillis: TIMEOUT_MS,
+        statementTimeoutMillis: KEY_SAMPLE_TIMEOUT_MS,
+        lockTimeoutMillis: KEY_SAMPLE_TIMEOUT_MS,
+      }),
+      'reading a data key',
+    );
+    if (!sample) return { id, status: 'info', message: 'no data keys yet; the key is checked when the first secret is stored' };
+    const provider = keyProviderFor(config);
+    const key = await withTimeout(provider.unwrap(sample.wrappedKey, sample.kekId), 'unwrapping a data key');
+    if (key.length !== 32)
+      return {
+        id,
+        status: 'fail',
+        message: `unwrapped data key ${sample.id} is ${key.length} bytes instead of 32`,
+        hint: 'The stored key is corrupt or was wrapped by something other than this key provider.',
+      };
+    return { id, status: 'ok', message: `${provider.id} unwraps the workspace data keys` };
+  } catch (err) {
+    if (err instanceof RowsHiddenByRlsError)
+      return {
+        id,
+        status: 'fail',
+        message: err.message,
+        hint: 'Fix the DATABASE_URL role (see the postgres.admin-role check), then run `am doctor` again.',
+      };
+    // The bounded statement or lock wait fired. The client has already been closed by then, so the
+    // check returns instead of leaving `am doctor` alive behind a waiting query (#1221 review).
+    const code = (err as { code?: string }).code;
+    if (code === '55P03' || code === '57014')
+      return {
+        id,
+        status: 'fail',
+        message: `reading a data key did not finish within the ${SECONDS}s check window (${messageOf(err)})`,
+        hint: 'Another session is holding a lock on data_keys. Let it finish, then run `am doctor` again.',
       };
     return {
       id,
@@ -708,6 +742,32 @@ export async function checkDataKeyProvider(config: Config, db: Db): Promise<Chec
         'Set MASTER_KEY to the key the workspace was created with, or add the old key to MASTER_KEY_PREVIOUS ' +
         'and run `am rotate-keys`. A restore needs the same key; see docs/deployment/backups.md.',
     };
+  }
+}
+
+/**
+ * The admin role must be able to read every tenant row (#1235). The server's sessions, API tokens
+ * and background loops all resolve through the admin pool without `app.workspace_id`; under FORCE
+ * ROW LEVEL SECURITY only a SUPERUSER or a `BYPASSRLS` role sees those rows. `postgres.app-role` is
+ * the mirror image for the application role.
+ */
+export async function checkAdminRole(db: Db): Promise<Check> {
+  const id = 'postgres.admin-role';
+  try {
+    const status = await withTimeout(adminRoleStatus(db.admin), 'the admin role');
+    // The attribute check, not the schema-dependent one: startup refuses a role without SUPERUSER
+    // or BYPASSRLS even on an empty database, so `am doctor` must report the same failure there
+    // instead of `info: no tenant tables yet` (#1218 review).
+    const problem = adminRoleBypassProblem(status, 'The application');
+    if (!problem) return { id, status: 'ok', message: `the DATABASE_URL role ${status.role} bypasses row-level security` };
+    return {
+      id,
+      status: 'fail',
+      message: problem,
+      hint: `As a superuser run "ALTER ROLE ${status.role} BYPASSRLS", or point DATABASE_URL at a role that is SUPERUSER or has BYPASSRLS.`,
+    };
+  } catch (err) {
+    return { id, status: 'warn', message: `could not read the DATABASE_URL role’s attributes: ${messageOf(err)}` };
   }
 }
 
@@ -1677,6 +1737,7 @@ export async function liveChecks(config: Config): Promise<Check[]> {
 
     if (postgres.reachable) {
       checks.push(await checkDataKeyProvider(config, db));
+      checks.push(await checkAdminRole(db));
       checks.push(await checkAppRole(config, db));
       checks.push(await checkSubjectKeyCoverage(config, db));
       checks.push(...(await operationalHealthChecks(db)));

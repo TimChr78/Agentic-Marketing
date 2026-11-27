@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { sha256 } from '@agentic-marketing/core';
 import pg from 'pg';
 import { withApplicationName } from './pool';
+import { readAllWorkspaceIds } from './roles';
 
 const MIGRATIONS_DIR = fileURLToPath(new URL('../migrations', import.meta.url));
 const LOCK_KEY = 7_340_001; // arbitrary constant: one migrator at a time across pods
@@ -53,8 +54,9 @@ export function listWorkspaceIds(databaseUrl: string): Promise<string[]> {
   return withPgClient(databaseUrl, async (client) => {
     const present = await client.query<{ present: boolean }>("SELECT to_regclass('public.workspaces') IS NOT NULL AS present");
     if (!present.rows[0]?.present) return [];
-    const { rows } = await client.query<{ id: string }>('SELECT id::text AS id FROM workspaces ORDER BY id');
-    return rows.map((row) => row.id);
+    // The admin role may own `workspaces` without BYPASSRLS (the small-install default): lift FORCE
+    // for the read instead of exporting zero workspaces (#1220).
+    return readAllWorkspaceIds(client);
   });
 }
 
@@ -150,6 +152,7 @@ const MIGRATION_RELEASES: Record<string, string> = {
   '0119_stranded_profile_scores.sql': '0.17.6',
   '0120_restore_fence.sql': '0.17.7',
   '0121_journey_participant_attempts.sql': '0.17.8',
+  '0122_replay_owner_repairs.sql': '0.17.8',
 };
 
 export function releaseForMigrationHead(head: string | null): string | null {

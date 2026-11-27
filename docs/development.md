@@ -102,7 +102,7 @@ volume); when the directory is absent the server runs API-only, as before.
 
 `bootstrap` prompts for the password without echoing it. Non-interactively, set `AM_BOOTSTRAP_PASSWORD` for the command or pipe one line on stdin; `--password` still works but is deprecated because arguments are visible in process listings and shell history. `pnpm --silent --filter @agentic-marketing/server cli reset-password --email you@example.com` changes a password later, reading `AM_RESET_PASSWORD`, a hidden prompt or stdin.
 
-`DATABASE_URL` must be a role that can create roles (the migration creates `am_app`, the row-level-security role the app uses, with `APP_DB_PASSWORD`).
+`DATABASE_URL` must be a role that can create roles (the migration creates `am_app`, the row-level-security role the app uses, with `APP_DB_PASSWORD`) **and** that is a `SUPERUSER` or has `BYPASSRLS`: the server's admin pool reads tenant tables without `app.workspace_id`, and every tenant table is `FORCE ROW LEVEL SECURITY` (the Compose `am` role is a superuser; for another role run `ALTER ROLE … BYPASSRLS`). `am migrate` and `am restore` still work as the table owner without the bypass.
 
 Connect an MCP client (Claude, an IDE, …) to `http://localhost:3000/mcp`. It registers itself, you sign in and choose its permissions on the consent page.
 

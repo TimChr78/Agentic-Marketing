@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { migrateAuth } from '@agentic-marketing/auth';
 import { newUuid } from '@agentic-marketing/core';
-import { migrate, requeueFailedOutbox } from '@agentic-marketing/db';
+import { assertAdminRoleReadsEveryRow, migrate, requeueFailedOutbox } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
 import { rewrapDataKeys } from '@agentic-marketing/secrets';
 import { createServer } from './app';
@@ -194,6 +194,10 @@ async function admin(command: string, rest: string[]) {
         options: { email: { type: 'string' }, password: { type: 'string' }, name: { type: 'string' }, workspace: { type: 'string' } },
       });
       if (!values.email || !values.workspace) throw new Error('bootstrap needs --email and --workspace');
+      // Both INSERTs below go through the admin pool without `app.workspace_id`, so a role that
+      // cannot bypass RLS fails the workspace policy after the user account already committed
+      // (#1229). Refuse before the sign-up, and name the role that is needed.
+      await assertAdminRoleReadsEveryRow(db.admin, 'am bootstrap');
       const password = await resolvePassword({
         command: 'bootstrap',
         envVar: 'AM_BOOTSTRAP_PASSWORD',

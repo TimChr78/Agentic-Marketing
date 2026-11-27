@@ -1,6 +1,6 @@
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, newId } from '@agentic-marketing/core';
-import { schema, type Tx } from '@agentic-marketing/db';
+import { assertAdminRoleReadsEveryRow, schema, type Tx } from '@agentic-marketing/db';
 import { and, eq } from 'drizzle-orm';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -157,6 +157,9 @@ export const deleteSecret = defineCommand({
  * on the admin connection across all workspaces; secrets themselves are not re-encrypted.
  */
 export async function rewrapDataKeys(admin: pg.Pool, kp: KeyProvider): Promise<{ rewrapped: number }> {
+  // `data_keys` is under FORCE RLS. A role that cannot see every row would re-wrap nothing and
+  // still let `am rotate-keys` tell the operator to remove the old key (#1228). Refuse instead.
+  await assertAdminRoleReadsEveryRow(admin, 'am rotate-keys');
   const { rows } = await admin.query<{ workspace_id: string; id: string; kek_id: string; wrapped_key: Buffer }>(
     'SELECT workspace_id, id, kek_id, wrapped_key FROM data_keys WHERE kek_id <> $1',
     [kp.id],

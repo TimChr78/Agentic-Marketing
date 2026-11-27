@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { migrate } from './migrate';
 import { withApplicationName } from './pool';
+import { assertReadsEveryRow, forcedLiftTargets, tableRls, withForcedLift } from './roles';
 
 // Erasures live in the database they protect, so a restore from a snapshot taken before an
 // erasure would bring the erased person back (#144). `am restore` reads this log from the live
@@ -229,70 +230,6 @@ const RESTORE_LOG_TABLES = [
   'warehouse_erasure_keys',
 ] as const;
 
-interface TableRls {
-  name: string;
-  rls: boolean;
-  forced: boolean;
-  is_owner: boolean;
-  bypass: boolean;
-  role: string;
-}
-
-/** The row-level-security state of `tables` as it applies to this connection's role. */
-async function tableRls(client: pg.Client, tables: readonly string[]): Promise<TableRls[]> {
-  const { rows } = await client.query<TableRls>(
-    `SELECT c.relname AS name,
-            c.relrowsecurity AS rls,
-            c.relforcerowsecurity AS forced,
-            current_user = pg_get_userbyid(c.relowner) AS is_owner,
-            (r.rolsuper OR r.rolbypassrls) AS bypass,
-            current_user::text AS role
-       FROM pg_class c
-       JOIN pg_namespace n ON n.oid = c.relnamespace
-       JOIN pg_roles r ON r.rolname = current_user
-      WHERE n.nspname = 'public' AND c.relname = ANY($1::text[])`,
-    [tables],
-  );
-  return rows;
-}
-
-/**
- * Refuses a role that is neither a table's owner nor able to bypass RLS.
- *
- * The tenant policy filters that role's reads, so it would read the table as empty and the restore
- * would skip the erasures it must replay — quietly resurrecting everyone erased since the snapshot.
- * Nothing has been replaced at this point.
- */
-function assertReadsEveryRow(tables: TableRls[], what: string): void {
-  const hidden = tables.find((row) => row.rls && !row.bypass && !row.is_owner);
-  if (hidden)
-    throw new Error(
-      `${what} is hidden by row-level security from role ${hidden.role}: it is not the owner of ${hidden.name} and ` +
-        'does not have BYPASSRLS, so erasures could be skipped instead of replayed. ' +
-        'Run the restore as the table owner or a role with BYPASSRLS.',
-    );
-}
-
-/** The tables whose FORCE RLS the owner must lift to read every row (none for a role that bypasses it). */
-function forcedLiftTargets(tables: TableRls[]): string[] {
-  return tables.filter((row) => row.forced && row.is_owner && !row.bypass).map((row) => row.name);
-}
-
-/** Runs `read` with FORCE lifted on `tables` for one transaction, so a rollback restores it. */
-async function withForcedLift<T>(client: pg.Client, tables: readonly string[], read: () => Promise<T>): Promise<T> {
-  await client.query('BEGIN');
-  try {
-    for (const table of tables) await client.query(`ALTER TABLE public.${table} NO FORCE ROW LEVEL SECURITY`);
-    const value = await read();
-    for (const table of tables) await client.query(`ALTER TABLE public.${table} FORCE ROW LEVEL SECURITY`);
-    await client.query('COMMIT');
-    return value;
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  }
-}
-
 /**
  * The ids of every workspace in a database. `workspaces` is under FORCE RLS too, and the replay
  * decides from this list whether a captured entry belongs to a workspace the snapshot still has: a
@@ -306,7 +243,7 @@ async function listRestoredWorkspaceIds(client: pg.Client): Promise<Set<string>>
   const tables = await tableRls(client, ['workspaces']);
   // A database older than 0.3.0 has no workspaces table, and then there is nothing to replay into.
   if (!tables.length) return new Set();
-  assertReadsEveryRow(tables, 'the restored workspace list');
+  assertReadsEveryRow(tables, 'the restored workspace list', 'erasures could be skipped instead of replayed');
   const lift = forcedLiftTargets(tables);
   return new Set(lift.length ? await withForcedLift(client, lift, read) : await read());
 }
@@ -321,7 +258,7 @@ export async function readErasureLog(databaseUrl: string, opts: { applicationNam
     // The whole log is read in one transaction when FORCE has to be lifted, so a failure anywhere
     // rolls the lift back and no reader ever sees a half-read log.
     const tables = await tableRls(client, RESTORE_LOG_TABLES);
-    assertReadsEveryRow(tables, 'the live erasure log');
+    assertReadsEveryRow(tables, 'the live erasure log', 'erasures could be skipped instead of replayed');
     const lift = forcedLiftTargets(tables);
     if (!lift.length) return readLog(client);
     return withForcedLift(client, lift, () => readLog(client));

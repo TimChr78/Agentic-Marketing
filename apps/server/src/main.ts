@@ -1,5 +1,5 @@
 import { migrateAuth } from '@agentic-marketing/auth';
-import { migrate, migrationFiles, recordServerVersion } from '@agentic-marketing/db';
+import { assertAdminRoleReadsEveryRow, migrate, migrationFiles, recordServerVersion } from '@agentic-marketing/db';
 import { migrateClickHouse } from '@agentic-marketing/events';
 import { endpointLocation, initTelemetry, logger, shutdownTelemetry } from '@agentic-marketing/telemetry';
 import { serve } from '@hono/node-server';
@@ -71,6 +71,17 @@ if (!config.skipMigrations) {
   await migrate(db.admin, { appRolePassword: config.appDbPassword, appRole: config.appDbRole, log: (m) => logger.info(m) });
   await migrateAuth({ baseUrl: config.publicUrl, secret: config.authSecret, db });
   await migrateClickHouse(config.clickhouse.url, config.clickhouse.database, (m) => logger.info(m), config.clickhouse);
+}
+
+// The admin pool reads tenant tables without `app.workspace_id`, which only works for a SUPERUSER
+// or a BYPASSRLS role under FORCE RLS (#1235). Check after the migrations created the tables and
+// before any listener opens, so a wrong role fails with the cause instead of refusing every
+// sign-in: sessions, API tokens and every background loop resolve principals on this pool.
+try {
+  await assertAdminRoleReadsEveryRow(db.admin, 'The server');
+} catch (err) {
+  logger.error((err as Error).message);
+  process.exit(1);
 }
 
 // The writer protocol marker (#1066): refuse to start beside a database that expects a newer

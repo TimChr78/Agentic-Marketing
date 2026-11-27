@@ -8,6 +8,7 @@ import { migrateClickHouse } from '@agentic-marketing/events';
 import { localKeyProvider, open, seal } from '@agentic-marketing/secrets';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createDisposableDb } from '../../../packages/db/test/disposable';
 import { runScoped } from '../../../packages/db/test/run';
 import { run as backupRun } from '../src/ops/backup';
 import {
@@ -240,6 +241,57 @@ describe.skipIf(!chUp)('ClickHouse export and restore', () => {
       await rm(out, { recursive: true, force: true });
     }
   });
+
+  it('exports the per-workspace files as a non-BYPASSRLS table owner (#1220)', async () => {
+    const d = await createDisposableDb('ch_owner_export');
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 10);
+    const role = `am_ch_owner_${suffix}`;
+    const database = runScoped(`am_backup_ch_owner_${suffix}`);
+    const out = await mkdtemp(join(tmpdir(), 'am-ch-owner-'));
+    const maintUrl = new URL(process.env.TEST_DATABASE_URL ?? '');
+    maintUrl.pathname = '/postgres';
+    const maintenance = new pg.Client({ connectionString: maintUrl.toString() });
+    await maintenance.connect();
+    try {
+      await clickhouse(`CREATE DATABASE ${database}`);
+      // The schema and row policies the server applies at startup.
+      await migrateClickHouse(chUrl, database, () => {}, { rowPolicies: 'required' });
+      await clickhouse(
+        `INSERT INTO ${database}.events
+           (workspace_id, event_id, source_id, received_at, timestamp, type, name, anonymous_id, user_id, properties, traits, context, consent)
+         VALUES ('${d.workspace}', 'evt-owner-export', 'src', now64(3), now64(3), 'track', 'page_viewed', 'anon-owner', '', '{}', '{}', '{}', {})`,
+      );
+      // The owner under FORCE RLS reads no workspace, which used to make the export write no file.
+      await maintenance.query(`CREATE ROLE ${role} LOGIN PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
+      await d.db.admin.query(`ALTER TABLE workspaces OWNER TO ${role}`);
+      const ownerUrl = new URL(d.url.toString());
+      ownerUrl.username = role;
+      ownerUrl.password = 'rls-password';
+      const plain = new pg.Client({ connectionString: ownerUrl.toString() });
+      await plain.connect();
+      try {
+        expect((await plain.query<{ n: number }>('SELECT count(*)::int AS n FROM workspaces')).rows[0]?.n).toBe(0);
+      } finally {
+        await plain.end();
+      }
+
+      const tables = await exportClickHouse({
+        url: chUrl,
+        database,
+        databaseUrl: ownerUrl.toString(),
+        outDir: out,
+        log: () => {},
+      });
+      const events = tables.find((table) => table.name === 'events');
+      expect(events?.files.map((file) => file.rows)).toEqual([1]);
+    } finally {
+      await clickhouse(`DROP DATABASE IF EXISTS ${database}`).catch(() => {});
+      await rm(out, { recursive: true, force: true });
+      await d.close().catch(() => {});
+      await maintenance.query(`DROP ROLE IF EXISTS ${role}`).catch(() => {});
+      await maintenance.end().catch(() => {});
+    }
+  }, 120_000);
 });
 
 describe.skipIf(!pgToolsReady)('backup and restore', () => {

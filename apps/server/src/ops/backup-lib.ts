@@ -8,6 +8,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { redactCredentials } from '@agentic-marketing/core';
 import {
+  assertBypassesRls,
   BACKUP_APPLICATION_NAME,
   type ErasureLog,
   ensureAppRoleInDatabase,
@@ -18,6 +19,7 @@ import {
   RESTORE_APPLICATION_NAME,
   type ReplayErasuresAfterMigrateOptions,
   type ReplayErasuresResult,
+  RowsHiddenByRlsError,
   readDataKeySample,
   readErasureLog,
   replayErasuresAfterMigrate,
@@ -361,6 +363,9 @@ async function backupKeyInfo(
       log('the configured key unwraps a data key in this database');
     }
   } catch (err) {
+    // A role that cannot see `data_keys` must not be reported as "the key unwraps nothing" (#1221):
+    // the backup would look verifiable while the trial unseal never read a row.
+    if (err instanceof RowsHiddenByRlsError) throw err;
     log(
       `warning: the configured key does not unwrap a data key in this database (${(err as Error).message}); ` +
         'restoring this backup with it would leave provider and connector secrets unreadable',
@@ -564,11 +569,27 @@ async function onlyRejectedTransactionTimeout(databaseUrl: string, message: stri
   }
 }
 
+/**
+ * `pg_dump` sets `row_security = off`, and PostgreSQL refuses that on a FORCE RLS table even for
+ * its owner. Refuse before the dump instead of letting `pg_dump` fail with a generic error after
+ * the temporary directory is made (#1218 review). `am restore` still works as the table owner.
+ */
+async function assertBackupRole(databaseUrl: string): Promise<void> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    await assertBypassesRls(client, 'am backup');
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
 export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ dir: string; manifest: BackupManifest }> {
   const env = opts.env ?? process.env;
   const log = opts.log ?? (() => {});
   const databaseUrl = opts.databaseUrl ?? env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is not set');
+  await assertBackupRole(databaseUrl);
   const dir = opts.dir ? resolveUserPath(opts.dir, env) : resolveBackupDir(env);
   const keepDays = opts.keepDays ?? keepDaysFromEnv(env);
   const kind = opts.kind ?? 'manual';
