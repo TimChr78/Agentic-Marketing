@@ -134,6 +134,14 @@ describe('the admin surface is PUBLIC_URL’s host alone (#1279)', () => {
     expect((await mcp(UNKNOWN)).status).toBe(404);
     // Even a valid session cookie and workspace header do not reach a command on that Host.
     expect((await restCall(UNKNOWN)).status).toBe(404);
+    // The public tracking API is a brand surface too: an unregistered Host does not reach it.
+    const tracking = await request('/v1/batch', {
+      method: 'POST',
+      host: UNKNOWN,
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(tracking.status).toBe(404);
   });
 
   it('treats 127.0.0.1 as the admin host when PUBLIC_URL is loopback', async () => {
