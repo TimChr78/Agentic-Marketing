@@ -116,15 +116,25 @@ async function withEnv<T>(overrides: Record<string, string>, fn: () => Promise<T
   }
 }
 
-/** Waits until the scheduler loop has recorded one completed run. */
-async function waitForScheduledRun(dir: string): Promise<ScheduleStatus> {
+/** Waits until the scheduler loop has recorded the result of a run: the timestamp is written with it. */
+async function waitForSchedule(dir: string, done: (status: ScheduleStatus) => boolean): Promise<ScheduleStatus> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     const status = await readScheduleStatus(dir);
-    if (status?.lastRunAt) return status;
+    if (status && done(status)) return status;
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
-  throw new Error('the scheduler did not complete a run within 90s');
+  throw new Error('the scheduler did not record a completed run within 90s');
+}
+
+/** Waits until the scheduler has verified the backup it wrote (written before the run's result). */
+async function waitForVerification(dir: string): Promise<void> {
+  const deadline = Date.now() + 90_000;
+  while (Date.now() < deadline) {
+    if (await readVerifyStatus(dir)) return;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error('the scheduler did not verify its backup within 90s');
 }
 
 async function clickhouse(query: string, database?: string, settings: Record<string, string> = {}): Promise<string> {
@@ -416,17 +426,19 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
     try {
       const env = { ...process.env, DATABASE_URL: dbUrl.toString(), BACKUP_DIR: dir, BACKUP_CRON: '* * * * *' };
       const running = runScheduledBackups({ env, log: () => {}, signal: controller.signal });
-      const status = await waitForScheduledRun(dir);
+      await waitForVerification(dir);
       controller.abort();
       expect(await running).toBe(0);
+      const status = await readScheduleStatus(dir);
+      expect(status).toBeTruthy();
 
       const backup = (await readdir(dir)).find((name) => name.startsWith('am-scheduled-'));
       expect(backup).toBeTruthy();
       const verification = await readVerifyStatus(dir);
       expect(verification?.backup).toBe(backup);
       expect(verification?.verifiedAt).toBeTruthy();
-      expect(status.lastOk).toBe(true);
-      expect(status.lastError).toBeUndefined();
+      expect(status?.lastOk).toBe(true);
+      expect(status?.lastError).toBeUndefined();
       // This is the container healthcheck: a heartbeat alone was not enough (#145, #654).
       expect(await backupHealth({ dir, env })).toMatchObject({ ok: true });
     } finally {
@@ -446,7 +458,7 @@ describe.skipIf(!pgToolsReady)('backup and restore', () => {
       await withEnv({ PATH: `${bin}:${process.env.PATH}` }, async () => {
         const env = { ...process.env, DATABASE_URL: dbUrl.toString(), BACKUP_DIR: dir, BACKUP_CRON: '* * * * *' };
         const running = runScheduledBackups({ env, log: () => {}, signal: controller.signal });
-        const status = await waitForScheduledRun(dir);
+        const status = await waitForSchedule(dir, (current) => current.lastOk === false);
         controller.abort();
         expect(await running).toBe(0);
 

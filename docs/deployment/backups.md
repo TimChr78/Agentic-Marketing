@@ -69,7 +69,10 @@ deliberately not part of any backup: `pg_restore --clean` can then never drop th
 interrupted restore. A backup is also refused while the fence is raised, because that database is
 not a valid restore point: finish the restore (`am restore`) or abandon it deliberately
 (`am restore --clear-fence`) first. The scheduled service records the refused run as failed, so
-`am backup --health` reports it.
+`am backup --health` reports it. A backup also refuses to start while a restore is running, and it
+holds the same restore lock **shared** for its whole capture (the fence read, the dump, the
+ClickHouse export and the manifest write), so a restore cannot start between the fence check and the
+dump or during the export; a restore that arrives meanwhile waits for the backup.
 
 Tables whose `workspace_id` has a ClickHouse row policy (`events`, `message_events`,
 `journey_events` and `ad_spend` by default) are exported once per workspace with `SQL_workspace`
@@ -283,7 +286,10 @@ the loop after the current run. The container needs only `DATABASE_URL`, `CLICKH
 renamed it. `DATABASE_URL` must be a `SUPERUSER` or have `BYPASSRLS`, also for a table owner: `pg_dump`
 reads with `row_security = off`, and PostgreSQL refuses that on every `FORCE ROW LEVEL SECURITY`
 table even for its owner. A backup therefore refuses a non-bypassing role before it starts the
-dump, naming the role and the `ALTER ROLE … BYPASSRLS` fix. (`am migrate` and `am restore` still
+dump, naming the role and the `ALTER ROLE … BYPASSRLS` fix. A dedicated backup role also needs
+`SELECT` on `public.restore_fence`, which `am backup` reads before the dump to refuse an unfinished
+restore; grant it with `GRANT SELECT ON public.restore_fence TO <role>`. A role that lacks the grant
+is refused before the dump with a message naming that grant. (`am migrate` and `am restore` still
 work as the table owner: they lift FORCE for the rows they read.)
 
 The scheduler writes `<BACKUP_DIR>/.schedule-status.json` (`0600`) at start and after every
@@ -352,6 +358,9 @@ contents but does not create them.
   `am migrate` take the same lock **shared** on a dedicated connection before their first migration
   and keep it until they shut down, so a restore is refused while any of them is running, even when
   its database pools are idle. The refusal says to stop every app, worker and scheduler first.
+  `am backup` takes the lock shared too, for its whole capture, so a restore that arrives while a
+  backup runs retries the exclusive lock for its drain bound, logs that it is waiting for the backup
+  and, if the backup outlasts it, refuses with `a backup is still running`.
   Keeping the lock takes a dedicated database session, so a transaction-pooling PgBouncer is not a
   suitable `DATABASE_URL` for either side;
 - refuses to run while an application process is still connected to the target database. That is
