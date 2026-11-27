@@ -72,7 +72,9 @@ not a valid restore point: finish the restore (`am restore`) or abandon it delib
 `am backup --health` reports it. A backup also refuses to start while a restore is running, and it
 holds the same restore lock **shared** for its whole capture (the fence read, the dump, the
 ClickHouse export and the manifest write), so a restore cannot start between the fence check and the
-dump or during the export; a restore that arrives meanwhile waits for the backup.
+dump or during the export; a restore that arrives meanwhile waits for the backup. That lock lives on
+one dedicated session, so a transaction-pooling PgBouncer is not a suitable `DATABASE_URL` for a
+backup either.
 
 Tables whose `workspace_id` has a ClickHouse row policy (`events`, `message_events`,
 `journey_events` and `ad_spend` by default) are exported once per workspace with `SQL_workspace`
