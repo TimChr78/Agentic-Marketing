@@ -4,7 +4,7 @@ import { cp, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/pro
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { lastServerVersion, latestMigration, migrate, recordServerVersion, releaseForMigrationHead } from '@agentic-marketing/db';
-import { migrateClickHouse } from '@agentic-marketing/events';
+import { clickHouseStore, migrateClickHouse } from '@agentic-marketing/events';
 import { localKeyProvider, open, seal } from '@agentic-marketing/secrets';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -241,6 +241,39 @@ describe.skipIf(!chUp)('ClickHouse export and restore', () => {
       await rm(out, { recursive: true, force: true });
     }
   });
+
+  it('exports a ClickHouse backup after a purge sweep leaves only masked staging rows', async () => {
+    const database = runScoped(`am_backup_ch_purge_${randomUUID().replace(/-/g, '').slice(0, 10)}`);
+    const out = await mkdtemp(join(tmpdir(), 'am-ch-purge-'));
+    const store = clickHouseStore({ url: chUrl, database, rowPolicies: 'off' });
+    try {
+      await clickhouse(`CREATE DATABASE ${database}`);
+      await migrateClickHouse(chUrl, database, () => {}, { rowPolicies: 'off' });
+      const workspace = randomUUID();
+      const keys = Array.from({ length: 2_400 }, (_, i) => `purge-key-${i}-${'p'.repeat(40)}`);
+      // A completed sweep stages the key set and removes it with a lightweight delete, which only
+      // masks the rows until a merge: metadata still counts them while a SELECT returns none. The
+      // backup's row-count check used to read that as lost data and refuse to write the backup.
+      expect(await store.purgeErasedSubjects(workspace, keys)).toMatchObject({ complete: true, deleted: 0 });
+      expect(Number((await clickhouse(`SELECT count() FROM ${database}.erasure_purge_keys`)).trim())).toBe(0);
+      expect(
+        Number(
+          (await clickhouse(`SELECT total_rows FROM system.tables WHERE database = '${database}' AND name = 'erasure_purge_keys'`)).trim(),
+        ),
+      ).toBeGreaterThan(0);
+
+      const tables = await exportClickHouse({ url: chUrl, database, outDir: out });
+      // The staging table is transport state, not data, so discovery skips it: it is absent from
+      // the export and from the manifest, and neither restore nor verify has an entry to walk.
+      expect(tables.map((table) => table.name)).toContain('events');
+      expect(tables.map((table) => table.name)).not.toContain('erasure_purge_keys');
+      await restoreClickHouse({ runDir: out, tables, url: chUrl, database });
+    } finally {
+      await store?.close().catch(() => {});
+      await clickhouse(`DROP DATABASE IF EXISTS ${database}`).catch(() => {});
+      await rm(out, { recursive: true, force: true });
+    }
+  }, 120_000);
 
   it('exports the per-workspace files as a non-BYPASSRLS table owner (#1220)', async () => {
     const d = await createDisposableDb('ch_owner_export');
