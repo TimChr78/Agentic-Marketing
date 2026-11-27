@@ -586,7 +586,6 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
       (c) => auth.handler(withClientIp(c)),
     );
 
-
     // OAuth discovery at the root, where MCP clients look (RFC 8414 path insertion included). The MCP
     // plugin answers RFC 9728 protected-resource metadata itself when the root path reaches it.
     const asMeta = oauthProviderAuthServerMetadata(auth);
