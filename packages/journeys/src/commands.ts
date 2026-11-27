@@ -1,5 +1,6 @@
 import {
   artifactTypes,
+  canonicalProfileId,
   canonicalProfileIds,
   DEFAULT_PURPOSES,
   type JourneyDefinition,
@@ -722,11 +723,16 @@ export const simulateJourney = defineCommand({
       throw new AppError('invalid_input', `This journey cannot run: ${safeErrorText((e as Error).message, 500)}`);
     }
     const ws = ctx.principal.workspaceId;
+    // A dry run for an id a merge has folded away reads the person it names today, as the runtime
+    // does for a live participant: the branches, segments and consent verdicts in the walk must be
+    // that person's, not the merged-away alias's. An id with no person keeps its own (empty) state
+    // rather than turning the walk into an anonymous one.
+    const personId = input.profileId ? ((await canonicalProfileId(ctx.tx, ws, input.profileId)) ?? input.profileId) : null;
     const start = new Date('2026-01-01T09:00:00Z');
     const scripted = input.events
       .map((e) => ({ event: e.event, at: start.getTime() + durationSeconds(e.after) * 1000 }))
       .sort((a, b) => a.at - b.at);
-    const segments = input.profileId ? await publishedSegments(ctx.tx) : [];
+    const segments = personId ? await publishedSegments(ctx.tx) : [];
     let entry: { key: string | null; source: 'message_id' | 'event_property'; duplicate: boolean; note: string } | undefined;
     if (input.sampleEvent && graph.trigger.event) {
       const choice = resolveEntryKey(graph.trigger, {
@@ -755,14 +761,14 @@ export const simulateJourney = defineCommand({
         let duplicate = false;
         if (keyed) duplicate = await duplicateEntryKey(ctx.tx, input.artifactId, choice.key, graph.trigger.reentry);
         else if (graph.trigger.reentry !== 'always') {
-          if (input.profileId) {
+          if (personId) {
             const [prior] = await ctx.tx
               .select({ id: schema.journeyParticipants.id })
               .from(schema.journeyParticipants)
               .where(
                 and(
                   eq(schema.journeyParticipants.journeyId, input.artifactId),
-                  eq(schema.journeyParticipants.profileId, input.profileId),
+                  eq(schema.journeyParticipants.profileId, personId),
                   graph.trigger.reentry === 'after_exit' ? inArray(schema.journeyParticipants.status, ['ready', 'waiting']) : undefined,
                 ),
               )
@@ -801,7 +807,7 @@ export const simulateJourney = defineCommand({
     const limit = start.getTime() + input.maxDays * 86_400_000;
     while (state.status === 'ready' || state.status === 'waiting') {
       const out = await advance(graph, state, new Date(clock), {
-        key: `simulation:${input.profileId ?? 'anyone'}`,
+        key: `simulation:${personId ?? 'anyone'}`,
         result: (node) => (input.actions[node] === 'error' ? { ok: false, error: 'given in the simulation' } : { ok: true }),
         ai: (node) => {
           if (input.scores[node] !== undefined) return { probability: input.scores[node] };
@@ -810,20 +816,17 @@ export const simulateJourney = defineCommand({
             : { fallback: 'not called in a simulation' };
         },
         branch: async (n) => {
-          if (!input.profileId) return input.branches[n.id] === 'yes';
+          if (!personId) return input.branches[n.id] === 'yes';
           if (n.segment) {
             const [m] = await ctx.tx
               .select()
               .from(schema.segmentMemberships)
-              .where(and(eq(schema.segmentMemberships.segmentId, n.segment), eq(schema.segmentMemberships.profileId, input.profileId)));
+              .where(and(eq(schema.segmentMemberships.segmentId, n.segment), eq(schema.segmentMemberships.profileId, personId)));
             return !!m;
           }
-          return (await evaluate(n.condition!, contextFor(ctx.tx, ws, ctx.services.events, segments, { scope: [input.profileId] }))).has(
-            input.profileId,
-          );
+          return (await evaluate(n.condition!, contextFor(ctx.tx, ws, ctx.services.events, segments, { scope: [personId] }))).has(personId);
         },
-        condition: async (n) =>
-          !!input.profileId && (await matchesCondition(ctx.tx, ws, ctx.services.events, segments, input.profileId, n.condition)),
+        condition: async (n) => !!personId && (await matchesCondition(ctx.tx, ws, ctx.services.events, segments, personId, n.condition)),
       });
       const effects = new Map(out.effects.map((e) => [`${e.node}:${e.seq}`, e]));
       for (const s of out.steps) {
@@ -831,7 +834,7 @@ export const simulateJourney = defineCommand({
         let detail = s.detail || (s.type === 'converted' ? 'converted' : '');
         const eff = effects.get(`${s.node}:${s.seq}`);
         if (eff?.kind === 'email') {
-          if (input.profileId) {
+          if (personId) {
             const [tpl] = await ctx.tx
               .select({
                 purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'`,
@@ -848,12 +851,12 @@ export const simulateJourney = defineCommand({
               )
               .where(eq(schema.artifacts.id, eff.template));
             const v = tpl
-              ? await checkRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose, tpl.topic)
+              ? await checkRecipient(ctx.tx, ws, ctx.services.keyProvider, personId, tpl.purpose, tpl.topic)
               : { ok: false as const, reason: 'not_published: the template has no published version' };
             detail = v.ok ? `would send ${eff.template}` : `would not send: ${v.reason}`;
           } else detail = `would send ${eff.template}`;
         } else if (eff?.kind === 'sms') {
-          if (input.profileId) {
+          if (personId) {
             const [tpl] = await ctx.tx
               .select({
                 purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'`,
@@ -870,12 +873,12 @@ export const simulateJourney = defineCommand({
               )
               .where(eq(schema.artifacts.id, eff.template));
             const v = tpl
-              ? await checkSmsRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose, tpl.topic)
+              ? await checkSmsRecipient(ctx.tx, ws, ctx.services.keyProvider, personId, tpl.purpose, tpl.topic)
               : { ok: false as const, reason: 'not_published: the template has no published version' };
             detail = v.ok ? `would text ${eff.template}` : `would not text: ${v.reason}`;
           } else detail = `would text ${eff.template}`;
         } else if (eff?.kind === 'push') {
-          if (input.profileId) {
+          if (personId) {
             const [tpl] = await ctx.tx
               .select({
                 purpose: sql<string>`${schema.artifactVersions.content} ->> 'purpose'`,
@@ -892,7 +895,7 @@ export const simulateJourney = defineCommand({
               )
               .where(eq(schema.artifacts.id, eff.template));
             const v = tpl
-              ? await checkPushRecipient(ctx.tx, ws, ctx.services.keyProvider, input.profileId, tpl.purpose, tpl.topic)
+              ? await checkPushRecipient(ctx.tx, ws, ctx.services.keyProvider, personId, tpl.purpose, tpl.topic)
               : { ok: false as const, reason: 'not_published: the template has no published version' };
             detail = v.ok
               ? `would notify ${eff.template} (${v.devices} device${v.devices === 1 ? '' : 's'})`
@@ -901,11 +904,11 @@ export const simulateJourney = defineCommand({
         } else if (eff?.kind === 'updateProfile') detail = `would set ${eff.trait} = ${JSON.stringify(eff.value)}`;
         else if (eff?.kind === 'webhook') {
           const allowed =
-            !input.profileId ||
+            !personId ||
             (await (async () => {
               const purposes = (await publishedSingleton(ctx.tx, 'purposes'))?.purposes ?? DEFAULT_PURPOSES;
               const basis = purposes.find((x) => x.key === graph.purpose)?.basis ?? 'consent';
-              const state = currentConsent(await consentStateOf(ctx.tx, ws, input.profileId!), graph.purpose, 'webhook');
+              const state = currentConsent(await consentStateOf(ctx.tx, ws, personId), graph.purpose, 'webhook');
               return purposeAllowed(basis, state?.status);
             })());
           detail = allowed ? `would send a webhook to ${eff.endpoint}` : `would not send: no lawful basis for purpose "${graph.purpose}"`;

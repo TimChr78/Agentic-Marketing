@@ -4,6 +4,7 @@ import { schema, type Tx } from '@agentic-marketing/db';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
+import { aiAllowed } from '../src/context';
 import { lockCanonicalProfile } from '../src/decision';
 import { consentCheckedScoreProfile } from '../src/score';
 
@@ -36,6 +37,42 @@ describe('the score lock resolves and locks through one canonical lookup (#1269 
 
     await expect(lockCanonicalProfile(tx, 'ws_test', 'prf_alias')).resolves.toBe('prf_survivor');
     expect(calls).toBe(4);
+  });
+});
+
+describe('the AI consent gate reads the person and their consent in one snapshot', () => {
+  it('cannot miss a consent change that keeps the id the same', async () => {
+    // The old gate resolved the person, read consent, then resolved the id once more. A merge that
+    // changes the survivor's effective consent without changing its id made that comparison come
+    // out equal, so the stale pre-merge consent was used. Both values must come from one statement:
+    // here the single read already carries the changed status, while the stale consent read the old
+    // code would do still says granted.
+    const answers = [
+      { rows: [{ origin: 'prf_alias', id: 'prf_survivor', merged_into: null, status: 'objected' }] },
+      { rows: [{ origin: 'prf_survivor', id: 'prf_survivor', merged_into: null, status: 'objected' }] },
+    ];
+    let executes = 0;
+    const tx = {
+      execute: async () => {
+        const answer = answers[executes];
+        executes += 1;
+        if (!answer) throw new Error(`unexpected statement ${executes}`);
+        return answer;
+      },
+      select: () => ({
+        from: (table: unknown) => {
+          const done = async () =>
+            table === schema.consentState
+              ? [{ purpose: 'ai_processing', channel: '', status: 'granted', updatedAt: new Date('2026-01-01T00:00:00Z') }]
+              : [];
+          const chain = { where: done, innerJoin: () => chain };
+          return chain;
+        },
+      }),
+    } as unknown as Tx;
+
+    await expect(aiAllowed(tx, 'ws_test', 'prf_alias')).resolves.toMatchObject({ ok: false });
+    expect(executes).toBe(1);
   });
 });
 

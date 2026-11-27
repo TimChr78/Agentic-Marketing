@@ -55,9 +55,13 @@ export const classify = defineCommand({
       throw new AppError('invalid_input', `${input.artifactId} is a ${p.def.kind} prompt; ai.classify needs a classify prompt.`);
     // The gate is consulted when a person is named. Without a profileId there is no person to
     // check: the text is not attached to a profile, and the log keeps only its redacted copy.
+    let profileId = input.profileId ?? null;
     if (input.profileId) {
       const consent = await aiAllowed(ctx.tx, ctx.principal.workspaceId, input.profileId);
       if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
+      // The worker stores the label on the person the gate answered for, so queue the call under
+      // the canonical id a merge leaves rather than the id the caller happened to hold.
+      profileId = consent.profileId;
     }
     const callId = newId('aic');
     await ctx.tx.insert(schema.aiCalls).values({
@@ -67,7 +71,7 @@ export const classify = defineCommand({
       status: 'pending',
       promptId: input.artifactId,
       promptVersion: p.version,
-      profileId: input.profileId ?? null,
+      profileId,
       // The worker needs the raw text to send to the model; it replaces this with the redacted
       // copy when the call settles (#1057).
       input: { text: input.text },
