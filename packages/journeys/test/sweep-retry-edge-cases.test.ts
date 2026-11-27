@@ -2,6 +2,7 @@ import { newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { localKeyProvider } from '@agentic-marketing/secrets';
+import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
 import { sweep } from '../src/runtime';
@@ -282,7 +283,10 @@ describe.skipIf(!hasTestDatabase())('journey participant savepoint review', () =
                     return (table: unknown) => {
                       if (table === schema.consentState && failOnce) {
                         failOnce = false;
-                        throw new Error('injected consent lookup failure');
+                        // A real PostgreSQL statement error: `SELECT 1/0` fails with 22012 and
+                        // aborts the transaction (25P02 for every later statement) unless the
+                        // participant's savepoint catches it (#1269 review).
+                        return { where: () => target.execute(sql`SELECT 1/0`) };
                       }
                       return (value as (t: unknown) => unknown).call(b, table);
                     };
@@ -308,7 +312,9 @@ describe.skipIf(!hasTestDatabase())('journey participant savepoint review', () =
       ['completed', 0],
       ['ready', 1],
     ]);
-    expect(rows.filter((row) => row.error?.includes('injected consent lookup failure'))).toHaveLength(1);
+    // Drizzle wraps a statement error as `Failed query: <sql>`, so the echoed query is the stable
+    // evidence that the real 1/0 error, not a thrown string, reached the retry path.
+    expect(rows.filter((row) => /division by zero|SELECT 1\/0/.test(row.error ?? ''))).toHaveLength(1);
     expect(new Set(rows.map((row) => row.profile_id))).toEqual(new Set([first, second]));
   });
 });

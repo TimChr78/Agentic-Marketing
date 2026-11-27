@@ -1,4 +1,4 @@
-import { decisionQuestions } from '@agentic-marketing/artifacts';
+import { canonicalProfileId, decisionQuestions } from '@agentic-marketing/artifacts';
 import { defineCommand } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
@@ -20,6 +20,31 @@ import { AiUnavailable } from './providers';
 // ai.score (#194): one metered call to a decision provider. It returns typed answers, never a
 // rationale, and stores a named score for a person when asked. ai.calibration compares stored
 // predictions with a later event, so a score can be shown to be calibrated before it routes.
+
+declare module '@agentic-marketing/commands' {
+  interface Services {
+    /** The pool itself, for the budget reservation and score storage (their own transactions). */
+    db?: Db;
+  }
+}
+
+/**
+ * The person a score may be computed for. A caller may pass an id a merge has folded away (#1241
+ * review), and a merge can also commit between the id's first resolution and this consent read,
+ * which moves the consent rows to the survivor. Refusing then would be a false `no_lawful_basis`,
+ * so a refusal re-resolves the canonical id once and retries when it changed (#1269 review).
+ */
+export async function consentCheckedScoreProfile(tx: Tx, workspaceId: string, profileId: string): Promise<string> {
+  const consent = await aiAllowed(tx, workspaceId, profileId);
+  if (consent.ok) return profileId;
+  const canonical = await canonicalProfileId(tx, workspaceId, profileId);
+  if (canonical && canonical !== profileId) {
+    const retried = await aiAllowed(tx, workspaceId, canonical);
+    if (retried.ok) return canonical;
+    throw new AppError('forbidden', `This person's data may not be processed with AI (${retried.reason}).`);
+  }
+  throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
+}
 
 const ProfileId = z.string().regex(/^prf_[0-9a-f]{32}$/);
 const ProviderId = z.string().regex(/^aip_[0-9a-f]{32}$/);
@@ -103,23 +128,19 @@ export const score = defineCommand({
     const db = ctx.services.db;
     const ws = ctx.principal.workspaceId;
     // A caller may pass an id a merge has folded away. Follow it before the consent check, the
-    // context read and the write, or the survivor's consent and data are missed (#1241 review). A
-    // merge that commits during the preparation is caught afterwards and the preparation is redone
+    // context read and the write, or the survivor's consent and data are missed (#1241 review), and
+    // resolve it in one statement so the merged_into check cannot disagree with the walk.
+    const reference = input.profileId ?? null;
+    const initial = reference ? await canonicalProfileId(ctx.tx, ws, reference) : null;
+    if (reference && !initial) throw new AppError('not_found', `No profile ${input.profileId}.`);
+    // A merge that commits during the preparation is caught afterwards and the preparation is redone
     // with the survivor, so its consent cannot look absent (#1269 review).
-    const prepared = await prepareWithCanonicalProfile(ctx.tx, ws, input.profileId ?? null, async (given) => {
-      let profileId: string | undefined;
-      if (given === undefined) {
-        profileId = input.profileId ? (await canonicalProfile(ctx.tx, ws, input.profileId))?.id : undefined;
-        if (input.profileId && !profileId) throw new AppError('not_found', `No profile ${input.profileId}.`);
-      } else if (given === null) {
-        throw new AppError('not_found', `No profile ${input.profileId}.`);
-      } else {
-        profileId = given;
-      }
-      if (profileId) {
-        const consent = await aiAllowed(ctx.tx, ws, profileId);
-        if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
-      }
+    const prepared = await prepareWithCanonicalProfile(ctx.tx, ws, reference, async (given) => {
+      if (given === null) throw new AppError('not_found', `No profile ${input.profileId}.`);
+      // Both the first run (the id resolved above) and a retry go through the consent check, which
+      // re-resolves once more when a merge landed after that first read.
+      const candidate = given === undefined ? initial : given;
+      const profileId = candidate ? await consentCheckedScoreProfile(ctx.tx, ws, candidate) : null;
       let provider: Awaited<ReturnType<typeof decisionProvider>>;
       try {
         provider = await decisionProvider(ctx.tx, ctx.services.keyProvider, input.providerId);

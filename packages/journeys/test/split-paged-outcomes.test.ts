@@ -43,26 +43,8 @@ const outcomeScopes: (string[] | undefined)[] = [];
 /** The size of each split-arms page the report asked for, so a test can prove the read is paged. */
 const armPages: number[] = [];
 
-/** A row queued when the first ClickHouse read runs, i.e. between the report's two barrier reads. */
-let queueOnFirstRead: { journeyId: string; at: string } | null = null;
-
 const events = {
   async journeySplitArms(_workspaceId: string, q: { pageSize?: number; onPage?: (rows: EntryRow[]) => void | Promise<void> }) {
-    if (queueOnFirstRead) {
-      const queued = queueOnFirstRead;
-      queueOnFirstRead = null;
-      await d.db.admin.query(
-        `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, subject_ref, state)
-         VALUES ($1, $2, 'journey_event', $3, $4, $5, 'pending')`,
-        [
-          ws,
-          newId('obx'),
-          { events: [{ journeyId: queued.journeyId, at: queued.at }] },
-          `journey-event:race:${newId('obx')}`,
-          queued.journeyId,
-        ],
-      );
-    }
     // Answer the report the way the ClickHouse store does: bounded pages when it supplies an
     // `onPage` consumer, the whole list for the historical unbounded call (#1108).
     if (!q.onPage) return entries;
@@ -145,9 +127,9 @@ function reset(rows: EntryRow[]): void {
   armPages.length = 0;
 }
 
-const splitResult = (journeyId: string, limits: { pageProfileLimit?: number } = {}, range: { from?: string; to?: string } = {}) =>
+const splitResult = (journeyId: string, limits: { pageProfileLimit?: number } = {}) =>
   d.db.withWorkspace(ws, (tx) =>
-    computeJourneySplit({ tx, events, workspaceId: ws, ...limits }, { journeyId, node: 'split', minSampleSize: 1, ...range }),
+    computeJourneySplit({ tx, events, workspaceId: ws, ...limits }, { journeyId, node: 'split', minSampleSize: 1 }),
   );
 
 const BASE = Date.parse('2026-11-01T00:00:00.000Z');
@@ -373,31 +355,6 @@ describe.skipIf(!hasTestDatabase())('journeys.splitResult reads its outcomes one
       expect(report.note).toContain('1 pending');
     } finally {
       await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND id = $2', [ws, outboxId]);
-    }
-  }, 120_000);
-
-  it('withholds the verdict when a conversion is queued between the snapshot and the reads (#1269 review)', async () => {
-    const journeyId = await publishJourney();
-    const ids = Array.from({ length: 12 }, () => newId('prf'));
-    await seedPeople(ids);
-    reset(ids.map((id, i) => ({ participantId: 900 + i, profileId: id, arm: i % 2, at: at(i) })));
-    // Only the treatment arm converts: a clear winner if the queued control conversion is missed.
-    converted = ids.map((profileId, i) => ({ profileId, participantId: 900 + i, at: at(i + 100) })).filter((_, i) => i % 2 === 1);
-    queueOnFirstRead = { journeyId, at: new Date().toISOString() };
-    try {
-      // The command path: the report runs in a REPEATABLE READ snapshot, which cannot see the row
-      // queued above; the second barrier read uses the pool's own transaction (#1269 review).
-      const report = await d.db.withWorkspace(
-        ws,
-        (tx) => computeJourneySplit({ tx, db: d.db, events, workspaceId: ws }, { journeyId, node: 'split', minSampleSize: 1 }),
-        { snapshot: true },
-      );
-      expect(report.comparisons).toEqual([]);
-      expect(report.note).toContain("Publication of this journey's journey events is incomplete");
-      expect(report.note).toContain('1 pending');
-    } finally {
-      queueOnFirstRead = null;
-      await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND subject_ref = $2', [ws, journeyId]);
     }
   }, 120_000);
 });

@@ -2,7 +2,7 @@ import { runAnalyticsQuery } from '@agentic-marketing/analytics';
 import { artifactTypes } from '@agentic-marketing/artifacts';
 import type { AgentOutcomes } from '@agentic-marketing/commands';
 import { AppError, redactCredentials } from '@agentic-marketing/core';
-import { type Db, schema, type Tx } from '@agentic-marketing/db';
+import { schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { computeJourneyHoldout } from '@agentic-marketing/journeys';
 import { and, eq, gte, inArray, lt } from 'drizzle-orm';
@@ -17,7 +17,7 @@ const EMAIL_MEASURES = ['email.sent', 'email.opened', 'email.clicked', 'email.un
 type RanAction = { actionClass: string; target: string | null; impact: Record<string, unknown> | null };
 
 export async function agentOutcomes(
-  deps: { tx: Tx; db?: Db; events: EventStore; workspaceId: string },
+  deps: { tx: Tx; events: EventStore; workspaceId: string },
   agentId: string,
   range: Range,
   goals: { measure: string; target?: number; direction: 'up' | 'down' }[],
@@ -35,7 +35,7 @@ export async function agentOutcomes(
  * The metric-layer queries that follow stay per agent: they are bounded by the compare cap.
  */
 export async function agentOutcomesMany(
-  deps: { tx: Tx; db?: Db; events: EventStore; workspaceId: string },
+  deps: { tx: Tx; events: EventStore; workspaceId: string },
   agents: { agentId: string; goals: { measure: string; target?: number; direction: 'up' | 'down' }[] }[],
   range: Range,
 ): Promise<Map<string, AgentOutcomes>> {
@@ -68,7 +68,7 @@ export async function agentOutcomesMany(
 }
 
 async function outcomesFromRan(
-  deps: { tx: Tx; db?: Db; events: EventStore; workspaceId: string },
+  deps: { tx: Tx; events: EventStore; workspaceId: string },
   range: Range,
   goals: { measure: string; target?: number; direction: 'up' | 'down' }[],
   ran: RanAction[],

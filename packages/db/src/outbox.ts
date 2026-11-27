@@ -1,5 +1,5 @@
 import { newId } from '@agentic-marketing/core';
-import { and, eq, gte, inArray, isNull, or, type SQL, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import type { Db, Tx } from './pool';
 import * as schema from './schema';
 
@@ -233,51 +233,6 @@ function payloadNamesSubject(subjectRef: string) {
 }
 
 /**
- * The payload predicate for a report's window: a row is relevant only while it carries an event
- * that names the subject and falls inside the window. A row whose events are all outside the
- * window cannot change the report, so a dead-lettered one no longer withholds its verdict
- * (#1269 review). An event without a readable `at` keeps its row relevant: the window cannot
- * prove it irrelevant. The event times are written with `Date.toISOString()`, so comparing their
- * text is a comparison of instants.
- */
-function payloadNamesSubjectInWindow(subjectRef: string, window: { from?: string; to?: string }) {
-  const bounds: SQL[] = [];
-  if (window.from) bounds.push(sql`e->>'at' >= ${window.from}`);
-  if (window.to) bounds.push(sql`e->>'at' <= ${window.to}`);
-  const inside = bounds.length ? sql.join(bounds, sql` AND `) : sql`TRUE`;
-  return sql`EXISTS (
-    SELECT 1 FROM jsonb_array_elements(
-      CASE WHEN jsonb_typeof(${schema.outbox.payload}->'events') = 'array' THEN ${schema.outbox.payload}->'events' ELSE '[]'::jsonb END
-    ) AS e
-    WHERE e->>'journeyId' = ${subjectRef}
-      AND (e->>'at' IS NULL OR e->>'at' = '' OR (${inside}))
-  )`;
-}
-
-/** A report's time window, as instants; the payload's event times are ISO strings. */
-export interface PublicationWindow {
-  from?: Date;
-  to?: Date;
-}
-
-export interface OutboxPublication {
-  outstanding: number;
-  failed: number;
-  /**
-   * The database clock when the caller asked for a mark. A report reads the barrier with it before
-   * its ClickHouse reads and passes it back as `since` afterwards.
-   */
-  revision?: string;
-  /**
-   * With `since`: a relevant row was delivered after that mark, so it was queued and published
-   * while the report was reading and the report's reads may straddle it.
-   */
-  changedSince?: boolean;
-  /** With a window: a failed row exists but none of its events fall inside the window. */
-  outsideWindowFailed?: boolean;
-}
-
-/**
  * Whether publication for one broadcast or journey is complete. A decision that depends on
  * ClickHouse events (the canary check, the subject-test winner) must wait while a row is pending or
  * being delivered; a failed row must not block it forever, so the caller proceeds but can warn.
@@ -290,19 +245,7 @@ export async function outboxPublicationBarrier(
   tx: Tx,
   workspaceId: string,
   subjectRef: string,
-  opts: { window?: PublicationWindow; revision?: boolean; since?: Date } = {},
-): Promise<OutboxPublication> {
-  const windowed = opts.window && (opts.window.from || opts.window.to) ? opts.window : undefined;
-  // Without a window a row needs no payload read; with one, a row whose events all fall outside
-  // the report's window cannot change it, so it no longer withholds the verdict (#1269 review).
-  const relevantPayload = windowed
-    ? payloadNamesSubjectInWindow(subjectRef, {
-        ...(windowed.from ? { from: windowed.from.toISOString() } : {}),
-        ...(windowed.to ? { to: windowed.to.toISOString() } : {}),
-      })
-    : payloadNamesSubject(subjectRef);
-  const subjectRow = () => eq(schema.outbox.subjectRef, subjectRef);
-  const subjectMatters = () => (windowed ? relevantPayload : sql`TRUE`);
+): Promise<{ outstanding: number; failed: number }> {
   // Two separately indexed queries: each predicate is in WHERE, so the partial indexes
   // outbox_undelivered_subject and outbox_failed_subject are usable. An aggregate with FILTER
   // cannot use them and would scan every delivered row of the workspace on each retry.
@@ -312,16 +255,15 @@ export async function outboxPublicationBarrier(
     .where(
       and(
         eq(schema.outbox.workspaceId, workspaceId),
-        subjectRow(),
+        eq(schema.outbox.subjectRef, subjectRef),
         inArray(schema.outbox.state, ['pending', 'delivering']),
-        subjectMatters(),
       ),
     )
     .limit(1);
   const failed = await tx
     .select({ one: sql<number>`1` })
     .from(schema.outbox)
-    .where(and(eq(schema.outbox.workspaceId, workspaceId), subjectRow(), eq(schema.outbox.state, 'failed'), subjectMatters()))
+    .where(and(eq(schema.outbox.workspaceId, workspaceId), eq(schema.outbox.subjectRef, subjectRef), eq(schema.outbox.state, 'failed')))
     .limit(1);
   // The same two state classes for an unsubjected row. `subject_ref IS NULL` is part of the partial
   // index's key range (PostgreSQL indexes NULLs), and `limit 1` stops at the first match, so the
@@ -335,7 +277,7 @@ export async function outboxPublicationBarrier(
         isNull(schema.outbox.subjectRef),
         eq(schema.outbox.kind, 'message_event'),
         inArray(schema.outbox.state, ['pending', 'delivering']),
-        relevantPayload,
+        payloadNamesSubject(subjectRef),
       ),
     )
     .limit(1);
@@ -348,50 +290,14 @@ export async function outboxPublicationBarrier(
         isNull(schema.outbox.subjectRef),
         eq(schema.outbox.kind, 'message_event'),
         eq(schema.outbox.state, 'failed'),
-        relevantPayload,
+        payloadNamesSubject(subjectRef),
       ),
     )
     .limit(1);
-  const result: OutboxPublication = {
+  return {
     outstanding: outstanding.length + unsubjectedOutstanding.length,
     failed: failed.length + unsubjectedFailed.length,
   };
-  if (windowed && !result.failed) {
-    // A failed row exists for the subject but only outside the report's window. The report may
-    // still issue its verdict, and its note says the dead letter is not checked for this window.
-    const outside = await tx
-      .select({ one: sql<number>`1` })
-      .from(schema.outbox)
-      .where(and(eq(schema.outbox.workspaceId, workspaceId), subjectRow(), eq(schema.outbox.state, 'failed')))
-      .limit(1);
-    result.outsideWindowFailed = outside.length > 0;
-  }
-  if (opts.revision) {
-    // The database's own clock: the dispatcher writes `delivered_at` from it, so the post-read
-    // compares like with like even when this process's clock is skewed.
-    const { rows } = await tx.execute<{ now: Date | string }>(sql`SELECT now() AS now`);
-    result.revision = rows[0]?.now ? new Date(rows[0].now).toISOString() : new Date().toISOString();
-  }
-  if (opts.since) {
-    // A row queued and delivered between the two reads is in neither state count. The delivered
-    // partial index (workspace, delivered_at) makes this a read of the few rows delivered during
-    // the report, not of the delivered history (#1269 review).
-    const delivered = await tx
-      .select({ one: sql<number>`1` })
-      .from(schema.outbox)
-      .where(
-        and(
-          eq(schema.outbox.workspaceId, workspaceId),
-          eq(schema.outbox.state, 'delivered'),
-          gte(schema.outbox.deliveredAt, opts.since),
-          subjectRow(),
-          subjectMatters(),
-        ),
-      )
-      .limit(1);
-    result.changedSince = delivered.length > 0;
-  }
-  return result;
 }
 
 export interface PendingOutboxBatch {

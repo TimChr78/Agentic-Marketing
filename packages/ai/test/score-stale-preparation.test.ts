@@ -4,13 +4,14 @@ import { schema, type Tx } from '@agentic-marketing/db';
 import { sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDisposableDb, hasTestDatabase } from '../../db/test/disposable';
-import { aiAllowed, prepareWithCanonicalProfile } from '../src/context';
 import { lockCanonicalProfile } from '../src/decision';
+import { consentCheckedScoreProfile } from '../src/score';
 
-// #1269 review: a merge that commits during score preparation could make the survivor's consent
-// look absent (a false `no_lawful_basis`), and the canonical lookup before the score lock could
-// drop a score when a merge landed between its two statements. Preparation now re-resolves and
-// repeats, and the lock resolves through the single-statement lookup.
+// #1269 review: a merge that commits between the score's first profile read and its consent
+// lookup could make the survivor's consent look absent (a false `no_lawful_basis`), and the
+// canonical lookup before the score lock could drop a score when a merge landed between its two
+// statements. The consent check re-resolves once, and the lock resolves through the
+// single-statement lookup.
 
 describe('the score lock resolves and locks through one canonical lookup (#1269 review)', () => {
   it('follows the survivor when a merge lands between the canonical read and the lock', async () => {
@@ -42,7 +43,7 @@ afterAll(async () => {
   await d?.close();
 });
 
-describe.skipIf(!hasTestDatabase())('score preparation redoes itself when a merge moves the person (#1269 review)', () => {
+describe.skipIf(!hasTestDatabase())('score consent re-resolves once when a merge moves the person (#1269 review)', () => {
   it('uses the survivor’s consent instead of falling back with no_lawful_basis', async () => {
     const alias = newId('prf');
     const survivor = newId('prf');
@@ -65,23 +66,21 @@ describe.skipIf(!hasTestDatabase())('score preparation redoes itself when a merg
       });
     });
 
-    const seen: (string | null | undefined)[] = [];
-    const prepared = await d.db.withWorkspace(ws, (tx) =>
-      prepareWithCanonicalProfile(tx, ws, alias, async (given) => {
-        seen.push(given);
-        const profileId = given === undefined ? await canonicalProfileId(tx, ws, alias) : given;
-        if (seen.length === 1) {
-          // The merge commits after the id was read and right before the consent lookup, so the
-          // first consent check reads the id that is now an alias.
-          await tx.execute(sql`UPDATE profiles SET merged_into = ${survivor} WHERE workspace_id = ${ws} AND id = ${alias}`);
-        }
-        const consent = profileId ? await aiAllowed(tx, ws, profileId) : { ok: false, reason: 'no_lawful_basis' };
-        return { profileId, result: consent };
-      }),
-    );
+    const resolved = await d.db.withWorkspace(ws, async (tx) => {
+      // The score resolves the person in one statement, and the merge then commits before the
+      // consent read — the window the retry covers.
+      const first = await canonicalProfileId(tx, ws, alias);
+      expect(first).toBe(alias);
+      await tx.execute(sql`UPDATE profiles SET merged_into = ${survivor} WHERE workspace_id = ${ws} AND id = ${alias}`);
+      return consentCheckedScoreProfile(tx, ws, first!);
+    });
 
-    expect(seen).toEqual([undefined, survivor]);
-    expect(prepared.profileId).toBe(survivor);
-    expect(prepared.result).toEqual({ ok: true });
+    expect(resolved).toBe(survivor);
+  }, 120_000);
+
+  it('still refuses when nobody in the family allows AI processing', async () => {
+    const person = newId('prf');
+    await d.db.withWorkspace(ws, (tx) => tx.insert(schema.profiles).values({ workspaceId: ws, id: person }));
+    await expect(d.db.withWorkspace(ws, (tx) => consentCheckedScoreProfile(tx, ws, person))).rejects.toMatchObject({ code: 'forbidden' });
   }, 120_000);
 });

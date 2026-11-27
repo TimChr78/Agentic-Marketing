@@ -13,7 +13,7 @@ import {
   suppressHoldout,
 } from '@agentic-marketing/artifacts';
 import { AppError } from '@agentic-marketing/core';
-import { type Db, type OutboxPublication, outboxPublicationBarrier, type PublicationWindow, schema, type Tx } from '@agentic-marketing/db';
+import { outboxPublicationBarrier, schema, type Tx } from '@agentic-marketing/db';
 import type { EventStore } from '@agentic-marketing/events';
 import { and, eq, sql } from 'drizzle-orm';
 
@@ -146,50 +146,12 @@ export function incompletePublicationNote(publication: { outstanding: number; fa
 }
 
 /**
- * The note a report carries when events were queued or published between its two barrier reads. The
- * reads may straddle a publication, so a comparison computed from them is not trustworthy.
- */
-export function publicationChangedNote(what: string): string {
-  return `Journey events were queued or published while this report was reading, so ${what} until it is run again.`;
-}
-
-/**
- * The note a windowed report carries when a dead-lettered row was found outside its window. The
- * barrier now ignores such a row, but the limit is deliberate: a failed row inside the window, or
- * one whose payload cannot be dated, still withholds the verdict, and only a requeue recovers it
- * (#1269 review; the repair command is out of this change's scope).
- */
-export function outsideWindowFailedNote(): string {
-  return 'A failed journey-event row outside this report’s window does not block it; a failed row inside the window, or one whose events cannot be dated, still withholds the verdict until it is requeued.';
-}
-
-/**
- * Reads the publication barrier. A read command runs its report in a REPEATABLE READ transaction,
- * which cannot see a row queued while the report is reading; the read after the ClickHouse reads
- * asks for `fresh` and takes its own short transaction when the pool is available, so a conversion
- * that arrived in between is seen (#1269 review). Without a pool (an in-process caller such as the
- * campaign summary, or a test) the caller's transaction is used as before.
- */
-export async function readPublicationBarrier(
-  deps: { tx: Tx; db?: Db; workspaceId: string },
-  journeyId: string,
-  opts: { window?: PublicationWindow; revision?: boolean; since?: Date },
-  fresh = false,
-): Promise<OutboxPublication> {
-  if (fresh && deps.db)
-    return deps.db.withWorkspace(deps.workspaceId, (tx) => outboxPublicationBarrier(tx, deps.workspaceId, journeyId, opts));
-  return outboxPublicationBarrier(deps.tx, deps.workspaceId, journeyId, opts);
-}
-
-/**
  * The computation behind journeys.holdoutResult, exported so campaign evaluation can report a
  * journey member's uplift without reimplementing the statistics or the assignment query.
  */
 export async function computeJourneyHoldout(
   deps: {
     tx: Tx;
-    /** The pool, when the caller has it: the second barrier read then gets its own transaction. */
-    db?: Db;
     events: EventStore;
     workspaceId: string;
     /**
@@ -221,14 +183,10 @@ export async function computeJourneyHoldout(
   const hashVersion = holdoutHashVersion(cg.percent);
   const from = range.from ? new Date(range.from) : undefined;
   const to = range.to ? new Date(range.to) : undefined;
-  const window = { ...(from ? { from } : {}), ...(to ? { to } : {}) };
   // Snapshot the outbox before the ClickHouse reads: an event that is still queued at this point is
-  // not in what follows, and one published afterwards must not make this report look complete. A
-  // verdict is actionable (the lifecycle optimiser promotes or retires an arm), so it waits for
-  // publication. Read it again afterwards: a conversion queued between this snapshot and the reads
-  // is in neither, and the revision catches a row queued and published in between (#1269 review).
-  const publicationBefore = await readPublicationBarrier(deps, journeyId, { window, revision: true });
-  const beforeIncomplete = publicationBefore.outstanding > 0 || publicationBefore.failed > 0;
+  // not in what follows, and one published afterwards must not make this report look complete.
+  const publication = await outboxPublicationBarrier(deps.tx, deps.workspaceId, journeyId);
+  const publicationIncomplete = publication.outstanding > 0 || publication.failed > 0;
   // The same merge-family resolution and window the campaign report uses (#985, #1070): one
   // person, one arm, the earliest assignment decides, and the window applies to that winner rather
   // than to every row. A later copy an entry wrote onto the survivor must not count the person
@@ -294,28 +252,9 @@ export async function computeJourneyHoldout(
     if (page.length < journeyHoldoutPageSize) break;
     after = page[page.length - 1]!.person;
   }
-  const publicationAfter = await readPublicationBarrier(
-    deps,
-    journeyId,
-    {
-      window,
-      ...(publicationBefore.revision ? { since: new Date(publicationBefore.revision) } : {}),
-    },
-    true,
-  );
-  const afterIncomplete = publicationAfter.outstanding > 0 || publicationAfter.failed > 0;
-  const publicationChanged = publicationAfter.changedSince === true;
-  const publicationIncomplete = beforeIncomplete || afterIncomplete || publicationChanged;
-  // The counts are existence flags per snapshot; the largest one is what the note can honestly say.
-  const publication = {
-    outstanding: Math.max(publicationBefore.outstanding, publicationAfter.outstanding),
-    failed: Math.max(publicationBefore.failed, publicationAfter.failed),
-  };
   const analysis = analyseHoldout(counts.control, counts.treatment, cg.minSampleSize);
   const verdictNote = publicationIncomplete
-    ? beforeIncomplete || afterIncomplete
-      ? incompletePublicationNote(publication, 'no verdict is issued')
-      : publicationChangedNote('no verdict is issued')
+    ? incompletePublicationNote(publication, 'no verdict is issued')
     : analysis.verdict === 'not_enough_data'
       ? `Need at least ${cg.minSampleSize} people in each arm; ${counts.control.entered} control and ${counts.treatment.entered} treatment so far.`
       : analysis.verdict === 'no_clear_difference'
@@ -323,12 +262,10 @@ export async function computeJourneyHoldout(
         : analysis.verdict === 'treatment_better'
           ? 'Treatment converted at a higher rate and the 95% interval excludes zero; the journey looks incremental.'
           : 'Treatment converted at a lower rate and the 95% interval excludes zero; the journey looks harmful.';
-  const windowNote = publicationBefore.outsideWindowFailed || publicationAfter.outsideWindowFailed ? ` ${outsideWindowFailedNote()}` : '';
-  const note = `${
+  const note =
     unresolved.size === 0
       ? verdictNote
-      : `${verdictNote} ${[...unresolved].map((reason) => unresolvedOutcomeNote(reason, pageProfileLimit)).join(' ')}`
-  }${windowNote}`;
+      : `${verdictNote} ${[...unresolved].map((reason) => unresolvedOutcomeNote(reason, pageProfileLimit)).join(' ')}`;
   return {
     journeyId,
     controlGroup: { percent: cg.percent, minSampleSize: cg.minSampleSize, hashVersion },

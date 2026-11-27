@@ -16,27 +16,10 @@ let d: Awaited<ReturnType<typeof createDisposableDb>>;
 let ws: string;
 
 const outcomes = { converted: [] as string[], unsubscribed: [] as string[] };
-/** A row queued when the first outcome read runs, i.e. between the report's two barrier reads. */
-let queueOnFirstRead: { journeyId: string; at: string } | null = null;
 /** The profileIds each event-store call was scoped to, so a test can prove the read is per page. */
 const outcomeScopes: (string[] | undefined)[] = [];
 const events = {
   async journeyHoldoutOutcomes(_workspaceId: string, q: { profileIds?: string[] }) {
-    if (queueOnFirstRead) {
-      const queued = queueOnFirstRead;
-      queueOnFirstRead = null;
-      await d.db.admin.query(
-        `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, subject_ref, state)
-         VALUES ($1, $2, 'journey_event', $3, $4, $5, 'pending')`,
-        [
-          ws,
-          newId('obx'),
-          { events: [{ journeyId: queued.journeyId, at: queued.at }] },
-          `journey-event:race:${newId('obx')}`,
-          queued.journeyId,
-        ],
-      );
-    }
     outcomeScopes.push(q.profileIds);
     const scoped = (ids: string[]) => (q.profileIds ? ids.filter((id) => q.profileIds!.includes(id)) : ids);
     const converted = scoped(outcomes.converted);
@@ -304,73 +287,6 @@ describe.skipIf(!hasTestDatabase())('journeys.holdoutResult resolves merge famil
       expect(failed.note).toContain('am outbox --kind journey_event');
     } finally {
       await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND id = $2', [ws, outboxId]);
-    }
-  }, 120_000);
-
-  it('withholds the verdict when a conversion is queued between the snapshot and the reads (#1269 review)', async () => {
-    outcomes.unsubscribed = [];
-    const journeyId = await publishJourney();
-    const control = Array.from({ length: 10 }, () => newId('prf'));
-    const treatment = Array.from({ length: 10 }, () => newId('prf'));
-    await seedPeople([...control, ...treatment]);
-    for (const id of control) await assign(journeyId, id, 'control', EARLY);
-    for (const id of treatment) await assign(journeyId, id, 'treatment', EARLY);
-    // Treatment converts at a higher rate; the queued row is a control conversion arriving during
-    // the report, which the ClickHouse read below has not seen.
-    outcomes.converted = treatment;
-    queueOnFirstRead = { journeyId, at: new Date().toISOString() };
-    try {
-      // The command path: a REPEATABLE READ snapshot cannot see the row queued below, so the second
-      // barrier read must use the pool's own transaction (#1269 review).
-      const report = await d.db.withWorkspace(ws, (tx) => computeJourneyHoldout({ tx, db: d.db, events, workspaceId: ws }, journeyId), {
-        snapshot: true,
-      });
-      expect(report.verdict).toBe('not_enough_data');
-      expect(report.absoluteLift).toBeNull();
-      expect(report.note).toContain("Publication of this journey's journey events is incomplete");
-    } finally {
-      queueOnFirstRead = null;
-      await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND subject_ref = $2', [ws, journeyId]);
-    }
-  }, 120_000);
-
-  it('ignores a failed row whose events fall outside the report’s window (#1269 review)', async () => {
-    outcomes.unsubscribed = [];
-    const journeyId = await publishJourney();
-    const control = Array.from({ length: 10 }, () => newId('prf'));
-    const treatment = Array.from({ length: 10 }, () => newId('prf'));
-    await seedPeople([...control, ...treatment]);
-    for (const id of control) await assign(journeyId, id, 'control', EARLY);
-    for (const id of treatment) await assign(journeyId, id, 'treatment', EARLY);
-    outcomes.converted = control;
-    // The dead letter's only event is a year before the report's window, so it cannot change it.
-    await d.db.admin.query(
-      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, subject_ref, state)
-       VALUES ($1, $2, 'journey_event', $3, $4, $5, 'failed')`,
-      [ws, newId('obx'), { events: [{ journeyId, at: '2025-01-01T00:00:00.000Z' }] }, `journey-event:outside:${newId('obx')}`, journeyId],
-    );
-    const range = { from: '2026-10-01T00:00:00.000Z' };
-    try {
-      const report = await result(journeyId, range);
-      expect(report.verdict).toBe('treatment_worse');
-      expect(report.note).toContain('outside this report’s window does not block it');
-      expect(report.note).not.toContain('am outbox');
-    } finally {
-      await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND subject_ref = $2', [ws, journeyId]);
-    }
-
-    // A failed row whose event is inside the window still withholds the verdict.
-    await d.db.admin.query(
-      `INSERT INTO outbox (workspace_id, id, kind, payload, operation_key, subject_ref, state)
-       VALUES ($1, $2, 'journey_event', $3, $4, $5, 'failed')`,
-      [ws, newId('obx'), { events: [{ journeyId, at: '2026-11-05T00:00:00.000Z' }] }, `journey-event:inside:${newId('obx')}`, journeyId],
-    );
-    try {
-      const report = await result(journeyId, range);
-      expect(report.verdict).toBe('not_enough_data');
-      expect(report.note).toContain('am outbox --kind journey_event');
-    } finally {
-      await d.db.admin.query('DELETE FROM outbox WHERE workspace_id = $1 AND subject_ref = $2', [ws, journeyId]);
     }
   }, 120_000);
 });
