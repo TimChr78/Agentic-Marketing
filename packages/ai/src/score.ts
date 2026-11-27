@@ -11,6 +11,7 @@ import {
   DecisionError,
   decisionCall,
   decisionProvider,
+  lockCanonicalProfile,
   nonPersonalState,
   stateHash,
   storeProfileScore,
@@ -262,6 +263,34 @@ async function insertCall(
     error?: string;
   },
 ) {
+  // Lock the person before the call row names them, the order erasure takes: it locks the profile
+  // and then deletes it, and the cascade removes the person's `ai_calls` rows. Without the lock an
+  // erasure committing between the consent check and this insert left the foreign key pointing at a
+  // deleted profile and the write failed with a raw 23503. A person erased while this transaction
+  // waited has no row to name, so the usage is recorded without the profile (the score is not
+  // stored, as `insertProfileScore` also finds no canonical row).
+  const profileId = input.profileId ? await lockCanonicalProfile(tx, principal.workspaceId, input.profileId) : null;
+  // An erasure that committed while the call was in flight leaves no person for the row to name,
+  // and the decision log is erased with the person (ADR-0012). Such a settlement keeps only what
+  // billing needs: workspace, kind, provider and configured model, tokens and cost, timestamps and
+  // status.
+  // The state hash, the questions and the answers describe the decision, and a provider error may
+  // quote the input, so none of them may outlive the person they were asked about.
+  const erased = input.profileId !== undefined && profileId === null;
+  // Question instructions are part of the request: redact contact details before they are kept,
+  // including on a refused call (#352).
+  const questions = Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions;
+  const decision = erased
+    ? { input: {}, output: null, error: null }
+    : {
+        input: {
+          stateHash: stateHash(state),
+          stateTokens: Math.ceil(JSON.stringify(state ?? null).length / 4),
+          questions,
+        },
+        output: out.answers ? { answers: out.answers } : null,
+        error: out.error ?? null,
+      };
   await tx
     .insert(schema.aiCalls)
     .values({
@@ -270,23 +299,17 @@ async function insertCall(
       kind: 'score',
       status: out.status,
       providerId: provider.providerId,
-      model: out.modelVersion ?? provider.model,
-      profileId: input.profileId ?? null,
-      input: {
-        stateHash: stateHash(state),
-        stateTokens: Math.ceil(JSON.stringify(state ?? null).length / 4),
-        // Question instructions are part of the request: redact contact details before they are
-        // kept, including on a refused call (#352).
-        questions: Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions,
-      },
-      output: out.answers ? { answers: out.answers } : null,
-      error: out.error ?? null,
+      // The provider reports its model version freely; an erased person's row keeps the configured
+      // model, so nothing the provider echoed about the request outlives them.
+      model: erased ? provider.model : (out.modelVersion ?? provider.model),
+      profileId,
+      ...decision,
       inputTokens: out.inputTokens ?? 0,
       outputTokens: out.outputTokens ?? 0,
       billedAt: new Date(),
       usageEstimated: out.usageEstimated ?? false,
-      latencyMs: out.latencyMs ?? null,
-      principalId: principal.userId,
+      latencyMs: erased ? null : (out.latencyMs ?? null),
+      principalId: erased ? null : principal.userId,
       finishedAt: new Date(),
     })
     // The settling transaction may have committed the row already; a last-resort retry of the

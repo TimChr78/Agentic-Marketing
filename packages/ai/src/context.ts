@@ -36,7 +36,7 @@ export interface PersonContext {
  */
 export type AiConsent = { ok: true; profileId: string } | { ok: false; reason: string; profileId: string | null };
 
-const NO_PROFILE = 'no_profile: the person does not exist (or was erased)';
+export const NO_PROFILE = 'no_profile: the person does not exist (or was erased)';
 
 /**
  * Whether the person's data may be processed by AI (the ai_processing purpose and its basis).
