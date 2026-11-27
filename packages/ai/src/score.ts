@@ -2,7 +2,7 @@ import { canonicalProfileId, decisionQuestions } from '@agentic-marketing/artifa
 import { defineCommand, ProviderError } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
-import { canonicalProfile } from '@agentic-marketing/profiles';
+import { canonicalProfile, lockIdentity } from '@agentic-marketing/profiles';
 import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { aiAllowed, prepareForPerson, redact, refuseAi } from './context';
@@ -286,18 +286,24 @@ async function insertCall(
   // deleted profile and the write failed with a raw 23503. A person erased while this transaction
   // waited has no row to name, so the usage is recorded without the profile (the score is not
   // stored, as `insertProfileScore` also finds no canonical row).
+  //
+  // The consent gate can also change while the model runs, so the row is written under the same
+  // locks its score is: the workspace identity lock first (the lock every consent writer serialises
+  // on), then the canonical profile row, then the gate read on the locked person (#1300 review).
+  if (input.profileId !== undefined) await lockIdentity(tx, principal.workspaceId);
   const profileId = input.profileId ? await lockCanonicalProfile(tx, principal.workspaceId, input.profileId) : null;
-  // An erasure that committed while the call was in flight leaves no person for the row to name,
-  // and the decision log is erased with the person (ADR-0012). Such a settlement keeps only what
+  const consent = profileId ? await aiAllowed(tx, principal.workspaceId, profileId) : null;
+  // A person who was erased, or who withdrew AI consent while the call was in flight, keeps nothing
+  // the request said about them: the decision log is erased with the person (ADR-0012), and a
+  // refusal is treated the same way, as for an erased person. Such a settlement keeps only what
   // billing needs: workspace, kind, provider and configured model, tokens and cost, timestamps and
-  // status.
-  // The state hash, the questions and the answers describe the decision, and a provider error may
-  // quote the input, so none of them may outlive the person they were asked about.
-  const erased = input.profileId !== undefined && profileId === null;
+  // status. The state hash, the questions, the answers and a provider error may quote the input, so
+  // none of them may outlive the person's permission.
+  const withheld = input.profileId !== undefined && (profileId === null || consent?.ok !== true);
   // Question instructions are part of the request: redact contact details before they are kept,
   // including on a refused call (#352).
   const questions = Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions;
-  const decision = erased
+  const decision = withheld
     ? { input: {}, output: null, error: null }
     : {
         input: {
@@ -316,17 +322,17 @@ async function insertCall(
       kind: 'score',
       status: out.status,
       providerId: provider.providerId,
-      // The provider reports its model version freely; an erased person's row keeps the configured
-      // model, so nothing the provider echoed about the request outlives them.
-      model: erased ? provider.model : (out.modelVersion ?? provider.model),
+      // The provider reports its model version freely; a withheld row keeps the configured model, so
+      // nothing the provider echoed about the request outlives the person's permission.
+      model: withheld ? provider.model : (out.modelVersion ?? provider.model),
       profileId,
       ...decision,
       inputTokens: out.inputTokens ?? 0,
       outputTokens: out.outputTokens ?? 0,
       billedAt: new Date(),
       usageEstimated: out.usageEstimated ?? false,
-      latencyMs: erased ? null : (out.latencyMs ?? null),
-      principalId: erased ? null : principal.userId,
+      latencyMs: withheld ? null : (out.latencyMs ?? null),
+      principalId: withheld ? null : principal.userId,
       finishedAt: new Date(),
     })
     // The settling transaction may have committed the row already; a last-resort retry of the

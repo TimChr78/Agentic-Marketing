@@ -189,6 +189,14 @@ async function ownsAttempt(tx: Tx, c: CallRow): Promise<boolean | null> {
   return row.attempts === c.attempts;
 }
 
+/** Keeps only the trigger event's name; its properties describe the person (#1300 review). */
+function stripTriggerProperties(input: Record<string, unknown>) {
+  if (!('trigger' in input)) return;
+  const trigger = input.trigger as { name?: unknown } | string | null | undefined;
+  const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
+  input.trigger = typeof name === 'string' ? { name } : null;
+}
+
 /**
  * Drops the person-derived parts of a call's stored input after a consent refusal (#1300 review):
  * the prepared person context, the properties of the trigger event that started the step, and a
@@ -201,10 +209,7 @@ function clearPersonDerived(input: Record<string, unknown>, kind: CallRow['kind'
     delete input.stateHash;
     delete input.stateTokens;
   }
-  if (!('trigger' in input)) return;
-  const trigger = input.trigger as { name?: unknown } | string | null | undefined;
-  const name = trigger && typeof trigger === 'object' ? trigger.name : trigger;
-  input.trigger = typeof name === 'string' ? { name } : null;
+  stripTriggerProperties(input);
 }
 
 type FinishPrep = Pick<Prepared, 'person'> & Partial<Pick<Prepared, 'def' | 'version' | 'model'>>;
@@ -251,19 +256,33 @@ type FinishOut = {
 };
 
 /**
+ * Whether this exit used a person context at all. Preparation builds it, and only then is the
+ * trigger event's properties read (into the context) and kept on the call row. Every other exit —
+ * a missing prompt, a participant that timed out before preparation, the attempt limit — strips
+ * them. This is deliberately the same condition that `persistsPersonData` treats as person data:
+ * an exit that keeps those properties is one that keeps the prepared context beside them.
+ */
+function usedPersonContext(prep: FinishPrep | null): boolean {
+  return prep?.person !== undefined;
+}
+
+/**
  * Whether storing this outcome would keep anything derived from the person (#1300 review): a
  * score's answer or the value it stores, a decision's choice, a generated text, the prepared person
- * context, a decision's state fingerprint, or a provider failure whose text may quote the person.
- * One helper answers for every outcome — done, late, fallback or failure — so no branch can skip the
- * gate. A budget or configuration fallback that carries none of it needs no gate read and no
- * workspace-wide identity lock.
+ * context (and the trigger event's properties kept beside it), a decision's state fingerprint, or a
+ * provider failure whose text may quote the person. One helper answers for every outcome — done,
+ * late, fallback or failure — so no branch can skip the gate. A budget or configuration fallback
+ * that carries none of it needs no gate read and no workspace-wide identity lock.
  */
 function persistsPersonData(c: CallRow, prep: FinishPrep | null, out: FinishOut): boolean {
   // Preparation already refused the person: nothing person-derived may be written, and the refusal
   // path below clears what the call row held.
   if (!c.profileId || out.refusal !== undefined) return false;
   if (out.status === 'done' || out.output !== undefined || out.rationale !== undefined || out.slots !== undefined) return true;
-  if (out.storeScore !== undefined || prep?.person !== undefined || out.providerText === true) return true;
+  if (out.storeScore !== undefined || out.providerText === true) return true;
+  // The prepared context, which carries the trigger event's properties: an exit that keeps it is
+  // the only kind that keeps them (`usedPersonContext`).
+  if (usedPersonContext(prep)) return true;
   // A score call records the state's hash and estimated size once the decision state was built.
   const input = c.input as { stateHash?: unknown; stateTokens?: unknown };
   return input.stateHash !== undefined || input.stateTokens !== undefined;
@@ -376,6 +395,11 @@ export async function finishIn(tx: Tx, c: CallRow, prep: FinishPrep | null, out:
     }
   }
   if (refused) clearPersonDerived(input, c.kind);
+  // An exit that never built the person context never read the trigger's properties either, so it
+  // has nothing to consent-gate and cannot keep them: drop them, keeping only the trigger's name.
+  // An exit that did build the context is the only one that keeps them, and `persistsPersonData`
+  // has already gated that above (#1300 review).
+  else if (!usedPersonContext(prep)) stripTriggerProperties(input);
   // A refusal's outcome is an explicit allowlist too: the fallback reason and the step's seq. The
   // model's option, rationale and probability, and the generated slots, are dropped (#1300 review).
   const outcome = refused

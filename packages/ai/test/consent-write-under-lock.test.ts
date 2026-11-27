@@ -637,6 +637,98 @@ describe.skipIf(!hasTestDatabase())('a failure fallback re-checks consent before
   }, 60_000);
 });
 
+// A queued step carries the event that started it, properties included. When the prompt is missing
+// or the participant timed out before preparation, finalisation never built the person context and
+// so never whether the person still allows AI processing — it copied those properties into the
+// terminal call record anyway. An exit that never built the context now strips them, keeping only
+// the trigger's name; an exit that did build it is consent-gated like any other person data.
+describe.skipIf(!hasTestDatabase())('a terminal exit that never built the context strips the trigger properties (#1300 review)', () => {
+  const exits: Array<{
+    name: string;
+    prep: { person?: Record<string, unknown> } | null;
+    out: { status: 'done' | 'fallback' | 'failed'; error?: string; inputTokens?: number };
+    keeps?: boolean;
+  }> = [
+    {
+      name: 'the prompt has no published version',
+      prep: null,
+      out: { status: 'failed', error: 'no_prompt: the prompt has no published version' },
+    },
+    {
+      name: 'the participant timed out before preparation',
+      prep: {},
+      out: { status: 'fallback', error: 'too_late: the step was no longer waiting' },
+    },
+    {
+      name: 'the step questions are invalid',
+      prep: null,
+      out: { status: 'fallback', error: 'invalid_questions: propensity: Required' },
+    },
+    {
+      name: 'the step gave up after three attempts',
+      prep: null,
+      out: { status: 'failed', error: 'gave up after 3 attempts' },
+    },
+    {
+      name: 'the model never ran but the context was built and the person allows AI',
+      prep: { person: { traits: { plan: 'pro' } } },
+      out: { status: 'fallback', error: 'budget: the monthly tokens are used up', inputTokens: 40 },
+      keeps: true,
+    },
+  ];
+
+  for (const exit of exits) {
+    it(`keeps only the trigger name when ${exit.name}`, async () => {
+      const person = newId('prf');
+      await seedProfile(person);
+      await grantAi(person);
+      const callId = newId('aic');
+      await d.db.withWorkspace(ws, (tx) =>
+        tx.insert(schema.aiCalls).values({
+          workspaceId: ws,
+          id: callId,
+          kind: 'generate',
+          status: 'running',
+          attempts: 1,
+          node: 'generate',
+          seq: 1,
+          profileId: person,
+          input: { trigger: { name: 'Order Completed', properties: { sample: 'synthetic-person-data' } } },
+        }),
+      );
+      const [call] = await d.db.withWorkspace(ws, (tx) => tx.select().from(schema.aiCalls).where(eq(schema.aiCalls.id, callId)));
+
+      // The person withdrew while the step was queued: neither the properties nor anything built
+      // from the person may be written after that. The last case keeps its consent, which shows the
+      // rule is about the context having been built, not about refusing every terminal exit.
+      if (!exit.keeps) {
+        const held = await withheldConsentChange(person, 'identity');
+        try {
+          await held.commit();
+        } finally {
+          await held.drop();
+        }
+      }
+      await d.db.withWorkspace(ws, (tx) => finishIn(tx, call!, exit.prep, exit.out));
+
+      const settled = (
+        await d.db.admin.query<{ status: string; input: Record<string, unknown> }>(
+          'SELECT status, input FROM ai_calls WHERE workspace_id = $1 AND id = $2',
+          [ws, callId],
+        )
+      ).rows[0]!;
+      expect(settled.status).toBe(exit.out.status);
+      if (exit.keeps) {
+        expect(settled.input.trigger).toEqual({ name: 'Order Completed', properties: { sample: 'synthetic-person-data' } });
+        expect(settled.input.person).toEqual({ traits: { plan: 'pro' } });
+      } else {
+        expect(settled.input.trigger).toEqual({ name: 'Order Completed' });
+        expect(JSON.stringify(settled.input)).not.toContain('synthetic-person-data');
+      }
+    }, 60_000);
+  }
+});
+
 describe.skipIf(!hasTestDatabase())('the classify trait write serialises with a consent change (#1300)', () => {
   it('takes the identity lock before the profile lock, so it reads the committed objection', async () => {
     const person = newId('prf');
