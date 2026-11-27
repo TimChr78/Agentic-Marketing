@@ -244,6 +244,38 @@ async function fenceRow(databaseUrl: string): Promise<{ backup: string; started_
   }
 }
 
+/** Whether the fence table itself exists, independent of the row it holds. */
+async function fenceTablePresent(databaseUrl: string): Promise<boolean> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    const { rows } = await client.query<{ present: boolean }>("SELECT to_regclass('public.restore_fence') IS NOT NULL AS present");
+    return rows[0]?.present ?? false;
+  } finally {
+    await client.end();
+  }
+}
+
+/**
+ * The effect a loaded archive has on the fence. Dumps written before the exclusion existed carry
+ * the table: `pg_restore --clean` drops it and copies the dump's row, so the restore's own marker
+ * is gone or replaced. A stand-in models that final state; `pg_restore` is not installed here.
+ */
+async function loadFenceShape(databaseUrl: string, shape: 'row' | 'dropped'): Promise<void> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  try {
+    if (shape === 'dropped') await client.query('DROP TABLE public.restore_fence');
+    else
+      await client.query(
+        `INSERT INTO public.restore_fence (id, started_at, backup) VALUES (1, '2026-11-01T00:00:00Z', '/backups/am-older-build')
+         ON CONFLICT (id) DO UPDATE SET started_at = EXCLUDED.started_at, backup = EXCLUDED.backup`,
+      );
+  } finally {
+    await client.end();
+  }
+}
+
 /**
  * What a server start would do: take the shared restore lock, read the fence, release. The message
  * is null when a start is allowed. A shared lock is compatible with the test server's own shared
@@ -655,12 +687,15 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
         dir: backupPath,
         env: restoreEnv(databaseUrl),
         log: () => {},
-        pgRestore: async () => {
+        pgRestore: async (url) => {
+          // `--clean` may already have dropped the fence table when the load fails.
+          await loadFenceShape(url, 'dropped');
           throw new Error('simulated pg_restore failure after committing part of the archive');
         },
       }),
     ).rejects.toThrow(/simulated pg_restore failure/);
 
+    expect(await fenceTablePresent(databaseUrl)).toBe(true);
     expect(await fenceRow(databaseUrl)).toMatchObject({ backup: backupPath });
     expect(await startupBlock(databaseUrl)).toMatch(/did not finish reconciling erasure exclusions/);
     // The deliberate escape hatch, and only it, can abandon the restore.
@@ -675,4 +710,76 @@ describe('a restore reconciles erasure exclusions itself (#1194)', () => {
     const { stdout } = await exec('pg_restore', ['--list', join(backupPath, 'postgres.dump')], { maxBuffer: 8 * 1024 * 1024 });
     expect(stdout).not.toMatch(/restore_fence/);
   }, 60_000);
+
+  describe('a restore keeps its fence when the loaded dump carries one', () => {
+    // A dump written before the exclusion existed (an older build running against this schema)
+    // still names `public.restore_fence`, so `pg_restore --clean` drops the table and copies the
+    // dump's own row. The restore must raise its marker again after the load: a failure later must
+    // still leave this attempt's fence, and a success must clear it instead of leaving the dump's.
+    const failAfterLoad = () => ({
+      replay: async () => {
+        throw new Error('simulated failure after the Postgres load');
+      },
+    });
+
+    it('keeps this attempt’s fence when the dump carries an older fence row and the restore fails afterwards', async () => {
+      const databaseUrl = testDatabaseUrl(t.dbName).toString();
+      await expect(
+        restoreBackup({
+          dir: backupPath,
+          env: restoreEnv(databaseUrl),
+          log: () => {},
+          pgRestore: (url) => loadFenceShape(url, 'row'),
+          ...failAfterLoad(),
+        }),
+      ).rejects.toThrow(/simulated failure after the Postgres load/);
+
+      expect(await fenceRow(databaseUrl)).toMatchObject({ backup: backupPath });
+      expect(await startupBlock(databaseUrl)).toMatch(/did not finish reconciling erasure exclusions/);
+    }, 180_000);
+
+    it('clears this attempt’s fence when the dump carries an older fence row and the restore succeeds', async () => {
+      const databaseUrl = testDatabaseUrl(t.dbName).toString();
+      await restoreBackup({
+        dir: backupPath,
+        env: restoreEnv(databaseUrl),
+        log: () => {},
+        pgRestore: (url) => loadFenceShape(url, 'row'),
+      });
+
+      expect(await fenceRow(databaseUrl)).toBeNull();
+      expect(await startupBlock(databaseUrl)).toBeNull();
+    }, 180_000);
+
+    it('keeps this attempt’s fence when the dump drops the fence table and the restore fails afterwards', async () => {
+      const databaseUrl = testDatabaseUrl(t.dbName).toString();
+      await expect(
+        restoreBackup({
+          dir: backupPath,
+          env: restoreEnv(databaseUrl),
+          log: () => {},
+          pgRestore: (url) => loadFenceShape(url, 'dropped'),
+          ...failAfterLoad(),
+        }),
+      ).rejects.toThrow(/simulated failure after the Postgres load/);
+
+      expect(await fenceTablePresent(databaseUrl)).toBe(true);
+      expect(await fenceRow(databaseUrl)).toMatchObject({ backup: backupPath });
+      expect(await startupBlock(databaseUrl)).toMatch(/did not finish reconciling erasure exclusions/);
+    }, 180_000);
+
+    it('recreates the fence table and clears this attempt’s row when the dump dropped it', async () => {
+      const databaseUrl = testDatabaseUrl(t.dbName).toString();
+      await restoreBackup({
+        dir: backupPath,
+        env: restoreEnv(databaseUrl),
+        log: () => {},
+        pgRestore: (url) => loadFenceShape(url, 'dropped'),
+      });
+
+      expect(await fenceTablePresent(databaseUrl)).toBe(true);
+      expect(await fenceRow(databaseUrl)).toBeNull();
+      expect(await startupBlock(databaseUrl)).toBeNull();
+    }, 180_000);
+  });
 });

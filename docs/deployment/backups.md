@@ -64,13 +64,16 @@ am-manual-0.2.5-20261027T031500Z/
 ```
 
 The Postgres dump excludes `public.restore_fence`, the small table that records an unfinished
-restore (see [After a failed or interrupted restore](#after-a-failed-or-interrupted-restore)). It is
-deliberately not part of any backup: `pg_restore --clean` can then never drop the fence of an
-interrupted restore. A backup is also refused while the fence is raised, because that database is
-not a valid restore point: finish the restore (`am restore`) or abandon it deliberately
-(`am restore --clear-fence`) first. The scheduled service records the refused run as failed, so
-`am backup --health` reports it. A backup also refuses to start while a restore is running, and it
-holds the same restore lock **shared** for its whole capture (the fence read, the dump, the
+restore (see [After a failed or interrupted restore](#after-a-failed-or-interrupted-restore)). In a
+dump written by 0.17.7 or later it is deliberately not part of the backup: `pg_restore --clean` can
+then never drop the fence of an interrupted restore. A dump written by an older build still carries
+the table — such a build can run against a database at this schema after a rollback or a staggered
+upgrade — so `am restore` raises its own fence row again immediately after the load, and the row it
+clears at the end is the one it raised. A backup is also refused while the fence is raised, because
+that database is not a valid restore point: finish the restore (`am restore`) or abandon it
+deliberately (`am restore --clear-fence`) first. The scheduled service records the refused run as
+failed, so `am backup --health` reports it. A backup also refuses to start while a restore is running,
+and it holds the same restore lock **shared** for its whole capture (the fence read, the dump, the
 ClickHouse export and the manifest write), so a restore cannot start between the fence check and the
 dump or during the export; a restore that arrives meanwhile waits for the backup. That lock lives on
 one dedicated session, so a transaction-pooling PgBouncer is not a suitable `DATABASE_URL` for a
@@ -410,9 +413,11 @@ contents but does not create them.
   touched, naming the key the backup needs and the `MASTER_KEY_PREVIOUS` option. A backup without a
   key check logs that it cannot be verified and continues.
 - creates or updates the `am_app` role before loading, so the dump's `GRANT`s to it apply;
-- **raises the restore fence before replacing Postgres.** The row lives in `public.restore_fence`,
-  which every dump excludes, so `pg_restore --clean` cannot drop it even when it commits changes
-  and then fails. A server that finds the row refuses to start (`apps/server/src/main.ts`). It does
+- **raises the restore fence before replacing Postgres.** The row lives in `public.restore_fence`.
+  Dumps written by 0.17.7 or later exclude the table, so for them `pg_restore --clean` cannot drop it
+  even when it commits changes and then fails; for any other dump, the restore raises the same row
+  again right after the load, so an archive that still carries the table can neither drop nor replace
+  it. A server that finds the row refuses to start (`apps/server/src/main.ts`). It does
   that check while holding the shared restore lock, and it takes that lock **before** running
   Postgres or ClickHouse migrations, so a restore never overlaps a starting process. The process
   keeps the lock and its connection until shutdown (released after the workers drain and the pools

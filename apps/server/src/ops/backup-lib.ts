@@ -479,10 +479,11 @@ function newestRelease(version: string | null): string | null {
 /**
  * Runs pg_dump -Fc --no-owner; connection details travel through PG* variables.
  *
- * `public.restore_fence` is excluded on purpose (#1194): the fence must survive `pg_restore --clean`
- * so an interrupted restore still fails closed. `pg_restore` only drops objects the archive names,
- * so leaving the table out of the dump is what protects it. Excluding a table that an older
- * database does not have is harmless.
+ * `public.restore_fence` is excluded on purpose (#1194): in a dump this build writes, the fence
+ * then survives `pg_restore --clean`, so an interrupted restore still fails closed. `pg_restore`
+ * only drops objects the archive names. A dump written by a build from before the exclusion existed
+ * can still carry the table, which is why the restore raises its marker again after the load.
+ * Excluding a table that an older database does not have is harmless.
  */
 export async function dumpPostgres(databaseUrl: string, outFile: string): Promise<void> {
   await runRestoreChild(
@@ -1631,20 +1632,36 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       );
 
     // The fence is raised *before* the replacement (#1194 review): `pg_restore --clean` can commit
-    // changes and then fail, and a marker written afterwards would miss exactly that case. The row
-    // lives in a table no dump contains, so it survives the restore and only reconciliation clears
-    // it. A server started between this point and reconciliation refuses to serve reads. It is
-    // written through the locked session, so a restore that has already lost the lock cannot raise it
-    // (#1204 review).
+    // changes and then fail, and a marker written afterwards would miss exactly that case. Every
+    // dump this build writes excludes the table, so the row survives the restore and only
+    // reconciliation clears it. A dump from an older build can still carry the table, so the load
+    // raises the marker again afterwards (below). A server started between this point and
+    // reconciliation refuses to serve reads. It is written through the locked session, so a restore
+    // that has already lost the lock cannot raise it (#1204 review).
     assertLock();
     const fenceState = await markRestoreStarted(session.client, dir);
     log('restore fence raised; Postgres replacement starts now');
 
     assertLock();
     log('restoring Postgres (this replaces the current database)');
-    await (opts.pgRestore ?? restorePostgres)(databaseUrl, manifestPath(dir, manifest.postgres.file));
+    try {
+      await (opts.pgRestore ?? restorePostgres)(databaseUrl, manifestPath(dir, manifest.postgres.file));
+    } catch (err) {
+      // `--clean` drops every object the archive names before copying it. A dump written before the
+      // fence exclusion existed therefore drops the row raised above, and a load that fails after
+      // that would leave the database unfenced. Raise this attempt's marker again — the same
+      // timestamp, so the matched clear still finds it — before reporting the load's failure. A lost
+      // lock session cannot write, and that error stays secondary to the load's.
+      if (!lockLost) await markRestoreStarted(session.client, dir, fenceState.startedAt).catch(() => {});
+      throw err;
+    }
     // Nothing after a lost lock: the next step would write into a database another restore owns.
     assertLock();
+    // The load may also have dropped the table or replaced this attempt's row: a dump written before
+    // the exclusion existed still names `public.restore_fence`. Raise this attempt's marker again so
+    // the steps below fail closed if they stop, and so the final matched clear removes this row
+    // rather than leaving the dump's stale one behind.
+    await markRestoreStarted(session.client, dir, fenceState.startedAt);
 
     // The pre-restore check used the sealed value in the manifest; this proves the key also opens a
     // real data key in the restored data, still before the app is started. `--skip-key-check`
