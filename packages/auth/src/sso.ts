@@ -83,8 +83,18 @@ export function ssoPlugin(db: Db, config: SsoConfig) {
       const p = await providerById(db, provider.providerId);
       if (!p) return;
       // SCIM, when on, is the source of truth for who is a member.
-      const { rows } = await db.admin.query('SELECT 1 FROM scim_settings WHERE workspace_id = $1 AND enabled', [p.workspace_id]);
-      if (rows.length) return;
+      const { rows: scim } = await db.admin.query('SELECT 1 FROM scim_settings WHERE workspace_id = $1 AND enabled', [p.workspace_id]);
+      if (scim.length) return;
+      // A pending invitation for this address and workspace decides the role: acceptance creates
+      // the membership with the invited role, so provisioning must not pre-empt it with the
+      // provider's default (#1277 review).
+      const { rows: invited } = await db.admin.query(
+        `SELECT 1 FROM invitations
+          WHERE workspace_id = $1 AND lower(email) = lower($2) AND status = 'pending' AND expires_at > now()
+          LIMIT 1`,
+        [p.workspace_id, user.email],
+      );
+      if (invited.length) return;
       await db.admin.query(
         `INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3) ON CONFLICT (workspace_id, user_id) DO NOTHING`,
         [p.workspace_id, user.id, MANAGED_ROLES.includes(p.default_role) ? p.default_role : 'viewer'],

@@ -6,7 +6,7 @@ import { ConditionView } from './ConditionView';
 import { PreviewLabel } from './PreviewLabel';
 import { useSharedRead } from './previewRead';
 import { type PreviewSource, resolvePreviewSource } from './previewSource';
-import { type PreviewStatus, useReportPreviewStatus } from './previewStatus';
+import { useReportPreviewStatus } from './previewStatus';
 
 /** A segment's condition in words, or its mode, and its estimated size now (#41, #83). */
 export function SegmentPreview({
@@ -44,8 +44,12 @@ export function SegmentPreview({
   );
   const mode = content.mode ?? 'dynamic';
   const resolved = source ?? (version != null ? { kind: 'saved' as const, version } : resolvePreviewSource({ requestedVersion: version }));
-  const status: PreviewStatus = skip ? 'ready' : size.loading ? 'loading' : size.error ? 'error' : 'ready';
-  useReportPreviewStatus(reportId, status);
+  // The reviewed rule is rendered from the approval's own content, so this review is viewable as
+  // soon as it is on screen. The audience size is a live estimate that annotates it: it can be slow
+  // or fail and still show its own loading or error state in place. Unlike a rendered e-mail or
+  // journey (#498), the estimate must not keep the exact version "Not yet viewed" — a person who
+  // opened the segment and read the rule would otherwise have to open it again.
+  useReportPreviewStatus(reportId, 'ready');
   return (
     <div className="space-y-4">
       {resolved && <PreviewLabel source={resolved} suffix={sourceSuffix} />}

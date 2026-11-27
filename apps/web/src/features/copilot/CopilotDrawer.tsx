@@ -2,9 +2,11 @@ import { ChevronRight, Loader2, Send, Trash2, Wrench } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { api, errText, streamFetch } from '../../app/api';
 import { useCopilotAvailable } from '../../app/capabilities';
+import { isConfirmingComposition } from '../../app/ime';
 import { useWorkspace } from '../../app/session';
 import { useApi } from '../../app/useApi';
 import { Alert, Button, Drawer, EmptyState, IconButton, JsonView, Select, StatusPill, Tag, Textarea, timeAgo, useConfirm } from '../../ui';
+import { invalidateArtifact, notifyArtifactsChanged } from '../artifactCache';
 
 // The copilot talks to the real API: the server runs the conversation with the workspace's
 // copilot provider, as an MCP client with an agent principal. Text streams in as the model
@@ -50,6 +52,32 @@ const nid = () => `m${++seq}`;
 type ConversationUsage = { totalTokens?: number; inputTokens?: number; outputTokens?: number };
 const usageTotal = (usage: ConversationUsage | undefined) =>
   usage ? (usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0)) : undefined;
+
+/** Copilot tools that change artifacts; every other `artifacts.*` call is a read. */
+const ARTIFACT_WRITES = new Set([
+  'artifacts.create',
+  'artifacts.setOwner',
+  'artifacts.archive',
+  'artifacts.updateDraft',
+  'artifacts.discardDraft',
+  'artifacts.requestPublish',
+  'artifacts.requestPublishBundle',
+]);
+
+/** The artifact ids a tool changed, from its result or (when the result omits them) its input. */
+function changedArtifactIds(input: unknown, output: unknown): string[] {
+  const ids = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === 'string' && value) ids.add(value);
+  };
+  const out = output as { artifactId?: unknown; members?: { artifactId?: unknown }[] } | null;
+  add(out?.artifactId);
+  for (const member of out?.members ?? []) add(member?.artifactId);
+  const inp = input as { artifactId?: unknown; artifactIds?: unknown } | null;
+  add(inp?.artifactId);
+  if (Array.isArray(inp?.artifactIds)) for (const id of inp.artifactIds) add(id);
+  return [...ids];
+}
 
 const SUGGESTIONS = [
   'What is in this workspace?',
@@ -119,11 +147,25 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
     setError(null);
     setItems((xs) => [...xs, { id: nid(), role: 'user', text }]);
     const streaming = { id: null as string | null };
+    // The copilot's tools create and edit artifacts, but a turn is just another in-tab writer of
+    // them: its changes must reach the picker index and the name cache like every other create,
+    // save or publish (#1251), and a cached `artifacts.get` must not stay stale (#1277 review).
+    const toolInputs = new Map<string, unknown>();
+    let artifactChangeUnknown = false;
     const on = (e: Event) => {
+      if (e.type === 'tool') toolInputs.set(e.id, e.input);
+      if (e.type === 'toolResult' && e.ok && ARTIFACT_WRITES.has(e.name)) {
+        // Only successful writes count: a read such as artifacts.list changes no cached read.
+        const ids = changedArtifactIds(toolInputs.get(e.id), e.output);
+        if (ids.length) for (const id of ids) invalidateArtifact(id);
+        else artifactChangeUnknown = true;
+      }
       if (e.type === 'conversation') {
         setConversationId(e.id);
         if (!conversationId) setConversationAgent(asAgent || null);
       } else if (e.type === 'done') {
+        // End-of-turn catch-all, in case a write's result and input did not name an id.
+        if (artifactChangeUnknown) notifyArtifactsChanged();
         setTokens((t) => t + e.usage.inputTokens + e.usage.outputTokens);
         loadPast();
       } else setItems((xs) => apply(xs, e, streaming));
@@ -343,6 +385,7 @@ export function CopilotDrawer({ open, onClose }: { open: boolean; onClose: () =>
             disabled={!can('artifacts:read') || !copilotAvailable}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
+              if (isConfirmingComposition(e)) return;
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 void ask(input);

@@ -74,6 +74,59 @@ const CONSENT_MAX_BODY = 16 * 1024;
 // their own limit, derived from `SSO_SAML_MAX_RESPONSE_BYTES`, before this catch-all.
 const AUTH_CATCHALL_MAX_BODY = 256 * 1024;
 
+const decodeQueryPart = (value: string) => {
+  try {
+    return decodeURIComponent(value.split('+').join(' '));
+  } catch {
+    return value;
+  }
+};
+
+/**
+ * The SSO callback redirects back to the authorization request that started it. That request
+ * still carries `prompt=login`, which the identity provider has just satisfied; replaying it would
+ * bounce the client back to /login. Drop only that prompt, keeping state, PKCE and any other
+ * prompt exactly as encoded (#1277 review).
+ */
+export function stripSatisfiedLoginPrompt(response: Response, base: string): Response {
+  if (response.status < 300 || response.status >= 400) return response;
+  const location = response.headers.get('location');
+  if (!location) return response;
+  let url: URL;
+  try {
+    url = new URL(location, base);
+  } catch {
+    return response;
+  }
+  if (!url.pathname.endsWith('/api/auth/oauth2/authorize')) return response;
+  // Rebuild only the query, byte for byte, so state and PKCE keep the client's exact encoding.
+  const hashAt = location.indexOf('#');
+  const hash = hashAt < 0 ? '' : location.slice(hashAt);
+  const beforeHash = hashAt < 0 ? location : location.slice(0, hashAt);
+  const queryAt = beforeHash.indexOf('?');
+  const head = queryAt < 0 ? beforeHash : beforeHash.slice(0, queryAt);
+  const rawQuery = queryAt < 0 ? '' : beforeHash.slice(queryAt + 1);
+  const parts: string[] = [];
+  for (const part of rawQuery ? rawQuery.split('&') : []) {
+    const at = part.indexOf('=');
+    const name = decodeQueryPart(at < 0 ? part : part.slice(0, at));
+    if (name !== 'prompt') {
+      parts.push(part);
+      continue;
+    }
+    const value = decodeQueryPart(at < 0 ? '' : part.slice(at + 1));
+    const kept = value.split(' ').filter((p) => p && p !== 'login');
+    if (kept.length) parts.push(`prompt=${encodeURIComponent(kept.join(' '))}`);
+  }
+  try {
+    response.headers.set('location', `${head}${parts.length ? `?${parts.join('&')}` : ''}${hash}`);
+  } catch {
+    // An immutable response header cannot be rewritten; the callback still works, just with the
+    // original prompt.
+  }
+  return response;
+}
+
 /** `overrides` exist for tests, e.g. a stub transport for Client ID Metadata Documents. */
 export interface ServerOverrides {
   cimd?: AuthConfig['cimd'];
@@ -519,6 +572,11 @@ export function createServer(config: Config, overrides: ServerOverrides = {}) {
     );
     app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/acs/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
     app.on(['GET', 'POST'], '/api/auth/sso/saml2/sp/slo/:providerId', samlCallbackLimit, (c) => auth.handler(withClientIp(c)));
+    // The OIDC callback resumes the authorize request it started. The login prompt is satisfied by
+    // the sign-in that just happened, so it must not be replayed (#1277 review).
+    const ssoCallback = async (c: Context) => stripSatisfiedLoginPrompt(await auth.handler(withClientIp(c)), config.publicUrl);
+    app.get('/api/auth/sso/callback', ssoCallback);
+    app.get('/api/auth/sso/callback/*', ssoCallback);
     app.on(
       ['GET', 'POST'],
       '/api/auth/*',

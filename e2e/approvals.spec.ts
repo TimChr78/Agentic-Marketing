@@ -6,7 +6,7 @@ test.describe('approvals (#41)', () => {
     await page.goto('/');
     await page.getByRole('textbox', { name: 'E-mail', exact: true }).fill(PEOPLE.approver);
     await page.getByLabel('Password', { exact: true }).fill(PASSWORD);
-    await page.getByRole('button', { name: 'Sign in' }).click();
+    await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     // The queue is a destination, not the landing page; Home is the start page for everyone.
     await expect(page).toHaveURL(/\/$/);
     await expect(page.getByRole('heading', { name: 'Home' })).toBeVisible();

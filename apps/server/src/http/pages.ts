@@ -64,7 +64,9 @@ export const loginPage = (nonce: string) =>
   <label>Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
   <p id="err" role="alert"></p>
   <button class="primary">Sign in</button>
+  <button type="button" id="sso">Sign in with SSO</button>
 </form>
+<p class="hint">Use your company e-mail address; an enforced domain signs in through its identity provider.</p>
 <script nonce="${nonce}">
 f.onsubmit = async (e) => {
   e.preventDefault(); err.textContent = '';
@@ -72,6 +74,45 @@ f.onsubmit = async (e) => {
     body: JSON.stringify({ email: email.value, password: password.value, oauth_query: location.search.slice(1) }) });
   const j = await r.json().catch(() => ({}));
   if (j.url) location.href = j.url; else err.textContent = j.message || 'Sign-in failed. Check your e-mail and password.';
+};
+// Keep the enforced-domain refusal, which names the method that works; other provider errors
+// ("No provider found for the issuer") are not actionable verbatim (#1277 re-review).
+const ssoError = (status, message) =>
+  typeof message === 'string' && /signs in with single sign-on/i.test(message) ? message
+  : status === 404 ? 'No single sign-on is set up for that address. Use your password, or ask your workspace admin to connect your company’s identity provider.'
+  : 'Couldn’t start single sign-on. Check the address and try again, or ask your workspace admin to set it up.';
+// A malformed escape in the forwarded query is kept as it was rather than breaking the click.
+const decodePart = (v) => { try { return decodeURIComponent(v.split('+').join(' ')); } catch { return v; } };
+// An enforced domain refuses the password; start SSO instead. With an OAuth request in the query,
+// return to the authorize endpoint so the client's flow resumes after the identity provider.
+// The login prompt was just satisfied, so drop only it: replaying prompt=login would send the
+// client straight back here. Every other parameter (state, PKCE, other prompts) stays as it was.
+const resumeUrl = () => {
+  const raw = location.search.slice(1);
+  if (!raw) return '/';
+  const parts = [];
+  for (const part of raw.split('&')) {
+    const at = part.indexOf('=');
+    const name = decodePart(at < 0 ? part : part.slice(0, at));
+    if (name !== 'prompt') { parts.push(part); continue; }
+    const value = decodePart(at < 0 ? '' : part.slice(at + 1));
+    const kept = value.split(' ').filter((p) => p && p !== 'login');
+    if (kept.length) parts.push('prompt=' + encodeURIComponent(kept.join(' ')));
+  }
+  const query = parts.join('&');
+  return '/api/auth/oauth2/authorize' + (query ? '?' + query : '');
+};
+sso.onclick = async () => {
+  err.textContent = '';
+  if (!email.value.trim()) { err.textContent = 'Enter your e-mail address first.'; return; }
+  sso.disabled = true;
+  try {
+    const r = await fetch('/api/auth/sign-in/sso', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: email.value.trim(), callbackURL: resumeUrl() }) });
+    const j = await r.json().catch(() => ({}));
+    if (j.url) location.href = j.url; else err.textContent = ssoError(r.status, j.message);
+  } catch { err.textContent = 'The server did not answer. Check that it is running and try again.'; }
+  finally { sso.disabled = false; }
 };
 </script>`,
     nonce,
@@ -163,10 +204,20 @@ export const invitePage = (nonce: string) =>
   <label>Password<input id="password" name="password" type="password" autocomplete="current-password" minlength="10" required></label>
   <p id="err" role="alert"></p>
   <button class="primary" id="go">Sign in and join</button> <button type="button" id="mode">I don't have an account</button>
+  <button type="button" id="sso">Sign in with SSO</button>
 </form>
 <p id="done" hidden></p>
 <script nonce="${nonce}">
-const token = location.hash.slice(1);
+// The token is in the fragment, which never reaches the server. Keep it across an SSO redirect,
+// where the identity provider only returns to /invite. The callback URL carries a single-use
+// marker instead of the token, because Better Auth stores that URL in its verification table.
+const INVITE_KEY = 'am-invite';
+const RETURN_KEY = 'am-invite-return';
+const stored = (key) => { try { return sessionStorage.getItem(key) || ''; } catch { return ''; } };
+const store = (key, value) => { try { sessionStorage.setItem(key, value); } catch {} };
+const clearAttempt = () => { try { sessionStorage.removeItem(INVITE_KEY); sessionStorage.removeItem(RETURN_KEY); } catch {} };
+const returnMarker = new URLSearchParams(location.search).get('return') || '';
+const token = location.hash.slice(1) || stored(INVITE_KEY);
 let signUp = false;
 mode.onclick = () => {
   signUp = !signUp; nameRow.hidden = !signUp;
@@ -175,7 +226,7 @@ mode.onclick = () => {
   password.autocomplete = signUp ? 'new-password' : 'current-password';
 };
 const post = (url, body) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
-  .then(async (r) => ({ ok: r.ok, body: await r.json().catch(() => ({})) }));
+  .then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) }));
 const accept = async () => {
   const r = await post('/api/invitations/accept', { token });
   if (!r.ok) { err.textContent = r.body.message || 'Could not accept the invitation.'; return false; }
@@ -191,7 +242,44 @@ f.onsubmit = async (e) => {
   if (!r.ok) { err.textContent = r.body.message || 'Sign-in failed. Check your e-mail and password.'; return; }
   await accept();
 };
+// Keep the enforced-domain refusal, which names the method that works; other provider errors
+// ("No provider found for the issuer") are not actionable verbatim (#1277 re-review).
+const ssoError = (status, message) =>
+  typeof message === 'string' && /signs in with single sign-on/i.test(message) ? message
+  : status === 404 ? 'No single sign-on is set up for that address. Use your password, or ask your workspace admin to connect your company’s identity provider.'
+  : 'Couldn’t start single sign-on. Check the address and try again, or ask your workspace admin to set it up.';
+// An enforced SSO domain has no password to use here; keep the token and let the provider sign
+// the person in, then re-open this page to join.
+sso.onclick = async () => {
+  err.textContent = '';
+  if (!token) { err.textContent = 'This link has no invitation token. Copy the whole link.'; return; }
+  if (!email.value.trim()) { err.textContent = 'Enter your e-mail address first.'; return; }
+  const marker = (crypto.randomUUID && crypto.randomUUID()) || Math.random().toString(36).slice(2);
+  store(INVITE_KEY, token); store(RETURN_KEY, marker);
+  sso.disabled = true;
+  try {
+    const r = await post('/api/auth/sign-in/sso', { email: email.value.trim(), callbackURL: '/invite?return=' + encodeURIComponent(marker) });
+    if (r.body.url) location.href = r.body.url; else err.textContent = ssoError(r.status, r.body.message);
+  } catch { err.textContent = 'The server did not answer. Check that it is running and try again.'; }
+  finally { sso.disabled = false; }
+};
 if (!token) { err.textContent = 'This link has no invitation token. Copy the whole link.'; go.disabled = true; }
+else (async () => {
+  // A return from SSO must carry the marker stored with the token; it is single-use.
+  if (returnMarker && returnMarker !== stored(RETURN_KEY)) {
+    err.textContent = 'This sign-in link expired. Open the invitation link again to join.';
+    return;
+  }
+  if (returnMarker) { try { history.replaceState(null, '', location.pathname + location.hash); } catch {} }
+  // Returning from SSO: the session exists but there is no password to type, so join directly.
+  const session = await fetch('/api/auth/get-session', { credentials: 'include' })
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (session && session.user) {
+    const joined = await accept();
+    // The marker is used up whether the invitation was accepted or refused.
+    if (joined || returnMarker) clearAttempt();
+  }
+})();
 </script>`,
     nonce,
   );

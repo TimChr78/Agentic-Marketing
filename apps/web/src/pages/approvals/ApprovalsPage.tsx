@@ -11,6 +11,7 @@ import { HoldBadge, HoldCountdown } from '../../features/approvals/HoldBadge';
 import { useNow } from '../../features/approvals/holds';
 import { RequesterView } from '../../features/approvals/requester';
 import { decisionWasViewed, useViewedTick } from '../../features/approvals/viewed';
+import { invalidateArtifact } from '../../features/artifactCache';
 import {
   Alert,
   Button,
@@ -39,6 +40,10 @@ import { pageWidth } from '../../ui/layout';
 type Approval = Out<'approvals.list'>['approvals'][number];
 type Proposal = Out<'workspace.proposals'>['proposals'][number];
 type Status = 'pending' | 'approved' | 'rejected';
+
+/** A brand publish changes the session's site name, logo and domain (#1266). */
+const changesWorkspaceBrand = (a: Approval) =>
+  a.artifactType === 'brand' || (a.bundle?.members ?? []).some((m) => m.artifactType === 'brand');
 
 // The route table keys each page by path (routes.tsx), so opening /approvals/:id remounts this
 // page. The invoking row therefore has to be remembered outside the component instance; a deep
@@ -184,7 +189,7 @@ const ApprovalDrawer = lazy(() => import('../../features/approvals/ApprovalDrawe
 /** Approvals (#41): the queue of changes waiting for a person, each opened in a review drawer. */
 export default function ApprovalsPage({ params }: { params: Record<string, string> }) {
   useCrumbs([{ label: 'Approvals', to: '/approvals' }, ...(params.id ? [{ label: 'Review' }] : [])]);
-  const { can, user, refreshPending } = useSession();
+  const { can, user, refresh, refreshPending } = useSession();
   const { search } = useLocation();
   const status = (search.get('status') as Status) || 'pending';
   const list = useKeyedApi(status, () => api.call('approvals.list', { status, limit: 200 }));
@@ -291,15 +296,23 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
     if (!ok) return;
     setBatching(true);
     const failed: string[] = [];
+    let refreshWorkspace = false;
     for (const a of chosen) {
       try {
         const out = await api.call('approvals.approve', { approvalId: a.id });
         // An archived artifact can never be published; the request is closed as rejected (#900).
         if (out.status === 'rejected') failed.push(`${a.artifactName}: ${out.reason ?? 'it is archived'}`);
+        else {
+          // The same notice the review drawer sends after a decision (#1252).
+          for (const m of a.bundle?.members ?? [a]) invalidateArtifact(m.artifactId);
+          if (changesWorkspaceBrand(a)) refreshWorkspace = true;
+        }
       } catch (e) {
         failed.push(`${a.artifactName}: ${(e as Error).message}`);
       }
     }
+    // A brand publish changes the shell's site name, logo and domain (#1266).
+    if (refreshWorkspace) await refresh().catch(() => {});
     setBatching(false);
     setSelected(new Set());
     if (failed.length)
@@ -360,6 +373,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
           canApprove={can('workspace:admin')}
           highlighted={highlightedProposal}
           onDecided={reload}
+          onWorkspaceChanged={refresh}
         />
       )}
       {canApprove && status === 'pending' && notViewed > 0 && items.length > 1 && (
@@ -537,11 +551,13 @@ function WorkspaceSettings({
   canApprove,
   highlighted,
   onDecided,
+  onWorkspaceChanged,
 }: {
   proposals: Proposal[];
   canApprove: boolean;
   highlighted: string | null;
   onDecided: () => void;
+  onWorkspaceChanged: () => Promise<void>;
 }) {
   const toast = useToast();
   const [rejecting, setRejecting] = useState<string | null>(null);
@@ -556,6 +572,9 @@ function WorkspaceSettings({
     setError(null);
     try {
       await api.call('workspace.approveProposal', { proposalId: p.id });
+      // The approved name and time zone are now live; re-read the session so the shell, dates and
+      // the Workspace form use them before any later save (#1249).
+      await onWorkspaceChanged().catch(() => {});
       toast.success('Approved the workspace settings change; it is live.');
       onDecided();
     } catch (e) {

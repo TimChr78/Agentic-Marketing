@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, errText } from '../../app/api';
 import { useCrumbs } from '../../app/page';
 import { useWorkspace } from '../../app/session';
@@ -45,6 +45,11 @@ export default function WorkspacePage() {
   const [name, setName] = useState(workspace.name);
   const [timeZone, setTimeZone] = useState(workspace.timeZone);
   const [seedText, setSeedText] = useState(workspace.seedList.join('\n'));
+  // A field the person is editing keeps its value through a session refresh; the rest take the
+  // new server value (#1277 review).
+  const [nameDirty, setNameDirty] = useState(false);
+  const [timeZoneDirty, setTimeZoneDirty] = useState(false);
+  const [seedDirty, setSeedDirty] = useState(false);
   const [nameError, setNameError] = useState<string | null>(null);
   const [seedError, setSeedError] = useState<string | null>(null);
   const [generalError, setGeneralError] = useState<string | null>(null);
@@ -52,13 +57,27 @@ export default function WorkspacePage() {
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [savingSeed, setSavingSeed] = useState(false);
 
+  // A refresh reads the same values into new objects (the seed list is a new array every time),
+  // so only a genuinely different server value may overwrite a field.
+  const serverSeed = workspace.seedList.join('\n');
+  const seenName = useRef(workspace.name);
+  const seenTimeZone = useRef(workspace.timeZone);
+  const seenSeed = useRef(serverSeed);
   useEffect(() => {
-    setName(workspace.name);
-    setTimeZone(workspace.timeZone);
-  }, [workspace.name, workspace.timeZone]);
+    if (workspace.name === seenName.current) return;
+    seenName.current = workspace.name;
+    if (!nameDirty) setName(workspace.name);
+  }, [workspace.name, nameDirty]);
   useEffect(() => {
-    setSeedText(workspace.seedList.join('\n'));
-  }, [workspace.seedList]);
+    if (workspace.timeZone === seenTimeZone.current) return;
+    seenTimeZone.current = workspace.timeZone;
+    if (!timeZoneDirty) setTimeZone(workspace.timeZone);
+  }, [workspace.timeZone, timeZoneDirty]);
+  useEffect(() => {
+    if (serverSeed === seenSeed.current) return;
+    seenSeed.current = serverSeed;
+    if (!seedDirty) setSeedText(serverSeed);
+  }, [serverSeed, seedDirty]);
 
   const zones = useMemo(
     () => (TIME_ZONES.includes(workspace.timeZone) ? TIME_ZONES : [workspace.timeZone, ...TIME_ZONES]),
@@ -73,15 +92,25 @@ export default function WorkspacePage() {
   };
 
   const saveGeneral = async () => {
-    const problem = nameProblem(name);
-    if (problem) {
-      setNameError(problem);
-      return;
+    const nextName = name.trim();
+    // Submit only what changed, so an untouched field never overwrites a newer server value.
+    const changes: { name?: string; timeZone?: string } = {};
+    if (nextName !== workspace.name) changes.name = nextName;
+    if (timeZone !== workspace.timeZone) changes.timeZone = timeZone;
+    if (changes.name === undefined && changes.timeZone === undefined) return;
+    if (changes.name !== undefined) {
+      const problem = nameProblem(nextName);
+      if (problem) {
+        setNameError(problem);
+        return;
+      }
     }
     setSavingGeneral(true);
     setGeneralError(null);
     try {
-      await api.call('workspace.update', { name: name.trim(), timeZone });
+      await api.call('workspace.update', changes);
+      setNameDirty(false);
+      setTimeZoneDirty(false);
       await refresh();
       toast.success('Saved the workspace name and time zone.');
     } catch (e) {
@@ -101,6 +130,7 @@ export default function WorkspacePage() {
     setSeedSaveError(null);
     try {
       await api.call('workspace.setSeedList', { seedList: parsed.emails });
+      setSeedDirty(false);
       await refresh();
       toast.success(
         parsed.emails.length
@@ -142,13 +172,20 @@ export default function WorkspacePage() {
                   maxLength={120}
                   onChange={(e) => {
                     setName(e.target.value);
+                    setNameDirty(true);
                     setNameError(null);
                   }}
                   onBlur={(e) => setNameError(nameProblem(e.target.value))}
                 />
               </Field>
               <Field label="Time zone" hint="Dates and the send-time picker use this zone.">
-                <Select value={timeZone} onChange={(e) => setTimeZone(e.target.value)}>
+                <Select
+                  value={timeZone}
+                  onChange={(e) => {
+                    setTimeZone(e.target.value);
+                    setTimeZoneDirty(true);
+                  }}
+                >
                   {zones.map((z) => (
                     <option key={z} value={z}>
                       {z}
@@ -189,6 +226,7 @@ export default function WorkspacePage() {
                   autoComplete="off"
                   onChange={(e) => {
                     setSeedText(e.target.value);
+                    setSeedDirty(true);
                     setSeedError(null);
                   }}
                   onBlur={(e) => {
