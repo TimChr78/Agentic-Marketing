@@ -17,12 +17,15 @@ import {
   listWorkspaceIds,
   migrationHead,
   RESTORE_APPLICATION_NAME,
+  RESTORE_FENCE_TABLE,
   type ReplayErasuresAfterMigrateOptions,
   type ReplayErasuresResult,
+  type RestoreFenceState,
   RowsHiddenByRlsError,
   readDataKeySample,
   readErasureLog,
   replayErasuresAfterMigrate,
+  restoreFenceState,
   withApplicationName,
   withRestoreAppName,
 } from '@agentic-marketing/db';
@@ -30,6 +33,7 @@ import pg from 'pg';
 import { keyProviderFromEnv } from '../keys';
 import { clickhouseEndpoint } from './clickhouse-endpoint';
 import {
+  acquireBackupInterlock,
   acquireRestoreSessionLock,
   assertDatabaseDrained,
   assertRestoreWorkDrained,
@@ -573,11 +577,41 @@ async function onlyRejectedTransactionTimeout(databaseUrl: string, message: stri
  * `pg_dump` sets `row_security = off`, and PostgreSQL refuses that on a FORCE RLS table even for
  * its owner. Refuse before the dump instead of letting `pg_dump` fail with a generic error after
  * the temporary directory is made (#1218 review). `am restore` still works as the table owner.
+ *
+ * A raised fence is refused first, for every role that may back up. The fence records a restore
+ * that replaced Postgres but has not reconciled the restored erasure exclusions yet, or one that
+ * stopped in between. Such a database is not a valid point to take a backup of: restoring that
+ * backup later would replay nothing from the unreconciled state and clear the fence over it.
+ * The role check below still runs, so a role that cannot dump at all gets its own message
+ * when no fence is raised. The read goes through the same connection and works for the table owner
+ * as well as for a role that bypasses RLS; only enumeration of tenant rows needs the bypass.
  */
-async function assertBackupRole(databaseUrl: string): Promise<void> {
+async function assertBackupAllowed(databaseUrl: string): Promise<void> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
+    let fence: RestoreFenceState | null;
+    try {
+      fence = await restoreFenceState(client);
+    } catch (err) {
+      // The fence table is revoked from PUBLIC. A role that cannot read it is normally one that
+      // cannot dump either, so let the role check explain that first; only a role that bypasses RLS
+      // but lacks SELECT reaches the grant below.
+      if ((err as { code?: string }).code !== '42501') throw err;
+      await assertBypassesRls(client, 'am backup');
+      const { rows } = await client.query<{ role: string }>('SELECT quote_ident(current_user) AS role');
+      const role = rows[0]?.role ?? 'the backup role';
+      throw new Error(
+        `cannot read ${RESTORE_FENCE_TABLE} to check whether a restore is unfinished: the role that DATABASE_URL names has no ` +
+          `SELECT on it. Grant it with \`GRANT SELECT ON ${RESTORE_FENCE_TABLE} TO ${role}\`, or run the backup as a superuser.`,
+      );
+    }
+    if (fence)
+      throw new Error(
+        `A restore of ${fence.backup} started at ${fence.startedAt} has not finished reconciling erasure exclusions, so this ` +
+          'database is not a valid point to back up. Run `am restore` for that backup again to completion, or ' +
+          '`am restore --clear-fence` to abandon it deliberately, then retry the backup.',
+      );
     await assertBypassesRls(client, 'am backup');
   } finally {
     await client.end().catch(() => {});
@@ -589,81 +623,97 @@ export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ di
   const log = opts.log ?? (() => {});
   const databaseUrl = opts.databaseUrl ?? env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is not set');
-  await assertBackupRole(databaseUrl);
-  const dir = opts.dir ? resolveUserPath(opts.dir, env) : resolveBackupDir(env);
-  const keepDays = opts.keepDays ?? keepDaysFromEnv(env);
-  const kind = opts.kind ?? 'manual';
-  const version = readVersion();
-  const createdAt = new Date();
-  const stamp = createdAt
-    .toISOString()
-    .replace(/[-:]/g, '')
-    .replace(/\.\d{3}Z$/, 'Z');
-  const migrationHeadValue = await migrationHead(databaseUrl);
-  // The version the data was running, not this build: on upgrade the two differ.
-  const recordedFromVersion = await lastServerVersion(databaseUrl, migrationHeadValue);
-  const fromVersion = newestRelease(recordedFromVersion);
-  // The name needs one version; the manifest keeps the full range and says where it came from.
-  const fromVersionLabel =
-    recordedFromVersion && recordedFromVersion !== fromVersion ? `${recordedFromVersion} (from migration head)` : recordedFromVersion;
-  const name =
-    kind === 'pre-upgrade'
-      ? `am-pre-upgrade-${versionForName(fromVersion)}-to-${versionForName(version)}-${stamp}`
-      : `am-${kind}-${versionForName(version)}-${stamp}`;
-  const finalDir = join(dir, name);
-  // A partial backup must never look like a completed one: write under a dot-prefixed name and
-  // rename only after the manifest exists.
-  const tempDir = join(dir, `.${name}.partial`);
-
-  await mkdir(dir, { recursive: true });
-  await secureDir(dir);
-  await rm(tempDir, { recursive: true, force: true });
-  await mkdir(tempDir, { recursive: true, mode: BACKUP_DIR_MODE });
-  await secureDir(tempDir);
-
+  // Hold the restore key shared for the whole capture (#1214 follow-up): a restore takes it
+  // exclusively, so it cannot pass its drain check and raise the fence between this backup's fence
+  // read and its dump, and its ClickHouse TRUNCATE cannot land inside the export. The fence read
+  // and the role check stay on their own connection; the shared lock already makes them stable.
+  const interlock = await acquireBackupInterlock(databaseUrl, { onLost: () => void stopRestoreChildren() });
   try {
-    log(`dumping Postgres to ${join(name, 'postgres.dump')}`);
-    const dumpPath = join(tempDir, 'postgres.dump');
-    await dumpPostgres(databaseUrl, dumpPath);
-    await secureFile(dumpPath);
-    const key = await backupKeyInfo(env, databaseUrl, log);
-    const manifest: BackupManifest = {
-      format: 2,
-      kind,
-      version,
-      fromVersion: fromVersionLabel,
-      ...(kind === 'pre-upgrade' ? { toVersion: version } : {}),
-      migrationHead: migrationHeadValue,
-      createdAt: createdAt.toISOString(),
-      postgres: await fileEntry(tempDir, 'postgres.dump'),
-      ...(key ? { key } : {}),
-    };
+    await assertBackupAllowed(databaseUrl);
+    interlock.assertHeld();
+    const dir = opts.dir ? resolveUserPath(opts.dir, env) : resolveBackupDir(env);
+    const keepDays = opts.keepDays ?? keepDaysFromEnv(env);
+    const kind = opts.kind ?? 'manual';
+    const version = readVersion();
+    const createdAt = new Date();
+    const stamp = createdAt
+      .toISOString()
+      .replace(/[-:]/g, '')
+      .replace(/\.\d{3}Z$/, 'Z');
+    const migrationHeadValue = await migrationHead(databaseUrl);
+    // The version the data was running, not this build: on upgrade the two differ.
+    const recordedFromVersion = await lastServerVersion(databaseUrl, migrationHeadValue);
+    const fromVersion = newestRelease(recordedFromVersion);
+    // The name needs one version; the manifest keeps the full range and says where it came from.
+    const fromVersionLabel =
+      recordedFromVersion && recordedFromVersion !== fromVersion ? `${recordedFromVersion} (from migration head)` : recordedFromVersion;
+    const name =
+      kind === 'pre-upgrade'
+        ? `am-pre-upgrade-${versionForName(fromVersion)}-to-${versionForName(version)}-${stamp}`
+        : `am-${kind}-${versionForName(version)}-${stamp}`;
+    const finalDir = join(dir, name);
+    // A partial backup must never look like a completed one: write under a dot-prefixed name and
+    // rename only after the manifest exists.
+    const tempDir = join(dir, `.${name}.partial`);
 
-    if (opts.clickhouse) {
-      log('exporting ClickHouse tables');
-      manifest.clickhouse = {
-        tables: await exportClickHouse({ env, databaseUrl, outDir: tempDir, log }),
+    await mkdir(dir, { recursive: true });
+    await secureDir(dir);
+    await rm(tempDir, { recursive: true, force: true });
+    await mkdir(tempDir, { recursive: true, mode: BACKUP_DIR_MODE });
+    await secureDir(tempDir);
+
+    try {
+      interlock.assertHeld();
+      log(`dumping Postgres to ${join(name, 'postgres.dump')}`);
+      const dumpPath = join(tempDir, 'postgres.dump');
+      await dumpPostgres(databaseUrl, dumpPath);
+      interlock.assertHeld();
+      await secureFile(dumpPath);
+      const key = await backupKeyInfo(env, databaseUrl, log);
+      const manifest: BackupManifest = {
+        format: 2,
+        kind,
+        version,
+        fromVersion: fromVersionLabel,
+        ...(kind === 'pre-upgrade' ? { toVersion: version } : {}),
+        migrationHead: migrationHeadValue,
+        createdAt: createdAt.toISOString(),
+        postgres: await fileEntry(tempDir, 'postgres.dump'),
+        ...(key ? { key } : {}),
       };
-    }
 
-    const manifestFile = join(tempDir, 'manifest.json');
-    await writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, { mode: BACKUP_FILE_MODE });
-    await secureFile(manifestFile);
-    await rename(tempDir, finalDir);
-    await secureDir(finalDir);
-    log(`backup written to ${finalDir}`);
-    if (keepDays !== undefined) {
-      try {
-        await pruneBackups(dir, keepDays, log);
-      } catch (err) {
-        // The backup itself is complete; failing to remove an old one should not report failure.
-        log(`could not prune old backups: ${(err as Error).message}`);
+      if (opts.clickhouse) {
+        log('exporting ClickHouse tables');
+        manifest.clickhouse = {
+          tables: await exportClickHouse({ env, databaseUrl, outDir: tempDir, log }),
+        };
+        interlock.assertHeld();
       }
+
+      const manifestFile = join(tempDir, 'manifest.json');
+      await writeFile(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, { mode: BACKUP_FILE_MODE });
+      await secureFile(manifestFile);
+      interlock.assertHeld();
+      await rename(tempDir, finalDir);
+      await secureDir(finalDir);
+      log(`backup written to ${finalDir}`);
+      if (keepDays !== undefined) {
+        try {
+          await pruneBackups(dir, keepDays, log);
+        } catch (err) {
+          // The backup itself is complete; failing to remove an old one should not report failure.
+          log(`could not prune old backups: ${(err as Error).message}`);
+        }
+      }
+      return { dir: finalDir, manifest };
+    } catch (err) {
+      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      // A child stopped by a lost lock reports its own exit; the operator needs the reason.
+      interlock.assertHeld();
+      throw err;
     }
-    return { dir: finalDir, manifest };
-  } catch (err) {
-    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
-    throw err;
+  } finally {
+    await interlock.release();
   }
 }
 
@@ -1493,6 +1543,8 @@ export async function restoreBackup(opts: RestoreBackupOptions): Promise<AnyBack
       throw lockLoss.signal.reason instanceof Error ? lockLoss.signal.reason : new Error('the restore lock was lost');
   };
   const session = await acquireRestoreSessionLock(databaseUrl, {
+    ...(opts.drainTimeoutMs === undefined ? {} : { waitMs: opts.drainTimeoutMs }),
+    log,
     onLost: (err) => {
       lockLost = err;
       lockLoss.abort(err);
@@ -1798,6 +1850,8 @@ function sleepUntilNextMinute(signal: AbortSignal): Promise<void> {
 /**
  * The heartbeat the scheduler writes for `am backup --health`. The timestamp is both the JSON
  * value and the file mtime, so a liveness check works even if the body is being replaced.
+ * `lastRunAt` is the completion time of the run `lastOk`/`lastError` describe; it is not written
+ * when a run starts.
  */
 export interface ScheduleStatus {
   lastRunAt: string | null;
@@ -1964,7 +2018,6 @@ export async function runScheduledBackups(
       const minute = now.toISOString().slice(0, 16);
       if (minute !== lastRunMinute && cronMatches(spec, now)) {
         lastRunMinute = minute;
-        status.lastRunAt = now.toISOString();
         try {
           // createBackup logs the final path; a failure is not fatal for the scheduler.
           const { dir: written } = await createBackup({
@@ -1988,6 +2041,9 @@ export async function runScheduledBackups(
           status.lastError = redactCredentials((err as Error).message);
           log(`backup failed: ${status.lastError}`);
         }
+        // The timestamp belongs to the result, never to a run that is still going: a heartbeat
+        // during a long backup must not pair the new start time with the previous outcome.
+        status.lastRunAt = new Date().toISOString();
         await heartbeat();
       } else {
         await heartbeat();

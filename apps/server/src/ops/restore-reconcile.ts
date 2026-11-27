@@ -13,6 +13,7 @@ import {
   type RestoreFenceState,
   raiseRestoreFence,
   restoreFenceState,
+  withApplicationName,
   withRestoreAppName,
 } from '@agentic-marketing/db';
 import { clickHouseStore, type EventStore, type SubjectKeyKind } from '@agentic-marketing/events';
@@ -733,6 +734,15 @@ export interface RestoreSessionLockOptions {
    * included, and fail (#1204 review).
    */
   onLost?: (err: Error) => void;
+  /**
+   * How long to retry while a backup holds the shared key. The backup keeps it for its whole
+   * capture, so a restore that arrives first waits for it, naming the backup, instead of failing
+   * with the generic message (#1214). Default 60 s; a running app or another restore still refuses
+   * at once, as before.
+   */
+  waitMs?: number;
+  /** Reports what a waiting restore is waiting for. */
+  log?: (message: string) => void;
   /** TCP keepalive after this much idle time. Default 10 s; 0 keeps the platform default. */
   keepAliveInitialDelayMs?: number;
   /** How often the session proves it still answers with `SELECT 1`. Default 30 s; 0 disables it. */
@@ -747,6 +757,8 @@ const RESTORE_LOCK_KEEPALIVE_MS = 10_000;
 const RESTORE_LOCK_LIVENESS_MS = 30_000;
 /** How long a statement on the lock session may take; also bounds one liveness check. */
 const RESTORE_LOCK_LIVENESS_TIMEOUT_MS = 15_000;
+/** Delay between retries of the exclusive lock while a backup holds the shared one. */
+const RESTORE_LOCK_POLL_MS = 100;
 
 /**
  * The dedicated connection a lock is held on (#1222). `keepAlive` makes the OS probe an idle peer:
@@ -866,12 +878,37 @@ export async function acquireRestoreSessionLock(databaseUrl: string, opts: Resto
   await client.connect();
   let pid = 0;
   try {
-    const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [RESTORE_ADVISORY_LOCK_KEY]);
-    if (!rows[0]?.locked)
-      throw new Error(
-        'another restore is running, or an app, worker or scheduler still holds the restore lock. ' +
-          'Stop every app, worker and scheduler first, then retry.',
+    // A backup holds the same key shared for its whole capture, so the exclusive take fails while
+    // it runs. Retry for the drain bound and name the backup; anything else holding the key (a
+    // running app, another restore) still refuses at once, as it did before.
+    const deadline = Date.now() + Math.max(0, opts.waitMs ?? RESTORE_WORK_DRAIN_TIMEOUT_MS);
+    for (;;) {
+      const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock($1) AS locked', [RESTORE_ADVISORY_LOCK_KEY]);
+      if (rows[0]?.locked) break;
+      const { rows: tagged } = await client.query<{ restores: number | string; backups: number | string }>(
+        `SELECT count(*) FILTER (WHERE application_name = $1)::int AS restores,
+                count(*) FILTER (WHERE application_name = $2)::int AS backups
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND pid <> pg_backend_pid()
+            AND application_name = ANY($3::text[])`,
+        [RESTORE_APPLICATION_NAME, BACKUP_APPLICATION_NAME, [RESTORE_APPLICATION_NAME, BACKUP_APPLICATION_NAME]],
       );
+      const restores = Number(tagged[0]?.restores ?? 0);
+      const backups = Number(tagged[0]?.backups ?? 0);
+      if (backups === 0 || restores > 0)
+        throw new Error(
+          'another restore is running, or an app, worker or scheduler still holds the restore lock. ' +
+            'Stop every app, worker and scheduler first, then retry.',
+        );
+      if (Date.now() >= deadline)
+        throw new Error(
+          `a backup is still running (${backups} PostgreSQL connection(s) still tagged ${BACKUP_APPLICATION_NAME}): ` +
+            'a restore would replace the database while it reads, so the backup would be incomplete. Wait for it to finish and retry.',
+        );
+      opts.log?.(`waiting for a running backup to stop (${backups} PostgreSQL connection(s) still tagged ${BACKUP_APPLICATION_NAME})`);
+      await sleep(RESTORE_LOCK_POLL_MS);
+    }
     const backend = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
     pid = Number(backend.rows[0]?.pid ?? 0);
   } catch (err) {
@@ -899,6 +936,97 @@ export async function acquireRestoreSessionLock(databaseUrl: string, opts: Resto
       // A lost session cannot answer, and the server drops its lock with the connection; sending
       // the unlock would only queue behind the unanswered liveness query.
       if (!lostReported) await watch.client.query('SELECT pg_advisory_unlock($1)', [RESTORE_ADVISORY_LOCK_KEY]).catch(() => {});
+      await client.end().catch(() => {});
+    },
+  };
+}
+
+/**
+ * The shared lock a backup holds for its whole capture (#1214 follow-up). `am restore` takes the
+ * same key exclusively, so a restore cannot pass its drain check and raise the fence between the
+ * backup's fence read and its dump, and it cannot truncate ClickHouse while the export reads it.
+ * Backups do not block each other: their shared takes are compatible. The session announces
+ * {@link BACKUP_APPLICATION_NAME}, so a restore that arrives while a backup runs names the backup.
+ */
+export interface BackupInterlock {
+  /** The backend PID holding the shared lock, for a test and for a diagnostic. */
+  readonly pid: number;
+  /**
+   * Throws when the interlock was lost. Call it between capture steps and before publishing: a
+   * backup that can no longer prove the interlock must not leave an archive behind.
+   */
+  assertHeld(): void;
+  /** Ends the lock session; its shared lock goes with it. */
+  release(): Promise<void>;
+}
+
+export interface BackupInterlockOptions {
+  /** Called once if the lock connection is lost before `release()`. */
+  onLost?: (err: Error) => void;
+  /** TCP keepalive after this much idle time. Default 10 s. */
+  keepAliveInitialDelayMs?: number;
+  /** How often the session proves it still answers with `SELECT 1`. Default 30 s; 0 disables it. */
+  livenessMs?: number;
+  /** How long one statement on the lock session may take before it counts as lost. Default 15 s. */
+  livenessTimeoutMs?: number;
+}
+
+/**
+ * Takes the restore key in shared mode for a backup's whole capture. A restore that already holds it
+ * exclusively — or `am restore --clear-fence` — makes this refuse before anything is read. The
+ * caller keeps it until the archive and manifest are published; a lost session is reported through
+ * `assertHeld` and must discard the partial output.
+ */
+export async function acquireBackupInterlock(databaseUrl: string, opts: BackupInterlockOptions = {}): Promise<BackupInterlock> {
+  const client = restoreLockClient(withApplicationName(databaseUrl, BACKUP_APPLICATION_NAME), opts);
+  await client.connect();
+  let pid = 0;
+  try {
+    const { rows } = await client.query<{ locked: boolean }>('SELECT pg_try_advisory_lock_shared($1) AS locked', [
+      RESTORE_ADVISORY_LOCK_KEY,
+    ]);
+    if (!rows[0]?.locked) {
+      // The exclusive holder is a restore. Name it when it announces itself, so the operator knows
+      // to wait rather than to look for a leaked advisory lock.
+      const { rows: tagged } = await client.query<{ restores: number | string }>(
+        `SELECT count(*)::int AS restores FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid() AND application_name = $1`,
+        [RESTORE_APPLICATION_NAME],
+      );
+      throw new Error(
+        Number(tagged[0]?.restores ?? 0) > 0
+          ? 'A restore is running on this database, so a backup must not read it. Wait for `am restore` to finish, then retry.'
+          : 'another process holds the restore lock. Wait for it to finish, then retry.',
+      );
+    }
+    const backend = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+    pid = Number(backend.rows[0]?.pid ?? 0);
+  } catch (err) {
+    await client.end().catch(() => {});
+    throw err;
+  }
+  let released = false;
+  let lost: Error | undefined;
+  let lostReported = false;
+  const reportLost = (err: Error) => {
+    if (released || lostReported) return;
+    lostReported = true;
+    lost = err;
+    opts.onLost?.(err);
+  };
+  client.on('error', reportLost);
+  client.on('end', () => reportLost(new Error('the backup lock connection ended unexpectedly')));
+  const watch = watchRestoreLock(client, reportLost, opts.livenessMs, opts.livenessTimeoutMs ?? RESTORE_LOCK_LIVENESS_TIMEOUT_MS);
+  return {
+    pid,
+    assertHeld() {
+      if (lost) throw new Error(`the backup lock was lost before the capture finished, so this backup was discarded: ${lost.message}`);
+    },
+    async release() {
+      if (released) return;
+      released = true;
+      watch.stop();
+      // The shared lock belongs to the session; ending it is enough, and a lost session cannot answer.
       await client.end().catch(() => {});
     },
   };
