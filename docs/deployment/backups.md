@@ -66,7 +66,10 @@ am-manual-0.2.5-20261027T031500Z/
 The Postgres dump excludes `public.restore_fence`, the small table that records an unfinished
 restore (see [After a failed or interrupted restore](#after-a-failed-or-interrupted-restore)). It is
 deliberately not part of any backup: `pg_restore --clean` can then never drop the fence of an
-interrupted restore.
+interrupted restore. A backup is also refused while the fence is raised, because that database is
+not a valid restore point: finish the restore (`am restore`) or abandon it deliberately
+(`am restore --clear-fence`) first. The scheduled service records the refused run as failed, so
+`am backup --health` reports it.
 
 Tables whose `workspace_id` has a ClickHouse row policy (`events`, `message_events`,
 `journey_events` and `ad_spend` by default) are exported once per workspace with `SQL_workspace`

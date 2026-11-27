@@ -17,12 +17,15 @@ import {
   listWorkspaceIds,
   migrationHead,
   RESTORE_APPLICATION_NAME,
+  RESTORE_FENCE_TABLE,
   type ReplayErasuresAfterMigrateOptions,
   type ReplayErasuresResult,
+  type RestoreFenceState,
   RowsHiddenByRlsError,
   readDataKeySample,
   readErasureLog,
   replayErasuresAfterMigrate,
+  restoreFenceState,
   withApplicationName,
   withRestoreAppName,
 } from '@agentic-marketing/db';
@@ -573,11 +576,39 @@ async function onlyRejectedTransactionTimeout(databaseUrl: string, message: stri
  * `pg_dump` sets `row_security = off`, and PostgreSQL refuses that on a FORCE RLS table even for
  * its owner. Refuse before the dump instead of letting `pg_dump` fail with a generic error after
  * the temporary directory is made (#1218 review). `am restore` still works as the table owner.
+ *
+ * A raised fence is refused first, for every role that may back up. The fence records a restore
+ * that replaced Postgres but has not reconciled the restored erasure exclusions yet, or one that
+ * stopped in between. Such a database is not a valid point to take a backup of: restoring that
+ * backup later would replay nothing from the unreconciled state and clear the fence over it.
+ * The role check below still runs, so a role that cannot dump at all gets its own message
+ * when no fence is raised. The read goes through the same connection and works for the table owner
+ * as well as for a role that bypasses RLS; only enumeration of tenant rows needs the bypass.
  */
-async function assertBackupRole(databaseUrl: string): Promise<void> {
+async function assertBackupAllowed(databaseUrl: string): Promise<void> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
   try {
+    let fence: RestoreFenceState | null;
+    try {
+      fence = await restoreFenceState(client);
+    } catch (err) {
+      // The fence table is revoked from PUBLIC. A role that cannot read it is normally one that
+      // cannot dump either, so let the role check explain that first; only a role that bypasses RLS
+      // but lacks SELECT reaches the message below.
+      if ((err as { code?: string }).code !== '42501') throw err;
+      await assertBypassesRls(client, 'am backup');
+      throw new Error(
+        `cannot read ${RESTORE_FENCE_TABLE} to check whether a restore is unfinished: the role that DATABASE_URL names has no ` +
+          'SELECT on it. Grant it SELECT on that table, or run the backup as a superuser.',
+      );
+    }
+    if (fence)
+      throw new Error(
+        `A restore of ${fence.backup} started at ${fence.startedAt} has not finished reconciling erasure exclusions, so this ` +
+          'database is not a valid point to back up. Run `am restore` for that backup again to completion, or ' +
+          '`am restore --clear-fence` to abandon it deliberately, then retry the backup.',
+      );
     await assertBypassesRls(client, 'am backup');
   } finally {
     await client.end().catch(() => {});
@@ -589,7 +620,7 @@ export async function createBackup(opts: CreateBackupOptions = {}): Promise<{ di
   const log = opts.log ?? (() => {});
   const databaseUrl = opts.databaseUrl ?? env.DATABASE_URL;
   if (!databaseUrl) throw new Error('DATABASE_URL is not set');
-  await assertBackupRole(databaseUrl);
+  await assertBackupAllowed(databaseUrl);
   const dir = opts.dir ? resolveUserPath(opts.dir, env) : resolveBackupDir(env);
   const keepDays = opts.keepDays ?? keepDaysFromEnv(env);
   const kind = opts.kind ?? 'manual';
