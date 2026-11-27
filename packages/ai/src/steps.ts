@@ -199,12 +199,27 @@ export async function finishIn(
     };
   },
 ) {
-  // Lock the person before the attempt fence. Erasure locks the profile row first and its cascade
-  // then deletes the `ai_calls` row; fencing the attempt first made a score finalisation wait for a
-  // profile erasure held while erasure waited for the `ai_calls` row the finalisation held, and
-  // PostgreSQL aborted one of them (#1274). Only a score step writes a profile, so only it takes
-  // the profile lock here.
-  const lockedProfile = c.kind === 'score' && c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
+  // Lock the person before the participant and the attempt fence: profile -> participant ->
+  // `ai_calls`, the order erasure uses. Erasure locks the profile, deletes (and holds) the
+  // participant rows and only then deletes the profile, whose cascade removes the `ai_calls` row.
+  // Fencing the attempt first made any journey finalisation wait for a participant row the erasure
+  // held while the erasure's cascade waited for the `ai_calls` row the finalisation held, and
+  // PostgreSQL aborted one of them (#1274). Every kind that names a person takes this order, not
+  // only a score step.
+  const lockedProfile = c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
+  // A person who is gone has no participant row to wait at: the wakeup below finds nothing and a
+  // done answer is recorded as late.
+  let waiting = true;
+  if (c.participantId) {
+    if (c.profileId && lockedProfile === null) waiting = false;
+    else {
+      const lockedParticipant = await tx.execute<{ id: string }>(sql`
+        SELECT id FROM journey_participants
+        WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'
+        FOR UPDATE`);
+      waiting = lockedParticipant.rows.length > 0;
+    }
+  }
   // Fence by attempt: a retry that took the lease over must keep the terminal outcome, while a
   // late original still adds the tokens the provider billed (#941 review).
   const owns = await ownsAttempt(tx, c);
@@ -236,27 +251,22 @@ export async function finishIn(
   // or the profile erased, is late and commits no score, so an erased person's scores cannot come
   // back.
   //
-  // Lock order: profile -> ai_calls (the attempt fence) -> participant -> profile_scores, the
+  // Lock order: profile -> participant -> ai_calls (the attempt fence) -> profile_scores, the
   // shared row order (see `packages/profiles/src/identity.ts`): an SDK batch that merges this
   // person locks the profile rows before it moves the participant rows, and the journey sweep locks
   // the profile row before it claims the participant row. Locking the participant first deadlocked
   // with a merge (#1011 review). `removeProfiles` takes the same profile lock before it deletes the
-  // person's participants and their `ai_calls` rows (the cascade), so the attempt fence has to come
-  // after the profile lock (#1274) — it is taken at the top of this function.
-  let waiting = true;
-  if (c.kind === 'score') {
+  // person's participants and their `ai_calls` rows (the cascade), so the profile lock and the
+  // participant row are taken at the top of this function, before the fence (#1274).
+  if (c.kind === 'score' && waiting && out.storeScore) {
     // `lockedProfile` at the top of this function resolved the person today, even when a merge has
     // folded the call's own profile id away (#1241), and locked only the canonical row: locking the
     // stored alias and then its survivor would invert the shared ascending-id profile lock order of
     // a merge (#1011). The shared helper follows a merge that commits while it waits.
-    const lockedParticipant = await tx.execute<{ id: string }>(sql`
-        SELECT id FROM journey_participants
-        WHERE workspace_id = ${c.workspaceId} AND id = ${c.participantId} AND node = ${c.node} AND seq = ${c.seq} AND status = 'waiting'
-        FOR UPDATE`);
-    waiting = lockedParticipant.rows.length > 0 && (!c.profileId || lockedProfile !== null);
+    //
     // The score and the wakeup commit together: a worker cannot claim the participant and read a
     // missing (or previous) value, and a failed score write leaves the step waiting to retry.
-    if (waiting && out.storeScore) await insertProfileScore(tx, c.workspaceId, out.storeScore);
+    await insertProfileScore(tx, c.workspaceId, out.storeScore);
   }
   // Wake the participant only if it still waits at this step; otherwise the answer came too late.
   const woke = waiting

@@ -11,6 +11,7 @@ import {
   DecisionError,
   decisionCall,
   decisionProvider,
+  lockCanonicalProfile,
   nonPersonalState,
   stateHash,
   storeProfileScore,
@@ -262,6 +263,13 @@ async function insertCall(
     error?: string;
   },
 ) {
+  // Lock the person before the call row names them, the order erasure takes: it locks the profile
+  // and then deletes it, and the cascade removes the person's `ai_calls` rows. Without the lock an
+  // erasure committing between the consent check and this insert left the foreign key pointing at a
+  // deleted profile and the write failed with a raw 23503. A person erased while this transaction
+  // waited has no row to name, so the usage is recorded without the profile (the score is not
+  // stored, as `insertProfileScore` also finds no canonical row).
+  const profileId = input.profileId ? await lockCanonicalProfile(tx, principal.workspaceId, input.profileId) : null;
   await tx
     .insert(schema.aiCalls)
     .values({
@@ -271,7 +279,7 @@ async function insertCall(
       status: out.status,
       providerId: provider.providerId,
       model: out.modelVersion ?? provider.model,
-      profileId: input.profileId ?? null,
+      profileId,
       input: {
         stateHash: stateHash(state),
         stateTokens: Math.ceil(JSON.stringify(state ?? null).length / 4),

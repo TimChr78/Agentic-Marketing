@@ -3,7 +3,8 @@ import { AppError, newId } from '@agentic-marketing/core';
 import { schema } from '@agentic-marketing/db';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { aiAllowed, redact } from './context';
+import { aiAllowed, NO_PROFILE, redact } from './context';
+import { lockCanonicalProfile } from './decision';
 import { promptVersion } from './prompts';
 
 // ai.classify: label a text (an inbound reply, a form message, a review) with one of a classify
@@ -59,9 +60,16 @@ export const classify = defineCommand({
     if (input.profileId) {
       const consent = await aiAllowed(ctx.tx, ctx.principal.workspaceId, input.profileId);
       if (!consent.ok) throw new AppError('forbidden', `This person's data may not be processed with AI (${consent.reason}).`);
+      // Lock the person before the call row names them, the order erasure takes: it locks the
+      // profile and then deletes it, and the cascade removes the person's `ai_calls` rows. Without
+      // the lock an erasure committing between the consent read and this insert left the foreign
+      // key pointing at a deleted profile and the caller saw a raw 23503. The lock also follows a
+      // merge that lands after the gate, so the call still names the person the gate answered for.
+      const locked = await lockCanonicalProfile(ctx.tx, ctx.principal.workspaceId, consent.profileId);
+      if (!locked) throw new AppError('forbidden', `This person's data may not be processed with AI (${NO_PROFILE}).`);
       // The worker stores the label on the person the gate answered for, so queue the call under
       // the canonical id a merge leaves rather than the id the caller happened to hold.
-      profileId = consent.profileId;
+      profileId = locked;
     }
     const callId = newId('aic');
     await ctx.tx.insert(schema.aiCalls).values({
