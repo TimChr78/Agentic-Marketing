@@ -224,10 +224,12 @@ export interface CommandDef<I extends z.ZodType = z.ZodType, O extends z.ZodType
   /** Top-level output fields shown once (e.g. an invitation token): an idempotent replay returns them redacted. */
   sensitiveOutput?: readonly string[];
   /**
-   * A fixed text stored in the audit log and the agent ledger instead of the error's own message
-   * when this command fails. For a command whose failure can quote the person it was about (a
-   * provider echoing the request): the caller still gets its own error, but the long-lived stores
-   * keep only this diagnostic. The code is prefixed, e.g. `conflict: <failureText>`.
+   * A fixed text stored in the audit log and the agent ledger instead of a provider's own error
+   * message. For a command whose failure can quote the person it was about (a provider echoing the
+   * request): the caller still gets its own error, but the long-lived stores keep only this
+   * diagnostic in place of a {@link ProviderError}. Any other failure — a policy denial, a
+   * validation refusal, an executor conflict — keeps its own reason. The audit log prefixes the
+   * code (`conflict: <failureText>`); the agent ledger keeps the message alone.
    */
   failureText?: string;
   /**
@@ -379,27 +381,26 @@ export type AuditedError = { code: string; message: string };
 export const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
 
 /**
- * The error codes whose message is this codebase's own text: a policy denial, a permission or
- * existence refusal, or input validation. None can quote a provider's answer, so a command with a
- * `failureText` keeps them instead of replacing every failure with the provider diagnostic (#1300).
+ * An AppError whose message came from an AI provider (or another external model service) rather
+ * than from this codebase. The caller still gets the provider's redacted text, but only this
+ * provenance gets a command's fixed `failureText` in the long-lived stores: a provider may quote the
+ * person's data back. An executor-owned failure (an idempotency-key reuse, a missing service, a
+ * budget or configuration refusal) is a plain AppError and keeps its own reason (#1300 review).
  */
-const OWN_FAILURE_CODES = new Set(['invalid_input', 'unauthorized', 'forbidden', 'not_found', 'precondition_failed']);
+export class ProviderError extends AppError {}
 
 /**
  * The diagnostic a failure leaves in the long-lived stores (the audit log and the agent ledger),
  * chosen in one place so a preflight refusal, a policy denial and a handler failure agree. A
- * command's `failureText` replaces the message only of a failure that may carry the provider's own
- * text (a `conflict`); an expected refusal keeps its own reason, and an unexpected exception keeps
- * the one fixed marker. Both stores write it as `code: message`.
+ * command's `failureText` replaces the message only of a failure that may carry a provider's own
+ * text; an expected refusal keeps its own reason, and an unexpected exception keeps the one fixed
+ * marker. The audit log writes it as `code: message`; the agent ledger keeps the message alone.
  */
 export function storedFailure(cmd: { failureText?: string }, err: AppError | null): AuditedError {
   if (!err) return UNEXPECTED_FAILURE;
-  if (cmd.failureText !== undefined && !OWN_FAILURE_CODES.has(err.code)) return { code: err.code, message: cmd.failureText };
+  if (cmd.failureText !== undefined && err instanceof ProviderError) return { code: err.code, message: cmd.failureText };
   return { code: err.code, message: err.message };
 }
-
-/** `code: message`, the form both persistent stores record. */
-const failureLine = (error: AuditedError) => `${error.code}: ${error.message}`;
 
 /**
  * Appends one entry to a workspace's audit log, keeping its hash chain. The executor calls this for
@@ -458,6 +459,8 @@ export function sanitizeAppError(err: AppError): AppError {
     const changed = message !== err.message || reasons.some((r, i) => r !== err.outcome.reasons[i]);
     return changed ? new PolicyDeniedError({ ...err.outcome, reasons }) : err;
   }
+  // Redaction rebuilds the error, so the provider provenance has to be carried over with it.
+  if (err instanceof ProviderError) return message === err.message ? err : new ProviderError(err.code, message, details);
   return message === err.message && details === err.details ? err : new AppError(err.code, message, details);
 }
 
@@ -878,12 +881,14 @@ export function createExecutor(db: Db, services: Services, options: ExecutorOpti
         // log. The original exception stays on the span for diagnostics (#838). An AppError's own
         // message is redacted before it is stored (#885): it may name a credential a provider echoed.
         const safe = err instanceof AppError ? sanitizeAppError(err) : null;
-        // One rule picks the stored diagnostic for the audit log and the agent ledger alike (#1300).
-        const failure = failureLine(storedFailure(cmd, safe));
+        // One rule picks the stored diagnostic for the audit log and the agent ledger alike; each
+        // store then keeps its established format for it (#1300 review). The ledger records the
+        // message alone (agents.activity shows it beside the command), the audit log `code: message`.
+        const failure = storedFailure(cmd, safe);
         if (agent && outcome)
           await db
             .withWorkspace(principal.workspaceId, (tx) =>
-              recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure, intentOf(parsed.data)),
+              recordAgentAction(tx, agent.id, cmd, outcome, opts.surface, target, failure.message, intentOf(parsed.data)),
             )
             .catch((e) => span.recordException(e as Error));
         if (safe) return fail(safe);

@@ -1,5 +1,5 @@
 import { canonicalProfileId, decisionQuestions } from '@agentic-marketing/artifacts';
-import { defineCommand } from '@agentic-marketing/commands';
+import { defineCommand, ProviderError } from '@agentic-marketing/commands';
 import { AppError, isoDateTime, newId, safeErrorText } from '@agentic-marketing/core';
 import { type Db, schema, type Tx } from '@agentic-marketing/db';
 import { canonicalProfile } from '@agentic-marketing/profiles';
@@ -58,11 +58,14 @@ const Answer = z.object({
 const appError = (err: unknown): never => {
   if (err instanceof DecisionError) {
     // A DecisionError's message is written for the caller, and decision.ts already reduces a
-    // provider's answer to its own code and message (#885), so it can be copied as is. The
-    // executor stores a fixed diagnostic for this command instead (#1300).
-    if (err.code === 'no_provider') throw new AppError('conflict', err.message);
+    // provider's answer to its own code and message (#885), so it can be copied as is.
     if (err.code === 'personal_data' || err.code === 'too_many_questions' || err.code === 'too_large' || err.code === 'invalid_request')
       throw new AppError('invalid_input', err.message);
+    // A transport failure, a timeout or an unreadable answer may quote the person's state back.
+    // Mark that provenance so the fixed diagnostic replaces it in the long-lived stores; a
+    // configuration refusal (no provider) and an executor conflict keep their own reason (#1300).
+    if (err.code === 'provider_error' || err.code === 'timeout' || err.code === 'invalid_response')
+      throw new ProviderError('conflict', err.message);
     throw new AppError('conflict', err.message);
   }
   if (err instanceof AiUnavailable) throw new AppError('conflict', err.message);

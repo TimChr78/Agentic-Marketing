@@ -3,12 +3,14 @@ import { createDb } from '@agentic-marketing/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import { APP_ROLE, createDisposableDb, type DisposableDb, hasTestDatabase } from '../../db/test/disposable';
-import { agentPrincipal, createExecutor, defineCommand, type Executor, userPrincipal } from '../src';
+import { agentPrincipal, createExecutor, defineCommand, type Executor, ProviderError, userPrincipal } from '../src';
 
 // #1300: a failed profile-bound AI command could store the provider's own message in the audit log
 // and the agent ledger, and a provider may quote the person's data back in that message. A command
-// that declares `failureText` records that fixed diagnostic instead, while the caller still gets
-// its own error. The copy is shared by both stores, so one rule covers the audit log and the ledger.
+// that declares `failureText` records that fixed diagnostic in place of a provider's text, while
+// the caller still gets its own error. The diagnostic is chosen once and formatted per store: the
+// audit log keeps `code: message`, the ledger the message alone. Only a failure whose text came
+// from a provider takes the fixed copy; the executor's own conflicts keep their reason.
 
 const SENTINEL = 'provider said: Ada Lovelace <ada@example.com>';
 const FIXED = 'the AI provider refused or failed';
@@ -24,8 +26,23 @@ const providerBound = defineCommand({
   actionClass: 'draft',
   failureText: FIXED,
   handler: async () => {
-    throw new AppError('conflict', SENTINEL);
+    // The provider answered, and its answer quotes the person.
+    throw new ProviderError('conflict', SENTINEL);
   },
+});
+
+/** A command with a fixed failure text that succeeds, so a reused key reaches the executor's conflict. */
+const reusable = defineCommand({
+  name: 'test.providerBoundReusable',
+  title: 'A profile-bound AI command with a key',
+  description: 'A test-only write that succeeds once and answers a reused idempotency key.',
+  input: z.object({ n: z.number() }),
+  output: z.object({ n: z.number() }),
+  permission: null,
+  effect: 'write',
+  actionClass: 'draft',
+  failureText: FIXED,
+  handler: async (input) => ({ n: input.n }),
 });
 
 const ordinary = defineCommand({
@@ -162,7 +179,7 @@ describe.skipIf(!hasTestDatabase())('a profile-bound AI failure stores a fixed d
       statusReason: null,
     });
     await expect(executor.execute(providerBound, { profileId: 'prf_x' }, principal, { surface: 'mcp' })).rejects.toThrow(SENTINEL);
-    expect(await ledgerError('test.providerBoundFailure')).toBe(`conflict: ${FIXED}`);
+    expect(await ledgerError('test.providerBoundFailure')).toBe(FIXED);
   }, 60_000);
 
   it('leaves the stored message of a command without a fixed failure text alone', async () => {
@@ -170,6 +187,24 @@ describe.skipIf(!hasTestDatabase())('a profile-bound AI failure stores a fixed d
       'still published',
     );
     expect(await auditErrors('test.ordinaryFailure')).toEqual(['conflict: the artifact is still published']);
+  }, 60_000);
+
+  it('keeps the executor’s own conflict reason when an idempotency key is reused', async () => {
+    // A reused key refuses before the handler runs: no provider was involved, so the stored
+    // diagnostic must not call it a provider failure.
+    const principal = agentPrincipal('usr_probe', 'client_probe', workspaceId(), 'owner', ['artifacts:write'], {
+      id: agentId,
+      name: 'Failure text probe',
+      status: 'active',
+      statusReason: null,
+    });
+    const key = `reuse-${Date.now()}`;
+    await executor.execute(reusable, { n: 1 }, principal, { surface: 'mcp', idempotencyKey: key });
+    await expect(executor.execute(reusable, { n: 2 }, principal, { surface: 'mcp', idempotencyKey: key })).rejects.toThrow('already used');
+    const own = 'This idempotency key was already used for a different request. Use a new key.';
+    // The conflict is answered before the policy engine runs, so it has an audit row and no ledger
+    // row; the audit copy is the one that used to call this a provider failure.
+    expect((await auditErrors('test.providerBoundReusable')).filter(Boolean)).toEqual([`conflict: ${own}`]);
   }, 60_000);
 
   it('keeps a policy refusal’s own reason instead of calling it a provider failure', async () => {
@@ -188,7 +223,7 @@ describe.skipIf(!hasTestDatabase())('a profile-bound AI failure stores a fixed d
     });
     await expect(executor.execute(invalid, {}, principal, { surface: 'mcp' })).rejects.toThrow('personal data');
     expect(await auditErrors('test.providerBoundInvalid')).toEqual(['invalid_input: The state has personal data.']);
-    expect(await ledgerError('test.providerBoundInvalid')).toBe('invalid_input: The state has personal data.');
+    expect(await ledgerError('test.providerBoundInvalid')).toBe('The state has personal data.');
   }, 60_000);
 
   it('keeps a preflight refusal’s own validation text', async () => {
@@ -207,8 +242,8 @@ describe.skipIf(!hasTestDatabase())('a profile-bound AI failure stores a fixed d
       statusReason: null,
     });
     await expect(executor.execute(crashed, {}, principal, { surface: 'mcp' })).rejects.toThrow('boom');
-    const marker = 'internal: The command failed with an unexpected error.';
-    expect(await auditErrors('test.providerBoundCrash')).toEqual([marker]);
-    expect(await ledgerError('test.providerBoundCrash')).toBe(marker);
+    // The audit log prefixes the code; the ledger keeps the established message alone.
+    expect(await auditErrors('test.providerBoundCrash')).toEqual(['internal: The command failed with an unexpected error.']);
+    expect(await ledgerError('test.providerBoundCrash')).toBe('The command failed with an unexpected error.');
   }, 60_000);
 });
