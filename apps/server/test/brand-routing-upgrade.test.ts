@@ -43,6 +43,11 @@ describe('public routes before any brand domain is verified', () => {
     expect(await get(`/u/${token}`, '192.168.1.20:8080')).toBe(200);
   });
 
+  it('keep the admin surface reachable on any Host while checking is off (#1279)', async () => {
+    expect(await get('/openapi.json', 'proxy-rewritten.internal')).toBe(200);
+    expect(await get('/api/auth/get-session', '192.168.1.20:8080')).toBe(200);
+  });
+
   it('start checking the Host once a domain is verified', async () => {
     t.srv.services.fetchDomainChallenge = async (url) => ({
       status: 200,
@@ -54,6 +59,10 @@ describe('public routes before any brand domain is verified', () => {
     const token = signer.sign({ w: ws, p: newId('prf'), u: 'marketing_email', m: newId('msg') });
     expect(await get(`/u/${token}`, 'brand.example')).toBe(200);
     expect(await get(`/u/${token}`, 'proxy-rewritten.internal')).toBe(404);
+    // The admin surface follows: PUBLIC_URL's host alone, while health answers on any Host (#1279).
+    expect(await get('/openapi.json', 'proxy-rewritten.internal')).toBe(404);
+    expect(await get('/openapi.json', `localhost:${PORT}`)).toBe(200);
+    expect(await get('/healthz', '192.168.1.20:8080')).toBe(200);
   });
 
   it('keeps checking the Host after the last verified domain is removed (#463)', async () => {
@@ -63,5 +72,8 @@ describe('public routes before any brand domain is verified', () => {
     expect(await get(`/u/${token}`, '192.168.1.20:8080')).toBe(404);
     // The installation fallback host keeps serving.
     expect(await get(`/u/${token}`, 'links.example')).toBe(200);
+    // The admin surface stays on PUBLIC_URL's host after the last domain is gone (#1279).
+    expect(await get('/openapi.json', 'proxy-rewritten.internal')).toBe(404);
+    expect(await get('/openapi.json', `localhost:${PORT}`)).toBe(200);
   });
 });

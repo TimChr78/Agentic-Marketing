@@ -160,9 +160,10 @@ Normalisation runs before the row is written, so `MartechSignal.COM` and `martec
 same host, and `/am/` and `am` are the same prefix. Host resolution for a request (before any
 workspace is known) reads the registry installation-wide and picks the **longest matching path
 prefix**, so several prefixes on one brand's host can coexist. Once any domain has been verified, an
-unknown host on a public path is answered with 404; admin routes keep using the session and
-`X-Workspace-Id`. That switch is an installation policy and stays on even if the last verified domain
-is later removed (#463).
+unknown Host is answered with 404, and the admin and API surface (UI, auth, MCP, SCIM and admin REST)
+answers only on `PUBLIC_URL`'s host; admin routes keep using the session and `X-Workspace-Id`. That
+switch is an installation policy and stays on even if the last verified domain is later removed
+(#463).
 
 ### Verify a domain
 
@@ -222,7 +223,7 @@ Every public request resolves its `Host` and path prefix to one workspace before
 
 - a verified registered domain → that workspace;
 - the host (and prefix) of `PUBLIC_LINKS_URL` → the installation fallback, exactly as before;
-- any other host → `404`, never the admin UI and never another brand's page.
+- any other host → `404` for every admin and public path, never the admin UI and never another brand's page (the health probes `/healthz` and `/readyz`, and the token-guarded `/metrics`, answer on every host).
 
 Until the first domain is verified, the installation keeps its old behaviour: public paths answer on
 any `Host`, so an upgrade does not break a proxy that rewrites `Host` or a LAN address used for
