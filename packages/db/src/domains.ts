@@ -176,6 +176,8 @@ export interface WorkspaceDomainResolver {
   resolveWorkspaceForRequest(host: string, path: string): Promise<ResolvedWorkspaceDomain | null>;
   /** Whether Host is a verified brand host, whatever path it was asked for (#1157). */
   isBrandHost(host: string): Promise<boolean>;
+  /** Whether Host is registered but not verified yet, so it must never reach the admin surface. */
+  isPendingHost(host: string): Promise<boolean>;
   /** The origin+prefix a workspace's primary domain serves, or null when it has no primary. */
   linksUrlFor(workspaceId: string): Promise<string | null>;
   /**
@@ -275,6 +277,15 @@ export function createWorkspaceDomainResolver(db: Db, options: DomainResolverOpt
         return false;
       }
       return (await load()).rows.some((row) => row.status === 'verified' && row.host === normalizedHost);
+    },
+    async isPendingHost(host) {
+      let normalizedHost: string;
+      try {
+        normalizedHost = normalizeHost(host);
+      } catch {
+        return false;
+      }
+      return (await load()).rows.some((row) => row.status === 'pending' && row.host === normalizedHost);
     },
     async linksUrlFor(workspaceId) {
       const domain = (await load()).rows.find((row) => row.workspaceId === workspaceId && row.isPrimary && row.status === 'verified');

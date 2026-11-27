@@ -35,6 +35,8 @@ let failDeletes = false;
 const forbiddenNamespaces = new Set<string>();
 const calls: { method: string; path: string; auth: string }[] = [];
 const yes = { consent: { categoryPreferences: { analytics: true, web_personalization: true } } };
+// Experiment event times are relative to the run: a fixed calendar date ages out of a windowed read (#1202).
+const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 
 const send = (batch: unknown[]) =>
   fetch(`${t.base}/v1/batch`, {
@@ -500,7 +502,7 @@ describe('preview and results', () => {
       anonymousId,
       properties: { experience_id: exp, variant_id: variant, version, placement: 'versioned_hero' },
       context: yes,
-      timestamp: '2026-11-10T09:00:00Z',
+      timestamp: minutesAgo(180),
     });
     const order = (anonymousId: string, at: string) => ({
       type: 'track',
@@ -518,7 +520,7 @@ describe('preview and results', () => {
       anonymousId,
       properties: { experience_id: exp, variant_id: 'control', placement: 'versioned_hero' },
       context: yes,
-      timestamp: '2026-11-10T09:00:00Z',
+      timestamp: minutesAgo(180),
     });
     // Three v1 "a" visitors and two v1 "b" visitors: ids the republished version no longer has.
     await send([...['a0', 'a1', 'a2'].map((v) => viewed(`ver-${v}`, 'a', 1)), ...['b0', 'b1'].map((v) => viewed(`ver-${v}`, 'b', 1))]);
@@ -534,7 +536,7 @@ describe('preview and results', () => {
     await send([
       ...['c0', 'c1', 'c2', 'c3', 'c4'].map((v) => viewed(`ver-${v}`, 'control', 2)),
       ...['t0', 't1', 't2', 't3', 't4'].map((v) => viewed(`ver-${v}`, 'treatment', 2)),
-      order('ver-t0', '2026-11-10T10:00:00Z'),
+      order('ver-t0', minutesAgo(120)),
     ]);
     await send([viewedWithoutVersion('ver-u0'), viewedWithoutVersion('ver-u1')]);
     // ClickHouse is written asynchronously; wait for every exposure before comparing counts.
@@ -596,7 +598,7 @@ describe('preview and results', () => {
       anonymousId,
       properties: { experience_id: exp, variant_id: variant, version: 1, placement: 'privacy_hero' },
       context: yes,
-      timestamp: '2026-11-11T09:00:00Z',
+      timestamp: minutesAgo(180),
     });
     const order = (anonymousId: string, at: string) => ({
       type: 'track',
@@ -608,8 +610,8 @@ describe('preview and results', () => {
     await send([
       ...Array.from({ length: 5 }, (_, i) => viewed(`priv-c${i}`, 'control')),
       ...Array.from({ length: 2 }, (_, i) => viewed(`priv-t${i}`, 'treatment')),
-      order('priv-c0', '2026-11-11T10:00:00Z'),
-      order('priv-t0', '2026-11-11T10:00:00Z'),
+      order('priv-c0', minutesAgo(120)),
+      order('priv-t0', minutesAgo(120)),
     ]);
     await eventually(
       async () => {

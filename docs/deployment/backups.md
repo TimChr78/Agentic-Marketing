@@ -354,8 +354,11 @@ contents but does not create them.
   ClickHouse load, which then replaces the published exclusions. Stop the app first, as above.
 - waits for a previous restore's work before it writes. Right after taking the lock it polls for up
   to 60 seconds until no other backend on the target database announces `application_name =
-  am-restore` and no ClickHouse request carries the `am-restore-` query marker, then refuses with
-  `a previous restore's work is still running` if either is still there. The advisory lock cannot
+  am-restore` or `am-backup` and no ClickHouse request carries the `am-restore-` query marker, then
+  refuses with `a previous restore's work is still running` (or `a backup is still running` for
+  `am-backup`) if any is still there. A backup's `pg_dump` announces `am-backup`, so a running
+  backup no longer looks like a previous restore, and the restore waits for it rather than reading
+  while the database changes under the dump. The advisory lock cannot
   fence work on other connections: the role setup, migration, erasure replay and reconciliation
   pools, the `pg_restore` child and ClickHouse `TRUNCATE`/`INSERT` requests all carry the marker.
   The ClickHouse load inserts synchronously (`async_insert=0`), so an insert stays visible until it

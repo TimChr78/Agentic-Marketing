@@ -205,6 +205,36 @@ describe('brand host routing', () => {
     expect(formVersionB).toBeGreaterThan(0);
   });
 
+  it('keeps a verified host scoped when a pending row shares that host (#1230 review)', async () => {
+    // The registry's uniqueness is (host, prefix), so workspace A can hold A verified at the root
+    // and the same host pending at a prefix. The pending check is per host and used to run before
+    // resolution, so the whole host lost its brand scoping while that row existed.
+    const second = await t.api(ownerA, wsA).call('workspace.domains.add', { host: A, pathPrefix: '/side', isPrimary: false });
+    expect(second.domain.status).toBe('pending');
+
+    // Another workspace's form stays refused on A's verified host.
+    const crossed = await request(MAIN_PORT, `/f/${formB}`, {
+      method: 'POST',
+      host: A,
+      body: new URLSearchParams({ email: `reader-b-${Date.now()}@example.com` }).toString(),
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: SITE_B },
+    });
+    expect(crossed.status).toBe(404);
+
+    // A's own form still works on its own host.
+    const own = await request(MAIN_PORT, `/f/${formA}`, {
+      method: 'POST',
+      host: A,
+      body: new URLSearchParams({ email: `reader-a-${Date.now()}@example.com` }).toString(),
+      headers: { 'content-type': 'application/x-www-form-urlencoded', origin: SITE_A },
+    });
+    expect(own.status).toBe(303);
+    expect(own.headers.location).toBe(`${SITE_A}/thanks`);
+
+    // The admin surface stays closed on the verified brand host, pending row or not.
+    expect((await request(MAIN_PORT, '/login', { host: A })).status).toBe(404);
+  });
+
   it('serves confirm, unsubscribe and preference pages only on the owning host', async () => {
     const confirm = signer.sign({
       k: 'doi',

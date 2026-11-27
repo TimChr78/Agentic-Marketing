@@ -10,6 +10,8 @@ let owner: User;
 let key: string;
 const ids = { hero: '', banner: '', overlay: '' };
 const yes = { consent: { categoryPreferences: { analytics: true, web_personalization: true } } };
+// Event times are relative to the run: a fixed calendar date ages out of a windowed read (#1202).
+const minutesAgo = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 const contextualOnly = { consent: { categoryPreferences: { analytics: true, web_personalization: false } } };
 
 beforeAll(async () => {
@@ -167,17 +169,17 @@ describe('experiment results', () => {
       anonymousId: v,
       properties: { experience_id: ids.hero, variant_id: variant, version: 1, placement: 'home_hero' },
       context: yes,
-      timestamp: '2026-10-21T10:00:00Z',
+      timestamp: minutesAgo(180),
     });
     const order = (v: string, at: string) => ({ type: 'track', event: 'Order Completed', anonymousId: v, context: yes, timestamp: at });
     const batch = [
       ...Array.from({ length: 10 }, (_, i) => viewed(`x-a${i}`, 'a')),
       ...Array.from({ length: 10 }, (_, i) => viewed(`x-b${i}`, 'b')),
       // Two "a" visitors and five "b" visitors buy after seeing it; one "a" visitor bought only before.
-      order('x-a0', '2026-10-21T11:00:00Z'),
-      order('x-a1', '2026-10-21T11:00:00Z'),
-      order('x-a2', '2026-10-21T09:00:00Z'),
-      ...Array.from({ length: 5 }, (_, i) => order(`x-b${i}`, '2026-10-21T12:00:00Z')),
+      order('x-a0', minutesAgo(120)),
+      order('x-a1', minutesAgo(120)),
+      order('x-a2', minutesAgo(240)),
+      ...Array.from({ length: 5 }, (_, i) => order(`x-b${i}`, minutesAgo(60))),
     ];
     expect((await post('/v1/batch', { batch })).status).toBe(200);
     const r = await eventually(

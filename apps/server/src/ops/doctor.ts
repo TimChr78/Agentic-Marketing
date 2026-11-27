@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { type Check, checkConfig, envFileChecks, envFileValues, liveChecks, offlineChecks } from './checks';
+import { SUPPLIED_BY_COMPOSE } from './env-history';
 
 // `am doctor`: check this install without changing it. Offline checks always run; live checks run
 // only when the configuration is valid, and every network operation has a short timeout.
@@ -105,6 +106,25 @@ async function readEnvFile(envFile: string): Promise<{ label: string; text: stri
   }
 }
 
+/**
+ * The environment the checks see: the process's own values with the piped `.env` laid over them.
+ *
+ * The file may describe a different `.env` than the container's environment (the upgrade flow
+ * pipes it in), so its values win — except for variables Compose sets in the container itself.
+ * A `.env` copied from `.env.example`, or written by `am init`, keeps the template's development
+ * `DATABASE_URL` (`localhost:5432`); letting that override the Compose-built URL made doctor
+ * report a healthy install as "Postgres is unreachable" (#1267).
+ */
+export function mergeEnvFile(base: NodeJS.ProcessEnv, fileText: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  for (const [key, value] of Object.entries(envFileValues(fileText))) {
+    if (value === '') continue;
+    if (SUPPLIED_BY_COMPOSE.has(key) && (base[key] ?? '') !== '') continue;
+    env[key] = value;
+  }
+  return env;
+}
+
 export async function run(args: string[]): Promise<number> {
   let values: { json?: boolean; help?: boolean; 'env-file'?: string; from?: string };
   try {
@@ -128,8 +148,9 @@ export async function run(args: string[]): Promise<number> {
   }
 
   // The file may describe a different .env than the container's environment (the upgrade flow
-  // pipes it in), so its values win when present.
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  // pipes it in), so its values win when present — except the ones Compose supplies itself
+  // (#1267).
+  let env: NodeJS.ProcessEnv = { ...process.env };
   let fileText: string | undefined;
   let readCheck: Check | undefined;
   const envFile = values['env-file']?.trim();
@@ -138,7 +159,7 @@ export async function run(args: string[]): Promise<number> {
     if ('check' in input) readCheck = input.check;
     else {
       fileText = input.text;
-      for (const [key, value] of Object.entries(envFileValues(fileText))) if (value !== '') env[key] = value;
+      env = mergeEnvFile(process.env, fileText);
     }
   }
 
