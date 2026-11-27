@@ -2,7 +2,7 @@ import { mergeRepresentative } from '@agentic-marketing/artifacts';
 import { AppError, newId } from '@agentic-marketing/core';
 import { type Db, type ErasureKeyKind, enqueueErasureCleanupJob, schema, type Tx } from '@agentic-marketing/db';
 import { type KeyProvider, newDataKey, open, type PreparedKeys, prepareKeys, seal } from '@agentic-marketing/secrets';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { mergedFamily } from './consent';
 import { personCrypto } from './crypto';
 import { exclusionHasher, prepareExclusionKey } from './exclusion';
@@ -18,6 +18,16 @@ const IV = 12;
 const TAG = 16;
 const pack = (s: { iv: Buffer; authTag: Buffer; ciphertext: Buffer }) => Buffer.concat([s.iv, s.authTag, s.ciphertext]);
 const unpack = (b: Buffer) => ({ iv: b.subarray(0, IV), authTag: b.subarray(IV, IV + TAG), ciphertext: b.subarray(IV + TAG) });
+
+/**
+ * Rows per insert in the stage's batched writes. Nothing bounds how many identifiers a profile
+ * carries: the resolver attaches every unknown identifier an event names, so a long-lived person
+ * (a shared device, a service account) accumulates thousands. One statement may bind at most 65,535
+ * parameters — six per ledger row, three per tombstone, four per suppression — and an insert that
+ * overruns it fails on every retry, leaving the person unerasable. The tombstones and the ledger
+ * keep their upsert semantics per batch; they share this transaction.
+ */
+const INSERT_ROWS = 1_000;
 
 /** The anonymous and user ids a cleanup needs to find the person's events and hot-state keys. */
 export interface ErasureSelectors {
@@ -81,6 +91,15 @@ export function openSelectors(key: Buffer, sealed: Buffer): ErasureSelectors {
 }
 
 /**
+ * `= ANY($1::text[])`, binding one parameter for a whole list. A person's identifier list and a
+ * merged family have no bound, and PostgreSQL refuses a statement that binds more than 65,535
+ * parameters (`08P01`), so a large list must travel as one array — the same shape the row lock and
+ * the restore replay use. A statement that overran it rolled back the stage, and the person could
+ * never be erased.
+ */
+const anyOf = (values: readonly string[]) => sql`= ANY(${sql.param([...values])}::text[])`;
+
+/**
  * Removes the person's SQL rows. The external deletes are not here any more: the erasure's job
  * owns them, so this runs entirely inside one transaction with no network I/O.
  */
@@ -97,39 +116,41 @@ export async function removeProfiles(
   await lockProfileRows(tx, workspaceId, family, { includeMerged: true });
   const anonymousIds = identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value);
   const userIds = identifiers.filter((i) => i.type === 'user_id').map((i) => i.value);
-  if (anonymousIds.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.anonymousId, anonymousIds));
-  if (userIds.length) await tx.delete(schema.pushSubscriptions).where(inArray(schema.pushSubscriptions.userId, userIds));
-  await tx.delete(schema.messages).where(inArray(schema.messages.profileId, family));
+  if (anonymousIds.length)
+    await tx.delete(schema.pushSubscriptions).where(sql`${schema.pushSubscriptions.anonymousId} ${anyOf(anonymousIds)}`);
+  if (userIds.length) await tx.delete(schema.pushSubscriptions).where(sql`${schema.pushSubscriptions.userId} ${anyOf(userIds)}`);
+  await tx.delete(schema.messages).where(sql`${schema.messages.profileId} ${anyOf(family)}`);
   // Out of every journey: no later step runs, and the participant's context (the trigger event) goes too.
-  await tx.delete(schema.journeyParticipants).where(inArray(schema.journeyParticipants.profileId, family));
+  await tx.delete(schema.journeyParticipants).where(sql`${schema.journeyParticipants.profileId} ${anyOf(family)}`);
   // The journey hook's per-event markers are the person's too: an event id is caller-supplied and can
   // name them, and a marker sitting on a merged-away id comes with the family (#1011 review).
-  await tx.delete(schema.journeyProcessedEvents).where(inArray(schema.journeyProcessedEvents.profileId, family));
+  await tx.delete(schema.journeyProcessedEvents).where(sql`${schema.journeyProcessedEvents.profileId} ${anyOf(family)}`);
   // Out of every segment's materialised membership; static list rows cascade with the profile below.
-  await tx.delete(schema.segmentMemberships).where(inArray(schema.segmentMemberships.profileId, family));
+  await tx.delete(schema.segmentMemberships).where(sql`${schema.segmentMemberships.profileId} ${anyOf(family)}`);
   // Holdout arms (`holdout_assignments`) go with the profile rows below: their foreign key to
   // profiles cascades, and the table is append-only for the app role (#1048).
   const suppress = opts.suppress ? identifiers.filter((i) => i.type === 'email' || i.type === 'phone') : [];
-  if (suppress.length)
-    await tx
-      .insert(schema.suppressions)
-      .values(
-        suppress.map((i) => ({
-          workspaceId,
-          channel: i.type === 'email' ? ('email' as const) : ('sms' as const),
-          valueHash: i.value,
-          reason: 'erased' as const,
-        })),
-      )
-      .onConflictDoNothing();
+  if (suppress.length) {
+    const rows = suppress.map((i) => ({
+      workspaceId,
+      channel: i.type === 'email' ? ('email' as const) : ('sms' as const),
+      valueHash: i.value,
+      reason: 'erased' as const,
+    }));
+    for (let i = 0; i < rows.length; i += INSERT_ROWS)
+      await tx
+        .insert(schema.suppressions)
+        .values(rows.slice(i, i + INSERT_ROWS))
+        .onConflictDoNothing();
+  }
   const consent = await tx
     .delete(schema.consentRecords)
-    .where(inArray(schema.consentRecords.profileId, family))
+    .where(sql`${schema.consentRecords.profileId} ${anyOf(family)}`)
     .returning({ id: schema.consentRecords.id });
-  await tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.fromId, family));
-  await tx.delete(schema.profileMerges).where(inArray(schema.profileMerges.intoId, family));
+  await tx.delete(schema.profileMerges).where(sql`${schema.profileMerges.fromId} ${anyOf(family)}`);
+  await tx.delete(schema.profileMerges).where(sql`${schema.profileMerges.intoId} ${anyOf(family)}`);
   // Cascades to identifiers, profile keys (crypto-shredding), consent state and decision scores.
-  await tx.delete(schema.profiles).where(inArray(schema.profiles.id, family));
+  await tx.delete(schema.profiles).where(sql`${schema.profiles.id} ${anyOf(family)}`);
   return {
     profiles: family.length,
     identifiers: identifiers.length,
@@ -183,7 +204,7 @@ async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promis
   const identifiers = await tx
     .select()
     .from(schema.identifiers)
-    .where(and(eq(schema.identifiers.workspaceId, workspaceId), inArray(schema.identifiers.profileId, family)));
+    .where(and(eq(schema.identifiers.workspaceId, workspaceId), sql`${schema.identifiers.profileId} ${anyOf(family)}`));
 
   const erasureId = newId('era');
   const crypto = personCrypto(tx, workspaceId, prepared.matching.provider);
@@ -191,13 +212,14 @@ async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promis
   // resolver drop events that were queued or arrive late (#210). The matching key came prepared.
   if (identifiers.length) {
     const hashes = [...new Set(await Promise.all(identifiers.map((i) => crypto.tombstoneHash(i.type, i.value))))];
-    await tx
-      .insert(schema.erasureTombstones)
-      .values(hashes.map((identHash) => ({ workspaceId, identHash, erasedAt: sql`now()`, erasureId })))
-      .onConflictDoUpdate({
-        target: [schema.erasureTombstones.workspaceId, schema.erasureTombstones.identHash],
-        set: { erasedAt: sql`now()`, erasureId },
-      });
+    for (let i = 0; i < hashes.length; i += INSERT_ROWS)
+      await tx
+        .insert(schema.erasureTombstones)
+        .values(hashes.slice(i, i + INSERT_ROWS).map((identHash) => ({ workspaceId, identHash, erasedAt: sql`now()`, erasureId })))
+        .onConflictDoUpdate({
+          target: [schema.erasureTombstones.workspaceId, schema.erasureTombstones.identHash],
+          set: { erasedAt: sql`now()`, erasureId },
+        });
   }
 
   // The durable erasure-key ledger (#1037): every identifier is HMAC_exclusion(kind, value) under
@@ -244,14 +266,17 @@ async function eraseProfileStageLocked(tx: Tx, input: ErasureStageInput): Promis
     addKey(identifier.type, identifier.value, 'full');
     if (identifier.type === 'anonymous_id' || identifier.type === 'user_id') addKey('alias_previous_id', identifier.value, 'full');
   }
-  if (keys.size)
-    await tx
-      .insert(schema.erasureKeys)
-      .values([...keys.values()])
-      .onConflictDoUpdate({
-        target: [schema.erasureKeys.workspaceId, schema.erasureKeys.kind, schema.erasureKeys.keyValue, schema.erasureKeys.keyVersion],
-        set: { erasureId, recordedAt: sql`now()`, coverage: sql`excluded.coverage` },
-      });
+  if (keys.size) {
+    const rows = [...keys.values()];
+    for (let i = 0; i < rows.length; i += INSERT_ROWS)
+      await tx
+        .insert(schema.erasureKeys)
+        .values(rows.slice(i, i + INSERT_ROWS))
+        .onConflictDoUpdate({
+          target: [schema.erasureKeys.workspaceId, schema.erasureKeys.kind, schema.erasureKeys.keyValue, schema.erasureKeys.keyVersion],
+          set: { erasureId, recordedAt: sql`now()`, coverage: sql`excluded.coverage` },
+        });
+  }
 
   const selectors: ErasureSelectors = {
     anonymousIds: identifiers.filter((i) => i.type === 'anonymous_id').map((i) => i.value),
