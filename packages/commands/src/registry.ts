@@ -381,6 +381,13 @@ export type AuditedError = { code: string; message: string };
 export const UNEXPECTED_FAILURE: AuditedError = { code: 'internal', message: 'The command failed with an unexpected error.' };
 
 /**
+ * What the ledger stores in place of an independent check's reason when the check passed but the
+ * reason is the provider's own text (#1300 review). The caller still sees the reason; the stored
+ * copy only needs to say the check happened, because the provider may quote the person in it.
+ */
+export const INDEPENDENT_CHECK_PASSED = 'Independent check passed';
+
+/**
  * An AppError whose message came from an AI provider (or another external model service) rather
  * than from this codebase. The caller still gets the provider's redacted text, but only this
  * provenance gets a command's fixed `failureText` in the long-lived stores: a provider may quote the
@@ -1147,11 +1154,19 @@ export function redactPolicyReasons(policy: PolicyOutcome): PolicyOutcome {
   // The provider's reasons are the same text as the visible ones: redact both the same way so a
   // stored copy stays recognisably a provider reason (#1300 review).
   const providerReasons = policy.providerReasons ? clean(policy.providerReasons) : undefined;
-  if (reasons === policy.reasons && shadowReasons === policy.shadow?.reasons && providerReasons === policy.providerReasons) return policy;
+  const passedCheckReasons = policy.passedCheckReasons ? clean(policy.passedCheckReasons) : undefined;
+  if (
+    reasons === policy.reasons &&
+    shadowReasons === policy.shadow?.reasons &&
+    providerReasons === policy.providerReasons &&
+    passedCheckReasons === policy.passedCheckReasons
+  )
+    return policy;
   return {
     ...policy,
     reasons,
     ...(providerReasons ? { providerReasons } : {}),
+    ...(passedCheckReasons ? { passedCheckReasons } : {}),
     ...(policy.shadow && shadowReasons ? { shadow: { ...policy.shadow, reasons: shadowReasons } } : {}),
   };
 }
@@ -1179,10 +1194,14 @@ export async function recordAgentAction(
   // Reasons may quote an exception (the independent check's failure does), so they are redacted
   // before they are stored (#885), exactly like the error text beside them. A reason that came from
   // a provider is replaced with the command's fixed diagnostic, the same copy the error keeps: the
-  // visible reason stays for the caller, the ledger must not hold the provider's text (#1300 review).
-  const storedReasons = policy.reasons.map((reason) =>
-    cmd.failureText !== undefined && policy.providerReasons?.includes(reason) ? cmd.failureText : redactCredentials(reason),
-  );
+  // visible reason stays for the caller, the ledger must not hold the provider's text (#1300
+  // review). An allowing check's provider reason is stored as the fixed passed line instead.
+  const storedReasons = policy.reasons.map((reason) => {
+    if (cmd.failureText === undefined) return redactCredentials(reason);
+    if (policy.providerReasons?.includes(reason)) return cmd.failureText;
+    if (policy.passedCheckReasons?.includes(reason)) return INDEPENDENT_CHECK_PASSED;
+    return redactCredentials(reason);
+  });
   const [row] = await tx
     .insert(schema.agentActions)
     .values({
@@ -1230,9 +1249,10 @@ async function withIndependentCheck(
   else
     verdict = await services.independentCheck(tx, { ...req, policy }).then(
       (answered) => {
-        // A valid negative verdict is the model's own answer, not this codebase's refusal: its reason
-        // may quote the person and needs the same provenance as a provider exception (#1300 review).
-        providerText = !answered.ok;
+        // A valid verdict is the model's own answer, whether it allows the action or denies it: its
+        // reason may quote the person and needs the same provenance as a provider exception
+        // (#1300 review).
+        providerText = true;
         return answered;
       },
       (err: Error) => {
@@ -1249,7 +1269,9 @@ async function withIndependentCheck(
  * The policy after an independent check's verdict. The verdict's reason is the model's own text (or
  * an exception's): it reaches a successful response (`heldBecause`), the agent ledger and an
  * idempotent replay as well as a denial, none of which pass through the executor's AppError
- * sanitising, so it is redacted here, whole and before its length cut (#885 round 7).
+ * sanitising, so it is redacted here, whole and before its length cut (#885 round 7). The reason is
+ * also recorded as provider text for either verdict, so the ledger can store a fixed line in its
+ * place (#1300 review).
  */
 export function applyVerdict(
   policy: PolicyOutcome,
@@ -1258,11 +1280,18 @@ export function applyVerdict(
   providerText = false,
 ): PolicyOutcome {
   const reason = `Independent check: ${redactedText(verdict.reason, 500)}`;
+  // Both verdicts can carry the provider's words, so both are tracked. Only the negative one is
+  // stored as the command's fixed failure diagnostic; the allowing one is stored as the fixed
+  // passed line (#1300 review).
   const providerReasons = providerText && !verdict.ok ? [...(policy.providerReasons ?? []), reason] : policy.providerReasons;
-  const withProviderReasons = (out: PolicyOutcome): PolicyOutcome => (providerReasons ? { ...out, providerReasons } : out);
-  if (verdict.ok) return withProviderReasons({ ...policy, reasons: [...policy.reasons, reason] });
+  const passedCheckReasons = providerText && verdict.ok ? [...(policy.passedCheckReasons ?? []), reason] : policy.passedCheckReasons;
+  const withProvenance = (out: PolicyOutcome): PolicyOutcome => {
+    const withProvider = providerReasons ? { ...out, providerReasons } : out;
+    return passedCheckReasons ? { ...withProvider, passedCheckReasons } : withProvider;
+  };
+  if (verdict.ok) return withProvenance({ ...policy, reasons: [...policy.reasons, reason] });
   const reasons = [...policy.reasons, reason];
-  return withProviderReasons(
+  return withProvenance(
     req.approvable
       ? { ...policy, decision: 'ask', level: 1, autonomous: false, reasons }
       : { ...policy, decision: 'deny', level: 1, autonomous: false, reasons: [...reasons, `${req.command} cannot wait for an approval.`] },

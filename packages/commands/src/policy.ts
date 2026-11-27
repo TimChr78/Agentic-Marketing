@@ -250,6 +250,12 @@ export interface PolicyOutcome {
    * command's fixed `failureText`: a provider may quote the person's data back (#1300 review).
    */
   providerReasons?: string[];
+  /**
+   * The reasons whose text came from an AI provider and whose independent check passed. The caller
+   * still sees them, but a command with a fixed `failureText` stores the ledger's fixed passed line
+   * instead: a provider may quote the person's data back (#1300 review).
+   */
+  passedCheckReasons?: string[];
   impact: Impact;
   /** The level the mandate grants for this action after every cap (0–4); undefined without a mandate. */
   level?: number;

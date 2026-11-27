@@ -1,3 +1,4 @@
+import { AppError } from '@agentic-marketing/core';
 import { createDb } from '@agentic-marketing/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -132,6 +133,57 @@ describe.skipIf(!hasTestDatabase())('a negative independent-check verdict stores
     expect((await auditErrors(withoutFixedText.name)).join(' ')).toContain(SENTINEL);
     const ledger = await ledgerRow(withoutFixedText.name);
     expect(ledger.error).toContain(SENTINEL);
+    expect(ledger.reasons.join(' ')).toContain(SENTINEL);
+  }, 60_000);
+});
+
+// An allowing verdict is the model's text too: its reason reaches the ledger on a successful run as
+// well as when the handler then fails, and it may quote the person. A command with a fixed
+// diagnostic stores a fixed line in place of it; the handler's own failure text is unrelated and is
+// kept. A command without `failureText` has no fixed line to store and keeps the reason.
+describe.skipIf(!hasTestDatabase())('an allowing independent-check verdict stores a fixed reason (#1300 review)', () => {
+  const failed = (name: string, failureText?: string) => ({
+    ...checked(name, failureText),
+    handler: async (): Promise<{ ok: true }> => {
+      throw new AppError('conflict', 'the requested operation failed');
+    },
+  });
+
+  const allowing = () =>
+    createExecutor(db, {
+      serverVersion: 'test',
+      strictInputs: false,
+      activeMandate: async () => ({ view: mandate, outsideHours: null }),
+      independentCheck: async () => ({ ok: true, reason: SENTINEL }),
+    });
+
+  it('keeps the provider’s verdict out of the ledger when the handler then fails', async () => {
+    const failing = failed('test.providerBoundVerdictAllowed', FIXED);
+    await expect(allowing().execute(failing, { profileId: 'prf_x' }, principal(), { surface: 'mcp' })).rejects.toThrow(
+      'the requested operation failed',
+    );
+    const ledger = await ledgerRow(failing.name);
+    // The handler's own diagnostic is executor-owned and stays.
+    expect(ledger.error).toBe('the requested operation failed');
+    expect(ledger.reasons.join(' ')).toContain('Independent check passed');
+    expect(JSON.stringify(ledger.reasons)).not.toContain('ada@example.com');
+  }, 60_000);
+
+  it('stores the fixed line for a successful run too', async () => {
+    const succeed = { ...withFixedText, name: 'test.providerBoundVerdictAllowedDone' };
+    const out = await allowing().execute(succeed, { profileId: 'prf_x' }, principal(), { surface: 'mcp' });
+    expect(out).toEqual({ ok: true });
+    const ledger = await ledgerRow(succeed.name);
+    expect(ledger.reasons.join(' ')).toContain('Independent check passed');
+    expect(JSON.stringify(ledger.reasons)).not.toContain('ada@example.com');
+  }, 60_000);
+
+  it('keeps the stored reason of a command that has no fixed diagnostic', async () => {
+    const failing = failed('test.providerBoundVerdictAllowedPlain');
+    await expect(allowing().execute(failing, { profileId: 'prf_x' }, principal(), { surface: 'mcp' })).rejects.toThrow(
+      'the requested operation failed',
+    );
+    const ledger = await ledgerRow(failing.name);
     expect(ledger.reasons.join(' ')).toContain(SENTINEL);
   }, 60_000);
 });
