@@ -268,10 +268,12 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
     const profile = 'prf_0000000000000000000000000000c301';
     await seedPerson(profile);
     const erasureId = await erase(profile);
-    const swept: string[] = [];
+    // Scope the observation to this erasure's own profiles: an earlier due job in the shared
+    // workspace may legitimately be swept in the same round.
+    const sweptProfiles = new Set<string>();
     const invisible = {
-      async deleteEventsOf() {
-        swept.push('sweep');
+      async deleteEventsOf(_workspaceId: string, ids: { profileIds?: string[] }) {
+        for (const id of ids.profileIds ?? []) sweptProfiles.add(id);
       },
       // The insert "succeeded" but a replica never shows it: publication must not be recorded.
       async publishErasedSubjects() {},
@@ -280,7 +282,7 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
       },
     };
     await runErasureCleanupOnce(deps(invisible), { finalSweepMs: 0, maxAttempts: 1 });
-    expect(swept).toEqual([]);
+    expect(sweptProfiles.has(profile)).toBe(false);
     const failed = await job(erasureId);
     expect(failed).toMatchObject({ state: 'failed', published_generation: null, published_at: null, clickhouse_done: false });
     expect(failed!.last_error).toMatch(/^clickhouse_error/);

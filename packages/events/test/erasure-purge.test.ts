@@ -163,6 +163,27 @@ describe('recurring physical purge (#1037 part 3)', () => {
     expect(await store.eventsOf(ws, { anonymousIds: ['purge-anon-2'], userIds: [] })).toHaveLength(1);
   }, 60_000);
 
+  it('matches the committed PostgreSQL keys, not every exclusion ClickHouse has published', async () => {
+    const authorityWs = newUuid();
+    const committedProfile = 'prf_authority_committed';
+    const publishedOnlyProfile = 'prf_authority_published_only';
+    await store.insert([
+      event(1, { workspaceId: authorityWs, profileId: committedProfile, anonymousId: '', userId: '' }),
+      event(2, { workspaceId: authorityWs, profileId: publishedOnlyProfile, anonymousId: '', userId: '' }),
+    ]);
+    const committed = hmac('profile', committedProfile);
+    const publishedOnly = hmac('profile', publishedOnlyProfile);
+    // ClickHouse still holds a key from an older publication that PostgreSQL never committed for
+    // this workspace: it must not choose what the sweep deletes. The committed key is deliberately
+    // absent from ClickHouse, so only the PostgreSQL list can find its row.
+    await publish(store, authorityWs, [publishedOnly]);
+    const result = await store.purgeErasedSubjects(authorityWs, [committed], { batchSize: 10 });
+    expect(result).toMatchObject({ complete: true, deleted: 1 });
+    expect(await rows<{ profile_id: string }>('SELECT profile_id FROM events FINAL', {}, authorityWs)).toEqual([
+      { profile_id: publishedOnlyProfile },
+    ]);
+  }, 60_000);
+
   it('matches events.profile_id through the keyed side entry, never a raw id', async () => {
     const legacyWs = newUuid();
     const legacy = (name: string, profileId: string) => ({
@@ -549,6 +570,30 @@ describe('recurring physical purge (#1037 part 3)', () => {
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, claimWs)).toEqual([
       { n: 3 },
     ]);
+  }, 60_000);
+
+  it('does not confirm visibility after its caller aborts between chunks', async () => {
+    const visibilityWs = newUuid();
+    // Enough long keys for several 32 KiB chunks, so the abort lands between two requests.
+    const keys = Array.from({ length: 1_200 }, (_, i) => hmac('anonymous_id', `visibility-${i}-${'v'.repeat(40)}`));
+    await publish(store, visibilityWs, keys);
+    const abort = new AbortController();
+    const isolated = clickHouseStore({ url: CH_URL, database: CH_DB, subjectKeys: factory, signal: abort.signal });
+    try {
+      const realQuery = isolated.client.query.bind(isolated.client);
+      let issued = 0;
+      isolated.client.query = (async (args: Parameters<typeof realQuery>[0]) => {
+        const result = await realQuery(args);
+        issued += 1;
+        // The restore loses its lock while this chunk's answer is in flight.
+        abort.abort(new Error('the restore lock was lost'));
+        return result;
+      }) as typeof isolated.client.query;
+      await expect(isolated.erasedSubjectsVisible(visibilityWs, keys)).rejects.toThrow(/restore lock was lost/);
+      expect(issued).toBe(1);
+    } finally {
+      await isolated.close();
+    }
   }, 60_000);
 });
 
