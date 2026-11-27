@@ -15,6 +15,14 @@ export const SNAPSHOT_TTL_S = 30 * 86_400;
 const TOMBSTONE_MARGIN_S = 7 * 86_400;
 export const HOT_STATE_TOMBSTONE_TTL_S = SNAPSHOT_TTL_S + TOMBSTONE_MARGIN_S;
 
+/**
+ * Keys per `DEL`. A person with a large identifier family contributes two keys per anonymous id, and
+ * `del(...keys)` with all of them exceeds V8's argument limit (about 125,000) before Valkey sees the
+ * call. The erasure writes its tombstones before calling this, so splitting the delete can only leave
+ * fenced (unreadable) snapshots behind, never an unfenced one.
+ */
+const DELETE_KEYS_PER_CALL = 1_000;
+
 /** The hot-state subjects an erasure names. Profile ids are not keys today; they are fenced too. */
 export interface HotStateIds {
   anonymousIds: string[];
@@ -364,7 +372,9 @@ export function valkeyHotState(opts: { url: string; prefix?: string }): HotState
         ...ids.anonymousIds.flatMap((a) => [snapKey(ws, 'a', a), sessionKey(ws, a)]),
         ...ids.userIds.map((u) => snapKey(ws, 'u', u)),
       ];
-      if (keys.length) await client.del(...keys);
+      // The caller fences every id before this (#1196), so the delete may be split across calls: an
+      // interrupted batch leaves a tombstoned snapshot that reads as absent anyway.
+      for (let i = 0; i < keys.length; i += DELETE_KEYS_PER_CALL) await client.del(...keys.slice(i, i + DELETE_KEYS_PER_CALL));
     },
 
     async tombstone(ws, ids, ttlSeconds = HOT_STATE_TOMBSTONE_TTL_S) {

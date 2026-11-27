@@ -91,12 +91,14 @@ export interface EventStore {
   deleteEventsOf(workspaceId: string, ids: { anonymousIds: string[]; userIds: string[]; profileIds?: string[] }): Promise<void>;
   /**
    * The recurring physical purge (#1037 part 3): deletes stored rows whose effective subject keys
-   * match any retained exclusion key, per person-linked table, in bounded batches. It uses the same
-   * keyed matching as the protected views (including `events.profile_id`, through its subject
-   * hash), never the raw identifiers and never the ledger or selector rows themselves. `complete`
-   * is false when the batch bound was reached with matching rows left, or when `checkpoint` reports
-   * that the caller's claim was lost. `checkpoint` runs between batches and tables, before each
-   * mutation; returning false stops the sweep without another delete.
+   * match the workspace's published exclusion keys, per person-linked table, in bounded batches. It
+   * uses the same keyed matching as the protected views (including `events.profile_id`, through its
+   * subject hash), never the raw identifiers and never the ledger or selector rows themselves. `keys`
+   * is the workspace's retained exclusion list: it only decides whether there is anything to sweep;
+   * the queries match the same set read from `erased_subjects`, so a large ledger never travels as
+   * one query parameter. `complete` is false when the batch bound was reached with matching rows
+   * left, or when `checkpoint` reports that the caller's claim was lost. `checkpoint` runs between
+   * batches and tables, before each mutation; returning false stops the sweep without another delete.
    */
   purgeErasedSubjects(
     workspaceId: string,
@@ -869,9 +871,21 @@ function purgeSideJoin(spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number]): stri
       .join(' AND ')}`;
 }
 
-/** The purge's exclusion predicate: any effective subject key is a retained exclusion key. */
+/**
+ * The workspace's published exclusion keys, read inside ClickHouse. Sending a workspace's whole
+ * ledger as one `Array(String)` parameter exceeds the server's `http_max_field_value_size` (128 KiB)
+ * at a few thousand keys, and every retry fails the same way. `erased_subjects` is the table the
+ * durable ledger publishes its full-coverage keys to, so matching against it keeps exactly the
+ * ledger's coverage and key-version semantics: an `unavailable` row was never publishable and cannot
+ * match a stored subject key anyway. The set is read once per query and the sweep's shape is
+ * unchanged, unlike chunking the parameter, which would multiply the batch select/count/delete
+ * sequence over the same rows.
+ */
+const PUBLISHED_EXCLUSION_KEYS = `(SELECT groupArray(key) FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID})`;
+
+/** The purge's exclusion predicate: any effective subject key is a published exclusion key. */
 function purgeMatch(): string {
-  return `arrayExists(k -> k != '' AND k IN {keys:Array(String)}, [${effectiveSubjectKeys()}])`;
+  return `hasAny(arrayFilter(k -> k != '', [${effectiveSubjectKeys()}]), ${PUBLISHED_EXCLUSION_KEYS})`;
 }
 
 /**
@@ -918,13 +932,13 @@ const baseShape = (spec: (typeof SUBJECT_KEY_BACKFILL_TABLES)[number]) => identi
 const sideShape = identityShape(['key1', 'key2', 'key3', 'key4']);
 
 /**
- * How many bytes of a rendered tuple parameter one delete may carry. A query parameter travels as a
- * single HTTP form field, and ClickHouse refuses one over `http_max_field_value_size` (128 KiB by
- * default) with "Field value too long" on every retry: a 1,000-event purge already fails. 32 KiB
- * leaves room for the query, the settings and their URI escaping while still deleting hundreds of
- * rows per mutation.
+ * How many bytes of a rendered parameter one request may carry. A query parameter travels as a
+ * single HTTP form field (multipart or URL-encoded, the limit is on the field value), and ClickHouse
+ * refuses one over `http_max_field_value_size` (128 KiB by default) with "Field value too long" on
+ * every retry: a 1,000-event purge already fails. 32 KiB leaves room for the query, the settings and
+ * their URI escaping while still carrying hundreds of values per request.
  */
-const PURGE_PARAM_BUDGET = 32 * 1024;
+const PARAM_BUDGET = 32 * 1024;
 
 /** Bytes one value costs inside a query parameter: quoted, with the client's escaping. */
 function quotedBytes(value: string): number {
@@ -951,13 +965,39 @@ function identityChunks(ids: string[][]): string[][][] {
   for (const id of ids) {
     const rendered =
       encodeURIComponent('()').length + id.reduce((total, value) => total + quotedBytes(value), Math.max(0, id.length - 1) * SEP);
-    if (chunk.length && bytes + SEP + rendered > PURGE_PARAM_BUDGET) {
+    if (chunk.length && bytes + SEP + rendered > PARAM_BUDGET) {
       chunks.push(chunk);
       chunk = [];
       bytes = OPEN_CLOSE;
     }
     bytes += (chunk.length ? SEP : 0) + rendered;
     chunk.push(id);
+  }
+  if (chunk.length) chunks.push(chunk);
+  return chunks;
+}
+
+/**
+ * One `Array(String)` parameter's values split so each request's field stays under the HTTP limit.
+ * Used where the values cannot be read inside ClickHouse instead (raw anonymous and user ids). The
+ * last chunk is never empty: one value over budget still travels alone rather than being dropped.
+ */
+function stringChunks(values: readonly string[]): string[][] {
+  const chunks: string[][] = [];
+  let chunk: string[] = [];
+  // `[` and `]` around the array, and one comma between values; each is three bytes URL-encoded.
+  const SEP = encodeURIComponent(',').length;
+  const OPEN_CLOSE = encodeURIComponent('[]').length;
+  let bytes = OPEN_CLOSE;
+  for (const value of values) {
+    const rendered = quotedBytes(value);
+    if (chunk.length && bytes + SEP + rendered > PARAM_BUDGET) {
+      chunks.push(chunk);
+      chunk = [];
+      bytes = OPEN_CLOSE;
+    }
+    bytes += (chunk.length ? SEP : 0) + rendered;
+    chunk.push(value);
   }
   if (chunk.length) chunks.push(chunk);
   return chunks;
@@ -1261,15 +1301,28 @@ export function clickHouseStore(opts: {
       }));
     },
     async deleteEventsOf(workspaceId, ids) {
-      if (ids.profileIds?.length)
+      // Every id list here can be as long as the person's identifier history, and one `Array(String)`
+      // over the server's field limit (128 KiB) fails on every retry. The profile ids cannot be read
+      // inside ClickHouse, so each list is chunked by its encoded size. Deleting anonymous and user
+      // ids in separate passes matches the same rows as the old OR: a row matching either is removed.
+      const profileIds = [...new Set(ids.profileIds ?? [])];
+      if (profileIds.length)
         for (const table of ['message_events', 'journey_events'])
-          await command(workspaceId, {
-            query: `DELETE FROM ${table} WHERE workspace_id = {ws:UUID} AND profile_id IN {profiles:Array(String)}`,
-            query_params: { ws: workspaceId, profiles: ids.profileIds },
-          });
-      if (!ids.anonymousIds.length && !ids.userIds.length) return;
+          for (const chunk of stringChunks(profileIds))
+            await command(workspaceId, {
+              query: `DELETE FROM ${table} WHERE workspace_id = {ws:UUID} AND profile_id IN {profiles:Array(String)}`,
+              query_params: { ws: workspaceId, profiles: chunk },
+            });
       // Lightweight delete: rows disappear from queries at once and from disk on the next merge.
-      await command(workspaceId, { query: `DELETE FROM events WHERE ${idFilter}`, query_params: params(workspaceId, ids) });
+      for (const [column, values] of [
+        ['anonymous_id', ids.anonymousIds],
+        ['user_id', ids.userIds],
+      ] as const)
+        for (const chunk of stringChunks([...new Set(values)]))
+          await command(workspaceId, {
+            query: `DELETE FROM events WHERE workspace_id = {ws:UUID} AND ${column} IN {ids:Array(String)}`,
+            query_params: { ws: workspaceId, ids: chunk },
+          });
     },
     async purgeErasedSubjects(workspaceId, keys, opts = {}) {
       const batchSize = Math.max(1, Math.trunc(opts.batchSize ?? 10_000));
@@ -1290,7 +1343,7 @@ export function clickHouseStore(opts: {
         if (unique.length) {
           const join = purgeSideJoin(spec);
           const match = purgeMatch();
-          const queryParams = { ws: workspaceId, keys: unique, table: spec.table, batch: batchSize };
+          const queryParams = { ws: workspaceId, table: spec.table, batch: batchSize };
           // Identities travel as literal tuples (`IN {ids:Array(Tuple(...))}`) rather than a
           // self-referencing subquery: a mutation may evaluate a subquery again, and an unordered
           // LIMIT inside it can then choose different rows than the ones counted, so a delete could
@@ -1384,9 +1437,9 @@ export function clickHouseStore(opts: {
           // side entries. Only do this once the base table has no matching row left: deleting a
           // side entry while its base row still exists would make that row visible again.
           if (!remaining && !stopped) {
-            const sideMatch = `arrayExists(k -> k != '' AND k IN {keys:Array(String)}, [${SUBJECT_KEY_KINDS.map(
-              (kind) => SUBJECT_KEY_COLUMNS[kind],
-            ).join(', ')}])`;
+            const sideMatch = `hasAny(arrayFilter(k -> k != '', [${SUBJECT_KEY_KINDS.map((kind) => SUBJECT_KEY_COLUMNS[kind]).join(
+              ', ',
+            )}]), ${PUBLISHED_EXCLUSION_KEYS})`;
             const sideKey = sideShape.tuple('');
             const countSide = async () => {
               const rs = await query(workspaceId, {
@@ -1695,18 +1748,25 @@ export function clickHouseStore(opts: {
       return readErasedSubjectKeys(workspaceId);
     },
     async erasedSubjectsVisible(workspaceId, keys) {
-      if (!keys.length) return true;
-      const rs = await query(workspaceId, {
-        // A key is the HMAC of one identifier under one exclusion key version, so counting distinct
-        // values present is the same as counting the exact rows. FINAL is the visibility check:
-        // it reads the merged state a later query will see, not the insert's acknowledgement.
-        query: `SELECT countDistinct(key) AS n FROM erased_subjects FINAL
-                WHERE workspace_id = {ws:UUID} AND key IN {keys:Array(String)}`,
-        query_params: { ws: workspaceId, keys: [...new Set(keys)] },
-        format: 'JSONEachRow',
-      });
-      const [row] = await rs.json<{ n: number | string }>();
-      return Number(row?.n ?? 0) === new Set(keys).size;
+      const unique = [...new Set(keys)];
+      if (!unique.length) return true;
+      // The callers' key list is a whole erasure ledger, which can run to thousands of keys and
+      // exceed the server's field limit in one parameter. Each chunk confirms its own set, so the
+      // whole list still has to be visible before the caller records the publication.
+      for (const chunk of stringChunks(unique)) {
+        const rs = await query(workspaceId, {
+          // A key is the HMAC of one identifier under one exclusion key version, so counting distinct
+          // values present is the same as counting the exact rows. FINAL is the visibility check:
+          // it reads the merged state a later query will see, not the insert's acknowledgement.
+          query: `SELECT countDistinct(key) AS n FROM erased_subjects FINAL
+                  WHERE workspace_id = {ws:UUID} AND key IN {keys:Array(String)}`,
+          query_params: { ws: workspaceId, keys: chunk },
+          format: 'JSONEachRow',
+        });
+        const [row] = await rs.json<{ n: number | string }>();
+        if (Number(row?.n ?? 0) !== chunk.length) return false;
+      }
+      return true;
     },
     async withoutErasedSubjects(workspaceId, events) {
       return withoutErased(workspaceId, events);

@@ -101,6 +101,24 @@ async function rows<T>(query: string, params: Record<string, unknown> = {}, work
 
 const count = async (table: string) => Number((await rows<{ n: number | string }>(`SELECT count() AS n FROM ${table} FINAL`))[0]?.n ?? 0);
 
+/**
+ * Publishes a workspace's exclusion keys, as the erasure cleanup does before a sweep. The purge
+ * matches the published set in `erased_subjects`, so a key must be published to be swept.
+ */
+async function publish(target: EventStore, workspaceId: string, keys: readonly string[]) {
+  await target.publishErasedSubjects(
+    keys.map((key, index) => ({
+      workspaceId,
+      kind: 'profile' as SubjectKeyKind,
+      key,
+      keyVersion: VERSION,
+      erasureId: `era_purge_${index}`,
+      generation: 1,
+      recordedAt: new Date().toISOString(),
+    })),
+  );
+}
+
 beforeAll(async () => {
   await resetClickHouse(CH_URL, CH_DB);
   await migrateClickHouse(CH_URL, CH_DB);
@@ -174,6 +192,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
 
     // The raw profile id is not retained anywhere in the purge's input: only its exclusion hash is.
     const key = hmac('profile', 'prf_legacy_erased');
+    await publish(store, legacyWs, [key]);
     expect(key).not.toContain('prf_legacy_erased');
     const result = await store.purgeErasedSubjects(legacyWs, [key], { batchSize: 10 });
     expect(result).toMatchObject({ complete: true, deleted: 2 });
@@ -239,6 +258,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
     expect(step.done).toBe(true);
 
     const key = hmac('profile', 'prf_bounded_side');
+    await publish(store, boundedWs, [key]);
     const first = await store.purgeErasedSubjects(boundedWs, [key], { batchSize: 1, maxBatches: 1 });
     expect(first).toMatchObject({ complete: false });
     // One base row remains, so both side entries stay: removing one would make its row visible.
@@ -280,6 +300,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
     for (let i = 0; i < 4 && !step.done; i++) step = await store.backfillSubjectKeys({ workspaceIds: [raceWs], batchSize: 10 });
     expect(step.done).toBe(true);
     const profileKey = hmac('profile', 'prf_side_race');
+    await publish(store, raceWs, [profileKey]);
     await store.client.insert({
       table: 'subject_key_backfill',
       format: 'JSONEachRow',
@@ -345,6 +366,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
       ),
     );
     const key = hmac('profile', 'prf_bulk_purge');
+    await publish(store, bulkWs, [key]);
     let deletes = 0;
     const result = await store.purgeErasedSubjects(bulkWs, [key], {
       maxBatches: 10,
@@ -360,6 +382,28 @@ describe('recurring physical purge (#1037 part 3)', () => {
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, bulkWs)).toEqual([
       { n: 0 },
     ]);
+  }, 120_000);
+
+  it('sweeps a workspace whose published ledger is larger than one query parameter', async () => {
+    const ledgerWs = newUuid();
+    const total = 3_200;
+    // A ledger this size is ordinary for a long-lived person. Bound as one `Array(String)`, it is
+    // over ClickHouse's 128 KiB field limit and every count, batch select and delete failed, so the
+    // physical purge could never make progress.
+    const anonymousIds = Array.from({ length: total }, (_, i) => `ledger-${String(i).padStart(4, '0')}-${'k'.repeat(40)}`);
+    const keys = anonymousIds.map((id) => hmac('anonymous_id', id));
+    await publish(store, ledgerWs, keys);
+    await store.insert([event(0, { workspaceId: ledgerWs, anonymousId: anonymousIds[0], userId: '', profileId: '' })]);
+
+    const result = await store.purgeErasedSubjects(ledgerWs, keys, { batchSize: 100 });
+    expect(result).toMatchObject({ complete: true, deleted: 1 });
+    expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, ledgerWs)).toEqual([
+      { n: 0 },
+    ]);
+    // The purge never deletes the exclusions it matched.
+    expect(
+      await rows<{ n: number }>('SELECT count() AS n FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID}', {}, ledgerWs),
+    ).toEqual([{ n: total }]);
   }, 120_000);
 
   it('measures non-ASCII and escaped identities in URL-encoded bytes, not characters', async () => {
@@ -378,6 +422,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
       ),
     );
     const key = hmac('profile', 'prf_wide_purge');
+    await publish(store, wideWs, [key]);
     const result = await store.purgeErasedSubjects(wideWs, [key], { maxBatches: 10 });
     expect(result).toMatchObject({ complete: true, deleted: total });
     expect(await rows<{ n: number }>('SELECT count() AS n FROM events FINAL WHERE workspace_id = {ws:UUID}', {}, wideWs)).toEqual([
@@ -388,6 +433,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
   it('removes an orphaned side entry for each table, whose identity is narrower than four keys', async () => {
     const sideWs = newUuid();
     const key = hmac('profile', 'prf_orphan_side');
+    await publish(store, sideWs, [key]);
     // No base row exists for any of these, so each table goes straight to its side cleanup. A
     // message event's identity is three columns, while the side table always keeps four keys.
     await store.client.insert({
@@ -446,6 +492,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
       [0, 1, 2, 3, 4].map((i) => event(i, { workspaceId: boundedWs, profileId: 'prf_bounded', anonymousId: `bounded-${i}` })),
     );
     const key = hmac('profile', 'prf_bounded');
+    await publish(store, boundedWs, [key]);
     const first = await store.purgeErasedSubjects(boundedWs, [key], { batchSize: 2, maxBatches: 1 });
     expect(first).toMatchObject({ deleted: 2, complete: false });
     expect(first.tables.find((table) => table.table === 'events')).toMatchObject({ deleted: 2, remaining: true });
@@ -458,6 +505,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
     const lateWs = newUuid();
     await store.insert([event(1, { workspaceId: lateWs, profileId: 'prf_observed', anonymousId: 'observed-1' })]);
     const key = hmac('profile', 'prf_observed');
+    await publish(store, lateWs, [key]);
     let wroteLate = false;
     const result = await store.purgeErasedSubjects(lateWs, [key], {
       batchSize: 1,
@@ -484,6 +532,7 @@ describe('recurring physical purge (#1037 part 3)', () => {
     const claimWs = newUuid();
     await store.insert([0, 1, 2, 3, 4].map((i) => event(i, { workspaceId: claimWs, profileId: 'prf_claim', anonymousId: `claim-${i}` })));
     const key = hmac('profile', 'prf_claim');
+    await publish(store, claimWs, [key]);
     let checks = 0;
     const result = await store.purgeErasedSubjects(claimWs, [key], {
       batchSize: 1,
@@ -534,6 +583,7 @@ describe('physical purge is scoped by workspace without row policies (#1146)', (
 
   it('deletes and counts only the purged workspace’s rows', async () => {
     const key = hmac('profile', 'prf_shared');
+    await publish(plain, wsA, [key]);
     const result = await plain.purgeErasedSubjects(wsA, [key], { batchSize: 100 });
     expect(result).toMatchObject({ complete: true, deleted: 1 });
 

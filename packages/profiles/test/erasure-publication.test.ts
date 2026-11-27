@@ -52,12 +52,28 @@ async function seedPerson(profileId: string) {
   ]);
 }
 
-async function erase(profileId: string): Promise<string> {
-  const prepared = await prepareErasure(d.db, d.workspace, keyProvider);
+/** One user id and many long anonymous ids, so the ledger and the selector list outgrow one field. */
+async function seedLargePerson(workspaceId: string, profileId: string, prefix: string, anonymousIds: number) {
+  await d.db.admin.query('INSERT INTO profiles (workspace_id, id) VALUES ($1, $2)', [workspaceId, profileId]);
+  await d.db.admin.query('INSERT INTO identifiers (workspace_id, profile_id, type, value) VALUES ($1, $2, $3, $4)', [
+    workspaceId,
+    profileId,
+    'user_id',
+    `${profileId}-user`,
+  ]);
+  await d.db.admin.query(
+    `INSERT INTO identifiers (workspace_id, profile_id, type, value)
+     SELECT $1, $2, 'anonymous_id', $3 || g || '-' || repeat('a', 64) FROM generate_series(1, $4::int) AS g`,
+    [workspaceId, profileId, prefix, anonymousIds],
+  );
+}
+
+async function erase(profileId: string, workspaceId = d.workspace): Promise<string> {
+  const prepared = await prepareErasure(d.db, workspaceId, keyProvider);
   try {
-    const result = await d.db.withWorkspace(d.workspace, (tx) =>
+    const result = await d.db.withWorkspace(workspaceId, (tx) =>
       eraseProfileStage(tx, {
-        workspaceId: d.workspace,
+        workspaceId,
         profileId,
         requestedBy: 'user_test',
         reason: 'publication test',
@@ -70,7 +86,7 @@ async function erase(profileId: string): Promise<string> {
   }
 }
 
-async function job(erasureId: string) {
+async function job(erasureId: string, workspaceId = d.workspace) {
   const { rows } = await d.db.admin.query<{
     state: string;
     attempts: number;
@@ -78,7 +94,7 @@ async function job(erasureId: string) {
     published_at: Date | null;
     last_error: string | null;
     clickhouse_done: boolean;
-  }>('SELECT * FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2', [d.workspace, erasureId]);
+  }>('SELECT * FROM erasure_cleanup_jobs WHERE workspace_id = $1 AND erasure_id = $2', [workspaceId, erasureId]);
   const row = rows[0];
   return row ? { ...row, published_generation: row.published_generation === null ? null : Number(row.published_generation) } : null;
 }
@@ -92,11 +108,11 @@ async function generation(): Promise<number> {
   return Number(rows[0]?.generation ?? 0);
 }
 
-async function testRows<T>(query: string, params: Record<string, unknown> = {}): Promise<T[]> {
-  const settings = await store.settingsFor(d.workspace);
+async function testRows<T>(query: string, params: Record<string, unknown> = {}, workspaceId = d.workspace): Promise<T[]> {
+  const settings = await store.settingsFor(workspaceId);
   const rs = await store.client.query({
     query,
-    query_params: { ws: d.workspace, ...params },
+    query_params: { ws: workspaceId, ...params },
     format: 'JSONEachRow',
     clickhouse_settings: settings,
   });
@@ -165,6 +181,41 @@ describe.skipIf(!hasTestDatabase())('durable exclusion publication (#1037 part 2
     ]);
     expect(await store.eventsOf(d.workspace, { anonymousIds: [`${profile}-anon`], userIds: [] })).toEqual([]);
   }, 120_000);
+
+  it('publishes and sweeps a ledger larger than one query parameter', async () => {
+    // Its own workspace keeps the erased_subjects count below exact: other tests in this file
+    // publish into the shared workspace.
+    const workspace = newUuid();
+    await d.db.admin.query("INSERT INTO workspaces (id, name, approval_policy) VALUES ($1, 'Large ledger', 'none')", [workspace]);
+    const profile = 'prf_0000000000000000000000000000c002';
+    const anonymousIds = 2_500;
+    await seedLargePerson(workspace, profile, 'large-publication-', anonymousIds);
+    const erasureId = await erase(profile, workspace);
+
+    const ledger = await d.db.admin.query<{ n: string }>(
+      "SELECT count(*) AS n FROM erasure_keys WHERE workspace_id = $1 AND erasure_id = $2 AND coverage = 'full'",
+      [workspace, erasureId],
+    );
+    const keys = Number(ledger.rows[0]!.n);
+    // The erasure's ledger and the sweep's anonymous-id selector are both past one HTTP field (128
+    // KiB). The publication's FINAL check and the sweep must move in bounded requests, and only then
+    // may the job record its publication and checkpoint the ClickHouse half.
+    expect(keys).toBeGreaterThan(3_000);
+
+    // Other due jobs in this file's workspace may be claimed in the same round; this job's own
+    // record is what proves its publication and sweep finished.
+    await runErasureCleanupOnce(deps(store), { finalSweepMs: 1_000 });
+    const published = await job(erasureId, workspace);
+    expect(published).toMatchObject({ clickhouse_done: true });
+    expect(published!.published_at).not.toBeNull();
+
+    const erased = await testRows<{ n: number | string }>(
+      'SELECT count() AS n FROM erased_subjects FINAL WHERE workspace_id = {ws:UUID}',
+      {},
+      workspace,
+    );
+    expect(Number(erased[0]?.n ?? 0)).toBe(keys);
+  }, 240_000);
 
   it('re-publishes after a restore: a pending job with no recorded publication publishes again', async () => {
     const profile = 'prf_0000000000000000000000000000c101';
