@@ -519,6 +519,22 @@ describe('subject keys on stored rows (#1037 part 1)', () => {
     }
   }, 60_000);
 
+  it('writes a legacy record whose profile id is null with the writer’s default', async () => {
+    // The writer already stores `''` for a missing profile id, so a queued `null` is recovered
+    // rather than dropped.
+    const legacy = { ...event(72), profileId: null } as unknown as BusEvent;
+    expect(await store.insert([legacy])).toBe(1);
+    const [row] = await rows<{ profile_id: string; subject_profile: string; subject_anonymous: string }>(
+      `SELECT profile_id, subject_profile, subject_anonymous FROM events FINAL
+        WHERE workspace_id = {ws:UUID} AND event_id = 'subject-72'`,
+    );
+    expect(row).toEqual({
+      profile_id: '',
+      subject_profile: '',
+      subject_anonymous: hmac('anonymous_id', 'anon-72'),
+    });
+  }, 60_000);
+
   it('fails the write when the exclusion key cannot be resolved, and counts the failure', async () => {
     const before = subjectKeyFailureCount();
     const broken = clickHouseStore({
