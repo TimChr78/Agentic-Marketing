@@ -222,11 +222,13 @@ export async function finishIn(
   // PostgreSQL aborted one of them (#1274). Every kind that names a person takes this order, not
   // only a score step.
   //
-  // A score step writes consent-gated data, so it takes the workspace identity lock before the
-  // profile row: a standalone consent writer serialises on the identity lock, and the score's
-  // consent re-check under the profile lock must see a refusal that committed while it waited
-  // (#1300).
-  if (c.kind === 'score') await lockIdentity(tx, c.workspaceId);
+  // A score step writes consent-gated data, and a finished decision or generated text is person
+  // data too. Take the workspace identity lock before the profile row: a standalone consent writer
+  // serialises on that lock, not on the profile row, so a refusal that commits while this waits is
+  // visible to the re-check under the lock (#1300).
+  const commitsPersonData =
+    c.kind === 'score' || (c.profileId !== null && (c.kind === 'decide' || c.kind === 'generate') && out.status === 'done');
+  if (commitsPersonData) await lockIdentity(tx, c.workspaceId);
   const lockedProfile = c.profileId ? await lockCanonicalProfile(tx, c.workspaceId, c.profileId) : null;
   // A person who is gone has no participant row to wait at: the wakeup below finds nothing and a
   // done answer is recorded as late.
@@ -255,7 +257,7 @@ export async function finishIn(
   let status = out.status;
   let error = out.error;
   // On a fallback the journey fills the slots with the prompt's fallback texts itself.
-  const content = out.slots;
+  let content = out.slots;
   // A decision call logs a state hash and a sanitised question set, never the person's state
   // or a trigger event with its properties (#358). Redacting the questions also keeps contact
   // details out of a refused call's audit row (#352).
@@ -294,9 +296,22 @@ export async function finishIn(
       error = write.refused;
     }
   }
+  // A decision or a generated text is person data: the consent check that admitted the model call
+  // can be stale by the time the answer is committed. The profile row this transaction holds was
+  // taken after the identity lock, so a refusal that committed meanwhile is visible here. A refusal
+  // takes the fallback path: the participant gets the fallback edge and no decision or text, and
+  // the usage below is still settled (#1300).
+  if (status === 'done' && (c.kind === 'decide' || c.kind === 'generate') && lockedProfile) {
+    const consent = await aiAllowed(tx, c.workspaceId, lockedProfile);
+    if (!consent.ok) {
+      status = 'fallback';
+      error = consent.reason;
+      content = undefined;
+    }
+  }
   const outcome = {
     seq: c.seq,
-    ...(out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
+    ...(status === 'done' && out.option ? { option: out.option, rationale: out.rationale ?? '' } : {}),
     ...(out.probability !== undefined ? { probability: out.probability } : {}),
     ...(status !== 'done' ? { fallback: error ?? 'failed' } : {}),
   };
