@@ -37,8 +37,9 @@ export function dropApprovalsQueueScope(userId: string | null | undefined, works
 }
 
 /**
- * Called by SessionProvider when the signed-in person or workspace changes. Keeping the previous
- * person's pages in memory is pointless at best and a leak at worst.
+ * Called by the Approvals page on render with the signed-in person and workspace. A change of either
+ * forgets the previous pages: keeping another person's rows in memory is pointless at best and a
+ * leak at worst. The keys carry both ids as well, so a stale page can never be read.
  */
 export function setApprovalsQueueScope(userId: string | null, workspaceId: string | null) {
   const next = userId && workspaceId ? scopeKey(userId, workspaceId) : null;
@@ -51,6 +52,10 @@ export function setApprovalsQueueScope(userId: string | null, workspaceId: strin
 export function clearApprovalsQueueCache() {
   pages.clear();
 }
+
+// SessionProvider announces a sign-out instead of importing this module, which keeps it out of the
+// signed-out bundle; the Approvals page sets the scope itself when it renders.
+if (typeof window !== 'undefined') window.addEventListener('am:signed-out', clearApprovalsQueueCache);
 
 /** A fresh module for a test case, including the remembered scope. */
 export function resetApprovalsQueueCache() {

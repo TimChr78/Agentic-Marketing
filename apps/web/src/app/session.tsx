@@ -1,6 +1,5 @@
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { pendingDecisionCount } from '../features/approvals/decisions';
-import { clearApprovalsQueueCache, setApprovalsQueueScope } from '../features/approvals/queueCache';
 import { setWorkspaceTimeZone } from '../ui/time';
 import { ApiError, api, getWorkspaceId, type Out, setWorkspaceId } from './api';
 import { clearRecentsMemory, setRecentsScope } from './recents';
@@ -63,11 +62,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // Recents are isolated per person and workspace; signing out clears this page's memory.
   useEffect(() => {
     setRecentsScope(user?.id ?? null, workspace?.id ?? null);
-  }, [user?.id, workspace?.id]);
-
-  // Remembered Approvals pages belong to one person's workspace too; a session change forgets them.
-  useEffect(() => {
-    setApprovalsQueueScope(user?.id ?? null, workspace?.id ?? null);
   }, [user?.id, workspace?.id]);
 
   const load = useCallback(async () => {
@@ -172,7 +166,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setUser(null);
         setThemeUser(null);
         clearRecentsMemory();
-        clearApprovalsQueueCache();
+        // Pages remembered by lazily loaded screens (the Approvals queue) listen for this, so the
+        // signed-out bundle does not carry their modules (phase 28 budget).
+        window.dispatchEvent(new Event('am:signed-out'));
         setStatus('signed-out');
         return true;
       },

@@ -15,6 +15,7 @@ import {
   dropApprovalsQueueScope,
   readApprovalsQueuePage,
   resetApprovalsQueueCache,
+  setApprovalsQueueScope,
   writeApprovalsQueuePage,
 } from '../../features/approvals/queueCache';
 import { RequesterView } from '../../features/approvals/requester';
@@ -223,6 +224,7 @@ export default function ApprovalsPage({ params }: { params: Record<string, strin
   const status = (search.get('status') as Status) || 'pending';
   const list = useKeyedApi(status, () => api.call('approvals.list', { status, limit: 200 }));
   const proposals = useApi(() => api.call('workspace.proposals', { status: 'pending', limit: 50 }), []);
+  setApprovalsQueueScope(user?.id ?? null, workspace?.id ?? null);
   const cacheKey = approvalsQueueKey(user?.id, workspace?.id, status);
   // One generation owns the extra pages, the cursor, the loading flag and the error. A reload, a
   // tab switch or a second Load more makes every late result from the old generation stale (#1254).
