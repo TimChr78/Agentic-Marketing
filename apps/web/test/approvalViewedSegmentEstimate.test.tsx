@@ -90,7 +90,8 @@ describe('a segment review is viewed without waiting for its live estimate (#127
     );
 
     expect(await screen.findByText('Who is in it')).toBeTruthy();
-    expect(h.calls).toContain('segments.preview');
+    // The preview call is an effect: it may still be in flight after the view has rendered.
+    await waitFor(() => expect(h.calls).toContain('segments.preview'));
 
     await waitFor(() => expect(wasViewed('usr_reviewer', detail.id, detail.version)).toBe(true));
     // A newer version is still a new review.
