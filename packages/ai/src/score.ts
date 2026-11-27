@@ -270,6 +270,26 @@ async function insertCall(
   // waited has no row to name, so the usage is recorded without the profile (the score is not
   // stored, as `insertProfileScore` also finds no canonical row).
   const profileId = input.profileId ? await lockCanonicalProfile(tx, principal.workspaceId, input.profileId) : null;
+  // An erasure that committed while the call was in flight leaves no person for the row to name,
+  // and the decision log is erased with the person (ADR-0012). Such a settlement keeps only what
+  // billing needs: workspace, kind, provider and model, tokens and cost, timestamps and status.
+  // The state hash, the questions and the answers describe the decision, and a provider error may
+  // quote the input, so none of them may outlive the person they were asked about.
+  const erased = input.profileId !== undefined && profileId === null;
+  // Question instructions are part of the request: redact contact details before they are kept,
+  // including on a refused call (#352).
+  const questions = Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions;
+  const decision = erased
+    ? { input: {}, output: null, error: null }
+    : {
+        input: {
+          stateHash: stateHash(state),
+          stateTokens: Math.ceil(JSON.stringify(state ?? null).length / 4),
+          questions,
+        },
+        output: out.answers ? { answers: out.answers } : null,
+        error: out.error ?? null,
+      };
   await tx
     .insert(schema.aiCalls)
     .values({
@@ -280,15 +300,7 @@ async function insertCall(
       providerId: provider.providerId,
       model: out.modelVersion ?? provider.model,
       profileId,
-      input: {
-        stateHash: stateHash(state),
-        stateTokens: Math.ceil(JSON.stringify(state ?? null).length / 4),
-        // Question instructions are part of the request: redact contact details before they are
-        // kept, including on a refused call (#352).
-        questions: Array.isArray(input.questions) ? input.questions.map((q) => redact(q)) : input.questions,
-      },
-      output: out.answers ? { answers: out.answers } : null,
-      error: out.error ?? null,
+      ...decision,
       inputTokens: out.inputTokens ?? 0,
       outputTokens: out.outputTokens ?? 0,
       billedAt: new Date(),

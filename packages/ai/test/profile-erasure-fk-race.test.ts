@@ -15,7 +15,7 @@ vi.mock('@agentic-marketing/secrets', async (importOriginal) => {
 import { classify } from '../src/classify';
 import { score } from '../src/score';
 import { fakeSystemOne } from '../src/testing';
-import { type ClientLike, holdPause, type Queryable, releasePause, waitFor } from './raceSupport';
+import { blockedBy, type ClientLike, holdPause, type Queryable, releasePause, waitFor } from './raceSupport';
 
 // #1274 review: `ai.classify` checks the person's AI consent and then inserts an `ai_calls` row that
 // names them; the SDK `ai.score` path does the same in the transaction that settles the call. An
@@ -272,5 +272,139 @@ describe.skipIf(!hasTestDatabase())('an AI call insert and an erasure do not rac
     expect(left.rowCount).toBe(0);
     const calls = await d.db.admin.query('SELECT 1 FROM ai_calls WHERE workspace_id = $1 AND id = $2', [ws, scored!.callId]);
     expect(calls.rowCount).toBe(0);
+  }, 120_000);
+});
+
+// #1274 review: when the erasure commits before the settling insert, the call row has no person to
+// name. It used to be written with `profile_id = NULL` and still carried the state hash, the
+// questions and the answers, so the erased person's decision stayed in `ai_calls`, outside the
+// erasure that removed everything else keyed by their profile. The decision log is erased with the
+// person (ADR-0012); a settlement that finds the person gone may keep only what billing needs.
+
+const ERASURE_PAUSE_KEY = 'test:pause-score-settle-after-erasure';
+
+/** Stops the erasure at its first row delete: the person's row locks are taken, the delete is not. */
+async function installErasurePause(conn: Queryable): Promise<void> {
+  await conn.query(`
+    CREATE OR REPLACE FUNCTION test_pause_score_erasure() RETURNS trigger AS $$
+    BEGIN
+      PERFORM pg_advisory_xact_lock(hashtextextended('${ERASURE_PAUSE_KEY}', 0));
+      RETURN OLD;
+    END $$ LANGUAGE plpgsql;
+    DROP TRIGGER IF EXISTS test_pause_score_erasure ON messages;
+    CREATE TRIGGER test_pause_score_erasure BEFORE DELETE ON messages
+      FOR EACH ROW EXECUTE FUNCTION test_pause_score_erasure();`);
+}
+
+async function dropErasurePause(conn: Queryable): Promise<void> {
+  await conn.query('DROP TRIGGER IF EXISTS test_pause_score_erasure ON messages');
+}
+
+/** The backend waiting on the test pause: the erasure, holding the person's row lock. */
+async function pausedErasure(conn: Queryable): Promise<number> {
+  return waitFor('the erasure to wait on its pause', async () => {
+    const { rows } = await conn.query<{ pid: number }>(
+      `SELECT a.pid FROM pg_stat_activity a
+        WHERE a.wait_event_type = 'Lock'
+          AND EXISTS (SELECT 1 FROM pg_locks l
+                       WHERE l.pid = a.pid AND l.locktype = 'advisory' AND NOT l.granted
+                         AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                         AND l.classid = ((hashtextextended($1, 0) >> 32) & 4294967295)::oid
+                         AND l.objid = (hashtextextended($1, 0) & 4294967295)::oid)`,
+      [ERASURE_PAUSE_KEY],
+    );
+    return rows[0]?.pid;
+  });
+}
+
+describe.skipIf(!hasTestDatabase())('a score settled after its person was erased keeps only usage (#1274 review)', () => {
+  it('stores no score and no decision payload when the erasure commits first', async () => {
+    const p = await seedConsentedProfile();
+    // A row the erasure deletes before it reaches the profile: the erasure can be held there, after
+    // it locked the person and before the profile delete whose cascade removes `ai_calls`.
+    const messageId = newId('msg');
+    await d.db.admin.query(
+      `INSERT INTO messages (workspace_id, id, idempotency_key, channel, purpose, profile_id, status)
+       VALUES ($1, $2, $3, 'email', 'marketing_email', $4, 'sent')`,
+      [ws, messageId, `idem_${messageId}`, p],
+    );
+    const prepared = await prepareErasure(d.db, ws, kp);
+    const probe = await d.db.admin.connect();
+    let scored: { callId: string; stored: unknown; inputTokens: number; outputTokens: number } | undefined;
+    let scoredError: unknown;
+    try {
+      await installErasurePause(probe);
+      await holdPause(probe as ClientLike, ERASURE_PAUSE_KEY);
+      const erasing = d.db.withWorkspace(ws, (tx) =>
+        eraseProfileStage(tx, {
+          workspaceId: ws,
+          profileId: p,
+          requestedBy: 'user_test',
+          reason: 'erase before the score settles',
+          prepared,
+        }),
+      );
+      const erasurePid = await pausedErasure(probe);
+      // The score reads the consent of the still-uncommitted person, then waits for the row lock the
+      // erasure holds: when the erasure commits, the person is gone and the call has no one to name.
+      const scoring = commandDb.withWorkspace(ws, (tx) =>
+        score.handler(
+          {
+            profileId: p,
+            questions: [{ key: 'propensity', type: 'noul', instructions: 'Will this person convert?' }],
+            state: { plan: 'pro' },
+            store: { key: 'purchase_propensity', ttlHours: 168 },
+          },
+          testContext(tx),
+        ),
+      );
+      await waitFor('the score settlement to wait for the erasure', async () => (await blockedBy(probe, erasurePid)).length > 0);
+      await releasePause(probe as ClientLike, ERASURE_PAUSE_KEY);
+      await erasing;
+      scored = await scoring.catch((err: unknown) => {
+        scoredError = err;
+        return undefined;
+      });
+    } finally {
+      await releasePause(probe as ClientLike, ERASURE_PAUSE_KEY).catch(() => {});
+      await dropErasurePause(probe).catch(() => {});
+      probe.release();
+      disposeErasure(prepared);
+    }
+
+    expect(scoredError).toBeUndefined();
+    expect(scored?.stored).toBeNull();
+    const left = await d.db.admin.query('SELECT 1 FROM profiles WHERE workspace_id = $1 AND id = $2', [ws, p]);
+    expect(left.rowCount).toBe(0);
+    const scores = await d.db.admin.query('SELECT 1 FROM profile_scores WHERE workspace_id = $1 AND profile_id = $2', [ws, p]);
+    expect(scores.rowCount).toBe(0);
+    // The usage is billed and stays readable; nothing that describes the person or their decision does.
+    const calls = await d.db.admin.query<{
+      profile_id: string | null;
+      status: string;
+      input: Record<string, unknown>;
+      output: unknown;
+      error: string | null;
+      rationale: string | null;
+      input_tokens: number;
+      provider_id: string | null;
+      model: string | null;
+    }>(
+      'SELECT profile_id, status, input, output, error, rationale, input_tokens, provider_id, model FROM ai_calls WHERE workspace_id = $1 AND id = $2',
+      [ws, scored!.callId],
+    );
+    expect(calls.rowCount).toBe(1);
+    const row = calls.rows[0]!;
+    expect(row.profile_id).toBeNull();
+    expect(row.input).toEqual({});
+    expect(row.output).toBeNull();
+    expect(row.error).toBeNull();
+    expect(row.rationale).toBeNull();
+    // What billing needs is kept.
+    expect(row.status).toBe('done');
+    expect(row.input_tokens).toBeGreaterThan(0);
+    expect(row.provider_id).toBe(providerId);
+    expect(row.model).toBeTruthy();
+    expect(scored!.inputTokens).toBeGreaterThan(0);
   }, 120_000);
 });
