@@ -8,8 +8,8 @@ import { createDisposableDb, hasTestDatabase } from './disposable';
 // The 0122 replay must not invert the lock order live ingestion uses: an ingest transaction takes
 // the workspace's identity advisory lock first and then needs `workspaces` through a foreign key.
 // A migration that holds the `workspaces` ACCESS EXCLUSIVE lock (the FORCE lift) while waiting for
-// that identity lock produces a 40P01 deadlock. A SUPERUSER or BYPASSRLS migrator already ran the
-// 0117–0119 repairs, so 0122 must take no lock at all for it.
+// that identity lock produces a 40P01 deadlock. A SUPERUSER or BYPASSRLS migrator needs no FORCE
+// lift, so 0122 must take no ACCESS EXCLUSIVE lock on `workspaces` for it.
 
 vi.setConfig({ hookTimeout: 180_000, testTimeout: 120_000 });
 
@@ -69,7 +69,7 @@ async function ownEverything() {
 const ownerPool = (url: string) => new pg.Pool({ connectionString: url });
 
 describe.skipIf(!hasTestDatabase())('the 0122 replay lock order (#1218 review)', () => {
-  it('takes the identity lock before the FORCE lift, so live ingestion does not deadlock', async () => {
+  it('takes the identity lock before a repair touches workspaces, so live ingestion does not deadlock', async () => {
     const owner = await ownEverything();
     const appRole = `am_replay_app_${randomBytes(4).toString('hex')}`;
     roles.push(appRole);
@@ -104,7 +104,7 @@ describe.skipIf(!hasTestDatabase())('the 0122 replay lock order (#1218 review)',
     expect(scores.rows.map((row) => row.profile_id)).toEqual([survivor]);
   }, 120_000);
 
-  it('does nothing, and takes no workspace lock, for a bypassing migrator', async () => {
+  it('takes no ACCESS EXCLUSIVE lock on workspaces for a bypassing migrator', async () => {
     // 0122 is still pending because the owner-only test above used its own disposable database.
     const fresh = await createDisposableDb('replay_noop', { upTo: '0116_broadcast_test_decision_variants.sql' });
     const appRole = `am_replay_noop_app_${randomBytes(4).toString('hex')}`;
@@ -113,7 +113,8 @@ describe.skipIf(!hasTestDatabase())('the 0122 replay lock order (#1218 review)',
     await blocker.connect();
     try {
       await blocker.query('BEGIN');
-      // Conflicts with the ACCESS EXCLUSIVE lock an `ALTER TABLE workspaces` would take.
+      // Conflicts with the ACCESS EXCLUSIVE lock an `ALTER TABLE workspaces` would take. The repairs
+      // run for a bypassing migrator too, but they must never wait for this lock.
       await blocker.query('LOCK TABLE workspaces IN ACCESS SHARE MODE');
 
       const migration = migrate(fresh.db.admin, { appRole, appRolePassword: 'rls-app-password' });

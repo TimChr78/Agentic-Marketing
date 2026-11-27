@@ -424,6 +424,36 @@ describe.skipIf(!hasTestDatabase())('the admin role under FORCE RLS (#1228, #122
     expect(result.output).not.toContain('api listening');
   }, 180_000);
 
+  it('#1218 am doctor fails the admin-role check on an empty database instead of reporting no tables', async () => {
+    const url = await emptyDatabase('role_doctor_empty');
+    const role = `am_role_empty_doctor_${suffixOf()}`;
+    roles.push(role);
+    const maint = new pg.Client({ connectionString: maintenanceUrl() });
+    await maint.connect();
+    try {
+      await maint.query(`CREATE ROLE ${role} LOGIN PASSWORD 'rls-password' NOSUPERUSER NOBYPASSRLS`);
+    } finally {
+      await maint.end();
+    }
+    const login = new URL(url.toString());
+    login.username = role;
+    login.password = 'rls-password';
+
+    // Startup refuses this role on an empty database, so `am doctor` must fail too instead of
+    // reporting `info: no tenant tables yet` and letting an operator start into that refusal.
+    const db = ownerDb(login.toString());
+    try {
+      const found = await checkAdminRole(db);
+      expect(found.id).toBe('postgres.admin-role');
+      expect(found.status).toBe('fail');
+      expect(found.message).toContain(role);
+      expect(found.message).toContain('BYPASSRLS');
+      expect(found.hint).toContain('ALTER ROLE');
+    } finally {
+      await db.close();
+    }
+  }, 60_000);
+
   it('#1235 starts on a migrated database with the Compose-style superuser', async () => {
     const d = await createDisposableDb('role_start_ok');
     open.push(d);

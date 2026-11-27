@@ -5,7 +5,7 @@ import { connect } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { isMcpResourceUrlAllowed } from '@agentic-marketing/auth';
 import {
-  adminRoleProblem,
+  adminRoleBypassProblem,
   adminRoleStatus,
   appRoleReach,
   createDb,
@@ -755,11 +755,11 @@ export async function checkAdminRole(db: Db): Promise<Check> {
   const id = 'postgres.admin-role';
   try {
     const status = await withTimeout(adminRoleStatus(db.admin), 'the admin role');
-    const problem = adminRoleProblem(status, 'The application');
-    if (!problem)
-      return status.superuser || status.bypassrls
-        ? { id, status: 'ok', message: `the DATABASE_URL role ${status.role} bypasses row-level security` }
-        : { id, status: 'info', message: 'no tenant tables yet; starting the app creates them' };
+    // The attribute check, not the schema-dependent one: startup refuses a role without SUPERUSER
+    // or BYPASSRLS even on an empty database, so `am doctor` must report the same failure there
+    // instead of `info: no tenant tables yet` (#1218 review).
+    const problem = adminRoleBypassProblem(status, 'The application');
+    if (!problem) return { id, status: 'ok', message: `the DATABASE_URL role ${status.role} bypasses row-level security` };
     return {
       id,
       status: 'fail',

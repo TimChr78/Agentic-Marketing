@@ -12,6 +12,12 @@ import type pg from 'pg';
 /** Anything that can run a query: a `pg.Client`, a `pg.Pool`, or a pool from `createDb`. */
 export type RoleQuery = Pick<pg.Client, 'query'>;
 
+/**
+ * One dedicated connection, never a pool: a transaction (`BEGIN` … `ALTER` … read … `COMMIT`)
+ * must run on the same backend, and a pool would hand each statement a different one.
+ */
+export type RoleClient = pg.Client | pg.PoolClient;
+
 export interface TableRls {
   name: string;
   rls: boolean;
@@ -74,7 +80,7 @@ export function forcedLiftTargets(tables: TableRls[]): string[] {
 }
 
 /** Runs `read` with FORCE lifted on `tables` for one transaction, so a rollback restores it. */
-export async function withForcedLift<T>(client: RoleQuery, tables: readonly string[], read: () => Promise<T>): Promise<T> {
+export async function withForcedLift<T>(client: RoleClient, tables: readonly string[], read: () => Promise<T>): Promise<T> {
   await client.query('BEGIN');
   try {
     for (const table of tables) await client.query(`ALTER TABLE public.${table} NO FORCE ROW LEVEL SECURITY`);
@@ -97,7 +103,7 @@ export async function withForcedLift<T>(client: RoleQuery, tables: readonly stri
  * on an owner connection returns one workspace's rows and looks like a complete answer. Reading
  * inside the lift — when there is one — is the only way to see every workspace.
  */
-export async function readAllWorkspaceIds(client: RoleQuery): Promise<string[]> {
+export async function readAllWorkspaceIds(client: RoleClient): Promise<string[]> {
   const read = async () =>
     (await client.query<{ id: string }>('SELECT id::text AS id FROM workspaces ORDER BY id')).rows.map((row) => row.id);
   const tables = await tableRls(client, ['workspaces']);
@@ -140,27 +146,6 @@ export async function adminRoleStatus(client: RoleQuery): Promise<AdminRoleStatu
     forcedTables: tables.rows.map((row) => row.name),
     ownedForcedTables: tables.rows.filter((row) => row.is_owner).map((row) => row.name),
   };
-}
-
-/**
- * Why the admin role cannot read every tenant row, or undefined when it can (#1235).
- *
- * A superuser or a `BYPASSRLS` role passes. Below the first migration there are no tenant tables
- * yet, so nothing can be hidden. Any other role would read zero rows from every `FORCE ROW LEVEL
- * SECURITY` table the admin pool uses (sessions, API tokens, workspaces, background loops).
- */
-export function adminRoleProblem(status: AdminRoleStatus, what = 'The server'): string | undefined {
-  if (status.superuser || status.bypassrls) return undefined;
-  if (!status.forcedTables.length) return undefined;
-  const owns = status.ownedForcedTables.length > 0;
-  const ownership = owns
-    ? `owns ${status.ownedForcedTables.length} row-level-security table(s) (including ${status.ownedForcedTables[0]}) but`
-    : `is subject to FORCE ROW LEVEL SECURITY on ${status.forcedTables.length} table(s) (including ${status.forcedTables[0]}) and`;
-  return (
-    `The database role "${status.role}" that DATABASE_URL names ${ownership} is not SUPERUSER and does not have BYPASSRLS. ` +
-    `${what} reads tenant rows on the admin pool without app.workspace_id, so it would see none: sign-in, API tokens and background work would fail. ` +
-    `As a superuser run "ALTER ROLE ${status.role} BYPASSRLS" (or point DATABASE_URL at a role that is SUPERUSER or has BYPASSRLS).`
-  );
 }
 
 /**

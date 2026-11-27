@@ -1,6 +1,5 @@
 -- am:no-transaction
--- 0.17.8 (#1218): repeat the 0117, 0118 and 0119 repairs for a migration role that owns the
--- tables but cannot bypass row-level security.
+-- 0.17.8 (#1218): repeat the 0117, 0118 and 0119 repairs for every migration role.
 --
 -- Those three files loop over `SELECT id FROM workspaces` to set `app.workspace_id` per tenant.
 -- `workspaces` is ENABLE + FORCE ROW LEVEL SECURITY, so a non-superuser table owner without
@@ -8,42 +7,48 @@
 -- workspaces, does nothing, and the file is then recorded as applied. The repairs can never run
 -- again on that install. `am restore` replays migrations as the restoring role too.
 --
--- This pass reads the workspace ids with FORCE briefly off (as 0072, 0083 and 0087 do) and then
--- repeats the three repairs. It runs outside one wrapping transaction on purpose: the identity
--- locks below must be taken *before* the FORCE lift takes its ACCESS EXCLUSIVE lock on
--- `workspaces`, because live ingestion takes the identity lock first and then needs `workspaces`
--- through a foreign key. Holding the workspace lock while waiting for the identity lock is the
--- 40P01 inversion. The two statements are separate transactions, with the ids kept in a temporary
--- table; each statement commits or rolls back as a whole, and a retry is safe because the repairs
--- are idempotent.
+-- The replay runs for every migrator, including a SUPERUSER or BYPASSRLS one: an install can run
+-- 0117–0119 as a non-bypass owner and then grant BYPASSRLS before upgrading, which is exactly what
+-- the 0.17.8 note asks. "The migrator bypasses now" does not mean the rows were repaired. A
+-- bypassing migrator needs no FORCE lift and no ALTER TABLE at all; a non-bypassing owner reads the
+-- workspace ids with FORCE briefly off (as 0072, 0083 and 0087 do).
 --
--- A SUPERUSER or BYPASSRLS migrator already ran the 0117–0119 repairs, so this file does nothing at
--- all for it: no ALTER and no lock.
+-- This file runs outside one wrapping transaction on purpose: the identity locks below must be
+-- taken *before* any repair touches `workspaces`, because live ingestion takes the identity lock
+-- first and then needs `workspaces` through a foreign key. Holding the workspace lock while
+-- waiting for the identity lock is the 40P01 inversion. The two statements are separate
+-- transactions, with the ids kept in a temporary table; each statement commits or rolls back as a
+-- whole, and a retry is safe because the repairs are idempotent.
 DO $$
 DECLARE
   bypass boolean;
 BEGIN
   SELECT (r.rolsuper OR r.rolbypassrls) INTO bypass FROM pg_roles r WHERE r.rolname = current_user;
+
+  -- A previous attempt in this session may have left the id table behind.
+  DROP TABLE IF EXISTS pg_temp.am_0122_plan;
+  DROP TABLE IF EXISTS pg_temp.am_0122_workspaces;
+  CREATE TEMPORARY TABLE am_0122_workspaces (id uuid PRIMARY KEY);
+
+  -- Statement 1: read the workspace ids once. A bypassing role reads `workspaces` directly, so it
+  -- takes no ACCESS EXCLUSIVE lock and blocks neither sign-in nor a background loop. Any other
+  -- migrator owns the tables (a small install's role ran every earlier migration) and lifts FORCE
+  -- for this one statement. No identity lock is held here, so an ingest transaction that holds one
+  -- only waits for this short statement: there is no cycle.
   IF bypass THEN
-    -- A previous owner-only attempt in this session may have left the id table behind; never let a
-    -- bypassing replay pick it up, and take no lock on `workspaces`.
-    DROP TABLE IF EXISTS pg_temp.am_0122_workspaces;
-    DROP TABLE IF EXISTS pg_temp.am_0122_plan;
+    INSERT INTO am_0122_workspaces (id) SELECT id FROM workspaces;
     RETURN;
   END IF;
 
-  -- Statement 1: read the workspace ids once, with a short exclusive lock that no identity lock is
-  -- held behind. Ingestion that already holds an identity lock only waits for this statement, and
-  -- this statement never waits for an identity lock, so there is no cycle.
   EXECUTE 'ALTER TABLE workspaces NO FORCE ROW LEVEL SECURITY';
-  DROP TABLE IF EXISTS pg_temp.am_0122_workspaces;
-  CREATE TEMPORARY TABLE am_0122_workspaces (id uuid PRIMARY KEY);
   INSERT INTO am_0122_workspaces (id) SELECT id FROM workspaces;
   EXECUTE 'ALTER TABLE workspaces FORCE ROW LEVEL SECURITY';
 END $$;
 
--- Statement 2: an owner-only replay. The identity locks are taken first, in the order ingestion
--- takes them, so a live merge can finish before the FORCE lift asks for `workspaces`.
+-- Statement 2: the repairs, for every migrator. The identity locks are taken first, in the order
+-- ingestion takes them, so a live merge can finish before a repair touches its workspace. Nothing
+-- here lifts FORCE: no repair reads `workspaces`, and the tenant tables are read with
+-- `app.workspace_id` set per workspace below.
 DO $$
 DECLARE
   w record;
@@ -56,8 +61,6 @@ BEGIN
   FOR w IN SELECT id FROM am_0122_workspaces ORDER BY id LOOP
     PERFORM pg_advisory_xact_lock(hashtextextended('identity:' || w.id::text, 0));
   END LOOP;
-
-  EXECUTE 'ALTER TABLE workspaces NO FORCE ROW LEVEL SECURITY';
 
   -- 0117's repair: static-list and materialised membership rows stranded on a merged-away profile
   -- (#1102), through the same `merge_segment_memberships` function a live merge uses.
@@ -242,7 +245,6 @@ BEGIN
     END LOOP;
   END LOOP;
 
-  EXECUTE 'ALTER TABLE workspaces FORCE ROW LEVEL SECURITY';
   DROP TABLE IF EXISTS pg_temp.am_0122_plan;
   DROP TABLE IF EXISTS pg_temp.am_0122_workspaces;
 END $$;

@@ -4,7 +4,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import { readDataKeySample } from '../src/data-keys';
 import { listWorkspaceIds } from '../src/migrate';
 import { createDb } from '../src/pool';
-import { adminRoleProblem, adminRoleStatus, assertAdminRoleReadsEveryRow } from '../src/roles';
+import { adminRoleBypassProblem, adminRoleStatus, assertAdminRoleReadsEveryRow } from '../src/roles';
 import { createDisposableDb, hasTestDatabase } from './disposable';
 
 // A small-install role owns the tables but is not a superuser and has no BYPASSRLS. Every tenant
@@ -161,7 +161,7 @@ describe.skipIf(!hasTestDatabase())('a non-BYPASSRLS table owner and the admin r
       const status = await adminRoleStatus(ownerDb.admin);
       expect(status).toMatchObject({ role: owner.role, superuser: false, bypassrls: false });
       expect(status.ownedForcedTables).toContain('workspaces');
-      const problem = adminRoleProblem(status, 'The server');
+      const problem = adminRoleBypassProblem(status, 'The server');
       expect(problem).toContain(owner.role);
       expect(problem).toContain('ALTER ROLE');
       expect(problem).toContain('BYPASSRLS');
@@ -169,7 +169,7 @@ describe.skipIf(!hasTestDatabase())('a non-BYPASSRLS table owner and the admin r
 
       // The superuser running the tests passes.
       await expect(assertAdminRoleReadsEveryRow(d.db.admin, 'The server')).resolves.toBeUndefined();
-      expect(adminRoleProblem(await adminRoleStatus(d.db.admin))).toBeUndefined();
+      expect(adminRoleBypassProblem(await adminRoleStatus(d.db.admin))).toBeUndefined();
     } finally {
       await ownerDb.close();
     }
